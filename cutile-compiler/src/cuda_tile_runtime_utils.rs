@@ -3,33 +3,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use cuda_core::{device, get_device_sm_name, init};
 use cuda_tile_rs::cuda_tile::ModuleOperation;
 use cuda_tile_rs::{cuda_tile, cuda_tile_write_bytecode, operation_parse};
 use melior::ir::attribute::StringAttribute;
 use melior::ir::operation::OperationLike;
 use melior::ir::{Block, BlockLike, Location, Region, RegionLike};
 use melior::Context;
-use regex::Regex;
 use std::env;
 use std::process::Command;
 use uuid::Uuid;
 
 pub fn get_gpu_name(device_id: usize) -> String {
-    let output = Command::new("nvidia-smi")
-        .arg("--query-gpu=compute_cap")
-        .arg("--format=csv,noheader")
-        .arg(format!("--id={device_id}"))
-        .output()
-        .expect(format!("Failed to determine compute capability for device {device_id}").as_str());
-    if !output.status.success() {
-        let error_output = String::from_utf8_lossy(&output.stderr).to_string();
-        panic!("{}", error_output)
-    }
-    // This has decimals.
-    let compute_cap = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let re_ver = Regex::new(r"\.").unwrap();
-    // TODO (hme): Confirm this solution cannot fail.
-    format!("sm_{}", re_ver.replace(&compute_cap, "").to_string())
+    unsafe { init(0) }.expect("failed to initialize CUDA driver");
+    let dev = device::get(device_id as i32).expect("failed to get CUDA device");
+    unsafe { get_device_sm_name(dev) }.expect("failed to get SM name")
 }
 
 pub fn parse_tile_entry<'c>(

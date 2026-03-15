@@ -7,6 +7,8 @@ pub use cuda_bindings as sys;
 use cuda_bindings::{
     cuDeviceGetAttribute, CUdevice, CUdevice_attribute,
     CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_CLOCK_RATE,
+    CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+    CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
     CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
 };
 use std::ffi::{c_int, c_uint, c_void};
@@ -216,4 +218,16 @@ pub unsafe fn get_device_multiprocessor_count(device: CUdevice) -> Result<i32, D
         device,
         CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
     )
+}
+
+pub unsafe fn get_device_sm_name(device: CUdevice) -> Result<String, DriverError> {
+    let major = get_device_attribute(
+        device,
+        CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+    )?;
+    let minor = get_device_attribute(
+        device,
+        CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+    )?;
+    Ok(format!("sm_{major}{minor}"))
 }
