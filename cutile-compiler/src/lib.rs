@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! JIT compiler that translates Rust DSL modules into CUDA Tile MLIR and compiles them to GPU cubins.
+
 #![feature(trim_prefix_suffix, int_roundings)]
 #![allow(non_snake_case)]
 extern crate core;
@@ -28,6 +30,7 @@ pub mod types;
 pub mod compiler;
 pub use compiler::utils;
 
+/// Registers all standard and CUDA Tile MLIR dialects into the given context.
 pub fn load_all_dialects(context: &Context) {
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
@@ -36,6 +39,7 @@ pub fn load_all_dialects(context: &Context) {
     context.load_all_available_dialects();
 }
 
+/// Creates a fully configured MLIR context with all dialects, LLVM translations, and diagnostics.
 pub fn context_all() -> Context {
     let context = Context::new();
     load_all_dialects(&context);

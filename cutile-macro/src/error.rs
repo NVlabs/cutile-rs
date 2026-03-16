@@ -1,3 +1,12 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! Error types and helpers for macro diagnostics.
+//!
+//! Provides span-aware error construction for producing compile-time error messages.
+
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use std::{
     error,
@@ -5,8 +14,10 @@ use std::{
 };
 use syn::spanned::Spanned;
 
+/// Unified error type for proc-macro diagnostics.
 #[derive(Debug)]
 pub enum Error {
+    /// Wraps a `syn::Error` with span information.
     Syn(syn::Error),
 }
 
@@ -49,6 +60,7 @@ pub fn call_site_error<T>(message: &str) -> Result<T, Error> {
     syn_error_at(Span::call_site(), message)
 }
 
+/// Extension trait for producing span-anchored errors from any `Spanned` item.
 pub trait SpannedError {
     /// Return `Err(Error)` anchored to this item's span, with an arbitrary `Ok` type.
     fn err<T>(&self, message: &str) -> Result<T, Error>;

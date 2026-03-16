@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! CUDA driver error types and result conversion utilities.
+
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::{
@@ -10,6 +12,7 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+/// Wrapper around a CUDA driver API error code.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct DriverError(pub cuda_bindings::CUresult);
 
@@ -44,7 +47,9 @@ impl std::fmt::Debug for DriverError {
 
 impl error::Error for DriverError {}
 
+/// Converts a CUDA driver call return value into a `Result`.
 pub trait IntoResult<T> {
+    /// Returns `Ok` on `CUDA_SUCCESS`, or `Err(DriverError)` otherwise.
     fn result(self) -> Result<T, DriverError>
     where
         Self: Sized;
@@ -78,6 +83,7 @@ impl<T> IntoResult<T> for (cuda_bindings::CUresult, MaybeUninit<T>) {
 }
 
 impl DriverError {
+    /// Returns the short error name string for this CUDA error code.
     pub fn error_name(&self) -> Result<&CStr, DriverError> {
         let mut err_str = MaybeUninit::uninit();
         unsafe {
@@ -86,6 +92,7 @@ impl DriverError {
         }
     }
 
+    /// Returns the human-readable description string for this CUDA error code.
     pub fn error_string(&self) -> Result<&CStr, DriverError> {
         let mut err_str = MaybeUninit::uninit();
         unsafe {

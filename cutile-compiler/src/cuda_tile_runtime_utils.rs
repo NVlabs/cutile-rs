@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Runtime utilities for compiling CUDA Tile MLIR modules to GPU cubins.
+//! Provides GPU detection, MLIR parsing, and bytecode compilation helpers.
+
 use cuda_core::{device, get_device_sm_name, init};
 use cuda_tile_rs::cuda_tile::ModuleOperation;
 use cuda_tile_rs::{cuda_tile, cuda_tile_write_bytecode, operation_parse};
@@ -14,12 +17,14 @@ use std::env;
 use std::process::Command;
 use uuid::Uuid;
 
+/// Queries `nvidia-smi` to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 pub fn get_gpu_name(device_id: usize) -> String {
     unsafe { init(0) }.expect("failed to initialize CUDA driver");
     let dev = device::get(device_id as i32).expect("failed to get CUDA device");
     unsafe { get_device_sm_name(dev) }.expect("failed to get SM name")
 }
 
+/// Parses a CUDA Tile MLIR entry string into a verified module operation.
 pub fn parse_tile_entry<'c>(
     context: &'c Context,
     module_name: &str,
@@ -42,6 +47,7 @@ pub fn parse_tile_entry<'c>(
     return module_op;
 }
 
+/// Compiles a CUDA Tile module operation to a `.cubin` file via `tileiras`, returning the path.
 pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
     let tmp_dir = env::temp_dir();
     let base_filename = tmp_dir.join(Uuid::new_v4().to_string());
@@ -65,12 +71,12 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
 
 #[cfg(test)]
 mod test {
-    use cuda_tile_rs::cuda_tile::ModuleOperation;
-    use melior::Context;
     use cuda_core::sys::cuDriverGetVersion;
     use cuda_core::{
         api_version, ctx, device, init, launch_kernel, module, primary_ctx, stream, DriverError,
     };
+    use cuda_tile_rs::cuda_tile::ModuleOperation;
+    use melior::Context;
     use std::ffi::{c_int, CString};
     use std::fs;
     use std::mem::MaybeUninit;

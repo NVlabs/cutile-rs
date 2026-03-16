@@ -1,3 +1,10 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! JIT compilation error types and helpers for source-located diagnostics.
+
 use crate::ast::SourceLocation;
 use anyhow::Result;
 use proc_macro2::LexError;
@@ -6,14 +13,18 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+/// Error type for the JIT compiler, with optional source location info.
 pub enum JITError {
+    /// An error without source location.
     Generic(String),
     /// An error with an associated [`SourceLocation`] captured at proc macro
     /// expansion time.  Unlike `Syn`, whose span is only meaningful inside
     /// a proc macro context, this variant carries a concrete file/line/column
     /// that can be displayed to the user even at JIT (runtime) compilation.
     Located(String, SourceLocation),
+    /// An error originating from the MLIR (Melior) layer.
     Melior(melior::Error),
+    /// A wrapped `anyhow::Error`.
     Anyhow(anyhow::Error),
 }
 
@@ -50,9 +61,11 @@ impl Display for JITError {
 impl error::Error for JITError {}
 
 impl JITError {
+    /// Create a `Generic` error value (not wrapped in `Result`).
     pub fn generic_err(err_str: &str) -> JITError {
         return JITError::Generic(err_str.to_string());
     }
+    /// Create a `Generic` error wrapped in `Err`.
     pub fn generic<R>(err_str: &str) -> Result<R, JITError> {
         return Err(JITError::generic_err(err_str));
     }
@@ -67,9 +80,13 @@ impl JITError {
     }
 }
 
+/// Trait for creating source-located errors from a [`SourceLocation`].
 pub trait SpannedJITError {
+    /// Create a located error from this span.
     fn jit_error(&self, error_message: &str) -> JITError;
+    /// Assert a predicate, returning a located error on failure.
     fn jit_assert(&self, pred: bool, error_message: &str) -> Result<(), JITError>;
+    /// Create a located error wrapped in `Err`.
     fn jit_error_result<R>(&self, error_message: &str) -> Result<R, JITError>;
 }
 
@@ -107,7 +124,9 @@ impl From<melior::Error> for JITError {
     }
 }
 
+/// Extension trait to convert `Option<T>` into `Result<T, JITError>`.
 pub trait OptionJITError<T> {
+    /// Unwrap or return a generic JIT error with the given message.
     fn ok_or_jit_error(self, message: &str) -> Result<T, JITError>;
 }
 
@@ -117,6 +136,7 @@ impl<T> OptionJITError<T> for Option<T> {
     }
 }
 
+/// Assert a predicate, returning a generic JIT error on failure.
 pub fn jit_assert(pred: bool, message: &str) -> Result<(), JITError> {
     if pred {
         Ok(())

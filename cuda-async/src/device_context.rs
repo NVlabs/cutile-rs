@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Thread-local GPU device state, kernel cache, and scheduling policy management.
+
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};

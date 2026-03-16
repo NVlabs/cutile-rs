@@ -113,6 +113,7 @@ use syn::{
 ///
 /// Returns the operation name, variadic type data, and variadic operation data
 /// for trait methods like `broadcast` that are called on primitive types.
+/// Looks up metadata for a trait method implementation on a possibly-primitive receiver.
 pub fn get_variadic_trait_impl_meta_data(
     maybe_primitive: &str,
     method_name: &str,
@@ -132,6 +133,7 @@ pub fn get_variadic_trait_impl_meta_data(
 ///
 /// Returns the operation name, type metadata, and operation metadata if the
 /// receiver type is variadic and the method exists.
+/// Looks up metadata for a method call on a variadic type receiver.
 pub fn get_variadic_method_meta_data(
     receiver_ty: &Type,
     method_name: &str,
@@ -673,6 +675,10 @@ fn get_variadic_op_ident(ident: &Ident, const_ga_lengths: &Vec<u32>) -> Ident {
 /// - `inst_u32`: `{"N" => 2}`
 /// - `var_arrays`: `{"S" => VarCGAParameter { name: "S", length_var: "N" }}`
 /// - `inst_array`: `{"S" => CGAParameter { name: "S", length: 2 }}`
+/// Tracks const generic array instantiations during variadic macro expansion.
+///
+/// Maps length variable names to concrete values and array names to their
+/// instantiated parameters.
 #[derive(Debug, Clone)]
 pub struct ConstInstances {
     inst_u32: HashMap<String, u32>,
@@ -811,6 +817,7 @@ impl ConstInstances {
 /// For `#[variadic_struct(N=4)]` with two arrays depending on N, this generates:
 /// - (0, 0), (1, 1), ..., (4, 4) - 5 total combinations
 #[derive(Debug)]
+/// Iterates over all combinations of const generic array lengths for variadic expansion.
 struct VariadicLengthIterator {
     i: usize,
     i_max: usize,
@@ -872,12 +879,14 @@ impl VariadicLengthIterator {
     }
 }
 
+/// A single combination of length variable values produced by `VariadicLengthIterator`.
 pub struct VariadicLengthItem {
     variadic_length_instance: BTreeMap<String, usize>,
     cga_length_instance: Vec<(String, usize)>,
 }
 
 impl VariadicLengthItem {
+    /// Returns CGA lengths as a vector, ordered by CGA declaration order.
     pub fn vec_of_cga_lengths(&self) -> Vec<u32> {
         // Ordered by key.
         self.cga_length_instance
@@ -885,6 +894,7 @@ impl VariadicLengthItem {
             .map(|x| x.1 as u32)
             .collect::<Vec<_>>()
     }
+    /// Returns unique length variable values, ordered by variable name.
     pub fn vec_of_unique_lengths(&self) -> Vec<u32> {
         // Ordered by key.
         self.variadic_length_instance
@@ -925,6 +935,7 @@ impl Iterator for VariadicLengthIterator {
     }
 }
 
+/// Extracts variable const generic array parameters from a `Generics` clause.
 pub fn parse_var_cgas(generics: &Generics) -> Vec<VarCGAParameter> {
     let mut result: Vec<VarCGAParameter> = vec![];
     for param in &generics.params {
@@ -1175,6 +1186,7 @@ pub fn variadic_impl(attributes: &SingleMetaList, item: ItemImpl) -> Result<Vec<
     Ok(result)
 }
 
+/// Expands a variadic impl method into rank-specific versions.
 pub(self) fn variadic_impl_fn_gen(
     attributes: &SingleMetaList,
     self_ty: &Type,
@@ -1200,6 +1212,7 @@ pub(self) fn variadic_impl_fn_gen(
     Ok(result)
 }
 
+/// Rewrites a single impl method using the given const instantiations.
 pub(self) fn rewrite_impl_fn(
     self_ty: &Type,
     item: &ImplItemFn,
@@ -1212,6 +1225,7 @@ pub(self) fn rewrite_impl_fn(
     Ok(result)
 }
 
+/// Desugars const generic arrays in a function signature's generics, inputs, and output.
 pub(self) fn rewrite_fn_sig(
     sig: &mut Signature,
     const_instances: &ConstInstances,
@@ -1299,6 +1313,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
     Ok(result)
 }
 
+/// Expands const generic array params in a `Generics` clause into individual const params.
 pub(self) fn desugar_generics(
     generics: &mut Generics,
     const_instances: &ConstInstances,
@@ -1352,6 +1367,7 @@ pub(self) fn desugar_generics(
     Ok(())
 }
 
+/// Expands a CGA path into angle-bracketed individual const generic arguments.
 pub(self) fn expand_cga(
     path: &Path,
     instances: &ConstInstances,
@@ -1398,6 +1414,7 @@ pub(self) fn expand_cga(
     }
 }
 
+/// Desugars variadic types in a path, replacing CGA syntax with concrete type names and args.
 pub(self) fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> {
     let mut result_path = path.clone();
     for (i, seg) in path.segments.iter().enumerate() {
@@ -1461,6 +1478,7 @@ pub(self) fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Pat
     Ok(result_path)
 }
 
+/// Desugars variadic types within angle-bracketed generic arguments.
 pub(self) fn desugar_generic_arguments(
     generic_args: &mut AngleBracketedGenericArguments,
     const_instances: &ConstInstances,
@@ -1485,6 +1503,7 @@ pub(self) fn desugar_generic_arguments(
     Ok(())
 }
 
+/// Recursively desugars const generic array syntax within a type.
 pub(self) fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, Error> {
     // Desugar const generic arrays as they appear as const generic arguments.
     Ok(match ty {
@@ -1559,6 +1578,7 @@ pub(self) fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, E
 }
 
 // TODO (hme): A lot of repetition between this and get_cga_type.
+/// Desugars CGA generic arguments on a type, producing a concrete ident and expanded args.
 pub(self) fn desugar_cga(
     instances: &ConstInstances,
     type_ident: &Ident,
@@ -1737,6 +1757,7 @@ pub(self) fn desugar_cga(
     ))
 }
 
+/// Extracts the `ConstGenericArrayType` from a type expression, if it is a variadic type.
 pub(self) fn get_cga_type(
     ty: &Type,
     const_instances: &ConstInstances,
@@ -1904,6 +1925,7 @@ pub(self) fn get_cga_type(
 /// let x = reshape(tile, shape); // Binding { ty: Some(Tile_2<f32, ...>) }
 /// let y; // Binding { ty: None }
 /// ```
+/// A variable binding with optional type information for variadic type inference.
 #[derive(Debug)]
 pub struct Binding {
     ty: Option<Type>,
@@ -1941,6 +1963,7 @@ impl Binding {
 ///
 /// This pass is invoked automatically during macro expansion for functions,
 /// impl blocks, and other items within `#[cutile::module]`.
+/// Main AST rewriting pass that desugars variadic types and operations into rank-specific code.
 pub struct RewriteVariadicsPass {}
 
 impl RewriteVariadicsPass {

@@ -147,9 +147,9 @@ use cuda_async::device_operation::{
 };
 use cuda_async::error::{device_error, DeviceError};
 use cuda_async::scheduling_policies::SchedulingPolicy;
-use half::f16;
 use cuda_core::curand::RNG;
 use cuda_core::{malloc_async, memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
+use half::f16;
 use std::alloc::{alloc, Layout};
 use std::cmp::min;
 use std::future::IntoFuture;

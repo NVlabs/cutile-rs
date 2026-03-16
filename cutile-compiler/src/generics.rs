@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Generic parameter resolution: maps Rust generic type and const parameters to
+//! concrete values, and infers generic arguments from call-site context.
+
 use crate::ast::SourceLocation;
 use crate::error::{JITError, SpannedJITError};
 use crate::syn_utils::{
@@ -22,13 +25,17 @@ use syn::{
     Generics, ImplItemFn, ItemImpl, Lit, PathArguments, Signature, Stmt, Type, TypePath,
 };
 
+/// Classification of a generic parameter variable.
 #[derive(Debug)]
 pub enum GenericVarType {
     // This is a generic type parameter. The T in <T, ...>
+    /// A generic type parameter (the `T` in `<T, ...>`).
     TypeVariable,
     // This is a const generic parameter. The const X: T in <const X: T, ...>
+    /// A const generic parameter (the `const X: T` in `<const X: T, ...>`).
     ConstVariable,
     // This is a length variable. The N in <const X: [i32; N], ...>
+    /// An array length variable (the `N` in `<const X: [i32; N], ...>`).
     LengthVariable,
 }
 
@@ -77,6 +84,7 @@ pub struct GenericVars {
 }
 
 impl GenericVars {
+    /// Returns the kind of generic variable for the given name, if it exists.
     pub fn var_type(&self, var: &str) -> Option<GenericVarType> {
         if self.inst_types.contains_key(var) {
             Some(GenericVarType::TypeVariable)
@@ -99,6 +107,7 @@ impl GenericVars {
         }
         true
     }
+    /// Creates an empty instance without validation. Use [`empty`](Self::empty) when possible.
     pub fn empty_unchecked() -> Self {
         let inst_types: HashMap<String, String> = HashMap::new();
         let inst_i32: HashMap<String, i32> = HashMap::new();
@@ -113,6 +122,7 @@ impl GenericVars {
             ordered_param_vars,
         }
     }
+    /// Creates an empty instance, returning an error if the signature has unresolved generics.
     pub fn empty(generics: &Generics) -> Result<Self, JITError> {
         if !Self::is_empty(generics) {
             return SourceLocation::unknown().jit_error_result(
@@ -204,6 +214,7 @@ impl GenericVars {
             ordered_param_vars,
         })
     }
+    /// Constructs a `GenericVars` by matching explicit generic arguments to parameter declarations.
     pub fn from_expr_generic_args(
         &self,
         generics: &Generics,
@@ -438,6 +449,7 @@ impl GenericVars {
             ordered_param_vars,
         })
     }
+    /// Looks up a const-generic `i32` value by parameter name.
     pub fn get_i32(&self, name: &str) -> Option<i32> {
         if let Some(inst) = self.inst_i32.get(name) {
             return Some(*inst);
@@ -453,6 +465,7 @@ impl GenericVars {
         None
     }
 
+    /// Merges another `GenericVars` into this one, erroring on conflicting entries.
     pub fn merge(mut self, other: GenericVars) -> Result<GenericVars, JITError> {
         self.inst_types = self.inst_types.merge_if_eq(other.inst_types);
         self.inst_i32 = self.inst_i32.merge_if_eq(other.inst_i32);
@@ -472,6 +485,7 @@ impl GenericVars {
         Ok(self)
     }
 
+    /// Resolves a possibly-generic `syn::Type` into a concrete [`TypeInstance`].
     pub fn instantiate_type(
         &self,
         ty: &syn::Type,
@@ -518,6 +532,7 @@ impl GenericVars {
     }
 }
 
+/// Trait for types that can be instantiated from a generic `syn::Type`.
 pub trait Instantiable {
     fn instantiate(
         generic_ty: &syn::Type,
@@ -528,17 +543,25 @@ pub trait Instantiable {
         Self: Sized;
 }
 
+/// A fully-instantiated type, classifying how a Rust type maps to the CUDA Tile type system.
 #[derive(Debug, Clone)]
 pub enum TypeInstance {
+    /// A plain user-defined or unresolved type.
     UserType(TypeInstanceUserType),
+    /// The `str` string type.
     StringType(TypeInstanceStringType),
+    /// The `Token` ordering-token type.
     TokenType(TypeInstanceTokenType),
+    /// A scalar element type (e.g. `f32`, `i32`).
     ElementType(TypeInstanceElementType),
+    /// A pointer type (`*mut E` / `*const E`).
     PtrType(TypeInstancePtrType),
+    /// A shaped type with element type and dimensions (e.g. `Tile<f32, {[128]}>`).
     StructuredType(TypeInstanceStructuredType),
 }
 
 impl TypeInstance {
+    /// Returns the concrete Rust element type name, if applicable.
     pub fn get_rust_element_instance_ty(&self) -> Option<String> {
         match self {
             Self::UserType(_inst) => None,
@@ -555,6 +578,7 @@ impl TypeInstance {
             }
         }
     }
+    /// Returns the concrete (instantiated) `syn::Type`.
     pub fn get_instantiated_type(&self) -> &syn::Type {
         match self {
             Self::UserType(inst) => &inst.maybe_generic_ty,
@@ -565,6 +589,7 @@ impl TypeInstance {
             Self::StructuredType(inst) => &inst.instance_ty,
         }
     }
+    /// Returns the original (possibly generic) `syn::Type`.
     pub fn get_source_type(&self) -> &syn::Type {
         match self {
             Self::UserType(inst) => &inst.maybe_generic_ty,
@@ -578,8 +603,11 @@ impl TypeInstance {
 }
 
 #[derive(Debug, Clone)]
+/// Primitive type instance: either a scalar element type or a pointer type.
 pub enum TypInstancePrimitiveType {
+    /// Scalar element type (e.g. `f32`).
     ElementType(TypeInstanceElementType),
+    /// Pointer type (e.g. `*mut f32`).
     PtrType(TypeInstancePtrType),
 }
 
@@ -599,6 +627,7 @@ impl TypInstancePrimitiveType {
 }
 
 #[derive(Debug, Clone)]
+/// A user-defined or unresolved type that may still contain generics.
 pub struct TypeInstanceUserType {
     pub(crate) maybe_generic_ty: syn::Type,
 }
@@ -618,12 +647,14 @@ impl Instantiable for TypeInstanceUserType {
 }
 
 impl TypeInstanceUserType {
+    /// Attempts to extract a const generic array from this type's generic arguments.
     pub fn try_extract_cga(&self, generic_vars: &GenericVars) -> Option<Vec<i32>> {
         try_extract_cga(&self.maybe_generic_ty, generic_vars)
     }
 }
 
 #[derive(Debug, Clone)]
+/// A resolved `str` string type instance.
 pub struct TypeInstanceStringType {
     pub(crate) generic_ty: syn::Type,
     pub(crate) instance_ty: syn::Type,
@@ -651,6 +682,7 @@ impl Instantiable for TypeInstanceStringType {
 }
 
 #[derive(Debug, Clone)]
+/// A resolved `Token` ordering-token type instance.
 pub struct TypeInstanceTokenType {
     pub(crate) generic_ty: syn::Type,
     pub(crate) instance_ty: syn::Type,
@@ -675,6 +707,7 @@ impl Instantiable for TypeInstanceTokenType {
 }
 
 #[derive(Debug, Clone)]
+/// A resolved scalar element type (e.g. `f32`) with its concrete Rust name.
 pub struct TypeInstanceElementType {
     pub(crate) generic_ty: syn::Type,
     pub(crate) instance_ty: syn::Type,
@@ -713,6 +746,7 @@ impl Instantiable for TypeInstanceElementType {
 }
 
 #[derive(Debug, Clone)]
+/// A resolved pointer type (`*mut E` / `*const E`) with mutability and element info.
 pub struct TypeInstancePtrType {
     pub(crate) generic_ty: syn::Type,
     pub(crate) instance_ty: syn::Type,
@@ -759,6 +793,7 @@ impl Instantiable for TypeInstancePtrType {
 }
 
 #[derive(Debug, Clone)]
+/// A resolved shaped type (e.g. `Tile<f32, {[128, 64]}>`) with element type and shape.
 pub struct TypeInstanceStructuredType {
     pub(crate) generic_ty: syn::Type,
     pub(crate) instance_ty: syn::Type,
@@ -1037,14 +1072,18 @@ impl<K: Hash + Eq, V: Clone + PartialEq> MergeIfEqual for HashMap<K, V> {
 }
 
 #[derive(Debug)]
+/// Classification of a generic argument for inference purposes.
 pub enum GenericArgType {
     // Any type. The T in <T, ...> or the element type E of a pointer *mut E.
+    /// A type argument (e.g. the `T` in `<T>`).
     Type,
     // Any const generic expression. The D_i in <{[..., D_i, ...]}> or an array expression {[...]} in <..., {[...]}, ...>
+    /// A const generic expression (e.g. `{[BM, BN]}`).
     GenericConstExpr,
 }
 
 #[derive(Debug)]
+/// Infers generic arguments for a function or method call from the call-site context.
 pub struct GenericArgInference {
     // Attempt to infer generics for function or impl/method pair from context of call site.
     // This is used to:
@@ -1068,6 +1107,7 @@ pub struct GenericArgInference {
 //  the structure of types when inferring generic parameters from input types.
 //  We still make an assumption about the structure of types on the instantiation side.
 impl GenericArgInference {
+    /// Creates an inference context for a method call, merging impl and method generics.
     pub fn new_method(impl_item: &ItemImpl, impl_method: &ImplItemFn) -> Self {
         let mut merged_generics = vec![];
 
@@ -1126,6 +1166,7 @@ impl GenericArgInference {
         }
     }
 
+    /// Maps positional call arguments to their corresponding parameter names.
     pub fn map_args_to_params(
         &mut self,
         call_arg_rust_tys: &Vec<syn::Type>,
@@ -1139,6 +1180,7 @@ impl GenericArgInference {
             self.add_generic_args(fn_arg_types, call_arg_rust_ty);
         }
     }
+    /// Applies explicitly provided generic arguments from a function call expression.
     pub fn apply_provided_generics_fn_call(
         &mut self,
         call_expr: &ExprCall,
@@ -1230,6 +1272,7 @@ impl GenericArgInference {
         }
     }
 
+    /// Applies explicitly provided generic arguments from a method call expression.
     pub fn apply_provided_generics_method_call(
         &mut self,
         method_call_expr: &ExprMethodCall,
@@ -1322,6 +1365,7 @@ impl GenericArgInference {
         }
     }
 
+    /// Returns `true` if all generic parameters have been resolved.
     pub fn verify(&self) -> bool {
         // Check if computed and succeeded.
         for (_key, val) in &self.param2arg {
@@ -1332,6 +1376,7 @@ impl GenericArgInference {
         true
     }
 
+    /// Builds a [`GenericVars`] from the inferred parameter-to-argument mapping.
     pub fn get_generic_vars_instance(
         &self,
         from_generic_args: &GenericVars,
@@ -1973,6 +2018,7 @@ pub fn get_cga_from_type(ty: &syn::Type, generic_args: &GenericVars) -> Option<V
     shape
 }
 
+/// Attempts to extract a const generic expression from a single generic argument.
 pub fn try_get_const_generic_from_generic_argument(
     generic_arg: &GenericArgument,
     generic_args: &GenericVars,
@@ -2012,6 +2058,7 @@ pub fn try_get_const_generic_from_generic_argument(
     result
 }
 
+/// Extracts a const generic array value from a generic argument, resolving variables.
 pub fn get_cga_from_generic_argument(
     generic_arg: &GenericArgument,
     generic_args: &GenericVars,

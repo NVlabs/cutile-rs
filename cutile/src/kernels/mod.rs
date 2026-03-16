@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
- ///! Pre-built optimized GPU kernels.
- ///!
- ///! This module provides a collection of commonly used GPU kernels that are optimized
- ///! and ready to use.
+//! Pre-built optimized GPU kernels.
+//!
+//! This module provides a collection of commonly used GPU kernels that are optimized
+//! and ready to use.
 
 mod _conversion;
 mod _creation;

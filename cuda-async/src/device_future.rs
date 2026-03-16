@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Future type that bridges CUDA stream callbacks with Rust's async executor.
+
 use crate::device_operation::{DeviceOperation, ExecutionContext};
 use crate::error::DeviceError;
 use futures::task::AtomicWaker;
@@ -12,19 +14,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+/// State machine for tracking the lifecycle of a device future.
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum DeviceFutureState {
     // The future was created with an error and will resolve immediately on first poll.
+    /// The future was created with an error and will resolve immediately.
     Failed,
     // The stream operation has not yet been scheduled. No callback has been added.
+    /// The stream operation has not yet been scheduled.
     Idle,
     // The stream operation has been scheduled and a callback has been added to the stream.
     // The callback should be added such that it immediately succeeds the scheduled operation.
+    /// The stream operation is in-flight and a completion callback is registered.
     Executing,
     // The callback has been fired, indicating the completion of the stream operation.
+    /// The stream callback has fired, indicating the operation is done.
     Complete,
 }
 
+/// Shared state between a CUDA stream callback and the async waker.
 #[derive(Debug)]
 pub struct StreamCallbackState {
     pub(crate) waker: AtomicWaker,
@@ -32,18 +40,21 @@ pub struct StreamCallbackState {
 }
 
 impl StreamCallbackState {
+    /// Creates a new callback state with the completion flag unset.
     pub fn new() -> Self {
         Self {
             waker: AtomicWaker::new(),
             complete: AtomicBool::new(false),
         }
     }
+    /// Marks the operation as complete and wakes the associated task.
     pub fn signal(&self) {
         self.complete.store(true, Ordering::Relaxed);
         self.waker.wake();
     }
 }
 
+/// A future that executes a [`DeviceOperation`] on a CUDA stream and resolves upon completion.
 #[derive(Debug)]
 pub struct DeviceFuture<T: Send, DO: DeviceOperation<Output = T>> {
     pub(crate) device_operation: Option<DO>,
@@ -55,6 +66,7 @@ pub struct DeviceFuture<T: Send, DO: DeviceOperation<Output = T>> {
 }
 
 impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
+    /// Creates an idle device future with no operation or execution context set.
     pub fn new() -> Self {
         Self {
             execution_context: None,
@@ -82,6 +94,10 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         }
     }
 
+    /// Registers a host callback on the CUDA stream to signal completion.
+    ///
+    /// # Safety
+    /// The execution context's stream must be valid for the lifetime of the callback.
     unsafe fn register_callback(
         &self,
         waker_state: Arc<StreamCallbackState>,
@@ -97,6 +113,7 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         })?;
         Ok(())
     }
+    /// Executes the stored device operation on the associated stream.
     fn execute(&mut self) -> Result<(), DeviceError> {
         let ctx = self
             .execution_context

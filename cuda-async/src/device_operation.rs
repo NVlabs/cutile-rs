@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Lazy, composable GPU operations and combinator types.
+
 use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
 use crate::error::{device_error, DeviceError};

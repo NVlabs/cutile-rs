@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Stream scheduling policies that control how operations are assigned to CUDA streams.
+
 use crate::device_future::DeviceFuture;
 use crate::device_operation::{DeviceOperation, ExecutionContext};
 use crate::error::{device_error, DeviceError};

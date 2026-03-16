@@ -121,12 +121,14 @@ impl RequiredGenerics {
             expressions,
         }
     }
+    /// Returns `true` if the given generic parameter has not yet been inferred.
     pub(crate) fn is_required(&self, s: &str) -> bool {
         match self.expressions.get(s) {
             None | Some(None) => true,
             _ => false,
         }
     }
+    /// Builds a runtime expression string that concatenates all inferred generic values.
     pub(crate) fn to_expr_str(&self) -> String {
         let mut res = vec![];
         for name in &self.names {
@@ -139,6 +141,7 @@ impl RequiredGenerics {
         format!("vec![{}].concat()", res.join(","))
     }
 
+    /// Classifies the generic parameter with the given name.
     pub(crate) fn get_ty(&self, name: &str) -> SupportedGenericType {
         let Some(index) = self.names.iter().position(|n| n == name) else {
             return SupportedGenericType::Unknown;
@@ -153,6 +156,7 @@ impl RequiredGenerics {
             _ => SupportedGenericType::ConstScalar,
         }
     }
+    /// Builds a `Generics` containing only the type parameters needed by the launcher.
     pub(crate) fn get_required_generics(&self) -> Generics {
         let mut type_params = vec![];
         for name in &self.names {
@@ -163,6 +167,7 @@ impl RequiredGenerics {
         }
         syn::parse2::<Generics>(format!("<{}>", type_params.join(", ")).parse().unwrap()).unwrap()
     }
+    /// Builds angle-bracketed generic arguments for the launcher type parameters.
     pub(crate) fn get_generic_args(&self) -> AngleBracketedGenericArguments {
         let mut type_params = vec![];
         for name in &self.names {

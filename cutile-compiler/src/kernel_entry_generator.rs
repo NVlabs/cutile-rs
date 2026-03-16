@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Generates CUDA Tile MLIR entry-point functions from Rust kernel signatures.
+//! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
+
 use crate::ast::SourceLocation;
 use crate::compiler::utils::OptimizationHints;
 use crate::error::{JITError, SpannedJITError};
@@ -356,6 +359,7 @@ impl TensorInput {
     }
 }
 
+/// Generates an MLIR entry-point wrapper for a kernel function, including tensor argument unpacking.
 pub fn generate_entry_point(
     fn_item: &ItemFn,
     generic_vars: &GenericVars,
@@ -503,6 +507,7 @@ pub fn generate_entry_point(
     ))
 }
 
+/// Parsed tensor shape information from generic parameters or const expressions.
 pub(crate) struct InputTensorShape {
     #[expect(
         dead_code,
@@ -513,6 +518,7 @@ pub(crate) struct InputTensorShape {
     shape: Vec<String>,
 }
 
+/// Extracts the tensor shape from a type's generic arguments, resolving const generics.
 pub fn get_tensor_shape(
     ty: &syn::Type,
     generic_vars: &GenericVars,
@@ -678,6 +684,7 @@ pub fn get_tensor_shape(
     Ok(res)
 }
 
+/// Returns the CUDA Tile element type string for a tensor type's first generic argument.
 pub fn get_tensor_element_type(
     ty: &syn::Type,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -692,6 +699,7 @@ pub fn get_tensor_element_type(
     get_element_type(ident, primitives, generic_vars)
 }
 
+/// Resolves an element type ident to its CUDA Tile type string via primitives or generic vars.
 pub fn get_element_type(
     ident: &Ident,
     primitives: &HashMap<(String, String), ItemImpl>,

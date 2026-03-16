@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compiler utility functions: MLIR attribute builders, binary op mappings, token management,
+//! optimization hint parsing, constant hex encoding, and variable mutation analysis.
+
 use crate::ast::SourceLocation;
 use crate::compiler::_value::{CompilerContext, Mutability, TileRustValue};
 use crate::error::{JITError, SpannedJITError};
@@ -26,10 +29,12 @@ use std::fmt::{Debug, Display, LowerHex};
 use std::hash::Hash;
 use syn::{BinOp, Expr, ItemImpl, Lit, Pat, Stmt};
 
+/// Creates a unit (flag) MLIR named attribute.
 pub fn named_flag_attr<'c>(context: &'c Context, name: &str) -> (Identifier<'c>, Attribute<'c>) {
     (Identifier::new(&context, name), Attribute::unit(&context))
 }
 
+/// Creates a named MLIR array attribute from a slice.
 pub fn named_array_attr<'c, T: Clone + Display + Debug>(
     context: &'c Context,
     name: &str,
@@ -38,6 +43,7 @@ pub fn named_array_attr<'c, T: Clone + Display + Debug>(
     (Identifier::new(&context, name), array_attr(context, arr))
 }
 
+/// Creates an MLIR array attribute from a slice.
 pub fn array_attr<'c, T: Clone + Display + Debug>(
     context: &'c Context,
     arr: &[T],
@@ -56,6 +62,7 @@ pub fn array_attr<'c, T: Clone + Display + Debug>(
     .unwrap()
 }
 
+/// Creates a named MLIR string attribute.
 pub fn named_str_attr<'c>(
     context: &'c Context,
     name: &str,
@@ -67,6 +74,7 @@ pub fn named_str_attr<'c>(
     )
 }
 
+/// Creates a named MLIR type attribute.
 pub fn named_type_attr<'c>(
     context: &'c Context,
     name: &str,
@@ -78,6 +86,7 @@ pub fn named_type_attr<'c>(
     )
 }
 
+/// Parses an attribute string and returns it as a named attribute pair.
 pub fn parse_named_attr<'c>(
     context: &'c Context,
     name: &str,
@@ -91,6 +100,7 @@ pub fn parse_named_attr<'c>(
     Ok((Identifier::new(&context, name), attr))
 }
 
+/// Creates a named MLIR 64-bit integer attribute.
 pub fn named_int_attr<'c>(
     context: &'c Context,
     name: &str,
@@ -103,6 +113,7 @@ pub fn named_int_attr<'c>(
     )
 }
 
+/// Creates a CUDA Tile comparison predicate attribute.
 pub fn cmp_pred_attr<'c>(
     context: &'c Context,
     pred: &str,
@@ -114,10 +125,12 @@ pub fn cmp_pred_attr<'c>(
     )
 }
 
+/// Parses a `!cuda_tile.tile<...>` MLIR type from a shape/element string.
 pub fn cuda_tile_tile_ty<'c>(context: &'c Context, str: &str) -> Type<'c> {
     Type::parse(&context, format!("!cuda_tile.tile<{str}>").as_str()).unwrap()
 }
 
+/// Constructs a `!cuda_tile.tile` MLIR type from a [`TypeInstance`].
 pub fn cuda_tile_tile_ty_from_type_instance<'c>(
     context: &'c Context,
     type_instance: &TypeInstance,
@@ -169,6 +182,7 @@ pub fn cuda_tile_tile_ty_from_type_instance<'c>(
 }
 
 #[derive(Debug, Eq, PartialEq)]
+/// Supported atomic read-modify-write modes.
 pub enum AtomicMode {
     And = 0,
     Or = 1,
@@ -183,12 +197,14 @@ pub enum AtomicMode {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+/// Whether an element type is floating-point or integer.
 pub enum ElementTypePrefix {
     Float,
     Integer,
 }
 
 impl ElementTypePrefix {
+    /// Determines the prefix from a CUDA Tile element type string (e.g. `"f32"` → `Float`).
     pub fn new(cuda_elem_ty_str: &str) -> Result<Self, JITError> {
         if cuda_elem_ty_str.starts_with("i") {
             Ok(ElementTypePrefix::Integer)
@@ -202,6 +218,7 @@ impl ElementTypePrefix {
 }
 
 impl AtomicMode {
+    /// Parses an atomic mode string, validating compatibility with the element type.
     pub fn new(mode: &str, elem_ty_prefix: ElementTypePrefix) -> Result<Self, JITError> {
         let result = match mode {
             "and" => AtomicMode::And,
@@ -231,6 +248,7 @@ impl AtomicMode {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+/// Enumeration of all supported binary operations in the CUDA Tile IR.
 pub enum TileBinaryOp {
     Add,
     Sub,
@@ -252,6 +270,7 @@ pub enum TileBinaryOp {
     BitXor,
 }
 
+/// Maps a string operation name (e.g. `"add"`, `"ceil_div"`) to a [`TileBinaryOp`].
 pub fn get_binary_op_from_op_str(op_str: &str) -> Result<TileBinaryOp, JITError> {
     match op_str {
         "add" => Ok(TileBinaryOp::Add),
@@ -277,6 +296,7 @@ pub fn get_binary_op_from_op_str(op_str: &str) -> Result<TileBinaryOp, JITError>
     }
 }
 
+/// Converts a Rust `syn::BinOp` to the corresponding [`TileBinaryOp`].
 pub fn get_tile_bop_from_rust_bop(rust_bin_op: &BinOp) -> Result<TileBinaryOp, JITError> {
     match rust_bin_op {
         BinOp::Add(_) => Ok(TileBinaryOp::Add),
@@ -300,6 +320,7 @@ pub fn get_tile_bop_from_rust_bop(rust_bin_op: &BinOp) -> Result<TileBinaryOp, J
     }
 }
 
+/// Returns a comparison predicate MLIR attribute for comparison binary ops, or `None` for others.
 pub fn get_cmp_predicate_attr<'c>(
     context: &'c Context,
     expr: &TileBinaryOp,
@@ -316,6 +337,7 @@ pub fn get_cmp_predicate_attr<'c>(
     }
 }
 
+/// Returns a signedness attribute based on the Rust element type name.
 pub fn get_signedness_attr<'c>(
     context: &'c Context,
     key: &str,
@@ -332,6 +354,7 @@ pub fn get_signedness_attr<'c>(
     )
 }
 
+/// Updates the ordering token in a variable's type metadata.
 pub fn update_token<'c>(
     var_arg: &Expr,
     new_token: Value<'c, 'c>,
@@ -364,6 +387,7 @@ pub fn update_token<'c>(
     Ok(ctx.vars.insert(var_name, new_value))
 }
 
+/// Retrieves the ordering token from a variable expression's type metadata.
 pub fn get_token_from_expr<'c>(
     var_arg: &Expr,
     ctx: &mut CompilerContext<'c, 'c>,
@@ -378,6 +402,7 @@ pub fn get_token_from_expr<'c>(
     get_token(var_name.as_str(), ctx)
 }
 
+/// Retrieves the ordering token from a named variable's type metadata.
 pub fn get_token<'c>(
     var_name: &str,
     ctx: &mut CompilerContext<'c, 'c>,
@@ -400,6 +425,7 @@ pub fn get_token<'c>(
     Ok(value_token_value.clone())
 }
 
+/// Propagates type metadata changes from an inner block context to the outer block context.
 pub fn update_outer_block_type_meta<'c>(
     inner_block_vars: &mut CompilerContext<'c, 'c>,
     outer_block_vars: &mut CompilerContext<'c, 'c>,
@@ -413,6 +439,7 @@ pub fn update_outer_block_type_meta<'c>(
     update_type_meta(inner_block_vars, outer_block_vars, &var_map, field_name);
 }
 
+/// Copies mutable type metadata fields from inner to outer context using a variable name mapping.
 pub fn update_type_meta<'c>(
     inner_block_vars: &mut CompilerContext<'c, 'c>,
     outer_block_vars: &mut CompilerContext<'c, 'c>,
@@ -457,6 +484,7 @@ pub fn update_type_meta<'c>(
     }
 }
 
+/// Parses a comma-separated token stream into a list of `syn::Expr`.
 pub fn parse_list_of_expr(tokens: TokenStream) -> Result<Vec<Expr>, JITError> {
     let mut args: Vec<Expr> = vec![];
     let mut arg_expr: Vec<TokenTree> = vec![];
@@ -496,6 +524,7 @@ pub fn parse_list_of_expr(tokens: TokenStream) -> Result<Vec<Expr>, JITError> {
     Ok(args)
 }
 
+/// Collects the names of variables assigned (mutated) in a block that were defined outside it.
 pub fn collect_mutated_variables_from_block(
     block: &syn::Block,
 ) -> Result<BTreeSet<String>, JITError> {
@@ -590,24 +619,28 @@ pub fn collect_mutated_variables_from_block(
     Ok(result)
 }
 
+/// Collects mutated outer-scope variables from a for-loop body.
 pub fn collect_mutated_variables(
     for_expr: &syn::ExprForLoop,
 ) -> Result<BTreeSet<String>, JITError> {
     collect_mutated_variables_from_block(&for_expr.body)
 }
 
+/// Collects mutated outer-scope variables from a while-loop body.
 pub fn collect_mutated_variables_while(
     while_expr: &syn::ExprWhile,
 ) -> Result<BTreeSet<String>, JITError> {
     collect_mutated_variables_from_block(&while_expr.body)
 }
 
+/// Collects mutated outer-scope variables from a loop body.
 pub fn collect_mutated_variables_loop(
     loop_expr: &syn::ExprLoop,
 ) -> Result<BTreeSet<String>, JITError> {
     collect_mutated_variables_from_block(&loop_expr.body)
 }
 
+/// Walks all operations in a module's function block and verifies each one.
 pub unsafe fn verify_statements_raw(cuda_tile_module: MlirOperation) -> Result<(), JITError> {
     let region = mlirOperationGetRegion(cuda_tile_module, 0);
     let block = mlirRegionGetFirstBlock(region);
@@ -644,6 +677,7 @@ fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
         .map_err(|e| JITError::Generic(format!("Failed to parse int hint: {e}")))
 }
 
+/// Per-architecture (SM) optimization hints for kernel compilation.
 pub struct SMHints {
     pub gpu_name: String,
     pub allow_tma: Option<bool>,
@@ -654,6 +688,7 @@ pub struct SMHints {
 }
 
 impl SMHints {
+    /// Creates a new `SMHints` with no hints set for the given GPU architecture.
     pub fn new(gpu_name: String) -> Self {
         Self {
             gpu_name,
@@ -665,6 +700,7 @@ impl SMHints {
         }
     }
 
+    /// Sets the TMA (Tensor Memory Access) permission hint.
     pub fn set_allow_tma(&mut self, hint: &Expr) -> Result<(), JITError> {
         if self.allow_tma.is_some() {
             return SourceLocation::unknown()
@@ -682,6 +718,7 @@ impl SMHints {
         Ok(())
     }
 
+    /// Sets the number of CTAs in a CGA (Cooperative Grid Array) hint.
     pub fn set_num_cta_in_cga(&mut self, hint: &Expr) -> Result<(), JITError> {
         if self.num_cta_in_cga.is_some() {
             return SourceLocation::unknown()
@@ -691,6 +728,7 @@ impl SMHints {
         Ok(())
     }
 
+    /// Sets the target occupancy hint.
     pub fn set_occupancy(&mut self, hint: &Expr) -> Result<(), JITError> {
         if self.occupancy.is_some() {
             return SourceLocation::unknown()
@@ -700,6 +738,7 @@ impl SMHints {
         Ok(())
     }
 
+    /// Sets the target latency hint.
     pub fn set_latency(&mut self, hint: &Expr) -> Result<(), JITError> {
         if self.latency.is_some() {
             return SourceLocation::unknown().jit_error_result("latency hint has already been set");
@@ -709,6 +748,7 @@ impl SMHints {
     }
 }
 
+/// Collection of optimization hints for kernel compilation, keyed by SM architecture.
 pub struct OptimizationHints {
     pub target_gpu_name: Option<String>,
     pub tile_as_hints: BTreeMap<String, SMHints>,
@@ -716,6 +756,7 @@ pub struct OptimizationHints {
 }
 
 impl OptimizationHints {
+    /// Creates an empty set of optimization hints.
     pub fn empty() -> OptimizationHints {
         Self {
             target_gpu_name: None,
@@ -724,6 +765,7 @@ impl OptimizationHints {
         }
     }
 
+    /// Sets the tensor dimension factor hint.
     pub fn set_tensor_dim_factor(&mut self, hint: &Expr) -> Result<(), JITError> {
         if self.tensor_dim_factor.is_some() {
             return SourceLocation::unknown()
@@ -754,6 +796,7 @@ impl OptimizationHints {
         Ok((key, value))
     }
 
+    /// Parses optimization hints from a tuple expression in the entry annotation.
     pub fn parse(expr: &Expr, target_gpu_name: String) -> Result<OptimizationHints, JITError> {
         let Expr::Tuple(opt_hints) = expr else {
             return SourceLocation::unknown()
@@ -820,10 +863,12 @@ impl OptimizationHints {
         Ok(result)
     }
 
+    /// Returns the SM-specific hints for the given architecture key.
     pub fn get_sm_hints(&self, key: &str) -> Option<&SMHints> {
         self.tile_as_hints.get(key)
     }
 
+    /// Builds the MLIR `optimization_hints` attribute for the entry function.
     pub fn get_entry_opt_hints<'c>(
         &self,
         context: &'c Context,
@@ -853,6 +898,7 @@ impl OptimizationHints {
         }
     }
 
+    /// Builds the MLIR `optimization_hints` attribute for load/store operations.
     pub fn get_load_store_hints<'c>(
         &self,
         context: &'c Context,
@@ -900,6 +946,7 @@ impl OptimizationHints {
     }
 }
 
+/// Builds a `cuda_tile.reduce` MLIR operation.
 pub fn reduce_op<'c>(
     context: &'c Context,
     location: Location<'c>,
@@ -1096,6 +1143,7 @@ fn get_integer_const<T: Integer>(const_str: &str) -> Result<String, JITError> {
 }
 
 // TODO (hme): These need to be tested.
+/// Returns the hex-encoded MLIR constant string for a typed constant name (e.g. `"zero"`, `"one"`).
 pub fn get_const_hex(rust_element_type_str: &str, const_str: &str) -> Result<String, JITError> {
     match rust_element_type_str {
         "f16" => get_float_const::<f16>(const_str),
@@ -1214,6 +1262,7 @@ pub fn resolve_option_arg<'c, 'a>(
     None
 }
 
+/// Removes duplicate elements from a vector while preserving order.
 pub fn dedup<T: Hash + Eq + Clone>(v: &mut Vec<T>) {
     let mut set = HashSet::new();
     v.retain(|x| set.insert(x.clone()));

@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Type representations for the CUDA Tile compiler.
+//! Maps Rust types to their CUDA Tile MLIR equivalents.
+
 use crate::compiler::utils::ElementTypePrefix;
 use crate::error::JITError;
 use crate::generics::{GenericVars, TypeInstance};
@@ -13,21 +16,28 @@ use quote::ToTokens;
 use std::collections::HashMap;
 use syn::ItemImpl;
 
+/// Classification of a Rust type within the CUDA Tile type system.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Kind {
     // A scalar type. The corresponding Rust type will be something like f32.
+    /// Scalar element type (e.g. `f32`, `i32`).
     PrimitiveType,
     // A structured type. The corresponding Rust type will be something like Tile<f32, {[]}>
+    /// Shaped type with element and dimensions (e.g. `Tile<f32, {[128, 64]}>`).
     StructuredType,
     // A compound type. This may be a tuple (i32, i32, ...) or array [i32; 2].
     // These don't compile to cuda tile.
+    /// Tuple or array compound type; not compiled to CUDA Tile IR.
     Compound,
     // A structure type. These don't compile to cuda tile.
+    /// User-defined struct; not compiled to CUDA Tile IR.
     Struct,
     // A string. Non-numeric types require special handling.
+    /// String literal type; requires special handling.
     String,
 }
 
+/// A compiled type binding a Rust `syn::Type` to its CUDA Tile MLIR type and metadata.
 #[derive(Debug, Clone)]
 pub struct TileRustType<'c> {
     pub(crate) kind: Kind,

@@ -23,7 +23,7 @@ pub const TEST_STACK_SIZE: usize = 5_000_000; // 5 MB
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// #[test]
 /// fn my_test() {
 ///     common::with_test_stack(|| {

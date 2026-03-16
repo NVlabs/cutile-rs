@@ -4,12 +4,12 @@
  */
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cuda_async::device_operation::DeviceOperation;
+use cuda_core::CudaContext;
 use cutile::api::{randn_f16, zeros};
 use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
 use cutile::tile_kernel::TileKernel;
 use kernels::*;
-use cuda_core::CudaContext;
 use std::iter::zip;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

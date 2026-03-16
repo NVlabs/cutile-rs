@@ -24,11 +24,11 @@
 //!    uniformly to every variant so that all error kinds look the same.
 //!    `Display` and `Debug` produce identical output for both types.
 
+use cutile;
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use cutile_compiler::error::JITError;
-use cutile;
 
 mod common;
 

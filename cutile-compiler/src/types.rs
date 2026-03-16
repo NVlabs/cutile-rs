@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Type parameter definitions and element-type resolution helpers.
+//! Maps Rust generic type parameters to their CUDA Tile MLIR representations.
+
 // Helper module for type parameters.
 use crate::ast::SourceLocation;
 use crate::error::{JITError, SpannedJITError};
@@ -20,18 +23,26 @@ use syn::{
     UnOp,
 };
 
+/// A type parameter slot in a CUDA Tile type definition (e.g. element type, shape, strides).
 #[derive(Debug, Clone)]
 pub enum TypeParam {
+    /// Scalar element type parameter.
     Primitive(TypeParamPrimitive),
+    /// Shaped element type parameter (shape × element).
     ShapedPrimitive(TypeParamShapedPrimitive),
+    /// Stride layout parameter.
     Strides(TypeParamStrides),
+    /// Dimension mapping parameter.
     DimMap(TypeParamDimMap),
+    /// Tile shape parameter.
     Tile(TypeParamTile),
     // TODO (hme): Can we rename this to Type?
+    /// Nested tensor view type parameter.
     TensorView(TypeParamTensorView),
 }
 
 impl TypeParam {
+    /// Returns the parameter name, if set.
     pub fn name(&self) -> Option<String> {
         match self {
             TypeParam::Primitive(tp) => tp.name.clone(),
@@ -42,6 +53,7 @@ impl TypeParam {
             TypeParam::DimMap(tp) => tp.name.clone(),
         }
     }
+    /// Resolves this type parameter to a concrete MLIR type string.
     pub fn instantiate(
         &mut self,
         generic_args: &GenericVars,
@@ -56,6 +68,7 @@ impl TypeParam {
             TypeParam::DimMap(tp) => tp.instantiate(generic_args, primitives),
         }
     }
+    /// Constructs the appropriate `TypeParam` variant from a parameter name and Rust type.
     pub fn derive_param_from_type(
         name: String,
         rust_ty: syn::Type,
@@ -113,6 +126,7 @@ impl TypeParam {
     }
 }
 
+/// A type parameter combining shape dimensions with an element type (e.g. `{D}xE`).
 #[derive(Debug, Clone)]
 pub struct TypeParamShapedPrimitive {
     pub name: Option<String>,
@@ -149,6 +163,7 @@ impl TypeParamShapedPrimitive {
     }
 }
 
+/// A scalar element type parameter (e.g. `E` → `f32`).
 #[derive(Debug, Clone)]
 pub struct TypeParamPrimitive {
     pub name: Option<String>,
@@ -187,6 +202,7 @@ impl TypeParamPrimitive {
     }
 }
 
+/// A stride layout parameter (e.g. `strides=[?,?,?]`).
 #[derive(Debug, Clone)]
 pub struct TypeParamStrides {
     pub name: Option<String>,
@@ -221,6 +237,7 @@ impl TypeParamStrides {
     }
 }
 
+/// A dimension mapping parameter (e.g. `dim_map=[0,1,2]`).
 #[derive(Debug, Clone)]
 pub struct TypeParamDimMap {
     pub name: Option<String>,
@@ -256,6 +273,7 @@ impl TypeParamDimMap {
     }
 }
 
+/// A tile shape parameter (e.g. `tile=(128x64)`).
 #[derive(Debug, Clone)]
 pub struct TypeParamTile {
     pub name: Option<String>,
@@ -291,6 +309,7 @@ impl TypeParamTile {
     }
 }
 
+/// A nested tensor view type parameter used by partition views.
 #[derive(Debug, Clone)]
 pub struct TypeParamTensorView {
     pub name: Option<String>,
@@ -349,6 +368,7 @@ impl From<syn::Type> for TypeParamTile {
     }
 }
 
+/// Shape and element type information formatted for MLIR type string construction.
 #[derive(Debug)]
 pub struct MLIRVariadicArg {
     pub primitive_type_str: Option<String>,
@@ -356,6 +376,7 @@ pub struct MLIRVariadicArg {
 }
 
 impl MLIRVariadicArg {
+    /// Builds an `MLIRVariadicArg` from a structured type instance's shape and element info.
     pub fn from_structured_type_instance(
         inst: &TypeInstanceStructuredType,
         primitives: &HashMap<(String, String), ItemImpl>,
@@ -399,6 +420,7 @@ impl MLIRVariadicArg {
             shape,
         }
     }
+    /// Formats as an MLIR type fragment (e.g. `128x64xf32`) with the given delimiter.
     pub fn mlir_str(&self, delim: &str, include_element_type: bool) -> String {
         let mlir_shape = self
             .shape
@@ -419,6 +441,7 @@ impl MLIRVariadicArg {
     }
 }
 
+/// Looks up the `cuda_tile::ty` attribute for a primitive trait impl.
 pub fn get_primitives_attrs(
     trait_name: &str,
     rust_type_name: &str,
@@ -430,6 +453,7 @@ pub fn get_primitives_attrs(
     }
 }
 
+/// Returns `true` if the Rust type string is a registered element type.
 pub fn is_element_type(
     rust_primitive: &str,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -437,6 +461,7 @@ pub fn is_element_type(
     get_primitives_attrs("ElementType", rust_primitive, primitives).is_some()
 }
 
+/// Returns `true` if the Rust type string is a pointer to a registered element type.
 pub fn is_element_type_ptr(
     rust_ptr: &str,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -453,6 +478,7 @@ pub fn is_element_type_ptr(
     get_primitives_attrs("ElementType", rust_primitive, primitives).is_some()
 }
 
+/// Parses a pointer type string, returning `(is_mutable, pointee_type)`.
 pub fn get_ptr_type(rust_ptr: &str) -> Option<(bool, String)> {
     // This also serves to check whether this is actually a pointer.
     let res = if rust_ptr.starts_with("* mut ") {
@@ -475,6 +501,7 @@ pub fn get_ptr_type(rust_ptr: &str) -> Option<(bool, String)> {
     Some(res)
 }
 
+/// Like [`get_ptr_type`] but also resolves generic type variables.
 pub fn get_ptr_type_instance(
     rust_ptr: &str,
     generic_vars: &GenericVars,
@@ -507,6 +534,7 @@ pub fn get_ptr_type_instance(
     }
 }
 
+/// Maps a Rust primitive name (e.g. `"f32"`) to its CUDA Tile element type string.
 pub fn get_cuda_tile_element_type_from_rust_primitive_str(
     rust_primitive: &str,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -517,6 +545,7 @@ pub fn get_cuda_tile_element_type_from_rust_primitive_str(
     }
 }
 
+/// Returns the Rust identifier string for a primitive type.
 pub fn get_rust_element_type_primitive(ty: &syn::Type) -> String {
     let type_ident = get_type_ident(&ty);
     assert!(
@@ -526,6 +555,7 @@ pub fn get_rust_element_type_primitive(ty: &syn::Type) -> String {
     return type_ident.unwrap().to_string();
 }
 
+/// Returns the CUDA Tile element type string for a Rust primitive type.
 pub fn get_cuda_tile_element_type_primitive(
     ty: &syn::Type,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -546,6 +576,7 @@ pub fn get_cuda_tile_element_type_primitive(
     element_type_param.unwrap()
 }
 
+/// Extracts the Rust element type name from a structured type's generic arguments.
 pub fn get_element_type_structured(
     ty: &syn::Type,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -583,6 +614,7 @@ pub fn get_element_type_structured(
     element_type
 }
 
+/// Returns the CUDA Tile element type string for a structured type.
 pub fn get_cuda_tile_element_type_structured(
     ty: &syn::Type,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -593,6 +625,7 @@ pub fn get_cuda_tile_element_type_structured(
     get_cuda_tile_element_type_from_rust_primitive_str(&rust_element_type, primitives)
 }
 
+/// Infers the `syn::Type` of a literal expression from its suffix or kind.
 pub fn get_lit_type(lit_expr: &ExprLit) -> Option<syn::Type> {
     match &lit_expr.lit {
         Lit::Int(lit) => {
@@ -615,6 +648,7 @@ pub fn get_lit_type(lit_expr: &ExprLit) -> Option<syn::Type> {
     }
 }
 
+/// Parses a possibly-negated integer literal expression as an `i32`.
 pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
     match expr {
         Expr::Lit(lit) => {
@@ -647,6 +681,7 @@ pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
 //     }
 // }
 
+/// Returns a per-parameter mutability flag for a function signature.
 pub fn get_sig_param_mutability(sig: &Signature) -> Vec<bool> {
     let mut result = vec![];
     for arg in &sig.inputs {
@@ -663,6 +698,7 @@ pub fn get_sig_param_mutability(sig: &Signature) -> Vec<bool> {
     result
 }
 
+/// Returns `true` if the pattern is marked mutable.
 pub fn get_pat_mutability(pat: &syn::Pat) -> bool {
     match pat {
         syn::Pat::Reference(ref_pat) => ref_pat.mutability.is_some(),
@@ -675,6 +711,7 @@ pub fn get_pat_mutability(pat: &syn::Pat) -> bool {
     }
 }
 
+/// Returns `true` if the type is a mutable reference.
 pub fn get_type_mutability(ty: &Type) -> bool {
     match ty {
         Type::Reference(TypeReference {
@@ -688,6 +725,7 @@ pub fn get_type_mutability(ty: &Type) -> bool {
     }
 }
 
+/// Tries to extract a const generic array from a type's generic arguments.
 pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>> {
     let Some(mut type_generic_args) = maybe_generic_args(ty) else {
         return None;

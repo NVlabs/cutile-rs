@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: LicenseRef-NVIDIA-SOFTWARE-LICENSE
 
+//! Raw FFI bindings to the CUDA toolkit libraries (CUDA driver API, cuRAND, etc.).
+
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]

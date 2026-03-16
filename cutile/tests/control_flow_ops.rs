@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+use cutile::{self, api::*, tensor::*, tile_kernel::*};
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
-use cutile::{self, api::*, tensor::*, tile_kernel::*};
 
 mod common;
 
