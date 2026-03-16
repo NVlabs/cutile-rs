@@ -114,6 +114,7 @@ mod basics_and_inlining_module {
         let _this_works: i32 = 1i32 + 2i32;
 
         let _multi_dim_const: Tile<f32, { [128, 64] }> = constant(0.0, x_shape);
+        let _neg_const: Tile<f32, { [128, 64] }> = constant(-1.0, x_shape);
 
         // Test tuples.
         let tuple: (i32, i32) = (1i32, 2i32);
@@ -210,6 +211,14 @@ mod basics_and_inlining_module {
             cuda_tile_assert!(shape_dim_1 == shape_dim_2, "Impossible");
         }
     }
+
+    #[cutile::entry()]
+    fn negative_constant_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let shape = output.shape();
+        let _neg_float: Tile<f32, S> = constant(-1.0, shape);
+        let _neg_int: Tile<i32, S> = constant(-42i32, shape);
+        let _neg_suffixed: Tile<f32, S> = constant(-2.5f32, shape);
+    }
 }
 
 use basics_and_inlining_module::_module_asts;
@@ -267,6 +276,32 @@ fn compile_basics() -> () {
             .expect("Failed.")
             .as_operation()
             .to_string();
+        println!("{module_op_str}");
+    });
+}
+
+#[test]
+fn compile_negative_constant() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "negative_constant_kernel",
+            &[128.to_string()],
+            &[("output", &[1024])],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed to compile negative constant kernel.")
+            .as_operation()
+            .to_string();
+        assert!(module_op_str.contains("-1.0"));
         println!("{module_op_str}");
     });
 }

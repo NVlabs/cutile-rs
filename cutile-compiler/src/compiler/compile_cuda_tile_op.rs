@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, HashMap};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Expr, ExprCall, ExprLit, ItemFn, Lit, Token, Type};
+use syn::{Expr, ExprCall, ExprLit, ItemFn, Lit, Token, Type, UnOp};
 
 impl<'m, 'c> CUDATileFunctionCompiler<'m> {
     pub fn compile_cuda_tile_op_call(
@@ -1986,6 +1986,37 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 )
                             }
                         },
+                        Expr::Unary(unary_expr) => {
+                            let UnOp::Neg(_) = unary_expr.op else {
+                                return self.jit_error_result(
+                                    &call_expr.args[i].span(),
+                                    "Only unary negation is supported for constant values",
+                                );
+                            };
+                            match &*unary_expr.expr {
+                                Expr::Lit(lit_expr) => match &lit_expr.lit {
+                                    Lit::Int(int_lit) => {
+                                        (format!("-{}", int_lit.base10_digits()), "i32".to_string())
+                                    }
+                                    Lit::Float(float_lit) => (
+                                        format!("-{}", float_lit.base10_digits()),
+                                        "f32".to_string(),
+                                    ),
+                                    _ => {
+                                        return self.jit_error_result(
+                                            &call_expr.args[i].span(),
+                                            "Unsupported literal type for negation",
+                                        )
+                                    }
+                                },
+                                _ => {
+                                    return self.jit_error_result(
+                                        &call_expr.args[i].span(),
+                                        "Only literal negation is supported for constant values",
+                                    )
+                                }
+                            }
+                        }
                         Expr::Path(path_expr) => {
                             let path_expr_string = path_expr.to_token_stream().to_string();
                             let ty_val_split = path_expr_string.split(" :: ").collect::<Vec<_>>();
