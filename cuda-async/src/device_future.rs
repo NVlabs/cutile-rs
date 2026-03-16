@@ -78,7 +78,11 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         }
     }
 
-    /// Returns a future that immediately resolves to `Err(error)` on first poll.
+    /// Create a future that is pre-loaded with an error.
+    ///
+    /// On first poll it immediately returns `Poll::Ready(Err(error))`.
+    /// This is used by `IntoFuture` implementations to surface scheduling
+    /// failures without panicking.
     pub fn failed(error: DeviceError) -> Self {
         Self {
             execution_context: None,

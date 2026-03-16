@@ -45,30 +45,90 @@ impl ExecutionContext {
     pub fn get_device_id(&self) -> Device {
         self.device
     }
+    #[expect(
+        dead_code,
+        reason = "kept for direct synchronous execution in tests and future blocking APIs"
+    )]
+    fn execute<T: Send>(&self, op: impl DeviceOperation<Output = T>) -> Result<T, DeviceError> {
+        unsafe {
+            // Safety: ExecutionContext is only available within a DeviceOperation closure.
+            // DeviceOperation closures can only be converted into DeviceFuture
+            // which synchronizes device operations with the host thread via a host callback.
+            op.execute(self)
+        }
+    }
 }
 
-/// A lazy, composable GPU operation executed synchronously or asynchronously on a CUDA device.
+/// A lazy, composable GPU operation that may be executed synchronously or asynchronously on a CUDA device.
 ///
-/// `DeviceOperation` is resource-agnostic; e.g. a stream on a device is determined when the
+/// `DeviceOperation` represents a resource-agnostic computation that will be scheduled and executed.
+/// The actual execution resource (stream, device, host machine, cluster, etc.) is determined when the
 /// operation is either executed or converted into a future.
+/// Device operations are lazy - they don't execute until synchronously executed, or a corresponding
+/// future is awaited upon. Multiple operations can be composed together before execution,
+/// enabling efficient streaming of GPU work.
 ///
-/// # Execution methods
+/// # Scheduling and Stream Assignment
 ///
-/// | Method              | Stream chosen by                      | Blocks thread? |
-/// |---------------------|---------------------------------------|----------------|
-/// | `.await`            | Default device's [`SchedulingPolicy`] | No             |
-/// | `.sync()`           | Default device's [`SchedulingPolicy`] | Yes            |
-/// | `.sync_on(&stream)` | Caller-provided stream                | Yes            |
-/// | `.into_future()`    | Default device's [`SchedulingPolicy`] | No             |
-/// | `.schedule(policy)` | Caller-provided policy                | No             |
+/// How an operation reaches the GPU depends on which method you use:
 ///
-/// Operations chained with [`.and_then()`](DeviceOperation::and_then) share a stream and
-/// execute in order. Independent operations submitted via `.await` or `.sync()` may overlap.
+/// | Method              | Stream chosen by                      | Blocks thread?      |
+/// |---------------------|---------------------------------------|---------------------|
+/// | `.await`            | Default device's [`SchedulingPolicy`] | No (suspends task)  |
+/// | `.sync()`           | Default device's [`SchedulingPolicy`] | Yes                 |
+/// | `.sync_on(&stream)` | The explicit `stream` you provide     | Yes                 |
+/// | `.into_future()`    | Default device's [`SchedulingPolicy`] | No (returns future) |
+/// | `.schedule(policy)` | The `policy` you provide              | No (returns future) |
+///
+/// With the default [`StreamPoolRoundRobin`] policy (4 streams), consecutive `.await` or
+/// `.sync()` calls rotate through streams, so independent operations can overlap on the GPU.
+/// Operations chained with [`.and_then()`](DeviceOperation::and_then) share a single stream
+/// and always execute in order.
+///
+/// See [`SchedulingPolicy`] for a full explanation of ordering guarantees.
 ///
 /// # Safety
 ///
-/// `execute` is unsafe: the GPU may still be writing to the output when it returns.
-/// Use [`DeviceFuture`] or `.sync()` to ensure completion before accessing results.
+/// The `execute` method is unsafe because it's asynchronous - the GPU may still be writing to
+/// memory allocated by the output after `execute` returns. Converting a `DeviceOperation` into
+/// a `DeviceFuture` ensures memory operations complete before the output can be accessed.
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// use cuda_async::device_operation::{DeviceOperation, value};
+///
+/// // Create a simple value operation
+/// let op1 = value(42);
+///
+/// // Chain operations together
+/// let op2 = op1.and_then(|x| value(x * 2));
+///
+/// // Execute synchronously (blocks until GPU completes)
+/// let result = op2.sync(); // returns 84
+/// ```
+///
+/// ```rust,ignore
+/// use cuda_async::device_operation::{DeviceOperation, zip};
+/// use cutile::api;
+///
+/// // Compose multiple tensor operations
+/// let x = api::zeros([64, 64]);
+/// let y = api::ones([64, 64]);
+/// let combined = zip!(x, y).and_then(|(x, y)| {
+///     // Both tensors are ready here
+///     value((x, y))
+/// });
+/// ```
+///
+/// ## Async Usage
+///
+/// Operations automatically implement `IntoFuture`, enabling use with `.await`:
+///
+/// ```rust,ignore
+/// let x = api::randn(0.0, 1.0, [100, 100]).arc().await;
+/// let y = some_kernel(x.clone()).await;
+/// ```
 pub trait DeviceOperation:
     Send + Sized + IntoFuture<Output = Result<<Self as DeviceOperation>::Output, DeviceError>>
 {
@@ -83,7 +143,7 @@ pub trait DeviceOperation:
         self,
         context: &ExecutionContext,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError>;
-    /// Schedule this operation on a specific policy, returning a [`DeviceFuture`].
+    /// Schedule this operation on a specific policy and return a [`DeviceFuture`].
     fn schedule<P: SchedulingPolicy>(
         self,
         policy: &P,
@@ -93,9 +153,11 @@ pub trait DeviceOperation:
     fn apply<O: Send, DO: DeviceOperation<Output = O>, F: Fn(Self) -> DO>(self, f: F) -> DO {
         f(self)
     }
-    /// Chain a follow-up operation on the same stream as `self`.
+    /// Chain a follow-up operation that runs **on the same stream** as `self`.
     ///
-    /// Guarantees `f` sees `self`'s output fully written — no manual synchronization needed.
+    /// Because both operations share a stream, `f` is guaranteed to see `self`'s output
+    /// fully written. This is the recommended way to express data dependencies without
+    /// manual synchronization.
     fn and_then<O: Send, DO, F>(
         self,
         f: F,
@@ -128,7 +190,10 @@ pub trait DeviceOperation:
     {
         DeviceOperationArc { op: self }
     }
-    /// Execute synchronously on the default device, blocking until the GPU finishes.
+    /// Execute synchronously using the default device's scheduling policy.
+    ///
+    /// The policy picks a stream (round-robin by default), submits the work, and blocks
+    /// until the GPU finishes. Equivalent to `.await` but blocking.
     fn sync(self) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
         with_default_device_policy(|policy| policy.sync(self))?
     }
@@ -141,9 +206,11 @@ pub trait DeviceOperation:
         let res = unsafe { self.execute(&ctx) };
         res
     }
-    /// Execute on an explicit stream, blocking until the GPU finishes.
+    /// Execute on an **explicit stream** and block until the GPU finishes.
     ///
-    /// Bypasses the scheduling policy. Operations on the same stream execute in call order.
+    /// This bypasses the scheduling policy entirely. All operations `sync_on` the same
+    /// stream are guaranteed to execute in call order. Use this when you need deterministic
+    /// ordering or are debugging concurrency issues.
     fn sync_on(
         self,
         stream: &Arc<CudaStream>,

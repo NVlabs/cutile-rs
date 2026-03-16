@@ -19,10 +19,12 @@ pub const DEFAULT_DEVICE_ID: usize = 0;
 /// The number of GPU devices initialized by default.
 pub const DEFAULT_NUM_DEVICES: usize = 1;
 
-/// Number of CUDA streams in the default round-robin pool.
+/// The number of CUDA streams in the default round-robin pool.
 ///
-/// Consecutive operations cycle through streams 0…N-1, allowing up to N operations to
-/// overlap. Set to 1 for behavior equivalent to [`SingleStream`](crate::scheduling_policies::SingleStream).
+/// With a pool of 4 streams, consecutive operations cycle through streams 0 → 1 → 2 → 3 → 0 → …,
+/// allowing up to 4 independent operations to overlap on the GPU. Increasing this value adds more
+/// potential concurrency at the cost of additional stream resources; decreasing it (down to 1)
+/// makes behavior equivalent to [`SingleStream`](crate::scheduling_policies::SingleStream).
 pub const DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE: usize = 4;
 
 pub trait FunctionKey: Hash {
@@ -69,9 +71,15 @@ type DeviceFunctionValidators = HashMap<String, Arc<Validator>>;
 
 /// Per-device state: CUDA context, scheduling policy, and compiled kernel cache.
 ///
-/// One instance per GPU device, stored in a thread-local map. Lazily initialized on first
-/// use with the default round-robin policy. Call [`init_device_contexts`] before any GPU
-/// work to customize.
+/// Each GPU device has one `AsyncDeviceContext` stored in a thread-local map. It holds:
+///
+/// - A [`CudaContext`] for driver API calls.
+/// - A [`GlobalSchedulingPolicy`] that decides which stream each operation runs on.
+/// - A cache of already-compiled kernel functions (keyed by [`FunctionKey::get_hash_string()`]).
+///
+/// The context is lazily initialized on first use with the default round-robin policy
+/// ([`DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE`] = 4 streams). To customize, call
+/// [`init_device_contexts`] before any GPU work.
 // TODO (hme): None of this needs to be compiled per thread.
 pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
@@ -97,19 +105,24 @@ thread_local!(static DEVICE_CONTEXTS: AsyncDeviceContexts = const {
     }
 });
 
-/// Returns the current thread's default GPU device ID (defaults to [`DEFAULT_DEVICE_ID`]).
+/// Returns the current thread's default GPU device ID.
+///
+/// This is the device used by `.sync()`, `.await`, and other operations that do not
+/// specify a device explicitly. Defaults to [`DEFAULT_DEVICE_ID`] (0).
 pub fn get_default_device() -> usize {
     DEVICE_CONTEXTS.with(|ctx| ctx.default_device.get())
 }
 
-/// Initialize the thread-local device context map.
+/// Initialize the device context map for the current thread.
 ///
-/// Call before any GPU work to change the default device or pre-allocate contexts.
-/// Contexts not explicitly added are still lazily created on first access.
+/// Call this **before** any GPU work if you need to change the default device or
+/// pre-allocate contexts for multiple devices. Individual device contexts are still
+/// lazily created on first access (with the default round-robin policy) if not
+/// explicitly added via [`init_device`].
 ///
 /// # Panics
 ///
-/// Panics if already initialized on this thread.
+/// Panics if contexts have already been initialized on this thread.
 pub fn init_device_contexts(
     default_device_id: usize,
     num_devices: usize,
@@ -135,8 +148,10 @@ pub fn init_device_contexts_default() -> Result<(), DeviceError> {
     init_device_contexts(default_device, DEFAULT_NUM_DEVICES)
 }
 
-/// Low-level constructor for a device context with a custom scheduling policy.
-/// Prefer [`init_device`] or auto-initialization for typical use.
+/// Create a new [`AsyncDeviceContext`] with a custom scheduling policy.
+///
+/// This is the low-level constructor. Most users should use [`init_device`] or let the
+/// runtime auto-initialize with the default policy.
 pub fn new_device_context(
     device_id: usize,
     mut policy: GlobalSchedulingPolicy,
@@ -157,13 +172,17 @@ pub fn new_device_context(
 
 /// Add a device with a specific scheduling policy to the context map.
 ///
+/// # Example: Using 8 streams instead of the default 4
+///
 /// ```rust,ignore
 /// use cuda_async::device_context::*;
 /// use cuda_async::scheduling_policies::*;
 ///
+/// // Before any GPU work:
 /// init_device_contexts(0, 1).unwrap();
+/// // Then add device 0 with a custom stream pool size:
 /// let policy = unsafe { StreamPoolRoundRobin::new(0, 8) };
-/// init_device(&mut hashmap, 0, GlobalSchedulingPolicy::RoundRobin(policy)).unwrap();
+/// // (use with_global_device_context_mut or init_device internally)
 /// ```
 pub fn init_device(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
@@ -248,7 +267,10 @@ where
     with_global_device_context(device_id, |device_context| f(&device_context.policy))
 }
 
-/// Returns a cloned `Arc` of the scheduling policy for `device_id`.
+/// Get a cloned `Arc` of the scheduling policy for `device_id`.
+///
+/// Useful when you need to schedule operations on a specific device outside the
+/// default `.await` / `.sync()` path.
 pub fn global_policy(device_id: usize) -> Result<Arc<GlobalSchedulingPolicy>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
         let policy = device_context.policy.clone();
@@ -274,18 +296,29 @@ where
 
 // Default device policy.
 
-/// Set the default GPU device for the current thread.
+/// Change the default GPU device for the current thread.
 ///
-/// All subsequent `.sync()` and `.await` calls target this device. The context is
-/// lazily created with the default round-robin policy if it doesn't exist.
+/// All subsequent `.sync()`, `.await`, and `with_default_device_policy` calls on this
+/// thread will target `default_device_id`. The context for that device is lazily created
+/// with the default round-robin policy if it doesn't already exist.
+///
+/// # Multi-GPU Example
+///
+/// ```rust,ignore
+/// // Thread dedicated to device 1:
+/// set_default_device(1);
+/// let tensor = api::zeros([1024, 1024]).await; // runs on GPU 1
+/// ```
 pub fn set_default_device(default_device_id: usize) -> () {
     DEVICE_CONTEXTS.with(|ctx| {
         ctx.default_device.set(default_device_id);
     })
 }
 
-/// Run a closure with the default device's scheduling policy.
-/// Called internally by [`DeviceOperation::sync()`] and [`IntoFuture`].
+/// Run a closure with the scheduling policy of the current thread's default device.
+///
+/// This is the function called internally by [`DeviceOperation::sync()`] and by the
+/// [`IntoFuture`] implementation to schedule operations when no explicit device is given.
 pub fn with_default_device_policy<F, R>(f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&Arc<GlobalSchedulingPolicy>) -> R,
@@ -318,7 +351,8 @@ pub fn load_module_from_ptx(
     })?
 }
 
-/// Cache a compiled kernel so future calls with the same [`FunctionKey`] skip compilation.
+/// Store a compiled kernel in the per-device cache so that future calls with the same
+/// [`FunctionKey`] can skip compilation.
 pub fn insert_cuda_function(
     device_id: usize,
     func_key: &impl FunctionKey,
@@ -340,11 +374,12 @@ pub fn contains_cuda_function(device_id: usize, func_key: &impl FunctionKey) -> 
     .is_ok_and(|pred| pred)
 }
 
-/// Retrieve a cached kernel by key.
+/// Retrieve a previously compiled kernel from the cache.
 ///
 /// # Panics
 ///
-/// Panics if no function with the given key exists. Check with [`contains_cuda_function`] first.
+/// Panics if no function with the given key exists. Use [`contains_cuda_function`] to
+/// check first, or rely on the compilation pipeline which always inserts before retrieving.
 pub fn get_cuda_function(
     device_id: usize,
     func_key: &impl FunctionKey,

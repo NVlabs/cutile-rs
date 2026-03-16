@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-readme = "README.md"
+readme = "../README.md"
 keywords = ["mlir", "cutile", "cuda", "gpu", "async"]
 
 [dependencies]
