@@ -89,6 +89,7 @@ use crate::error::{call_site_error, Error};
 /// let suffix = get_variadic_type_suffix(&[2]); // Returns "_2"
 /// let type_name = format!("Tile{}", suffix);   // "Tile_2"
 /// ```
+/// Generates a rank suffix string from an array of dimension counts (e.g., `[2]` → `"2"`, `[2, 3]` → `"2_3"`).
 pub fn get_variadic_type_suffix(n: &[u32]) -> String {
     n.iter()
         .map(|v| v.to_string())
@@ -125,6 +126,7 @@ pub fn get_variadic_type_suffix(n: &[u32]) -> String {
 /// ```rust,ignore
 /// let name = concrete_name("Tile", &[2]); // Returns "Tile_2"
 /// ```
+/// Builds a concrete type name by appending the rank suffix (e.g., `"Tile"` + `[2]` → `"Tile_2"`).
 pub fn concrete_name(name: &str, n: &[u32]) -> String {
     format!("{}_{}", name, get_variadic_type_suffix(n))
 }
@@ -142,6 +144,7 @@ pub fn concrete_name(name: &str, n: &[u32]) -> String {
 ///   - Example: `Tile<f32, {[128, 64]}>` - shape known at compile-time
 /// - **`Mixed`**: Dimensions can be static or dynamic (`-1`)
 ///   - Example: `Tensor<f32, {[-1, 64]}>` - first dimension determined at runtime
+/// Whether a const-generic array parameter allows dynamic (`-1`) dimensions.
 pub enum DimType {
     /// All dimensions must be compile-time constants (no `-1` allowed)
     Static,
@@ -180,6 +183,7 @@ pub enum DimType {
 ///     cga_index_types: &["i32"],
 /// }
 /// ```
+/// Metadata describing a variadic type's name, CGA parameters, and dimension constraints.
 pub struct VariadicTypeData {
     /// Base name of the type (e.g., "Tile", "Tensor")
     pub name: &'static str,
@@ -263,6 +267,7 @@ static VARIADIC_TYPES: phf::Map<&'static str, VariadicTypeData> = phf_map! {
 /// let data = get_variadic_trait_type_data("f32", "broadcast");
 /// // Returns VariadicTypeData for the broadcast method
 /// ```
+/// Looks up variadic type data for a trait method on a primitive receiver type.
 pub fn get_variadic_trait_type_data(
     maybe_primitive: &str,
     method_name: &str,
@@ -317,6 +322,7 @@ pub fn get_variadic_trait_type_data(
 /// assert_eq!(data.name, "Tile");
 /// assert_eq!(data.cga_names, &["D"]);
 /// ```
+/// Returns metadata for a variadic type by name, or `None` if not variadic.
 pub fn get_variadic_type_data(type_name: &str) -> Option<VariadicTypeData> {
     VARIADIC_TYPES.get(type_name).cloned()
 }
@@ -394,6 +400,7 @@ pub fn get_variadic_type_data(type_name: &str) -> Option<VariadicTypeData> {
 ///     return_type: ("Tile", &["R"]),          // returns Tile<E, R>
 /// }
 /// ```
+/// Metadata describing a variadic operation's const-generic array signature and type mappings.
 pub struct VariadicOpData {
     /// Names of const rank variables
     pub const_length_vars: &'static [&'static str], // [ length_var, ... ]
@@ -432,6 +439,7 @@ pub struct VariadicOpData {
 /// // name might be "reshape" (base name)
 /// // op_data describes the type signature
 /// ```
+/// Looks up variadic operation data for a method on a variadic type.
 pub fn get_variadic_method_data(
     vtd: &VariadicTypeData,
     method_name: &str,
@@ -500,6 +508,7 @@ pub fn get_variadic_method_data(
 /// let op_data = get_variadic_op_data("broadcast_scalar").unwrap();
 /// // Describes type signature: <E, const S: [i32; N]>(E, Shape<S>) -> Tile<E, S>
 /// ```
+/// Returns variadic operation data for a standalone function, or `None` if not variadic.
 pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
     match op_name {
         "addptr" => Some(VariadicOpData {
@@ -922,6 +931,7 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
 /// assert!(is_variadic_op("reduce_sum"));
 /// assert!(!is_variadic_op("mma"));  // mma has fixed 2D/3D signatures
 /// ```
+/// Returns `true` if the given function name is a known variadic operation.
 pub fn is_variadic_op(op_name: &str) -> bool {
     get_variadic_op_data(op_name).is_some()
 }
@@ -951,6 +961,7 @@ pub fn is_variadic_op(op_name: &str) -> bool {
 ///     n: vec![2],                         // 2D
 /// }
 /// ```
+/// A specific instantiation of const-generic array parameters with concrete ranks.
 pub struct ConstGenericArrayType {
     pub cga_arg_strings: Vec<Option<String>>,
     pub n: Vec<u32>,
@@ -975,6 +986,7 @@ pub struct ConstGenericArrayType {
 /// let suffix = get_variadic_function_suffix(&vec![2, 3]);
 /// assert_eq!(suffix, "_2_3");
 /// ```
+/// Generates a function name suffix from CGA rank values (e.g., `[2, 3]` → `"2__3"`).
 pub fn get_variadic_function_suffix(const_ga_lengths: &Vec<u32>) -> String {
     const_ga_lengths
         .iter()
@@ -1004,6 +1016,7 @@ pub fn get_variadic_function_suffix(const_ga_lengths: &Vec<u32>) -> String {
 /// // Generates: Tile_0, Tile_1, Tile_2, Tile_3, Tile_4
 /// ```
 #[derive(Debug, Clone)]
+/// Iterator over all rank combinations for a single variadic type's CGA parameters.
 pub struct ConstGenericArrayTypeIterator {
     i: u32,
     i_max: u32,
@@ -1088,6 +1101,7 @@ impl Iterator for ConstGenericArrayTypeIterator {
 /// let list_iter = ConstGenericArrayTypeListIterator::new(vec![iter1, iter2]);
 /// // Generates all 25 combinations: (0,0), (0,1), ..., (4,4)
 /// ```
+/// Iterator over rank combinations across multiple variadic type parameters simultaneously.
 pub struct ConstGenericArrayTypeListIterator {
     iterators: Vec<ConstGenericArrayTypeIterator>,
     state: Vec<ConstGenericArrayType>,

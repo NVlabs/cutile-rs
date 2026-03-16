@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Core compiler struct and top-level compilation logic for CUDA Tile functions.
+//! Core compiler struct and entry point for compiling a single CUDA Tile function.
 //! Expression, block, type, inline, intrinsic, binary_op, cuda_tile_op, derive,
 //! constant, and assume compilation are delegated to `compile_*` submodules.
 
@@ -48,6 +48,7 @@ pub(crate) const STACK_RED_ZONE: usize = 1 * 1024 * 1024;
 /// Size of each new stack segment when growth is needed (10 MiB).
 pub(crate) const STACK_GROW_SIZE: usize = 10 * 1024 * 1024;
 
+/// Compiles a single Rust function into a CUDA Tile MLIR module.
 pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) context: Context,
     // ASTs
@@ -69,6 +70,7 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) module_name_stack: Vec<String>,
 }
 
+/// Parsed attributes from the `#[cuda_tile::entry(...)]` annotation on a kernel function.
 pub struct EntryAttrs {
     entry_attrs: SingleMetaList,
 }

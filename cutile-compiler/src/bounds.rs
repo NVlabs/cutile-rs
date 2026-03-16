@@ -3,12 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Integer interval arithmetic for static bounds tracking.
+//! Used by the compiler to propagate and check value ranges at compile time.
+
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
 use crate::compiler::utils::TileBinaryOp;
 
 // TODO (hme): Look into bounds for types other than i64.
 
+/// An inclusive interval `[start, end]` over a copyable type.
 #[derive(Debug, Copy, Clone)]
 pub struct Bounds<T: Copy + PartialEq> {
     pub start: T, // Inclusive.
@@ -16,15 +20,18 @@ pub struct Bounds<T: Copy + PartialEq> {
 }
 
 impl<T: Copy + PartialEq> Bounds<T> {
+    /// Creates a new bounds interval from `start` to `end` (both inclusive).
     pub fn new(start: T, end: T) -> Bounds<T> {
         Self { start, end }
     }
+    /// Creates an exact (single-value) bounds where `start == end`.
     pub fn exact(value: T) -> Bounds<T> {
         Self {
             start: value,
             end: value,
         }
     }
+    /// Returns `true` if this interval represents a single known value.
     pub fn is_exact(&self) -> bool {
         self.end == self.start
     }
@@ -160,6 +167,7 @@ impl Rem for Bounds<i64> {
     }
 }
 
+/// Computes the output bounds of a binary operation `f` applied to two intervals.
 pub fn bop_bounds<F: Fn(i64, i64) -> i64>(a: &Bounds<i64>, b: &Bounds<i64>, f: F) -> Bounds<i64> {
     // Compute bounds for various binary operations.
     // In general, the new bounds (for valid inputs) are:
@@ -185,6 +193,7 @@ pub fn bop_bounds<F: Fn(i64, i64) -> i64>(a: &Bounds<i64>, b: &Bounds<i64>, f: F
     Bounds::new(start, end)
 }
 
+/// Returns the result bounds for a [`TileBinaryOp`], or `None` on division by zero.
 pub fn bounds_from_bop(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> Option<Bounds<i64>> {
     match op {
         TileBinaryOp::CeilDiv | TileBinaryOp::Div | TileBinaryOp::TrueDiv => {

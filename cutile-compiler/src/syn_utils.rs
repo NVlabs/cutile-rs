@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Utilities for inspecting and manipulating `syn` AST nodes—attribute parsing,
+//! generic parameter extraction, closure analysis, and pretty-printing helpers.
+
 use crate::generics::GenericVars;
 use proc_macro2::Ident;
 use quote::ToTokens;
@@ -17,6 +20,7 @@ use syn::{
     MetaList, Pat, PathArguments, ReturnType, Signature, Token, Type,
 };
 
+/// A parsed attribute meta list (e.g. `#[cuda_tile::ty(name = "f32")]`).
 #[derive(Debug)]
 pub struct SingleMetaList {
     name: Option<String>,
@@ -25,6 +29,7 @@ pub struct SingleMetaList {
 }
 
 impl SingleMetaList {
+    /// Construct from a `syn::Attribute` that contains a meta list.
     pub fn from_attribute(attr: Attribute) -> Self {
         let Meta::List(meta_list) = attr.meta else {
             panic!("Unexpected attribute list {:#?}", attr.meta)
@@ -35,12 +40,14 @@ impl SingleMetaList {
         result.meta_list = Some(meta_list);
         return result;
     }
+    /// Returns the attribute path as a single string.
     pub fn name_as_str(&self) -> Option<String> {
         match &self.name {
             Some(s) => Some(s.clone()),
             None => None,
         }
     }
+    /// Returns the attribute path split by `::` separators.
     pub fn name_as_vec(&self) -> Option<Vec<&str>> {
         match &self.name {
             Some(s) => Some(s.as_str().split(" :: ").collect()),
@@ -62,9 +69,11 @@ impl SingleMetaList {
         }
         None
     }
+    /// Returns the raw expression for a named key-value entry.
     pub fn parse_custom_expr(&self, name: &str) -> Option<&Expr> {
         self.get_value(name)
     }
+    /// Parses a named entry as an array of string literals.
     pub fn parse_string_arr(&self, name: &str) -> Option<Vec<String>> {
         let value = self.get_value(name);
         match value {
@@ -87,6 +96,7 @@ impl SingleMetaList {
             None => None,
         }
     }
+    /// Parses a named entry as a single string literal.
     pub fn parse_string(&self, name: &str) -> Option<String> {
         let value = self.get_value(name);
         match value {
@@ -102,6 +112,7 @@ impl SingleMetaList {
             None => None,
         }
     }
+    /// Parses a named entry as a `u32` integer literal.
     pub fn parse_int(&self, name: &str) -> Option<u32> {
         let value = self.get_value(name);
         match value {
@@ -117,6 +128,7 @@ impl SingleMetaList {
             None => None,
         }
     }
+    /// Parses a named entry as a boolean literal.
     pub fn parse_bool(&self, name: &str) -> Option<bool> {
         let value = self.get_value(name);
         match value {
@@ -160,6 +172,7 @@ impl Into<Vec<Attribute>> for SingleMetaList {
     }
 }
 
+/// Removes all attributes whose path matches one of the given names.
 pub fn clear_attributes(attr_names: HashSet<&str>, attrs: &mut Vec<Attribute>) -> () {
     // filter == keep
     *attrs = attrs
@@ -179,6 +192,7 @@ pub fn clear_attributes(attr_names: HashSet<&str>, attrs: &mut Vec<Attribute>) -
         .collect::<Vec<Attribute>>();
 }
 
+/// Finds an attribute by path string, optionally matching only the last segment.
 pub fn get_attribute(
     lookup_str: &str,
     outer_attrs: &Vec<Attribute>,
@@ -206,6 +220,7 @@ pub fn get_attribute(
     None
 }
 
+/// Looks up an attribute by full path and parses it as a [`SingleMetaList`].
 pub fn get_meta_list(attr_name: &str, outer_attrs: &Vec<Attribute>) -> Option<SingleMetaList> {
     match get_attribute(attr_name, outer_attrs, false) {
         Some(attr) => Some(SingleMetaList::from_attribute(attr)),
@@ -213,6 +228,7 @@ pub fn get_meta_list(attr_name: &str, outer_attrs: &Vec<Attribute>) -> Option<Si
     }
 }
 
+/// Like [`get_meta_list`] but matches only the last path segment.
 pub fn get_meta_list_by_last_segment(
     last_seg: &str,
     outer_attrs: &Vec<Attribute>,
@@ -223,6 +239,7 @@ pub fn get_meta_list_by_last_segment(
     }
 }
 
+/// Finds the first `cuda_tile::*` attribute and parses it as a [`SingleMetaList`].
 pub fn get_cuda_tile_meta_list(outer_attrs: &Vec<Attribute>) -> Option<SingleMetaList> {
     let mut found: Option<SingleMetaList> = None;
     for attr in outer_attrs {
@@ -242,6 +259,7 @@ pub fn get_cuda_tile_meta_list(outer_attrs: &Vec<Attribute>) -> Option<SingleMet
 }
 
 #[derive(Debug, Clone)]
+/// A const generic array parameter whose length is itself a generic variable.
 pub struct VarCGAParameter {
     pub name: String,
     pub element_type: String,
@@ -249,6 +267,7 @@ pub struct VarCGAParameter {
 }
 
 impl VarCGAParameter {
+    /// Instantiate with a concrete length to produce a [`CGAParameter`].
     pub fn instance(&self, length: u32) -> CGAParameter {
         CGAParameter {
             name: self.name.clone(),
@@ -258,6 +277,7 @@ impl VarCGAParameter {
     }
 }
 impl VarCGAParameter {
+    /// Extracts a variable-length CGA parameter from a `const` generic declaration.
     pub fn from_const_param(const_param: &ConstParam) -> VarCGAParameter {
         let name = const_param.ident.to_string();
         let Type::Array(ty_arr) = &const_param.ty else {
@@ -291,6 +311,7 @@ impl VarCGAParameter {
             }
         }
     }
+    /// Returns `true` if the const param has a variable (non-literal) array length.
     pub fn is_var_cga(const_param: &ConstParam) -> bool {
         let Type::Array(ty_arr) = &const_param.ty else {
             panic!("Expected array type.")
@@ -300,6 +321,7 @@ impl VarCGAParameter {
         };
         false
     }
+    /// Returns `Some` if the const param is a variable-length CGA parameter.
     pub fn maybe_var_cga(const_param: &ConstParam) -> Option<VarCGAParameter> {
         if VarCGAParameter::is_var_cga(const_param) {
             Some(VarCGAParameter::from_const_param(const_param))
@@ -310,6 +332,7 @@ impl VarCGAParameter {
 }
 
 #[derive(Debug, Clone)]
+/// A const generic array parameter with a concrete length.
 pub struct CGAParameter {
     pub name: String,
     pub element_type: String,
@@ -317,12 +340,14 @@ pub struct CGAParameter {
 }
 
 #[derive(Debug, Clone)]
+/// A scalar const generic parameter (e.g. `const N: i32`).
 pub struct ConstParameter {
     pub name: String,
     pub ty: String,
 }
 
 impl CGAParameter {
+    /// Extracts a fixed-length CGA parameter from a `const` generic declaration.
     pub fn from_const_param(const_param: &ConstParam) -> CGAParameter {
         let name = const_param.ident.to_string();
         let Type::Array(ty_arr) = &const_param.ty else {
@@ -357,6 +382,7 @@ impl CGAParameter {
     }
 }
 
+/// Separates generic params into const generic arrays and scalar const parameters.
 pub fn parse_cgas(generics: &Generics) -> (Vec<CGAParameter>, Vec<ConstParameter>) {
     let mut cga_params: Vec<CGAParameter> = vec![];
     let mut const_params: Vec<ConstParameter> = vec![];
@@ -381,6 +407,7 @@ pub fn parse_cgas(generics: &Generics) -> (Vec<CGAParameter>, Vec<ConstParameter
     (cga_params, const_params)
 }
 
+/// Returns the variable name for a function argument (including `self`).
 pub fn get_fn_arg_var_name(arg: &FnArg) -> String {
     match arg {
         FnArg::Receiver(receiver) => receiver.self_token.to_token_stream().to_string(),
@@ -391,6 +418,7 @@ pub fn get_fn_arg_var_name(arg: &FnArg) -> String {
     }
 }
 
+/// Collects parameter names from a function signature.
 pub fn get_sig_param_names(sig: &Signature) -> Vec<String> {
     let mut result = vec![];
     for arg in &sig.inputs {
@@ -400,6 +428,7 @@ pub fn get_sig_param_names(sig: &Signature) -> Vec<String> {
     result
 }
 
+/// Extracts angle-bracketed generic arguments from a call expression (e.g. `foo::<T, 3>(...)`).
 pub fn get_call_expression_generics(
     call_expr: &ExprCall,
 ) -> Option<AngleBracketedGenericArguments> {
@@ -422,6 +451,7 @@ pub fn get_call_expression_generics(
     }
 }
 
+/// Collects integer const generic arguments from angle brackets, resolving generic vars.
 pub fn get_generic_arg_ints<T>(
     generic_args: &AngleBracketedGenericArguments,
     generic_vars: Option<&GenericVars>,
@@ -462,6 +492,7 @@ where
     result
 }
 
+/// Returns `(input_types, return_type)` for a function signature.
 pub fn get_sig_types(sig: &Signature, self_ty: Option<&Type>) -> (Vec<Type>, Type) {
     let mut input_tys: Vec<Type> = vec![];
     for input in sig.inputs.iter() {
@@ -490,6 +521,7 @@ pub fn get_sig_types(sig: &Signature, self_ty: Option<&Type>) -> (Vec<Type>, Typ
     (input_tys, ret_ty)
 }
 
+/// Returns the output type of a signature, defaulting to `()`.
 pub fn get_sig_output_type(sig: &Signature) -> Type {
     match &sig.output {
         ReturnType::Type(_, return_type) => *return_type.clone(),
@@ -497,6 +529,7 @@ pub fn get_sig_output_type(sig: &Signature) -> Type {
     }
 }
 
+/// Returns `true` if the function has a non-unit return type.
 pub fn function_returns(fn_item: &ItemFn) -> bool {
     match &fn_item.sig.output {
         ReturnType::Type(_, return_type) => match &**return_type {
@@ -507,14 +540,17 @@ pub fn function_returns(fn_item: &ItemFn) -> bool {
     }
 }
 
+/// Returns the last segment's ident from a `syn::Path`.
 pub fn get_ident_from_path(path: &syn::Path) -> Ident {
     path.segments.last().unwrap().ident.clone()
 }
 
+/// Returns the last segment's ident from a path expression.
 pub fn get_ident_from_path_expr(path_expr: &ExprPath) -> Ident {
     get_ident_from_path(&path_expr.path)
 }
 
+/// Tries to extract an ident from a path or reference expression.
 pub fn get_ident_from_expr(expr: &Expr) -> Option<Ident> {
     match expr {
         Expr::Path(path_expr) => Some(get_ident_from_path(&path_expr.path)),
@@ -523,6 +559,7 @@ pub fn get_ident_from_expr(expr: &Expr) -> Option<Ident> {
     }
 }
 
+/// Returns the leaf ident of a type, following pointers and references.
 pub fn get_type_ident(ty: &Type) -> Option<Ident> {
     match ty {
         Type::Path(type_path) => Some(type_path.path.segments.last().unwrap().ident.clone()),
@@ -532,6 +569,7 @@ pub fn get_type_ident(ty: &Type) -> Option<Ident> {
     }
 }
 
+/// Returns a string representation of the type's leaf segment.
 pub fn get_type_str(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(type_path) => Some(type_path.path.segments.last().unwrap().ident.to_string()),
@@ -541,6 +579,7 @@ pub fn get_type_str(ty: &Type) -> Option<String> {
     }
 }
 
+/// Returns `(ident, generic_args)` for a type of the form `T<...>`.
 pub fn get_ident_generic_args(ty: &Type) -> (Option<Ident>, AngleBracketedGenericArguments) {
     match ty {
         Type::Path(type_path) => {
@@ -565,6 +604,7 @@ pub fn get_ident_generic_args(ty: &Type) -> (Option<Ident>, AngleBracketedGeneri
     }
 }
 
+/// Returns generic arguments if the type has them, or `None` otherwise.
 pub fn maybe_generic_args(ty: &Type) -> Option<AngleBracketedGenericArguments> {
     match ty {
         Type::Path(type_path) => {
@@ -601,6 +641,7 @@ pub fn maybe_generic_args(ty: &Type) -> Option<AngleBracketedGenericArguments> {
     }
 }
 
+/// Extracts type and const generic param names (skipping lifetimes).
 pub fn get_supported_generic_params(generics: &Generics) -> Vec<(String, Option<Type>)> {
     let mut param_names: Vec<(String, Option<Type>)> = vec![];
     for param in &generics.params {
@@ -622,6 +663,7 @@ pub fn get_supported_generic_params(generics: &Generics) -> Vec<(String, Option<
     param_names
 }
 
+/// Removes lifetime arguments from angle-bracketed generic arguments in place.
 pub fn strip_generic_args_lifetimes(gen_args: &mut AngleBracketedGenericArguments) -> () {
     let mut res = gen_args.args.clone();
     res.clear();
@@ -634,6 +676,7 @@ pub fn strip_generic_args_lifetimes(gen_args: &mut AngleBracketedGenericArgument
     gen_args.args = res;
 }
 
+/// Removes lifetime parameters from generics in place.
 pub fn strip_generics_lifetimes(generics: &mut Generics) -> () {
     let mut res = generics.params.clone();
     res.clear();
@@ -646,6 +689,7 @@ pub fn strip_generics_lifetimes(generics: &mut Generics) -> () {
     generics.params = res;
 }
 
+/// Pretty-prints a single `syn::Item` via `prettyplease`.
 pub fn item_string_pretty(item: &Item) -> String {
     let file = syn::File {
         attrs: vec![],
@@ -655,6 +699,7 @@ pub fn item_string_pretty(item: &Item) -> String {
     file_item_string_pretty(&file)
 }
 
+/// Pretty-prints a `syn::File` via `prettyplease`.
 pub fn file_item_string_pretty(file: &syn::File) -> String {
     prettyplease::unparse(file)
 }

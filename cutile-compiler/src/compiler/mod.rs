@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Compiler backend: translates Rust syn ASTs into CUDA Tile MLIR operations.
+//! Submodules handle functions, modules, types, values, and individual compilation passes.
+
 pub mod _function;
 pub mod _module;
 pub mod _type;

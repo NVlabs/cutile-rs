@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Module registry: collects and indexes all parsed DSL modules, structs, trait impls,
+//! and functions for lookup during compilation.
+
 use crate::ast::{Module, SourceLocation, SpanBase};
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
@@ -13,6 +16,7 @@ use syn::{
     ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, Type,
 };
 
+/// Aggregated index of all DSL modules, types, impls, and functions available to the compiler.
 pub struct CUDATileModules {
     pub(crate) modules: HashMap<String, ItemMod>,
     // Rust primitives marked as cuda tile types.

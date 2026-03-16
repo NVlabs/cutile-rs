@@ -2,6 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+
+//! Shared utilities and reference implementations for cutile examples.
+
 use candle_nn::ops::softmax;
 use std::sync::Arc;
 
@@ -11,6 +14,7 @@ use cutile::candle_core;
 use cutile::candle_core::WithDType;
 use cutile::tensor::{CopyToHost, Tensor};
 
+/// Formats a byte count into a human-readable size string (e.g. "1.5kb", "2.3mb").
 pub fn size_label(size_bytes: usize) -> String {
     if size_bytes < 10usize.pow(3) {
         // bytes
@@ -27,6 +31,7 @@ pub fn size_label(size_bytes: usize) -> String {
     }
 }
 
+/// Computes a reference FMHA result on the host: `softmax(scale(Q @ K^T)) @ V`.
 pub fn fmha_ref_exec<T: WithDType>(
     q: &Arc<Tensor<T>>,
     k: &Arc<Tensor<T>>,
@@ -52,6 +57,7 @@ pub fn fmha_ref_exec<T: WithDType>(
     qkv // (b, h, m, d)
 }
 
+/// Computes the theoretical peak (speed-of-light) tensor core TFLOPS for a Blackwell GPU.
 pub fn blackwell_tensorcore_sol_tflops(
     num_sms: f64,
     tensorcores_per_sm: f64,
@@ -69,6 +75,7 @@ pub fn blackwell_tensorcore_sol_tflops(
     sol_tflops_per_sec
 }
 
+/// Returns RTX 5090 theoretical peak f16 tensor core TFLOPS at the given clock speed (MHz).
 pub fn rtx_5090_tensorcore_f16_sol_tflops_at(clock_speed: f64) -> f64 {
     let num_sms = 170.0;
     let num_tensor_cores = 4.0;
@@ -85,6 +92,7 @@ pub fn rtx_5090_tensorcore_f16_sol_tflops_at(clock_speed: f64) -> f64 {
     )
 }
 
+/// Returns RTX 5090 theoretical peak f16 tensor core TFLOPS using the device's clock rate.
 pub fn rtx_5090_tensorcore_f16_sol_tflops(device_id: usize) -> f64 {
     let ctx = CudaContext::new(device_id).unwrap();
     let clock_rate = unsafe { get_device_clock_rate(ctx.cu_device()).unwrap() } as f64;

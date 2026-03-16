@@ -3,14 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Tile kernel compilation, caching, launching, and partitioning for CUDA device operations.
+
 use anyhow::{Context, Result};
 use candle_core::WithDType;
 use cuda_async::error::DeviceError;
+use cuda_core::{memcpy_dtoh_async, CudaFunction};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile::ModuleOperation;
 use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
-use cuda_core::{memcpy_dtoh_async, CudaFunction};
 use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
@@ -60,7 +62,6 @@ impl TileFunctionKey {
 
 impl FunctionKey for TileFunctionKey {}
 
-#[expect(unused)]
 /// Reads IR (MLIR or PTX) from a file.
 ///
 /// This helper function reads intermediate representation files from disk, typically
@@ -73,6 +74,7 @@ impl FunctionKey for TileFunctionKey {}
 /// ## Returns
 ///
 /// The file contents as a UTF-8 string, or an I/O error if reading fails.
+#[expect(unused)]
 fn read_ir(path: String) -> Result<String, std::io::Error> {
     let s = String::from_utf8(fs::read(path)?).expect("Unable to convert from utf8 to string.");
     Ok(s)
@@ -112,7 +114,7 @@ fn write_ir(
 
 /// Compiles a tile function to CUDA and caches it for reuse.
 ///
-/// This function handles the complete compilation pipeline from Rust/MLIR to CUDA:
+/// Handles the complete compilation pipeline from Rust/MLIR to CUDA:
 /// 1. Checks the thread-local cache for a previously compiled function
 /// 2. If not cached, compiles the module AST to MLIR, then to PTX/CUBIN
 /// 3. Loads the compiled function and caches it for future use
@@ -279,6 +281,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     }
 }
 
+/// Validates that all partition grids match the expected launch grid.
 pub fn validate_grids(
     grid: (u32, u32, u32),
     partition_grids: &[(u32, u32, u32)],
@@ -417,6 +420,7 @@ pub trait TileKernel<ARGS: Send, DI>: DeviceOperation<Output = ARGS>
 where
     DI: DeviceOperation<Output = ARGS>,
 {
+    /// Compiles the kernel from module ASTs, returning the CUDA function and validator.
     fn compile<F: Fn() -> Vec<Module>>(
         &mut self,
         ctx: &ExecutionContext,
@@ -439,9 +443,13 @@ where
             grid,
         )
     }
+    /// Sets the type and const generic arguments for this kernel.
     fn generics(self, generics: Vec<String>) -> Self;
+    /// Sets a compile-time constant grid, enabling grid-dependent optimizations.
     fn const_grid(self, grid: (u32, u32, u32)) -> Self;
+    /// Sets the runtime launch grid dimensions.
     fn grid(self, grid: (u32, u32, u32)) -> Self;
+    /// Infers the launch grid from partitioned tensor inputs, or uses the explicit grid.
     fn infer_launch_grid(
         &self,
         inferred_grids: &[(u32, u32, u32)],
@@ -449,10 +457,13 @@ where
         let grid = self.get_launch_grid();
         infer_launch_grid(grid, &inferred_grids)
     }
+    /// Returns the currently configured launch grid dimensions.
     fn get_launch_grid(&self) -> (u32, u32, u32);
+    /// Returns the dynamic shared memory size in bytes. Defaults to 0.
     fn get_launch_smem(&self) -> u32 {
         0
     }
+    /// Returns the thread block dimensions. Defaults to `(1, 1, 1)`.
     fn get_launch_block(&self) -> (u32, u32, u32) {
         (1, 1, 1)
     }
@@ -726,8 +737,8 @@ where
 
 /// Unwraps a partitioned device operation back to a regular tensor operation.
 ///
-/// This function converts a device operation that produces a `Partition<T>` into one
-/// that produces `T` directly. It's useful for converting partitioned kernel outputs
+/// Converts a device operation that produces a `Partition<T>` into one
+/// that produces `T` directly. Useful for converting partitioned kernel outputs
 /// back to regular tensors for further processing.
 ///
 /// ## Examples
@@ -752,6 +763,7 @@ where
 
 // ToHostVec
 
+/// A device operation that copies a tensor from device memory to a host `Vec<T>`.
 pub struct TensorToHostVec<T: WithDType, DI>
 where
     DI: DeviceOperation<Output = Tensor<T>>,
@@ -799,7 +811,9 @@ where
     }
 }
 
+/// Extension trait for converting a tensor device operation into a host `Vec<T>` operation.
 pub trait TensorDeviceOpToHostVec<T: WithDType> {
+    /// Wraps this operation to copy the resulting tensor to a host `Vec<T>`.
     fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>>
     where
         Self: DeviceOperation<Output = Tensor<T>>,

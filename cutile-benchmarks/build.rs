@@ -3,4 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Build script for cutile benchmarks.
+
 fn main() {}

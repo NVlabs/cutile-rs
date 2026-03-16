@@ -32,10 +32,10 @@
 //!    number, and column number — proving that `source_text()` correctly
 //!    preserves comments in the captured text.
 
+use cutile;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use cutile_compiler::error::JITError;
-use cutile;
 
 mod common;
 

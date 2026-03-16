@@ -5,6 +5,7 @@ use std::{env, error::Error, path::Path, process::exit, str};
 
 use std::path::PathBuf;
 
+/// Returns the CUDA toolkit directory from the `CUDA_TOOLKIT_PATH` environment variable.
 pub fn cuda_toolkit_dir() -> String {
     env::var("CUDA_TOOLKIT_PATH").expect("CUDA_TOOLKIT_PATH is required but not set")
 }
@@ -16,6 +17,7 @@ fn main() {
     }
 }
 
+/// Generates CUDA bindings via bindgen and configures native library link paths.
 fn run() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=wrapper.h");
 
@@ -38,6 +40,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Collects valid library search paths from the given CUDA toolkit root directory.
 pub fn collect_paths(cuda_toolkit: &str) -> Vec<PathBuf> {
     let candidates = vec![PathBuf::from(cuda_toolkit)];
     let mut valid_paths = vec![];

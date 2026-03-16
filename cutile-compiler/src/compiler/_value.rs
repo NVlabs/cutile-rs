@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Value representations used during compilation: typed MLIR values, structs,
+//! compounds, compiler context (variable scopes), and block terminators.
+
 use crate::bounds::Bounds;
 use crate::compiler::_type::{Kind, TileRustType};
 use crate::error::JITError;
@@ -11,6 +14,7 @@ use melior::ir::Value;
 use std::collections::BTreeMap;
 use syn::Expr;
 
+/// Flattens all values in a `BTreeMap` of [`TileRustValue`]s into a linear list.
 pub fn unpack_btree_to<'c, 'a>(
     btree: &BTreeMap<String, TileRustValue<'c, 'a>>,
     values: &mut Vec<Value<'c, 'a>>,
@@ -22,6 +26,7 @@ pub fn unpack_btree_to<'c, 'a>(
     Ok(())
 }
 
+/// Reconstructs a `BTreeMap` of [`TileRustValue`]s from a flat list of MLIR values.
 pub fn repack_btree_from<'c, 'a>(
     old_btree: &BTreeMap<String, TileRustValue<'c, 'a>>,
     values: &Vec<Value<'c, 'a>>,
@@ -37,6 +42,7 @@ pub fn repack_btree_from<'c, 'a>(
     Ok((new_btree, pos))
 }
 
+/// Type-level metadata (named sub-fields) attached to structured values like views.
 #[derive(Debug, Clone)]
 pub struct TypeMeta<'c, 'a> {
     pub fields: BTreeMap<String, TileRustValue<'c, 'a>>,
@@ -56,13 +62,18 @@ impl<'c, 'a> TypeMeta<'c, 'a> {
     }
 }
 
+/// Mutability state of a variable binding during compilation.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Mutability {
+    /// Mutability has not been determined yet.
     Unset,
+    /// The binding is mutable (`let mut`).
     Mutable,
+    /// The binding is immutable (`let`).
     Immutable,
 }
 
+/// A compiled value: wraps an MLIR `Value` together with its Rust type, kind, bounds, and metadata.
 #[derive(Debug, Clone)]
 pub struct TileRustValue<'c, 'a> {
     // This may be a structured cuda tile type, a struct, or compound value.
@@ -86,6 +97,7 @@ pub struct TileRustValue<'c, 'a> {
 }
 
 impl<'c, 'a> TileRustValue<'c, 'a> {
+    /// Creates a struct value from named fields.
     pub fn new_struct(
         fields: BTreeMap<String, TileRustValue<'c, 'a>>,
         ty: TileRustType<'c>,
@@ -102,6 +114,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             string_literal: None,
         }
     }
+    /// Creates a compound (tuple/array) value from ordered elements.
     pub fn new_compound(
         values: Vec<TileRustValue<'c, 'a>>,
         ty: TileRustType<'c>,
@@ -118,6 +131,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             string_literal: None,
         }
     }
+    /// Creates a structured CUDA Tile type value (e.g. Tile, TensorView).
     pub fn new_structured_type(
         value: Value<'c, 'a>,
         ty: TileRustType<'c>,
@@ -135,6 +149,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             string_literal: None,
         }
     }
+    /// Creates a scalar primitive value with optional static bounds.
     pub fn new_primitive(
         value: Value<'c, 'a>,
         ty: TileRustType<'c>,
@@ -152,6 +167,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             string_literal: None,
         }
     }
+    /// Creates a compile-time string literal value.
     pub fn new_string(string_literal: Expr, ty: TileRustType<'c>) -> TileRustValue<'c, 'a> {
         Self {
             fields: None,
@@ -165,6 +181,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             string_literal: Some(string_literal),
         }
     }
+    /// Creates a new value matching the kind of the given type.
     pub fn new_value_kind_like(
         value: Value<'c, 'a>,
         ty: TileRustType<'c>,
@@ -191,6 +208,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             },
         }
     }
+    /// Creates an uncompiled literal value (stored as AST until needed).
     pub fn new_literal(literal_expr: syn::Expr, ty: TileRustType<'c>) -> TileRustValue<'c, 'a> {
         Self {
             fields: None,
@@ -204,6 +222,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             string_literal: Some(literal_expr),
         }
     }
+    /// Validates internal consistency between `kind` and which fields are set.
     pub fn verify(&self) -> Result<(), JITError> {
         match self.kind {
             Kind::String => {
@@ -246,18 +265,21 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
         }
         Ok(())
     }
+    /// Returns a reference to a named type-metadata sub-field, if present.
     pub fn get_type_meta_field(&self, name: &str) -> Option<&Self> {
         let Some(type_meta) = &self.type_meta else {
             return None;
         };
         type_meta.fields.get(name)
     }
+    /// Consumes self and removes a named type-metadata sub-field, returning it.
     pub fn take_type_meta_field(self, name: &str) -> Option<Self> {
         let Some(mut type_meta) = self.type_meta else {
             return None;
         };
         type_meta.fields.remove(name)
     }
+    /// Inserts or replaces a named type-metadata sub-field.
     pub fn insert_type_meta_field(
         &mut self,
         name: &str,
@@ -272,15 +294,18 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
         type_meta.fields.insert(name.to_string(), val.clone());
         Ok(())
     }
+    /// Returns the ordering token sub-field, if present.
     pub fn get_token(&self) -> Option<&Self> {
         self.get_type_meta_field("token")
     }
+    /// Returns `true` if the underlying Rust type is a `Tile*` type.
     pub fn is_tile(&self) -> bool {
         let Some(ident) = get_type_ident(&self.ty.rust_ty) else {
             return false;
         };
         ident.to_string().starts_with("Tile")
     }
+    /// Returns `true` if the underlying Rust type is a `Partition*` type.
     pub fn is_partition(&self) -> bool {
         let Some(ident) = get_type_ident(&self.ty.rust_ty) else {
             return false;
@@ -288,6 +313,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
         ident.to_string().starts_with("Partition")
     }
 
+    /// Recursively flattens this value's MLIR values into a linear list.
     pub fn unpack_to(&self, values: &mut Vec<Value<'c, 'a>>) -> Result<(), JITError> {
         self.verify()?;
         match self.kind {
@@ -328,6 +354,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
         Ok(())
     }
 
+    /// Reconstructs this value's structure from a flat list of MLIR values starting at `pos`.
     pub fn repack_from(
         &self,
         values: &Vec<Value<'c, 'a>>,
@@ -387,23 +414,34 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
     }
 }
 
+/// How a compiled block transfers control at its end.
 #[derive(Debug, Clone, Copy)]
 pub enum BlockTerminator {
+    /// Yield values to the enclosing region.
     Yield,
+    /// Continue to the next loop iteration.
     Continue,
+    /// Return from the function.
     Return,
+    /// Break out of the enclosing loop.
     Break,
 }
 
+/// Variable scope and control-flow state for a compilation block.
 #[derive(Debug, Clone)]
 pub struct CompilerContext<'c, 'a> {
+    /// Named variables in the current scope.
     pub vars: BTreeMap<String, TileRustValue<'c, 'a>>,
+    /// Variables carried across loop iterations, if inside a loop.
     pub carry_vars: Option<Vec<String>>,
+    /// Default terminator for the current block (e.g. yield for loops).
     pub default_terminator: Option<BlockTerminator>,
+    /// Current module scope path used for symbol resolution.
     pub module_scope: Vec<String>,
 }
 
 impl<'c, 'a> CompilerContext<'c, 'a> {
+    /// Creates an empty context with no variables or terminators.
     pub fn empty() -> CompilerContext<'c, 'a> {
         Self {
             vars: BTreeMap::new(),
@@ -412,16 +450,19 @@ impl<'c, 'a> CompilerContext<'c, 'a> {
             module_scope: vec![],
         }
     }
+    /// Returns the names of all variables in scope.
     pub fn var_keys(&self) -> Vec<String> {
         self.vars.keys().cloned().collect()
     }
 
+    /// Flattens all variable values into a linear MLIR value list.
     pub fn unpack_vars(&self) -> Result<Vec<Value<'c, 'a>>, JITError> {
         let mut result = vec![];
         unpack_btree_to(&self.vars, &mut result)?;
         Ok(result)
     }
 
+    /// Reconstructs variables from a flat value list, replacing scope metadata.
     pub fn repack_vars(
         &self,
         vars: &Vec<Value<'c, 'a>>,
@@ -438,6 +479,7 @@ impl<'c, 'a> CompilerContext<'c, 'a> {
         })
     }
 
+    /// Flattens only the specified variables into a linear value list.
     pub fn unpack_some_vars(&self, keys: &Vec<String>) -> Result<Vec<Value<'c, 'a>>, JITError> {
         let mut result = vec![];
         for key in keys {
@@ -449,6 +491,7 @@ impl<'c, 'a> CompilerContext<'c, 'a> {
         Ok(result)
     }
 
+    /// Repacks a subset of variables from a flat value list, optionally invalidating bounds.
     pub fn repack_some_vars(
         &mut self,
         keys: &Vec<String>,

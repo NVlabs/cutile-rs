@@ -1,11 +1,19 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! Error types for the cutile crate, covering tensor, kernel launch, JIT, and device errors.
+
 use cuda_async::error::DeviceError;
-use cutile_compiler::error::JITError;
 use cuda_core::DriverError;
+use cutile_compiler::error::JITError;
 use std::{
     error,
     fmt::{self, Display, Formatter},
 };
 
+/// An error originating from an invalid tensor operation (e.g. shape mismatch).
 #[derive(Debug)]
 pub struct TensorError(pub String);
 
@@ -18,6 +26,7 @@ impl Display for TensorError {
 
 impl error::Error for TensorError {}
 
+/// An error raised when a kernel launch fails (e.g. mismatched grid dimensions).
 #[derive(Debug)]
 pub struct KernelLaunchError(pub String);
 
@@ -30,12 +39,19 @@ impl Display for KernelLaunchError {
 
 impl error::Error for KernelLaunchError {}
 
+/// Unified error type aggregating all error sources in the cutile crate.
 pub enum Error {
+    /// A tensor-related error (shape, rank, size, etc.).
     Tensor(TensorError),
+    /// A kernel launch configuration error (grid, block, shared memory, etc.).
     KernelLaunch(KernelLaunchError),
+    /// A JIT compilation error from the cutile compiler.
     JIT(JITError),
+    /// An asynchronous device execution error.
     Device(DeviceError),
+    /// A low-level CUDA driver error.
     Driver(DriverError),
+    /// A catch-all error from `anyhow`.
     Anyhow(anyhow::Error),
 }
 
@@ -64,26 +80,31 @@ impl error::Error for Error {}
 
 // Tensor
 
+/// Creates a `Error::Tensor` from the given message string.
 pub fn tensor_error(err_str: &str) -> Error {
     return Error::Tensor(TensorError(err_str.to_string()));
 }
 
+/// Returns `Err(Error::Tensor(...))` with the given message string.
 pub fn tensor_error_result<R>(err_str: &str) -> Result<R, Error> {
     return Err(tensor_error(err_str));
 }
 
 // Kernel Launch
 
+/// Creates a `Error::KernelLaunch` from the given message string.
 pub fn kernel_launch_error(err_str: &str) -> Error {
     return Error::KernelLaunch(KernelLaunchError(err_str.to_string()));
 }
 
+/// Returns `Err(Error::KernelLaunch(...))` with the given message string.
 pub fn kernel_launch_error_result<R>(err_str: &str) -> Result<R, Error> {
     return Err(kernel_launch_error(err_str));
 }
 
 // anyhow
 
+/// Converts an `anyhow::Error` into `Error::Anyhow`.
 impl From<anyhow::Error> for Error {
     fn from(error: anyhow::Error) -> Self {
         Self::Anyhow(error)
@@ -92,12 +113,14 @@ impl From<anyhow::Error> for Error {
 
 // Device
 
+/// Converts an `Error` into a `DeviceError` by formatting via `Debug`.
 impl From<Error> for DeviceError {
     fn from(error: Error) -> Self {
         DeviceError::Anyhow(format!("{:?}", error))
     }
 }
 
+/// Converts a `DeviceError` into `Error::Device`.
 impl From<DeviceError> for Error {
     fn from(error: DeviceError) -> Self {
         Self::Device(error)
@@ -106,6 +129,7 @@ impl From<DeviceError> for Error {
 
 // DriverError
 
+/// Converts a `DriverError` into `Error::Driver`.
 impl From<DriverError> for Error {
     fn from(error: DriverError) -> Self {
         Self::Driver(error)
@@ -114,6 +138,7 @@ impl From<DriverError> for Error {
 
 // Syn
 
+/// Converts a `JITError` into `Error::JIT`.
 impl From<JITError> for Error {
     fn from(error: JITError) -> Self {
         Self::JIT(error)
