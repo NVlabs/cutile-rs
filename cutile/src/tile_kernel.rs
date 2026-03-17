@@ -155,6 +155,7 @@ fn write_ir(
 ///     None
 /// );
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     ctx: &ExecutionContext,
     module_asts: F,
@@ -295,15 +296,14 @@ pub fn validate_grids(
     partition_grids: &[(u32, u32, u32)],
 ) -> Result<(), Error> {
     // Make sure we're not trying to map mutable references to incorrect launch grid.
-    for i in 0..partition_grids.len() {
-        if grid != partition_grids[i] {
-            return Err(Error::KernelLaunch(KernelLaunchError(format!(
-                "{:?} != {:?}",
-                grid, partition_grids[i]
-            ))));
-        }
+    if let Some(partition_grid) = partition_grids.iter().find(|&&i| i != grid) {
+        Err(Error::KernelLaunch(KernelLaunchError(format!(
+            "{:?} != {:?}",
+            grid, partition_grid
+        ))))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 /// Infers the launch grid for a kernel from partitioned tensor inputs.
@@ -393,16 +393,16 @@ pub fn infer_launch_grid(
 /// ```rust,ignore
 /// async fn pipeline() -> impl DeviceOp<Output=Tensor<f32>> {
 ///     let x = api::randn(0.0, 1.0, [128, 128]).await;
-///     
+///
 ///     // Chain kernel operations
 ///     let y = my_kernel_1(x.clone())
 ///         .grid((8, 8, 1))
 ///         .await;
-///     
+///
 ///     let z = my_kernel_2(y)
 ///         .grid((4, 4, 1))
 ///         .await;
-///     
+///
 ///     z
 /// }
 /// ```
@@ -411,6 +411,7 @@ where
     DI: DeviceOp<Output = STORED>,
 {
     /// Compiles the kernel from module ASTs, returning the CUDA function and validator.
+    #[allow(clippy::too_many_arguments)]
     fn compile<F: Fn() -> Vec<Module>>(
         &mut self,
         ctx: &ExecutionContext,
@@ -770,7 +771,7 @@ where
 /// async fn process_data() -> Tensor<f32> {
 ///     let x = api::randn(0.0, 1.0, [1024]).partition([128]);
 ///     let processed = my_tiled_kernel(x);  // Returns Partition<Tensor<f32>>
-///     
+///
 ///     // Unwrap to get a regular tensor
 ///     unwrap_partition(processed).await
 /// }
