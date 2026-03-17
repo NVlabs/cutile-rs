@@ -740,6 +740,9 @@ impl<T: WithDType> DeviceVec<Tensor<T>> {
             device_vec,
         }
     }
+    pub fn is_empty(&self) -> bool {
+        self.host_vec.len() == 0
+    }
     pub fn len(&self) -> usize {
         self.host_vec.len()
     }
@@ -768,7 +771,7 @@ pub struct DeviceVecIntoIter<Item> {
 impl<T: WithDType + Debug> Iterator for DeviceVecIntoIter<Tensor<T>> {
     type Item = Tensor<T>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.items.len() > 0 {
+        if !self.items.is_empty() {
             let x = self.items.host_vec.remove(0);
             let x = Arc::try_unwrap(x).expect("Unable to perform into_iter from non-unique Arc.");
             Some(x)
