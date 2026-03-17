@@ -40,10 +40,11 @@ impl VisitMut for CallSiteSpanSetter {
 }
 
 impl<'m, 'c> CUDATileFunctionCompiler<'m> {
+    #[allow(clippy::too_many_arguments)]
     pub fn inline_function_call(
         &'c self,
         builder: &'c ir::Block<'c>,
-        module_name: &String,
+        module_name: &str,
         fn_item: &ItemFn,
         call_expr: &ExprCall,
         generic_vars: &GenericVars,
@@ -72,7 +73,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             let param_names = get_sig_param_names(&fn_item.sig);
             let (input_params, _output_param) = get_sig_types(&fn_item.sig, None);
             let mut call_variables = CompilerContext::empty();
-            call_variables.module_scope.push(module_name.clone());
+            call_variables.module_scope.push(module_name.into());
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
 
@@ -111,11 +112,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None);
                 // println!("inline_function_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ngeneric_arg_inference={generic_arg_inference:#?}", fn_item.sig.ident.to_string());
                 generic_arg_inference
-                    .get_generic_vars_instance(&generic_vars, &self.modules.primitives)
+                    .get_generic_vars_instance(generic_vars, &self.modules.primitives)
             };
             // Add function call const generics as variables.
             for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(&builder, &call_generic_vars, *value)?;
+                let tr_val = self.compile_constant(builder, &call_generic_vars, *value)?;
                 call_variables.vars.insert(key.clone(), tr_val);
             }
             // Add function call CGAs arrays as variables.
@@ -257,14 +258,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 generic_arg_inference.map_args_to_params(&call_arg_rust_tys, Some(self_ty));
                 // println!("sig={} \nargs={} \narg_map={:#?}", impl_method.sig.to_token_stream().to_string(), args.to_token_stream().to_string(), generic_arg_inference.param2arg);
                 let inferred_generics = generic_arg_inference
-                    .get_generic_vars_instance(&generic_vars, &self.modules.primitives);
+                    .get_generic_vars_instance(generic_vars, &self.modules.primitives);
 
                 // If there are generics passed as part of the method call, capture them.
                 if method_call_turbofish.is_some() {
-                    let passed_generics = generic_vars.from_expr_generic_args(
-                        &impl_method.sig.generics,
-                        &method_call_turbofish,
-                    )?;
+                    let passed_generics = generic_vars
+                        .from_expr_generic_args(&impl_method.sig.generics, method_call_turbofish)?;
                     inferred_generics.merge(passed_generics)?
                 } else {
                     inferred_generics
@@ -273,7 +272,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
             // Add method call const generics as variables.
             for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(&builder, generic_vars, *value)?;
+                let tr_val = self.compile_constant(builder, generic_vars, *value)?;
                 call_variables.vars.insert(key.clone(), tr_val);
             }
             for (key, value) in &call_generic_vars.inst_array {

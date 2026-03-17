@@ -93,7 +93,7 @@ impl GenericVars {
         } else if self.inst_i32.contains_key(var) || self.inst_array.contains_key(var) {
             Some(GenericVarType::ConstVariable)
         } else {
-            return None;
+            None
         }
     }
 
@@ -292,13 +292,13 @@ impl GenericVars {
                         (syn::Expr::Path(arg_path_expr), syn::Type::Path(_param_ty_path)) => {
                             let name = const_param.ident.to_string();
                             let ident_str = get_ident_from_path_expr(arg_path_expr).to_string();
-                            let Some(inst) = self.inst_i32.get(ident_str.as_str()) else {
+                            let Some(&inst) = self.inst_i32.get(ident_str.as_str()) else {
                                 return SourceLocation::unknown().jit_error_result(&format!(
                                     "variable `{ident_str}` is not a known const generic scalar"
                                 ));
                             };
                             ordered_param_vars.push(name.clone());
-                            inst_i32.insert(name, inst.clone());
+                            inst_i32.insert(name, inst);
                         }
                         (syn::Expr::Lit(_arg_lit_expr), syn::Type::Path(_param_ty_path)) => {
                             let name = const_param.ident.to_string();
@@ -310,7 +310,7 @@ impl GenericVars {
                             let name = const_param.ident.to_string();
                             let from_generic_args = self;
                             if let Some(res) = try_get_const_generic_from_generic_argument(
-                                &generic_arg,
+                                generic_arg,
                                 from_generic_args,
                             ) {
                                 // This is something like
@@ -318,24 +318,20 @@ impl GenericVars {
                                 inst_i32.insert(name.clone(), res);
                             } else {
                                 let Some(res) =
-                                    get_cga_from_generic_argument(&generic_arg, from_generic_args)
+                                    get_cga_from_generic_argument(generic_arg, from_generic_args)
                                 else {
                                     return SourceLocation::unknown().jit_error_result(&format!(
                                         "unable to resolve generic argument `{}` for parameter `{}`",
-                                        generic_arg.to_token_stream().to_string(),
-                                        generic_param.to_token_stream().to_string()
+                                        generic_arg.to_token_stream(),
+                                        generic_param.to_token_stream()
                                     ));
                                 };
                                 // This is something like
                                 // {[...]} -> CONST_ARRAY_PARAM
                                 inst_array.insert(name.clone(), res);
                                 if let Expr::Path(length_expr) = &ty_arr.len {
-                                    let length_var = length_expr
-                                        .path
-                                        .get_ident()
-                                        .unwrap()
-                                        .to_string()
-                                        .to_string();
+                                    let length_var =
+                                        length_expr.path.get_ident().unwrap().to_string();
                                     len2array.insert(length_var, name.clone());
                                 }
                             }
@@ -343,8 +339,8 @@ impl GenericVars {
                         _ => {
                             return SourceLocation::unknown().jit_error_result(&format!(
                                 "unable to resolve generic argument `{}` for parameter `{}`",
-                                generic_arg.to_token_stream().to_string(),
-                                generic_param.to_token_stream().to_string()
+                                generic_arg.to_token_stream(),
+                                generic_param.to_token_stream()
                             ));
                         }
                     }
@@ -398,7 +394,7 @@ impl GenericVars {
                         }
                         syn::Type::Path(_param_ty_path) => {
                             let name = const_param.ident.to_string();
-                            let Some(inst) = self.inst_i32.get(arg_ident_str.to_string().as_str())
+                            let Some(&inst) = self.inst_i32.get(arg_ident_str.to_string().as_str())
                             else {
                                 return SourceLocation::unknown().jit_error_result(&format!(
                                     "variable `{}` is not a known const generic scalar",
@@ -406,13 +402,13 @@ impl GenericVars {
                                 ));
                             };
                             ordered_param_vars.push(name.clone());
-                            inst_i32.insert(name.clone(), inst.clone());
+                            inst_i32.insert(name.clone(), inst);
                         }
                         _ => {
                             return SourceLocation::unknown().jit_error_result(&format!(
                                 "unable to resolve generic argument `{}` for parameter `{}`",
-                                generic_arg.to_token_stream().to_string(),
-                                generic_param.to_token_stream().to_string()
+                                generic_arg.to_token_stream(),
+                                generic_param.to_token_stream()
                             ));
                         }
                     }
@@ -522,12 +518,12 @@ impl GenericVars {
         if let Some(instance) =
             TypeInstanceStructuredType::instantiate(&maybe_generic_ty, self, primitives)
         {
-            return Ok(TypeInstance::StructuredType(instance));
+            Ok(TypeInstance::StructuredType(Box::new(instance)))
         } else {
-            return SourceLocation::unknown().jit_error_result(&format!(
+            SourceLocation::unknown().jit_error_result(&format!(
                 "unable to resolve generic type `{}`",
-                maybe_generic_ty.to_token_stream().to_string()
-            ));
+                maybe_generic_ty.to_token_stream()
+            ))
         }
     }
 }
@@ -557,7 +553,7 @@ pub enum TypeInstance {
     /// A pointer type (`*mut E` / `*const E`).
     PtrType(TypeInstancePtrType),
     /// A shaped type with element type and dimensions (e.g. `Tile<f32, {[128]}>`).
-    StructuredType(TypeInstanceStructuredType),
+    StructuredType(Box<TypeInstanceStructuredType>),
 }
 
 impl TypeInstance {
@@ -779,7 +775,7 @@ impl Instantiable for TypeInstancePtrType {
                 .unwrap();
                 Some(Self {
                     generic_ty: maybe_generic_ty.clone(),
-                    instance_ty: instance_ty,
+                    instance_ty,
                     is_mutable,
                     rust_element_instance_ty: concrete_ptr_ty.to_string(),
                 })
@@ -826,7 +822,7 @@ impl Instantiable for TypeInstanceStructuredType {
                 .path
                 .segments
                 .last_mut()
-                .expect(format!("Unexpected structured type {maybe_generic_ty:#?}.").as_str());
+                .unwrap_or_else(|| panic!("Unexpected structured type {maybe_generic_ty:#?}."));
             let PathArguments::AngleBracketed(type_params) = &mut last_seg.arguments else {
                 panic!(
                     "Unexpected structured type generic arguments {:#?} for {maybe_generic_ty:#?}",
@@ -849,10 +845,8 @@ impl Instantiable for TypeInstanceStructuredType {
                             let last_ident =
                                 type_path.path.segments.last().unwrap().ident.to_string();
                             // println!("get_variadic_type_args: Type::Path: {}", last_ident);
-                            if generic_vars.inst_array.contains_key(&last_ident) {
+                            if let Some(array_instance) = generic_vars.inst_array.get(&last_ident) {
                                 // This is something like Shape<D> for const generic array D: [i32; N].
-                                let array_instance =
-                                    generic_vars.inst_array.get(&last_ident).unwrap();
                                 if shape.is_some() {
                                     panic!("Unexpected array arg: {last_ident:#?}")
                                 }
@@ -901,13 +895,13 @@ impl Instantiable for TypeInstanceStructuredType {
                                 // This is something like N for const generic N: i32.
                                 panic!("Unexpected const arg {last_ident} for variadic type {maybe_generic_ty:#?}");
                             } else {
-                                panic!("Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}", maybe_generic_ty.to_token_stream().to_string());
+                                panic!("Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}", maybe_generic_ty.to_token_stream());
                             }
                         }
                         syn::Type::Ptr(_) => {
                             let Some(ptr_inst) = TypeInstancePtrType::instantiate(
                                 type_param,
-                                &generic_vars,
+                                generic_vars,
                                 primitives,
                             ) else {
                                 panic!("Unexpected primitives {primitives:#?}.")
@@ -1007,13 +1001,14 @@ impl Instantiable for TypeInstanceStructuredType {
                                             // This is something like Tensor<E, {[-1; N]}>
                                             let num_rep_var =
                                                 len_path.to_token_stream().to_string();
-                                            if !generic_vars.get_i32(&num_rep_var).is_some() {
-                                                panic!(
-                                                    "Expected instance for generic argument {}",
-                                                    num_rep_var
-                                                );
-                                            }
-                                            generic_vars.get_i32(&num_rep_var).unwrap()
+                                            generic_vars.get_i32(&num_rep_var).unwrap_or_else(
+                                                || {
+                                                    panic!(
+                                                        "Expected instance for generic argument {}",
+                                                        num_rep_var
+                                                    )
+                                                },
+                                            )
                                         }
                                         Expr::Lit(len_lit) => {
                                             // This is something like Tensor<E, {[-1; 3]}>
@@ -1167,11 +1162,7 @@ impl GenericArgInference {
     }
 
     /// Maps positional call arguments to their corresponding parameter names.
-    pub fn map_args_to_params(
-        &mut self,
-        call_arg_rust_tys: &Vec<syn::Type>,
-        self_ty: Option<&Type>,
-    ) -> () {
+    pub fn map_args_to_params(&mut self, call_arg_rust_tys: &[syn::Type], self_ty: Option<&Type>) {
         let (fn_arg_types, _return_type) = get_sig_types(&self.sig, self_ty);
         // Get the generic parameters in this function signature.
         for i in 0..call_arg_rust_tys.len() {
@@ -1285,7 +1276,7 @@ impl GenericArgInference {
         let Some(method_params) = &self.method_params else {
             panic!(
                 "Method params undefined for {}",
-                method_call_expr.to_token_stream().to_string()
+                method_call_expr.to_token_stream()
             )
         };
         assert_eq!(expr_generic_args.args.len(), method_params.len());
@@ -1368,7 +1359,7 @@ impl GenericArgInference {
     /// Returns `true` if all generic parameters have been resolved.
     pub fn verify(&self) -> bool {
         // Check if computed and succeeded.
-        for (_key, val) in &self.param2arg {
+        for val in self.param2arg.values() {
             if val.is_none() {
                 return false;
             }
@@ -1496,7 +1487,7 @@ impl GenericArgInference {
         to_generic_vars
     }
 
-    fn add_generic_args(&mut self, type_param: &syn::Type, type_arg: &syn::Type) -> () {
+    fn add_generic_args(&mut self, type_param: &syn::Type, type_arg: &syn::Type) {
         // Adds generic arguments to arg_map.
         // arg_map maps generic parameters (present in arg_map upon initialization) to various GenericArgument patterns (see below).
         // Each key in arg_map specifies the set of generic parameters in a function / method signature.
@@ -1573,7 +1564,7 @@ impl GenericArgInference {
                         }
                         (syn::Type::Ptr(arg_type_ptr), syn::Type::Ptr(param_type_ptr)) => {
                             // Something like (PointerTile<*mut f32, ...>, PointerTile<*mut E, ...>)
-                            let param_elem_ty = match get_type_ident(&*param_type_ptr.elem) {
+                            let param_elem_ty = match get_type_ident(&param_type_ptr.elem) {
                                 Some(ident) => ident.to_string(),
                                 None => panic!(
                                     "Unable to extract ident from pointer {param_type_ptr:#?}"
@@ -1734,7 +1725,7 @@ impl GenericArgInference {
             }
             (syn::Type::Ptr(arg_type_ptr), syn::Type::Ptr(param_type_ptr)) => {
                 // Something like (PointerTile<*mut f32, ...>, PointerTile<*mut E, ...>)
-                let param_elem_ty = match get_type_ident(&*param_type_ptr.elem) {
+                let param_elem_ty = match get_type_ident(&param_type_ptr.elem) {
                     Some(ident) => ident.to_string(),
                     None => panic!("Unable to extract ident from pointer {param_type_ptr:#?}"),
                 };
@@ -1762,7 +1753,7 @@ impl GenericArgInference {
     pub fn infer_type(&self, ty: &syn::Type, _generic_vars: &GenericVars) -> syn::Type {
         let arg_map = &self.param2arg;
         // println!("Infer generic args for {} using \n {arg_map:#?}", ty.to_token_stream().to_string());
-        let Some(mut result_args) = maybe_generic_args(&ty) else {
+        let Some(mut result_args) = maybe_generic_args(ty) else {
             // Is it a generic arg itself?
             // TODO (hme): *Really* need to make this recursive and just call with the following types.
             let mut result = ty.clone();
@@ -1945,36 +1936,29 @@ impl GenericArgInference {
                             else {
                                 panic!("Unexpected block expression.")
                             };
-                            match param_stmt_expr {
-                                Expr::Array(param_array_expr) => {
-                                    for i in 0..param_array_expr.elems.iter().len() {
-                                        let param_elem = &mut param_array_expr.elems[i];
-                                        let param_var = param_elem.to_token_stream().to_string();
-                                        match arg_map.get(param_var.as_str()) {
-                                            None => {
-                                                // This is not a generic parameter.
-                                            }
-                                            Some(None) => {
-                                                panic!(
-                                                    "Failed to infer generic parameter {param_var}"
-                                                )
-                                            }
-                                            Some(Some((
-                                                GenericArgType::GenericConstExpr,
-                                                target_expr,
-                                            ))) => {
-                                                *param_elem = syn::parse2::<Expr>(
-                                                    target_expr.parse().unwrap(),
-                                                )
-                                                .unwrap();
-                                            }
-                                            Some(Some((arg_type, _arg))) => {
-                                                panic!("Unexpected arg type {arg_type:#?}")
-                                            }
+                            if let Expr::Array(param_array_expr) = param_stmt_expr {
+                                for param_elem in &mut param_array_expr.elems {
+                                    let param_var = param_elem.to_token_stream().to_string();
+                                    match arg_map.get(param_var.as_str()) {
+                                        None => {
+                                            // This is not a generic parameter.
+                                        }
+                                        Some(None) => {
+                                            panic!("Failed to infer generic parameter {param_var}")
+                                        }
+                                        Some(Some((
+                                            GenericArgType::GenericConstExpr,
+                                            target_expr,
+                                        ))) => {
+                                            *param_elem =
+                                                syn::parse2::<Expr>(target_expr.parse().unwrap())
+                                                    .unwrap();
+                                        }
+                                        Some(Some((arg_type, _arg))) => {
+                                            panic!("Unexpected arg type {arg_type:#?}")
                                         }
                                     }
                                 }
-                                _ => {}
                             }
                         }
                         Expr::Path(param_path) => {
@@ -2012,7 +1996,7 @@ pub fn get_cga_from_type(ty: &syn::Type, generic_args: &GenericVars) -> Option<V
     for type_generic_arg in &type_generic_args.args {
         let res = get_cga_from_generic_argument(type_generic_arg, generic_args);
         if res.is_some() {
-            shape = Some(res.unwrap());
+            shape = res
         }
     }
     shape
@@ -2025,33 +2009,21 @@ pub fn try_get_const_generic_from_generic_argument(
 ) -> Option<i32> {
     let mut result: Option<i32> = None;
     match generic_arg {
-        GenericArgument::Type(type_param) => {
-            match type_param {
-                syn::Type::Path(type_path) => {
-                    let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
-                    // println!("get_variadic_type_args: Type::Path: {}", last_ident);
-                    if generic_args.inst_i32.contains_key(&last_ident) {
-                        // This is something like N for const generic N: i32.
-                        result = Some(generic_args.inst_i32.get(&last_ident).unwrap().clone());
-                    }
-                    // If it's anything else, then return None.
-                }
-                _ => {}
+        GenericArgument::Type(syn::Type::Path(type_path)) => {
+            let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
+            // println!("get_variadic_type_args: Type::Path: {}", last_ident);
+            if let Some(&value) = generic_args.inst_i32.get(&last_ident) {
+                // This is something like N for const generic N: i32.
+                result = Some(value);
             }
         }
-        GenericArgument::Const(const_param) => {
-            // println!("expand GenericArgument::Const? {const_param:#?}");
-            match const_param {
-                Expr::Lit(lit) => {
-                    let Lit::Int(int_lit) = &lit.lit else {
-                        panic!("Expected int literal, got {:#?}", lit)
-                    };
-                    // This is something like 32 in Tile<E, {[32]}>
-                    // TODO (hme): Add a test for this.
-                    result = Some(int_lit.base10_parse().unwrap());
-                }
-                _ => {}
-            }
+        GenericArgument::Const(Expr::Lit(lit)) => {
+            let Lit::Int(int_lit) = &lit.lit else {
+                panic!("Expected int literal, got {:#?}", lit)
+            };
+            // This is something like 32 in Tile<E, {[32]}>
+            // TODO (hme): Add a test for this.
+            result = Some(int_lit.base10_parse().unwrap());
         }
         _ => {}
     }
@@ -2065,87 +2037,69 @@ pub fn get_cga_from_generic_argument(
 ) -> Option<Vec<i32>> {
     let mut shape: Option<Vec<i32>> = None;
     match generic_arg {
-        GenericArgument::Type(type_param) => {
-            match type_param {
-                syn::Type::Path(type_path) => {
-                    // This must be a CGA, or it will fail.
-                    let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
-                    // println!("get_variadic_type_args: Type::Path: {}", last_ident);
-                    if generic_args.inst_array.contains_key(&last_ident) {
-                        // This is something like Shape<D> for const generic array D: [i32; N].
-                        let array_instance = generic_args.inst_array.get(&last_ident).unwrap();
-                        if shape.is_some() {
-                            panic!("Unexpected array arg: {last_ident:#?}")
-                        }
-                        shape = Some(array_instance.clone());
-                    } else if generic_args.inst_i32.contains_key(&last_ident) {
-                        // This is something like N for const generic N: i32.
-                        // This should have been handled by
-                        // try_get_const_generic_from_generic_argument.
-                        unimplemented!(
-                            "Unexpected const arg {last_ident} for type {type_param:#?}"
-                        );
-                    } else {
-                        unimplemented!("Failed to get cga for {type_param:#?}");
-                    }
+        GenericArgument::Type(syn::Type::Path(type_path)) => {
+            // This must be a CGA, or it will fail.
+            let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
+            // println!("get_variadic_type_args: Type::Path: {}", last_ident);
+            if let Some(array_instance) = generic_args.inst_array.get(&last_ident) {
+                // This is something like Shape<D> for const generic array D: [i32; N].
+                if shape.is_some() {
+                    panic!("Unexpected array arg: {last_ident:#?}")
                 }
-                _ => {}
+                shape = Some(array_instance.clone());
+            } else if generic_args.inst_i32.contains_key(&last_ident) {
+                // This is something like N for const generic N: i32.
+                // This should have been handled by
+                // try_get_const_generic_from_generic_argument.
+                unimplemented!("Unexpected const arg {last_ident} for type {type_path:#?}");
+            } else {
+                unimplemented!("Failed to get cga for {type_path:#?}");
             }
         }
-        GenericArgument::Const(const_param) => {
-            // println!("expand GenericArgument::Const? {const_param:#?}");
-            match const_param {
-                Expr::Block(block_expr) => {
-                    // This is something like Tensor<E, {[...]}>
-                    assert_eq!(block_expr.block.stmts.len(), 1);
-                    let statement = &block_expr.block.stmts[0];
-                    let Stmt::Expr(statement_expr, _) = statement else {
-                        panic!("Unexpected block expression.")
-                    };
-                    match statement_expr {
-                        Expr::Array(array_expr) => {
-                            // This is something like Tensor<E, {[1, 2, -1]}>
-                            let mut _shape: Vec<i32> = vec![];
-                            for elem in &array_expr.elems {
-                                _shape.push(parse_expr_as_i32(elem, generic_args));
+        GenericArgument::Const(Expr::Block(block_expr)) => {
+            // This is something like Tensor<E, {[...]}>
+            assert_eq!(block_expr.block.stmts.len(), 1);
+            let statement = &block_expr.block.stmts[0];
+            let Stmt::Expr(statement_expr, _) = statement else {
+                panic!("Unexpected block expression.")
+            };
+            match statement_expr {
+                Expr::Array(array_expr) => {
+                    // This is something like Tensor<E, {[1, 2, -1]}>
+                    let mut _shape: Vec<i32> = vec![];
+                    for elem in &array_expr.elems {
+                        _shape.push(parse_expr_as_i32(elem, generic_args));
+                    }
+                    shape = Some(_shape);
+                }
+                Expr::Repeat(repeat_expr) => {
+                    // println!("Expr::Repeat: {:?}", repeat_expr.expr);
+                    let thing_to_repeat = parse_expr_as_i32(&repeat_expr.expr, generic_args);
+                    match &*repeat_expr.len {
+                        Expr::Path(len_path) => {
+                            // This is something like Tensor<E, {[-1; N]}>
+                            let num_rep_var = len_path.to_token_stream().to_string();
+                            if generic_args.get_i32(&num_rep_var).is_none() {
+                                panic!("Expected instance for generic argument {}", num_rep_var);
                             }
-                            shape = Some(_shape);
+                            let num_rep = generic_args.get_i32(&num_rep_var).unwrap();
+                            shape = Some(vec![thing_to_repeat; num_rep as usize]);
                         }
-                        Expr::Repeat(repeat_expr) => {
-                            // println!("Expr::Repeat: {:?}", repeat_expr.expr);
-                            let thing_to_repeat =
-                                parse_expr_as_i32(&repeat_expr.expr, generic_args);
-                            match &*repeat_expr.len {
-                                Expr::Path(len_path) => {
-                                    // This is something like Tensor<E, {[-1; N]}>
-                                    let num_rep_var = len_path.to_token_stream().to_string();
-                                    if !generic_args.get_i32(&num_rep_var).is_some() {
-                                        panic!(
-                                            "Expected instance for generic argument {}",
-                                            num_rep_var
-                                        );
-                                    }
-                                    let num_rep = generic_args.get_i32(&num_rep_var).unwrap();
-                                    shape = Some(vec![thing_to_repeat; num_rep as usize]);
-                                }
-                                Expr::Lit(len_lit) => {
-                                    // This is something like Tensor<E, {[-1; 3]}>
-                                    let num_rep: u32 = len_lit
-                                        .to_token_stream()
-                                        .to_string()
-                                        .parse::<u32>()
-                                        .unwrap();
-                                    shape = Some(vec![thing_to_repeat; num_rep as usize]);
-                                }
-                                _ => {
-                                    unimplemented!("Unexpected repeat expression: {repeat_expr:#?}")
-                                }
-                            }
+                        Expr::Lit(len_lit) => {
+                            // This is something like Tensor<E, {[-1; 3]}>
+                            let num_rep: u32 = len_lit
+                                .to_token_stream()
+                                .to_string()
+                                .parse::<u32>()
+                                .unwrap();
+                            shape = Some(vec![thing_to_repeat; num_rep as usize]);
                         }
-                        _ => panic!("Unexpected block expression."),
+                        _ => {
+                            unimplemented!("Unexpected repeat expression: {repeat_expr:#?}")
+                        }
                     }
                 }
-                _ => {}
+                _ => panic!("Unexpected block expression."),
             }
         }
         _ => {}
@@ -2160,7 +2114,7 @@ pub fn parse_expr_as_i32(expr: &Expr, generic_args: &GenericVars) -> i32 {
         Expr::Path(path) => {
             let ident = get_ident_from_path_expr(path);
             match generic_args.inst_i32.get(ident.to_string().as_str()) {
-                Some(val) => return *val,
+                Some(&val) => val,
                 None => panic!("Undefined generic parameter {ident}"),
             }
         }
