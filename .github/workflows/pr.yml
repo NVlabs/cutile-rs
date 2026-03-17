@@ -39,6 +39,7 @@ jobs:
         run: |
           # Install rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "${HOME}/.cargo/env"
           rustup default nightly
           wget https://apt.llvm.org/llvm.sh
           bash ./llvm.sh 21
