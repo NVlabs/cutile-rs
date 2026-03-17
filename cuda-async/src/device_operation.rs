@@ -617,12 +617,10 @@ where
         Ok(())
     }
     unsafe fn left(&self) -> T1 {
-        let left = unsafe { (&mut *self.left.get()).take() }.unwrap();
-        left
+        unsafe { (&mut *self.left.get()).take() }.unwrap()
     }
     unsafe fn right(&self) -> T2 {
-        let right = unsafe { (&mut *self.right.get()).take() }.unwrap();
-        right
+        unsafe { (&mut *self.right.get()).take() }.unwrap()
     }
 }
 

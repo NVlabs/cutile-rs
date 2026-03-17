@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// State machine for tracking the lifecycle of a device future.
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Default, Eq, PartialEq, Copy, Clone)]
 pub enum DeviceFutureState {
     // The future was created with an error and will resolve immediately on first poll.
     /// The future was created with an error and will resolve immediately.
     Failed,
     // The stream operation has not yet been scheduled. No callback has been added.
     /// The stream operation has not yet been scheduled.
+    #[default]
     Idle,
     // The stream operation has been scheduled and a callback has been added to the stream.
     // The callback should be added such that it immediately succeeds the scheduled operation.
@@ -33,7 +34,7 @@ pub enum DeviceFutureState {
 }
 
 /// Shared state between a CUDA stream callback and the async waker.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StreamCallbackState {
     pub(crate) waker: AtomicWaker,
     pub(crate) complete: AtomicBool,
@@ -42,10 +43,7 @@ pub struct StreamCallbackState {
 impl StreamCallbackState {
     /// Creates a new callback state with the completion flag unset.
     pub fn new() -> Self {
-        Self {
-            waker: AtomicWaker::new(),
-            complete: AtomicBool::new(false),
-        }
+        Self::default()
     }
     /// Marks the operation as complete and wakes the associated task.
     pub fn signal(&self) {
@@ -68,14 +66,7 @@ pub struct DeviceFuture<T: Send, DO: DeviceOperation<Output = T>> {
 impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
     /// Creates an idle device future with no operation or execution context set.
     pub fn new() -> Self {
-        Self {
-            execution_context: None,
-            device_operation: None,
-            state: DeviceFutureState::Idle,
-            callback_state: None,
-            result: None,
-            error: None,
-        }
+        Self::default()
     }
 
     /// Create a future that is pre-loaded with an error.
@@ -130,6 +121,19 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         let out = unsafe { operation.execute(ctx) }?;
         self.result = Some(out);
         Ok(())
+    }
+}
+
+impl<T: Send, DO: DeviceOperation<Output = T>> Default for DeviceFuture<T, DO> {
+    fn default() -> Self {
+        Self {
+            device_operation: Default::default(),
+            execution_context: Default::default(),
+            result: Default::default(),
+            error: Default::default(),
+            state: Default::default(),
+            callback_state: Default::default(),
+        }
     }
 }
 
