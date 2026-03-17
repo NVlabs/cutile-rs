@@ -1,0 +1,54 @@
+---
+name: pr
+
+on:
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -eou pipefail {0}
+
+jobs:
+  build:
+    runs-on: linux-amd64-cpu16
+    container:
+      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
+      env:
+        DEBIAN_FRONTEND: noninteractive
+    timeout-minutes: 30
+    steps:
+      - name: Install basic dependencies
+        run: |
+          apt update
+          apt install -y --no-install-recommends curl wget ca-certificates \
+            lsb-release git software-properties-common gnupg cmake zlib1g-dev \
+            libzstd-dev git
+
+      - name: Clone repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install custom dependencies
+        run: |
+          # Install rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          rustup default nightly
+          wget https://apt.llvm.org/llvm.sh
+          bash ./llvm.sh 21
+          apt install -y --no-install-recommends libmlir-21-dev mlir-21-tools libpolly-21-dev
+          update-alternatives --install /usr/bin/llvm-config llvm-config /usr/lib/llvm-21/bin/llvm-config 1
+
+      - name: Build
+        env:
+          CUDA_TOOLKIT_PATH: /usr/local/cuda-13
+          CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
+        run: |
+          source "${HOME}/.cargo/env"
+          cargo build
