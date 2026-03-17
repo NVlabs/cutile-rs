@@ -76,6 +76,8 @@ pub fn cuda_tile_write_bytecode(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, Once};
+
     use crate::cuda_tile::{self};
     use crate::util::{attribute_parse, operation_parse, type_parse};
     use melior::Context;
@@ -85,6 +87,15 @@ mod tests {
     use melior::ir::operation::{OperationBuilder, OperationLike};
     use melior::ir::{Attribute, Block, Identifier, Location, Module, Region};
     use melior::utility::{register_all_dialects, register_all_llvm_translations};
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+    static REGISTER_GLOBALS: Once = Once::new();
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        // MLIR pass/translation registration mutates process-global state and has
+        // proven flaky under libtest's default parallel execution.
+        TEST_MUTEX.lock().expect("cuda-tile-rs test mutex poisoned")
+    }
 
     pub fn load_all_dialects(context: &Context) {
         let registry = DialectRegistry::new();
@@ -97,8 +108,10 @@ mod tests {
     pub fn context_all() -> Context {
         let context = Context::new();
         load_all_dialects(&context);
-        register_all_llvm_translations(&context);
-        crate::register_cuda_tile_passes();
+        REGISTER_GLOBALS.call_once(|| {
+            register_all_llvm_translations(&context);
+            crate::register_cuda_tile_passes();
+        });
         context.attach_diagnostic_handler(|diagnostic| {
             eprintln!("{}", diagnostic);
             true
@@ -108,6 +121,7 @@ mod tests {
 
     #[test]
     fn build_cuda_tile_module() {
+        let _guard = test_guard();
         println!("Building CUDA Tile module");
         let context = context_all();
         let location = Location::unknown(&context);
@@ -127,6 +141,7 @@ mod tests {
 
     #[test]
     fn parse_cuda_tile_module() {
+        let _guard = test_guard();
         const module_str: &'static str = r#"
             cuda_tile.module @hello_world_module {
             }
@@ -138,6 +153,7 @@ mod tests {
 
     #[test]
     fn test_parse_helpers() {
+        let _guard = test_guard();
         let context = context_all();
         let op = crate::util::operation_parse(&context, "%x = gpu.thread_id x", None)
             .unwrap_or_else(|| panic!("failed."));
@@ -209,6 +225,7 @@ mod tests {
 
     #[test]
     fn build_print() {
+        let _guard = test_guard();
         let context = context_all();
         // print_tko is not available in 13.1.
         let print_builder = OperationBuilder::new("cuda_tile.print", Location::unknown(&context));
