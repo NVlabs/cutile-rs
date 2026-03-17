@@ -63,11 +63,11 @@ impl error::Error for JITError {}
 impl JITError {
     /// Create a `Generic` error value (not wrapped in `Result`).
     pub fn generic_err(err_str: &str) -> JITError {
-        return JITError::Generic(err_str.to_string());
+        JITError::Generic(err_str.to_string())
     }
     /// Create a `Generic` error wrapped in `Err`.
     pub fn generic<R>(err_str: &str) -> Result<R, JITError> {
-        return Err(JITError::generic_err(err_str));
+        Err(JITError::generic_err(err_str))
     }
     /// Create a `Located` error that carries a real source location captured
     /// at proc macro expansion time.

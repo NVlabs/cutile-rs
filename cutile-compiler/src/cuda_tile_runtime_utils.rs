@@ -24,7 +24,9 @@ pub fn get_gpu_name(device_id: usize) -> String {
         .arg("--format=csv,noheader")
         .arg(format!("--id={device_id}"))
         .output()
-        .expect(format!("Failed to determine compute capability for device {device_id}").as_str());
+        .unwrap_or_else(|_| {
+            panic!("Failed to determine compute capability for device {device_id}")
+        });
     if !output.status.success() {
         let error_output = String::from_utf8_lossy(&output.stderr).to_string();
         panic!("{}", error_output)
@@ -33,7 +35,7 @@ pub fn get_gpu_name(device_id: usize) -> String {
     let compute_cap = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let re_ver = Regex::new(r"\.").unwrap();
     // TODO (hme): Confirm this solution cannot fail.
-    format!("sm_{}", re_ver.replace(&compute_cap, "").to_string())
+    format!("sm_{}", re_ver.replace(&compute_cap, ""))
 }
 
 /// Parses a CUDA Tile MLIR entry string into a verified module operation.
@@ -42,10 +44,10 @@ pub fn parse_tile_entry<'c>(
     module_name: &str,
     entry: &str,
 ) -> ModuleOperation<'c> {
-    let location = Location::unknown(&context);
-    let module_op = cuda_tile::ModuleOperationBuilder::new(&context, location)
+    let location = Location::unknown(context);
+    let module_op = cuda_tile::ModuleOperationBuilder::new(context, location)
         .body({
-            let entry_op = operation_parse(&context, entry, None).unwrap();
+            let entry_op = operation_parse(context, entry, None).unwrap();
             let module_block = Block::new(&[]);
             module_block.append_operation(entry_op);
 
@@ -53,10 +55,10 @@ pub fn parse_tile_entry<'c>(
             region.append_block(module_block);
             region
         })
-        .sym_name(StringAttribute::new(&context, module_name))
+        .sym_name(StringAttribute::new(context, module_name))
         .build();
     assert!(module_op.as_operation().verify());
-    return module_op;
+    module_op
 }
 
 /// Compiles a CUDA Tile module operation to a `.cubin` file via `tileiras`, returning the path.
@@ -66,7 +68,7 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
     let bc_filename = format!("{}.bc", base_filename.to_str().unwrap());
     let cubin_filename = format!("{}.cubin", base_filename.to_str().unwrap());
 
-    let res = cuda_tile_write_bytecode(&module_op, bc_filename.as_str());
+    let res = cuda_tile_write_bytecode(module_op, bc_filename.as_str());
     assert!(res.is_ok());
     let _ = Command::new("tileiras")
         .arg("--gpu-name")
@@ -77,7 +79,7 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
         .arg(&cubin_filename)
         .arg(&bc_filename)
         .output()
-        .expect(format!("Failed to compile bytecode {bc_filename}").as_str());
+        .unwrap_or_else(|_| panic!("Failed to compile bytecode {bc_filename}"));
     cubin_filename
 }
 
