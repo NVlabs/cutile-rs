@@ -181,7 +181,7 @@
 #[cutile_macro::module(core = true, tile_rust_crate = true)]
 pub mod core {
 
-    pub use half::f16;
+    pub use half::{bf16, f16};
     use std::marker::PhantomData;
     use std::ops;
 
@@ -193,7 +193,7 @@ pub mod core {
     ///
     /// ## Supported Types
     ///
-    /// - **Floating point**: `f16`, `f32`, `f64`, `tf32`
+    /// - **Floating point**: `bf16`, `f16`, `f32`, `f64`, `tf32`
     /// - **Signed integers**: `i32`, `i64`
     /// - **Unsigned integers**: `u32` (mapped to `i32`), `u64` (mapped to `i64`)
     /// - **Boolean**: `bool` (mapped to `i1`)
@@ -206,6 +206,8 @@ pub mod core {
     /// }
     /// ```
     pub trait ElementType: Copy + Clone {}
+    #[cuda_tile::ty(name = "bf16")]
+    impl ElementType for bf16 {}
     #[cuda_tile::ty(name = "f16")]
     impl ElementType for f16 {}
     #[cuda_tile::ty(name = "f32")]

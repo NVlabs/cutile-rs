@@ -36,6 +36,19 @@ mod binary_math_ops_module {
         let result: Tile<f32, S> = maxf(x, y);
         output.store(result);
     }
+
+    
+    #[cutile::entry()]
+    fn bf16_binary_arith_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
+        // Covers bf16 binary arithmetic lowering 
+        let x: Tile<bf16, S> = load_tile_mut(output);
+        let y: Tile<bf16, S> = load_tile_mut(output);
+
+        let sum: Tile<bf16, S> = x + y;
+        let product: Tile<bf16, S> = sum * y;
+        let result: Tile<bf16, S> = product / x;
+        output.store(result);
+    }
 }
 
 use binary_math_ops_module::_module_asts;
@@ -108,5 +121,42 @@ fn compile_select() -> () {
         );
 
         println!("\n✓ select operation verified in MLIR output");
+    });
+}
+
+#[test]
+fn compile_bf16_binary_arith() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "binary_math_ops_module",
+            "bf16_binary_arith_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== BF16 BINARY ARITH MLIR ===\n{}", module_op_str);
+
+        for op in ["addf", "mulf", "divf"] {
+            assert!(
+                module_op_str.contains(format!("= {}", op).as_str()),
+                "Expected {} operation in MLIR output",
+                op
+            );
+        }
+        assert!(
+            module_op_str.contains("bf16"),
+            "Expected bf16 type in MLIR output"
+        );
     });
 }

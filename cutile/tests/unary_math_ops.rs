@@ -84,6 +84,18 @@ mod unary_math_ops_module {
         let result: Tile<f32, S> = pow(x, y); // x^y
         output.store(result);
     }
+
+    
+    #[cutile::entry()]
+    fn unary_math_ops_bf16_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
+        // Verifies bf16 unary math operation lowering
+        let x: Tile<bf16, S> = load_tile_mut(output);
+        let t1: Tile<bf16, S> = absf(x);
+        let t2: Tile<bf16, S> = negf(t1);
+        let t3: Tile<bf16, S> = exp(t2);
+        let result: Tile<bf16, S> = floor(t3);
+        output.store(result);
+    }
 }
 
 use unary_math_ops_module::_module_asts;
@@ -262,5 +274,42 @@ fn compile_pow() -> () {
         );
 
         println!("\n✓ pow operation verified in MLIR output");
+    });
+}
+
+#[test]
+fn compile_unary_math_ops_bf16() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            "unary_math_ops_bf16_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== BF16 UNARY MATH OPS MLIR ===\n{}", module_op_str);
+
+        for op in ["absf", "negf", "exp", "floor"] {
+            assert!(
+                module_op_str.contains(op),
+                "Expected {} operation in MLIR output",
+                op
+            );
+        }
+        assert!(
+            module_op_str.contains("bf16"),
+            "Expected bf16 type in MLIR output"
+        );
     });
 }

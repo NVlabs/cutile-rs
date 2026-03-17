@@ -254,7 +254,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     }
                 }
             }
-            "f16" | "f32" | "f64" => {
+            "bf16" | "f16" | "f32" | "f64" => {
                 if let Some(comparison_predicate) =
                     get_cmp_predicate_attr(&self.context, tile_rust_arithmetic_op)?
                 {
@@ -327,7 +327,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     let flush_to_zero = self.flag_attr("flush_to_zero");
                                     vec![rounding_mode_attr, flush_to_zero]
                                 }
-                                "f16" | "f64" => {
+                                "bf16" | "f16" | "f64" => {
                                     vec![rounding_mode_attr]
                                 }
                                 _ => unreachable!("Impossible"),

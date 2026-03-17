@@ -45,6 +45,16 @@ mod type_conversion_ops_module {
         let extended: Tile<i64, S> = exti(truncated);
         output.store(extended);
     }
+
+    
+    #[cutile::entry()]
+    fn bf16_conversion_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
+        // Exercises bf16 <-> f32 tile conversion lowering
+        let x: Tile<bf16, S> = load_tile_mut(output);
+        let upcast: Tile<f32, S> = convert_tile(x);
+        let downcast: Tile<bf16, S> = convert_tile(upcast);
+        output.store(downcast);
+    }
 }
 
 use type_conversion_ops_module::_module_asts;
@@ -162,5 +172,39 @@ fn compile_exti_unsigned() -> () {
         );
 
         println!("\n✓ exti with unsigned types (zero extension) verified in MLIR output");
+    });
+}
+
+#[test]
+fn compile_bf16_conversion() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "type_conversion_ops_module",
+            "bf16_conversion_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== BF16 CONVERSION MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= ftof"),
+            "Expected floating-point conversion operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("bf16"),
+            "Expected bf16 type in MLIR output"
+        );
     });
 }

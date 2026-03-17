@@ -713,6 +713,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     ),
                                 );
                             },
+                            ("i32", "bf16") | ("u32", "bf16") | ("i64", "bf16") | ("u64", "bf16") |
                             ("i32", "f16") | ("u32", "f16") | ("i64", "f16") | ("u64", "f16") |
                             ("i32", "f32") | ("u32", "f32") | ("i64", "f32") | ("u64", "f32") |
                             ("i32", "f64") | ("u32", "f64") | ("i64", "f64") | ("u64", "f64") => {
@@ -730,6 +731,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     .add_operands(&[input_value])
                                     .add_results(&[output_value])
                             },
+                            ("bf16", "i32") | ("bf16", "u32") | ("bf16", "i64") | ("bf16", "u64") |
                             ("f16", "i32") | ("f16", "u32") | ("f16", "i64") | ("f16", "u64") |
                             ("f32", "i32") | ("f32", "u32") | ("f32", "i64") | ("f32", "u64") |
                             ("f64", "i32") | ("f64", "u32") | ("f64", "i64") | ("f64", "u64") => {
@@ -746,8 +748,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     .add_operands(&[input_value])
                                     .add_results(&[output_value])
                             },
-                            ("f16", "f32") | ("f16", "f64") | ("f32", "f16") |
-                            ("f32", "f64") | ("f64", "f16") | ("f64", "f32") |
+                            ("bf16", "f16") | ("bf16", "f32") | ("bf16", "f64") |
+                            ("f16", "bf16") | ("f16", "f32") | ("f16", "f64") |
+                            ("f32", "bf16") | ("f32", "f16") | ("f32", "f64") |
+                            ("f64", "bf16") | ("f64", "f16") | ("f64", "f32") |
                             ("f32", "tf32") | ("tf32", "f32")  => {
                                 let rounding_mode_attr =self.parse_named_attr("rounding_mode", "#cuda_tile.rounding<nearest_even>")?;
                                 let Some(input_value) = arg.value else {

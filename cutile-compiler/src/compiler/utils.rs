@@ -12,7 +12,7 @@ use crate::error::{JITError, SpannedJITError};
 use crate::generics::TypeInstance;
 use crate::syn_utils::{get_ident_from_expr, get_ident_from_path_expr};
 use crate::types::{get_cuda_tile_element_type_from_rust_primitive_str, MLIRVariadicArg};
-use half::f16;
+use half::{bf16, f16};
 use melior::ir::attribute::{IntegerAttribute, StringAttribute, TypeAttribute};
 use melior::ir::operation::OperationBuilder;
 use melior::ir::r#type::IntegerType;
@@ -208,7 +208,7 @@ impl ElementTypePrefix {
     pub fn new(cuda_elem_ty_str: &str) -> Result<Self, JITError> {
         if cuda_elem_ty_str.starts_with("i") {
             Ok(ElementTypePrefix::Integer)
-        } else if cuda_elem_ty_str.starts_with("f") {
+        } else if cuda_elem_ty_str.starts_with("f") || cuda_elem_ty_str.starts_with("bf") {
             Ok(ElementTypePrefix::Float)
         } else {
             SourceLocation::unknown()
@@ -1007,6 +1007,27 @@ impl Float for f16 {
     }
 }
 
+impl Float for bf16 {
+    fn to_hex(&self) -> String {
+        format_hex(self.to_bits())
+    }
+    fn zero() -> bf16 {
+        bf16::ZERO
+    }
+    fn one() -> bf16 {
+        bf16::ONE
+    }
+    fn negative_infinity() -> bf16 {
+        bf16::NEG_INFINITY
+    }
+    fn positive_infinity() -> bf16 {
+        bf16::INFINITY
+    }
+    fn e() -> bf16 {
+        bf16::E
+    }
+}
+
 impl Float for f32 {
     fn to_hex(&self) -> String {
         format_hex(self.to_bits())
@@ -1146,6 +1167,7 @@ fn get_integer_const<T: Integer>(const_str: &str) -> Result<String, JITError> {
 /// Returns the hex-encoded MLIR constant string for a typed constant name (e.g. `"zero"`, `"one"`).
 pub fn get_const_hex(rust_element_type_str: &str, const_str: &str) -> Result<String, JITError> {
     match rust_element_type_str {
+        "bf16" => get_float_const::<bf16>(const_str),
         "f16" => get_float_const::<f16>(const_str),
         "f32" => get_float_const::<f32>(const_str),
         "f64" => get_float_const::<f64>(const_str),
