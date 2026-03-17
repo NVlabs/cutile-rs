@@ -366,7 +366,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         &format!("Undefined method {ident}"),
                     );
                 };
-                let self_ty = &*impl_item.self_ty;
+                let self_ty = impl_item.self_ty.as_ref();
                 let (fn_arg_types, return_type) = get_sig_types(&impl_method.sig, Some(self_ty));
 
                 // Closures trigger errors in compile_call_args, so only valid non-closure args are compiled.
@@ -469,7 +469,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 Ok(ct_type)
             }
             Expr::Call(call_expr) => {
-                match &*call_expr.func {
+                match call_expr.func.as_ref() {
                     Expr::Path(path_expr) => {
                         let ident = get_ident_from_path_expr(path_expr);
                         let Some((_, fn_item)) = self.modules.functions.get(&ident.to_string())

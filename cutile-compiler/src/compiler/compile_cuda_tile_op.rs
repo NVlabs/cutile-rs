@@ -43,7 +43,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         ctx: &mut CompilerContext<'c, 'c>,
         return_type: Option<TileRustType<'c>>,
     ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
-        let Expr::Path(path) = &*call_expr.func else {
+        let Expr::Path(path) = call_expr.func.as_ref() else {
             return self.jit_error_result(
                 &call_expr.func.span(),
                 "expected a function path in call expression",
@@ -1671,7 +1671,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         return_type: Option<TileRustType<'c>>,
     ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
         let rust_function_name = {
-            let Expr::Path(path) = &*call_expr.func else {
+            let Expr::Path(path) = call_expr.func.as_ref() else {
                 return self.jit_error_result(
                     &call_expr.func.span(),
                     "expected a function path in call expression",

@@ -53,7 +53,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 let pat_mutability = get_pat_mutability(&pat_type.pat);
                                 let ty_mutability = get_type_mutability(&pat_type.ty);
                                 mutability = pat_mutability || ty_mutability;
-                                match &*pat_type.pat {
+                                match pat_type.pat.as_ref() {
                                     Pat::Ident(pat_ident) => {
                                         var_name = Some(pat_ident.ident.to_string());
                                     }
@@ -363,7 +363,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 // break;
                             }
                             Expr::Assign(assign_expr) => {
-                                let var_name: String = match &*assign_expr.left {
+                                let var_name: String = match assign_expr.left.as_ref() {
                                     Expr::Path(path_expr) => {
                                         get_ident_from_path_expr(path_expr).to_string()
                                     }

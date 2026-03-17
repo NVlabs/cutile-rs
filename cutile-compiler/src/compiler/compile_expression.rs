@@ -44,7 +44,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             match expr {
                 Expr::ForLoop(for_expr) => {
                     // A for loop: for pat in expr { ... }.
-                    let maybe_iterand_ident = match &*for_expr.pat {
+                    let maybe_iterand_ident = match for_expr.pat.as_ref() {
                         Pat::Wild(_) => {
                             // Iterand is not bounded.
                             None
@@ -55,7 +55,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "this loop pattern is not supported; use a simple variable name or `_`",
                         ),
                     };
-                    let Expr::Range(range_expr) = &*for_expr.expr else {
+                    let Expr::Range(range_expr) = for_expr.expr.as_ref() else {
                         return self.jit_error_result(
                             &for_expr.expr.span(),
                             "only range expressions (e.g. `0..n`) are supported in for loops",
@@ -461,7 +461,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             let branch_block = match (bounds.start, &if_expr.else_branch) {
                                 (1, _) => Some(&if_expr.then_branch),
                                 (0, Some((_Else, else_expr))) => {
-                                    let Expr::Block(block_expr) = &**else_expr else {
+                                    let Expr::Block(block_expr) = else_expr.as_ref() else {
                                         return self.jit_error_result(
                                             &else_expr.span(),
                                             "only block expressions (`{ ... }`) are supported in else branches",
@@ -504,7 +504,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             .collect::<Vec<_>>();
                     let else_captured_vars = {
                         if let Some((_Else, else_expr)) = &if_expr.else_branch {
-                            let Expr::Block(block_expr) = &**else_expr else {
+                            let Expr::Block(block_expr) = else_expr.as_ref() else {
                                 return self.jit_error_result(
                                     &else_expr.span(),
                                     "only block expressions (`{ ... }`) are supported in else branches",
@@ -579,7 +579,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     // We don't need to check return type. Both Rust and Tile IR compiler perform this check.
                     let (else_region, _else_return_type) = {
                         if let Some((_Else, else_expr)) = &if_expr.else_branch {
-                            let Expr::Block(block_expr) = &**else_expr else {
+                            let Expr::Block(block_expr) = else_expr.as_ref() else {
                                 return self.jit_error_result(
                                     &else_expr.span(),
                                     "only block expressions (`{ ... }`) are supported in else branches",
@@ -792,7 +792,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         }
                         _ => return_type,
                     };
-                    match &*ref_expr.expr {
+                    match ref_expr.expr.as_ref() {
                         Expr::Array(_array_expr) => Ok(self.compile_expression(
                             builder,
                             &ref_expr.expr,
@@ -952,7 +952,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
                 Expr::Repeat(repeat_expr) => {
                     let len = {
-                        let len_expr = &*repeat_expr.len;
+                        let len_expr = repeat_expr.len.as_ref();
                         if let Expr::Path(len_expr) = len_expr {
                             let var_name = len_expr.path.segments.last().unwrap().ident.to_string();
                             // Expecting a const generic primitive.
@@ -1065,7 +1065,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 Expr::Call(call_expr) => {
                     let call_expr_func_str = call_expr.func.to_token_stream().to_string();
                     let _args_str = call_expr.args.to_token_stream().to_string();
-                    match &*call_expr.func {
+                    match call_expr.func.as_ref() {
                         Expr::Path(path_expr) => {
                             let ident = get_ident_from_path_expr(path_expr);
                             // Handle Some(...) specially - it's a Rust Option constructor, not a function call
@@ -1221,7 +1221,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "Unary expression not supported",
                         );
                     };
-                    match &*unary_expr.expr {
+                    match unary_expr.expr.as_ref() {
                         Expr::Lit(lit_expr) => {
                             let return_type = if return_type.is_none() {
                                 match get_lit_type(lit_expr) {

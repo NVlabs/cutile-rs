@@ -657,7 +657,7 @@ pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
             val
         }
         Expr::Unary(unary_expr) => match unary_expr.op {
-            UnOp::Neg(_) => match &*unary_expr.expr {
+            UnOp::Neg(_) => match unary_expr.expr.as_ref() {
                 Expr::Lit(lit_expr) => {
                     let val: i32 = match &lit_expr.lit {
                         Lit::Int(int_lit) => int_lit.base10_parse().unwrap(),
@@ -794,7 +794,7 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                             }
                             Expr::Repeat(repeat_expr) => {
                                 // println!("Expr::Repeat: {:?}", repeat_expr.expr);
-                                let repeat_expr_expr = &*repeat_expr.expr;
+                                let repeat_expr_expr = repeat_expr.expr.as_ref();
                                 let thing_to_repeat = match repeat_expr_expr {
                                     Expr::Lit(lit) => {
                                         match &lit.lit {
@@ -819,7 +819,7 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                     },
                                     _ => unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"),
                                 };
-                                let num_rep = match &*repeat_expr.len {
+                                let num_rep = match repeat_expr.len.as_ref() {
                                     Expr::Path(len_path) => {
                                         // This is something like Tensor<E, {[-1; N]}>
                                         let num_rep_var = len_path.to_token_stream().to_string();

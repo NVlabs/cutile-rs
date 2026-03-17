@@ -534,7 +534,7 @@ pub fn collect_mutated_variables_from_block(
                 // These are the local patterns we currently support in compile_block.
                 // Make sure any changes there are reflected here.
                 match &local.pat {
-                    Pat::Type(pat_type) => match &*pat_type.pat {
+                    Pat::Type(pat_type) => match pat_type.pat.as_ref() {
                         Pat::Ident(pat_ident) => {
                             var_names.push(pat_ident.ident.to_string());
                         }
@@ -590,7 +590,7 @@ pub fn collect_mutated_variables_from_block(
                 local_vars.extend(var_names);
             }
             Stmt::Expr(Expr::Assign(assign_expr), _) => {
-                let var_name: String = match &*assign_expr.left {
+                let var_name: String = match assign_expr.left.as_ref() {
                     Expr::Path(path_expr) => get_ident_from_path_expr(path_expr).to_string(),
                     _ => {
                         return SourceLocation::unknown().jit_error_result(&format!(
@@ -771,7 +771,7 @@ impl OptimizationHints {
             return SourceLocation::unknown()
                 .jit_error_result("expected an assignment expression in optimization hints");
         };
-        let Expr::Path(key_path) = &*key_val.left else {
+        let Expr::Path(key_path) = key_val.left.as_ref() else {
             return SourceLocation::unknown().jit_error_result(
                 "Expected path expression on LHS of optimization hints assignment.",
             );
@@ -1221,7 +1221,7 @@ pub fn resolve_option_arg<'c, 'a>(
 ) -> Option<syn::Expr> {
     use syn::Expr;
     if let Expr::Call(call) = expr {
-        if let Expr::Path(path) = &*call.func {
+        if let Expr::Path(path) = call.func.as_ref() {
             if path.path.segments.last().unwrap().ident == "Some" {
                 return Some(call.args[0].clone());
             }
@@ -1236,7 +1236,7 @@ pub fn resolve_option_arg<'c, 'a>(
             if let Some(ast) = &val.string_literal {
                 // Recursively resolve the stored AST
                 if let Expr::Call(call) = ast {
-                    if let Expr::Path(path) = &*call.func {
+                    if let Expr::Path(path) = call.func.as_ref() {
                         if path.path.segments.last().unwrap().ident == "Some" {
                             return Some(call.args[0].clone());
                         }

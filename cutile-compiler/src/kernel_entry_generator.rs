@@ -47,7 +47,7 @@ impl TensorInput {
         let FnArg::Typed(typed_arg) = src_fn_arg else {
             return SourceLocation::unknown().jit_error_result("Failed to get arg type.");
         };
-        let ty = &*typed_arg.ty;
+        let ty = typed_arg.ty.as_ref();
         let Some(element_type) = get_tensor_element_type(ty, primitives, generic_vars)? else {
             return SourceLocation::unknown().jit_error_result("Failed to get element type.");
         };
@@ -380,7 +380,7 @@ pub fn generate_entry_point(
                 return SourceLocation::unknown().jit_error_result("Unexpected receiver argument.");
             }
             FnArg::Typed(typed_param) => {
-                let ty = &*typed_param.ty;
+                let ty = typed_param.ty.as_ref();
                 match ty {
                     syn::Type::Reference(_type_ref) => {
                         let tensor_input = TensorInput::new(
@@ -601,7 +601,7 @@ pub fn get_tensor_shape(
                     Expr::Repeat(repeat_expr) => {
                         // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                         let thing_to_repeat = repeat_expr.expr.to_token_stream().to_string();
-                        match &*repeat_expr.len {
+                        match repeat_expr.len.as_ref() {
                             Expr::Path(len_path) => {
                                 // This is something like Tensor<E, {[-1; N]}>
                                 let num_rep_var = len_path.to_token_stream().to_string();

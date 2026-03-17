@@ -813,7 +813,7 @@ impl Instantiable for TypeInstanceStructuredType {
         let mut shape: Option<Vec<i32>> = None;
 
         let inst_mut_ref = if let Type::Reference(inner_elem) = &mut instance_ty {
-            &mut *inner_elem.elem
+            &mut inner_elem.elem
         } else {
             &mut instance_ty
         };
@@ -971,7 +971,7 @@ impl Instantiable for TypeInstanceStructuredType {
                                 }
                                 Expr::Repeat(repeat_expr) => {
                                     // println!("Expr::Repeat: {:?}", repeat_expr.expr);
-                                    let repeat_expr_expr = &*repeat_expr.expr;
+                                    let repeat_expr_expr = repeat_expr.expr.as_ref();
                                     let thing_to_repeat = match repeat_expr_expr {
                                         Expr::Lit(lit) => {
                                             match &lit.lit {
@@ -996,7 +996,7 @@ impl Instantiable for TypeInstanceStructuredType {
                                         },
                                         _ => unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"),
                                     };
-                                    let num_rep = match &*repeat_expr.len {
+                                    let num_rep = match repeat_expr.len.as_ref() {
                                         Expr::Path(len_path) => {
                                             // This is something like Tensor<E, {[-1; N]}>
                                             let num_rep_var =
@@ -1809,7 +1809,7 @@ impl GenericArgInference {
                 }
                 syn::Type::Array(array_ty) => {
                     // Something like [T; N]
-                    let syn::Type::Path(elem) = &mut *array_ty.elem else {
+                    let syn::Type::Path(elem) = array_ty.elem.as_mut() else {
                         panic!("Unexpected element type for array {array_ty:#?}")
                     };
                     // This is a type var or concrete type.
@@ -1976,7 +1976,7 @@ impl GenericArgInference {
                 let last_seg = type_path.path.segments.last_mut().unwrap();
                 last_seg.arguments = PathArguments::AngleBracketed(result_args);
             }
-            Type::Reference(ref_type) => match &mut *ref_type.elem {
+            Type::Reference(ref_type) => match ref_type.elem.as_mut() {
                 Type::Path(type_path) => {
                     let last_seg = type_path.path.segments.last_mut().unwrap();
                     last_seg.arguments = PathArguments::AngleBracketed(result_args);
@@ -2075,7 +2075,7 @@ pub fn get_cga_from_generic_argument(
                 Expr::Repeat(repeat_expr) => {
                     // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                     let thing_to_repeat = parse_expr_as_i32(&repeat_expr.expr, generic_args);
-                    match &*repeat_expr.len {
+                    match repeat_expr.len.as_ref() {
                         Expr::Path(len_path) => {
                             // This is something like Tensor<E, {[-1; N]}>
                             let num_rep_var = len_path.to_token_stream().to_string();

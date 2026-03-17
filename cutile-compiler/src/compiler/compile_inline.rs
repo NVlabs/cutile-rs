@@ -208,7 +208,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
             // Remap function parameters.
             // Do this by constructing new values from the method's parameters.
-            let self_ty = &*impl_item.self_ty;
+            let self_ty = impl_item.self_ty.as_ref();
             // Note that self_ty here is treated as a param type.
             // Bind new variables.
             // The variables must:

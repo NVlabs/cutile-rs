@@ -198,7 +198,7 @@ fn try_get_path_expr_ident_str(maybe_path_expr: &Expr) -> Result<Option<String>,
 /// - `Some(VariadicOpData)`: Metadata if the called function is a variadic operation
 /// - `None`: If the function is not variadic or the name cannot be extracted
 fn get_vod_from_call(expr: &mut ExprCall) -> Result<Option<VariadicOpData>, Error> {
-    let name = match &*expr.func {
+    let name = match expr.func.as_ref() {
         Expr::Path(path_expr) => {
             if path_expr.path.segments.is_empty() {
                 return Ok(None);
@@ -1646,7 +1646,7 @@ fn desugar_cga(
                                 // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                                 let thing_to_repeat =
                                     repeat_expr.expr.to_token_stream().to_string();
-                                let num_repetitions = match &*repeat_expr.len {
+                                let num_repetitions = match repeat_expr.len.as_ref() {
                                     Expr::Path(len_path) => {
                                         // This is something like Tensor<E, {[-1; N]}>
                                         let num_rep_var = len_path.to_token_stream().to_string();
@@ -1813,7 +1813,7 @@ fn get_cga_type(
                         Expr::Repeat(repeat_expr) => {
                             // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                             let _thing_to_repeat = repeat_expr.expr.to_token_stream().to_string();
-                            match &*repeat_expr.len {
+                            match repeat_expr.len.as_ref() {
                                 Expr::Path(len_path) => {
                                     // This is something like Tensor<E, {[-1; N]}>
                                     let num_rep_var = len_path.to_token_stream().to_string();
@@ -2190,7 +2190,7 @@ impl RewriteVariadicsPass {
             match input {
                 FnArg::Typed(fn_param) => {
                     let name = {
-                        match &*fn_param.pat {
+                        match fn_param.pat.as_ref() {
                             Pat::Ident(ident) => ident.ident.to_string(),
                             _ => {
                                 return Err(syn_err(
@@ -2200,7 +2200,7 @@ impl RewriteVariadicsPass {
                             }
                         }
                     };
-                    let ty = &*fn_param.ty;
+                    let ty = fn_param.ty.as_ref();
                     variables.insert(
                         name.clone(),
                         Binding {
@@ -2248,7 +2248,7 @@ impl RewriteVariadicsPass {
                     let mut binding_ty: Option<Type> = None;
                     match &mut local.pat {
                         Pat::Type(pat_type) => {
-                            match &*pat_type.pat {
+                            match pat_type.pat.as_ref() {
                                 Pat::Ident(pat_ident) => {
                                     binding_name = Some(pat_ident.ident.to_string());
                                 }
@@ -2366,7 +2366,7 @@ impl RewriteVariadicsPass {
                         Expr::Assign(assign_expr) => {
                             let binding_name: String;
                             let mut binding_ty: Option<Type> = None;
-                            match &mut *assign_expr.left {
+                            match assign_expr.left.as_mut() {
                                 Expr::Path(path_expr) => {
                                     if path_expr.path.segments.len() != 1 {
                                         return Err(syn_err(
@@ -2436,7 +2436,7 @@ impl RewriteVariadicsPass {
                 // Extract info we need before borrowing expr mutably.
                 let index_span = index_expr.span();
                 let inner_expr_span = index_expr.expr.span();
-                let is_path = matches!(&*index_expr.expr, Expr::Path(_));
+                let is_path = matches!(index_expr.expr.as_ref(), Expr::Path(_));
                 if !is_path {
                     return Err(syn_err(
                         inner_expr_span,
@@ -2446,7 +2446,7 @@ impl RewriteVariadicsPass {
                         ),
                     ));
                 }
-                let path_expr = match &*index_expr.expr {
+                let path_expr = match index_expr.expr.as_ref() {
                     Expr::Path(p) => p.clone(),
                     _ => unreachable!(),
                 };
@@ -2479,7 +2479,7 @@ impl RewriteVariadicsPass {
                         Expr::Index(ie) => ie,
                         _ => unreachable!(),
                     };
-                    let index_expr_expr = &mut *index_expr.expr;
+                    let index_expr_expr = index_expr.expr.as_mut();
                     match self.rewrite_expr(
                         index_expr_expr,
                         const_instances,
@@ -2653,7 +2653,7 @@ impl RewriteVariadicsPass {
             ),
             Expr::Return(return_expr) => match &mut return_expr.expr {
                 Some(return_expr) => self.rewrite_expr(
-                    &mut *return_expr,
+                    return_expr.as_mut(),
                     const_instances,
                     variables,
                     return_type.clone(),
@@ -2984,7 +2984,7 @@ impl RewriteVariadicsPass {
             Some(_vod) => {
                 let rtype = return_type.clone();
                 // Actually perform function call rewrite.
-                let last_seg = match &mut *expr.func {
+                let last_seg = match expr.func.as_mut() {
                     Expr::Path(path_expr) => {
                         if path_expr.path.segments.is_empty() {
                             return Err(syn_err(

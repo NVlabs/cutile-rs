@@ -83,12 +83,12 @@ impl SchedulingPolicy for Arc<GlobalSchedulingPolicy> {
         &self,
         op: O,
     ) -> Result<DeviceFuture<T, O>, DeviceError> {
-        match &**self {
+        match self.as_ref() {
             GlobalSchedulingPolicy::RoundRobin(roundrobin) => roundrobin.schedule(op),
         }
     }
     fn sync<T: Send, O: DeviceOperation<Output = T>>(&self, op: O) -> Result<T, DeviceError> {
-        match &**self {
+        match self.as_ref() {
             GlobalSchedulingPolicy::RoundRobin(roundrobin) => roundrobin.sync(op),
         }
     }

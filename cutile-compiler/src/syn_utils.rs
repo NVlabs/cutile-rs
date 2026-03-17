@@ -422,7 +422,7 @@ pub fn get_sig_param_names(sig: &Signature) -> Vec<String> {
 pub fn get_call_expression_generics(
     call_expr: &ExprCall,
 ) -> Option<AngleBracketedGenericArguments> {
-    match &*call_expr.func {
+    match call_expr.func.as_ref() {
         Expr::Path(path_expr) => {
             let last_seg = path_expr.path.segments.last();
             match last_seg {
@@ -489,12 +489,12 @@ pub fn get_sig_types(sig: &Signature, self_ty: Option<&Type>) -> (Vec<Type>, Typ
         match input {
             FnArg::Typed(fn_param) => {
                 let _name = {
-                    match &*fn_param.pat {
+                    match fn_param.pat.as_ref() {
                         Pat::Ident(ident) => ident.ident.to_string(),
                         _ => panic!("Unexpected function param pattern {:#?}.", fn_param.pat),
                     }
                 };
-                let ty = &*fn_param.ty;
+                let ty = fn_param.ty.as_ref();
                 input_tys.push(ty.clone());
             }
             FnArg::Receiver(_fn_self) => {
@@ -522,7 +522,7 @@ pub fn get_sig_output_type(sig: &Signature) -> Type {
 /// Returns `true` if the function has a non-unit return type.
 pub fn function_returns(fn_item: &ItemFn) -> bool {
     match &fn_item.sig.output {
-        ReturnType::Type(_, return_type) => match &**return_type {
+        ReturnType::Type(_, return_type) => match return_type.as_ref() {
             Type::Tuple(type_tuple) => !type_tuple.elems.is_empty(),
             _ => true,
         },
@@ -729,7 +729,7 @@ pub fn parse_closure(closure_expr: &ExprClosure) -> ClosureInfo {
             }
             Pat::Type(pat_type) => {
                 // Typed parameter: |x: i32| ...
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
                     params.push(ClosureParam {
                         name: pat_ident.ident.to_string(),
                         ty: Some((*pat_type.ty).clone()),

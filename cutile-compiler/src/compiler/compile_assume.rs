@@ -46,7 +46,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         generic_vars: &GenericVars,
         ctx: &mut CompilerContext<'c, 'c>,
     ) -> Result<TileRustValue<'c, 'c>, JITError> {
-        let Expr::Path(path_expr) = &*call_expr.func else {
+        let Expr::Path(path_expr) = call_expr.func.as_ref() else {
             return self.jit_error_result(
                 &call_expr.func.span(),
                 "expected a simple function path for assume invocation",
