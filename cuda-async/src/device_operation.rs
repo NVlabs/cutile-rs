@@ -262,8 +262,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -305,8 +304,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -360,8 +358,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -394,8 +391,7 @@ impl<T: Send> IntoFuture for Value<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -460,8 +456,7 @@ impl<O: Send, DO: DeviceOperation<Output = O>, F: FnOnce() -> DO> IntoFuture for
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -514,8 +509,7 @@ impl<T1: Send, T2: Send, A: DeviceOperation<Output = T1>, B: DeviceOperation<Out
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -617,12 +611,10 @@ where
         Ok(())
     }
     unsafe fn left(&self) -> T1 {
-        let left = unsafe { (&mut *self.left.get()).take() }.unwrap();
-        left
+        unsafe { (&mut *self.left.get()).take() }.unwrap()
     }
     unsafe fn right(&self) -> T2 {
-        let right = unsafe { (&mut *self.right.get()).take() }.unwrap();
-        right
+        unsafe { (&mut *self.right.get()).take() }.unwrap()
     }
 }
 
@@ -649,8 +641,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -693,8 +684,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -811,8 +801,7 @@ impl<O: Send, DO: DeviceOperation<Output = O>, F: FnOnce(&ExecutionContext) -> D
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -866,8 +855,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }

@@ -33,9 +33,9 @@ impl Drop for AsyncKernelLaunch {
         let _ = self
             .args
             .iter()
-            .map(|arg| {
+            .map(|&arg| {
                 // Reconstruct the boxes. Pointers will be dropped when they go out of scope.
-                unsafe { Box::from_raw(*arg) }
+                unsafe { Box::from_raw(arg as *mut usize) }
             })
             .collect::<Vec<_>>();
     }
@@ -136,8 +136,7 @@ impl IntoFuture for AsyncKernelLaunch {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
