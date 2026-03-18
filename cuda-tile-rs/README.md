@@ -17,5 +17,5 @@ sudo apt-get install libmlir-21-dev mlir-21-tools
 
 2. Get cuda-tile: `git submodule update --init --recursive`
 3. Point to LLVM-21: `sudo update-alternatives --config llvm-config`
-4. Run tests: `cargo test`
-5. Build a basic kernel and translate to tile ir bytecode: `cargo run --example build_translate_basic`
+4. Run tests: `cargo test -p cuda-tile-rs`
+5. Build a basic kernel and translate to tile ir bytecode: `cargo run -p cuda-tile-rs --example build_translate_basic`

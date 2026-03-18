@@ -5,7 +5,7 @@ It features a safe host-side API for passing tensors to asynchronously executed 
 # Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
 
-Please see the [Contributing.md](CONTRIBUTING.md) if you're interested in contributing to the project.
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
 
 # Setup
 
@@ -66,7 +66,7 @@ This project depends on the cuda-tile MLIR dialect. Please follow the instructio
 
 ## Verifying Installation
 
-Run the hello world example via `cargo run --example hello_world`.
+Run the hello world example via `cargo run -p cutile-examples --example hello_world`.
 
 If everything works, you should see: `Hello, I am tile <0, 0, 0> in a kernel with <1, 1, 1> tiles.`
 
@@ -119,17 +119,17 @@ a distinct sub-tensor from the partitioning of `z` as the `&mut Tensor<...>` ker
 Each tile thread has exclusive access to a distinct sub-tensor within the partition of `z`,
 allowing for safe parallel mutable access.
 
-- To run the above example, run `cargo run --example add_basic` within the `cutile-examples` crate.
-- More kernels and usage examples of the host-side API can be found here [here](cutile-examples/examples).
+- To run the above example, run `cargo run -p cutile-examples --example add_basic`.
+- More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
 # Tests
 - CUDA Tile dialect bindings: `cargo test --package cuda-tile-rs`
 - cuTile Rust Compiler: `cargo test --package cutile-compiler`
 - cuTile Rust Library: `cargo test --package cutile`
-- Examples: `bash cutile-examples/run.sh`
+- Examples: run an individual example, for example `cargo run -p cutile-examples --example async_gemm`
 - Benchmarks: `cargo bench`
 - Everything: `./scripts/run_all_tests.sh` (or pipe to a log file: `./scripts/run_all_tests.sh 2>&1 | tee test_run.log`)
 
 # License
 The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
-All other crates are licensed under the Apache License, Version 2.0 http://www.apache.org/licenses/LICENSE-2.0
+All other crates are licensed under the Apache License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0
