@@ -238,7 +238,7 @@ pub fn get_cuda_tile_meta_list(outer_attrs: &Vec<Attribute>) -> Option<SingleMet
         };
         let name = meta_list.path.to_token_stream().to_string();
         let name_parts = name.split(" :: ").collect::<Vec<&str>>();
-        if name_parts[0] == "cuda_tile" {
+        if name_parts.first() == Some(&"cuda_tile") {
             if found.is_some() {
                 panic!("Found multiple cuda_tile attributes {outer_attrs:#?}")
             }

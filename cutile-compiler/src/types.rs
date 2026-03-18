@@ -447,10 +447,9 @@ pub fn get_primitives_attrs(
     rust_type_name: &str,
     primitives: &HashMap<(String, String), ItemImpl>,
 ) -> Option<SingleMetaList> {
-    match primitives.get(&(trait_name.to_string(), rust_type_name.to_string())) {
-        Some(item_impl) => get_meta_list("cuda_tile :: ty", &item_impl.attrs),
-        None => None,
-    }
+    primitives
+        .get(&(trait_name.to_string(), rust_type_name.to_string()))
+        .and_then(|item_impl| get_meta_list("cuda_tile :: ty", &item_impl.attrs))
 }
 
 /// Returns `true` if the Rust type string is a registered element type.
@@ -540,10 +539,8 @@ pub fn get_cuda_tile_element_type_from_rust_primitive_str(
     rust_primitive: &str,
     primitives: &HashMap<(String, String), ItemImpl>,
 ) -> Option<String> {
-    match get_primitives_attrs("ElementType", rust_primitive, primitives) {
-        Some(attrs) => attrs.parse_string("name"),
-        None => None,
-    }
+    get_primitives_attrs("ElementType", rust_primitive, primitives)
+        .and_then(|attrs| attrs.parse_string("name"))
 }
 
 /// Returns the Rust identifier string for a primitive type.
@@ -595,9 +592,10 @@ pub fn get_element_type_structured(
                     }
                 }
                 syn::Type::Ptr(type_ptr) => {
-                    let ident_str = match get_type_ident(type_param) {
-                        Some(ident) => ident.to_string(),
-                        None => panic!("Unable to extract ident from pointer {type_ptr:#?}"),
+                    let ident_str = if let Some(ident) = get_type_ident(type_param) {
+                        ident.to_string()
+                    } else {
+                        panic!("Unable to extract ident from pointer {type_ptr:#?}")
                     };
                     if get_primitives_attrs("ElementType", &ident_str, primitives).is_some() {
                         element_type = Some(ident_str);
@@ -626,19 +624,11 @@ pub fn get_cuda_tile_element_type_structured(
 /// Infers the `syn::Type` of a literal expression from its suffix or kind.
 pub fn get_lit_type(lit_expr: &ExprLit) -> Option<syn::Type> {
     match &lit_expr.lit {
-        Lit::Int(lit) => {
-            if !lit.suffix().is_empty() {
-                Some(syn::parse2(lit.suffix().parse().unwrap()).unwrap())
-            } else {
-                None
-            }
+        Lit::Int(lit) if !lit.suffix().is_empty() => {
+            Some(syn::parse2(lit.suffix().parse().unwrap()).unwrap())
         }
-        Lit::Float(lit) => {
-            if !lit.suffix().is_empty() {
-                Some(syn::parse2(lit.suffix().parse().unwrap()).unwrap())
-            } else {
-                None
-            }
+        Lit::Float(lit) if !lit.suffix().is_empty() => {
+            Some(syn::parse2(lit.suffix().parse().unwrap()).unwrap())
         }
         Lit::Bool(_bool_lit) => Some(syn::parse2("bool".parse().unwrap()).unwrap()),
         Lit::Str(_str_lit) => Some(syn::parse2("str".parse().unwrap()).unwrap()),
@@ -744,9 +734,8 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                 match const_expr {
                     Expr::Block(block_expr) => {
                         // This is something like Tensor<E, {[...]}>
-                        assert_eq!(block_expr.block.stmts.len(), 1);
-                        let statement = &block_expr.block.stmts[0];
-                        let Stmt::Expr(statement_expr, _) = statement else {
+                        let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice()
+                        else {
                             panic!("Unexpected block expression.")
                         };
                         match statement_expr {
@@ -773,14 +762,13 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                         }
                                         Expr::Path(path) => {
                                             let ident = get_ident_from_path_expr(path);
-                                            match generic_vars
+                                            if let Some(&val) = generic_vars
                                                 .inst_i32
                                                 .get(ident.to_string().as_str())
                                             {
-                                                Some(val) => _result.push(*val),
-                                                None => {
-                                                    panic!("Undefined generic parameter {ident}")
-                                                }
+                                                _result.push(val)
+                                            } else {
+                                                panic!("Undefined generic parameter {ident}")
                                             }
                                         }
                                         _ => unimplemented!(
@@ -810,9 +798,13 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                     },
                                     Expr::Path(path) => {
                                         let ident = get_ident_from_path_expr(path);
-                                        match generic_vars.inst_i32.get(ident.to_string().as_str()) {
-                                            Some(val) => *val,
-                                            None => panic!("Undefined generic parameter {ident}")
+                                        if let Some(&val) = generic_vars
+                                            .inst_i32
+                                            .get(ident.to_string().as_str())
+                                        {
+                                            val
+                                        } else {
+                                            panic!("Undefined generic parameter {ident}")
                                         }
                                     },
                                     _ => unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"),

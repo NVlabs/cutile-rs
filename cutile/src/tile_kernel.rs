@@ -197,7 +197,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         //         &key.function_generics,
         //         &key.stride_args
         //             .iter()
-        //             .map(|x| (x.0.as_str(), x.1.as_slice()))
+        //             .map(|(x, y)| (x.as_str(), y.as_slice()))
         //             .collect::<Vec<_>>(),
         //         const_grid,
         //         gpu_name.clone(),
@@ -211,7 +211,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
             &key.function_generics,
             &key.stride_args
                 .iter()
-                .map(|x| (x.0.as_str(), x.1.as_slice()))
+                .map(|(x, y)| (x.as_str(), y.as_slice()))
                 .collect::<Vec<_>>(),
             const_grid,
             gpu_name.clone(),
@@ -312,23 +312,22 @@ pub fn infer_launch_grid(
     grid: (u32, u32, u32),
     inferred_grids: &[(u32, u32, u32)],
 ) -> Result<(u32, u32, u32), Error> {
-    if grid != (0, 0, 0) {
-        // A launch grid was specified.
-        if !inferred_grids.is_empty() {
+    match inferred_grids {
+        [] if grid != (0, 0, 0) => Ok(grid),
+        _ if grid != (0, 0, 0) => {
             validate_grids(grid, inferred_grids).with_context(|| {
                 "Specified launch grid does not match inferred tensor partition grid"
             })?;
+            Ok(grid)
         }
-        return Ok(grid);
+        [] => kernel_launch_error_result("Launch grid required."),
+        [inferred_grid, ..] => {
+            let grid = *inferred_grid;
+            validate_grids(grid, inferred_grids)
+                .with_context(|| "Inferred tensor partition grids do not match")?;
+            Ok(grid)
+        }
     }
-    // Try to infer launch grid.
-    if inferred_grids.is_empty() {
-        return kernel_launch_error_result("Launch grid required.");
-    }
-    let grid = inferred_grids[0];
-    validate_grids(grid, inferred_grids)
-        .with_context(|| "Inferred tensor partition grids do not match")?;
-    Ok(grid)
 }
 
 /// A compiled CUDA kernel generated from Rust code that can be launched on the GPU.
@@ -665,8 +664,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -730,8 +728,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -806,8 +803,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }

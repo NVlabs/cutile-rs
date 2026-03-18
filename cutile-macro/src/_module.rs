@@ -506,29 +506,16 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
     );
     // println!("structure {ident}: {attributes:#?}");
     let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap() {
-            "cuda_tile :: variadic_struct" => {
-                let items = variadic_struct(&attributes, item)?;
-                let structs = items.iter().map(|item| item.0.clone()).collect::<Vec<_>>();
-                let maybe_impls = items
-                    .iter()
-                    .filter(|item| item.1.is_some())
-                    .collect::<Vec<_>>();
-                let impls = maybe_impls
-                    .iter()
-                    .map(|item| item.1.clone().unwrap())
-                    .collect::<Vec<_>>();
-                quote! {
-                    #(#structs)*
-                    #(#impls)*
-                }
+        Some(attributes) if attributes.name_as_str() == Some("cuda_tile :: variadic_struct") => {
+            let items = variadic_struct(&attributes, item)?;
+            let (structs, impls): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+            let impls = impls.into_iter().flatten().collect::<Vec<_>>();
+            quote! {
+                #(#structs)*
+                #(#impls)*
             }
-            _ => {
-                let item = desugar_structure_cgas(&item)?;
-                quote! { #item }
-            }
-        },
-        None => {
+        }
+        _ => {
             let item = desugar_structure_cgas(&item)?;
             quote! { #item }
         }
@@ -722,8 +709,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             fn into_future(self) -> Self::IntoFuture {
                 match with_default_device_policy(|policy| policy.schedule(self)) {
                     Ok(Ok(future)) => future,
-                    Ok(Err(e)) => DeviceFuture::failed(e),
-                    Err(e) => DeviceFuture::failed(e),
+                    Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
                 }
             }
         }

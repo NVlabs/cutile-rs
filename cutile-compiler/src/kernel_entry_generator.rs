@@ -541,14 +541,7 @@ pub fn get_tensor_shape(
             }
             GenericArgument::Const(Expr::Block(block_expr)) => {
                 // This is something like Tensor<E, {[...]}>
-                if block_expr.block.stmts.len() != 1 {
-                    return SourceLocation::unknown().jit_error_result(&format!(
-                        "Expected exactly 1 statement in block expression, got {}",
-                        block_expr.block.stmts.len()
-                    ));
-                }
-                let statement = &block_expr.block.stmts[0];
-                let Stmt::Expr(statement_expr, _) = statement else {
+                let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice() else {
                     return SourceLocation::unknown()
                         .jit_error_result("Unexpected block expression.");
                 };

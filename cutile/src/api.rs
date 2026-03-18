@@ -199,8 +199,7 @@ impl<T: WithDType + Send> IntoFuture for CopyDeviceToDevice<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -270,8 +269,7 @@ impl<T: WithDType + Send> IntoFuture for CopyHostToDevice<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -320,7 +318,12 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToHost<T> {
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
         let src = self.tensor.device_box.cu_deviceptr();
         let num_elements = self.tensor.size();
-        let shape: Vec<usize> = self.tensor.shape.iter().map(|x| *x as usize).collect();
+        let shape = self
+            .tensor
+            .shape
+            .iter()
+            .map(|&x| x as _)
+            .collect::<Vec<_>>();
         let layout = Layout::array::<T>(num_elements).expect("overflow cannot happen");
         let dst = alloc(layout).cast::<T>();
         memcpy_dtoh_async(dst, src, num_elements, context.get_cuda_stream());
@@ -342,8 +345,7 @@ impl<T: WithDType + Send> IntoFuture for CopyDeviceToHost<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -401,8 +403,7 @@ impl<T: WithDType + Send> IntoFuture for CopyDeviceToHostVec<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -461,8 +462,7 @@ impl<T: WithDType + Send> IntoFuture for CopyHostVecToDevice<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -487,8 +487,8 @@ pub fn copy_host_vec_to_device<T: WithDType>(
 pub(crate) fn candle_tensor_to_vec<T: WithDType>(
     tensor: &Arc<candle_core::Tensor>,
 ) -> (Vec<T>, Vec<i32>, Vec<i32>) {
-    let shape: Vec<i32> = tensor.shape().dims().iter().map(|x| *x as i32).collect();
-    let strides: Vec<i32> = tensor.stride().iter().map(|x| *x as i32).collect();
+    let shape = tensor.shape().dims().iter().map(|&x| x as _).collect();
+    let strides = tensor.stride().iter().map(|&x| x as _).collect();
     let size: usize = tensor.shape().dims().iter().product();
     let vec = tensor.reshape((size,)).unwrap().to_vec1().unwrap();
     (vec, shape, strides)
@@ -617,10 +617,9 @@ pub fn convert<FromType: WithDType, ToType: WithDType>(
     Tensor::<ToType>::uninitialized(len).and_then(move |t| {
         let partition_size = min(len, 128);
         let dst = unsafe { t.assume_init() }.partition([partition_size as i32]);
-        let res = value((src.clone(), dst)).apply(convert_apply).unzip();
-        res.1
-            .unpartition()
-            .reshape_dyn(src.shape.iter().map(|x| *x as usize).collect::<Vec<_>>())
+        let shape = src.shape.iter().map(|&x| x as _).collect();
+        let res = value((src, dst)).apply(convert_apply).unzip();
+        res.1.unpartition().reshape_dyn(shape)
     })
 }
 
@@ -796,8 +795,7 @@ impl<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<Output = Tensor
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -881,8 +879,7 @@ impl<T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> IntoFuture
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }

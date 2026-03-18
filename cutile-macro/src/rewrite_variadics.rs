@@ -572,14 +572,15 @@ fn get_concrete_op_or_method_ident_from_types(
             let mut missing_cgas = vec![];
             let mut return_type_generic_arg_strings = vec![];
             let mut num_cgas = 0;
-            for arg in return_type_generic_args {
-                if !vod.cga_map.contains_key(*arg) {
+            for &arg in return_type_generic_args {
+                if !vod.cga_map.contains_key(arg) {
                     continue;
                 }
                 num_cgas += 1;
-                match vod_cga_name_to_context_cga_name.get(arg) {
-                    Some(Some(s)) => return_type_generic_arg_strings.push(s.clone()),
-                    _ => missing_cgas.push(arg),
+                if let Some(Some(s)) = vod_cga_name_to_context_cga_name.get(arg) {
+                    return_type_generic_arg_strings.push(s.clone())
+                } else {
+                    missing_cgas.push(arg)
                 };
             }
             if return_type_generic_arg_strings.len() != num_cgas {
@@ -754,7 +755,10 @@ impl ConstInstances {
     fn instantiate_var_cgas(&self, var_cgas: &[VarCGAParameter]) -> Result<Self, Error> {
         let mut result = self.clone();
         for cga in var_cgas {
-            if !result.inst_u32.contains_key(&cga.length_var) {
+            if let Some(&n) = result.inst_u32.get(&cga.length_var) {
+                result.inst_array.insert(cga.name.clone(), cga.instance(n));
+                result.var_arrays.insert(cga.name.clone(), cga.clone());
+            } else {
                 return Err(syn_err(
                     Span::call_site(),
                     &format!(
@@ -763,9 +767,6 @@ impl ConstInstances {
                     ),
                 ));
             }
-            let n = result.inst_u32.get(&cga.length_var).unwrap();
-            result.inst_array.insert(cga.name.clone(), cga.instance(*n));
-            result.var_arrays.insert(cga.name.clone(), cga.clone());
         }
         Ok(result)
     }
@@ -843,7 +844,7 @@ impl VariadicLengthIterator {
         }
         let mut cga_length_vars = vec![];
         for cga in arrays {
-            let var = cga.length_var.clone();
+            let var = &cga.length_var;
             cga_length_vars.push(var.clone());
             // This is so we don't need to explicitly specify the variadic_length_vars attribute.
             let len = (attribute_list.parse_int(var.as_str()).ok_or_else(|| {
@@ -852,8 +853,8 @@ impl VariadicLengthIterator {
                     &format!("Missing attribute value for '{var}'"),
                 )
             })? + 1) as usize;
-            if variadic_lengths.contains_key(&var) {
-                if *variadic_lengths.get(&var).unwrap() != len {
+            if let Some(&met_len) = variadic_lengths.get(var) {
+                if met_len != len {
                     return Err(syn_err(
                         Span::call_site(),
                         &format!("Variadic length mismatch for '{var}'"),
@@ -885,16 +886,16 @@ impl VariadicLengthItem {
         // Ordered by key.
         self.cga_length_instance
             .iter()
-            .map(|x| x.1 as u32)
-            .collect::<Vec<_>>()
+            .map(|&(_, x)| x as _)
+            .collect()
     }
     /// Returns unique length variable values, ordered by variable name.
     pub fn vec_of_unique_lengths(&self) -> Vec<u32> {
         // Ordered by key.
         self.variadic_length_instance
             .values()
-            .map(|x| *x as u32)
-            .collect::<Vec<_>>()
+            .map(|&x| x as _)
+            .collect()
     }
 }
 
@@ -1367,9 +1368,8 @@ fn expand_cga(
     })?;
     let param_name = last_seg.ident.to_string();
     // Is it a variadic type or is it expecting a variadic type parameter?
-    if instances.inst_array.contains_key(&param_name) {
+    if let Some(cga) = instances.inst_array.get(&param_name) {
         // The type is a const generic array, e.g. the D in f(..., shape: D) -> ()
-        let cga = instances.inst_array.get(&param_name).unwrap();
         let mut generic_args_result: Vec<String> = vec![];
         for j in 0..cga.length {
             generic_args_result.push(format!("{}{}", cga.name, j));
@@ -1520,8 +1520,7 @@ fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, Error> {
             let mut result = type_array.clone();
             *result.elem = desugar_ty(&type_array.elem, instances)?;
             let arr_len = result.len.to_token_stream().to_string();
-            if instances.inst_u32.contains_key(&arr_len) {
-                let n = instances.inst_u32.get(&arr_len).unwrap();
+            if let Some(n) = instances.inst_u32.get(&arr_len) {
                 result.len = syn::parse::<Expr>(format!("{}", n).parse().map_err(|_| {
                     syn_err(
                         type_array.span(),
@@ -1581,9 +1580,8 @@ fn desugar_cga(
                             })?
                             .ident
                             .to_string();
-                        if instances.inst_array.contains_key(&last_ident) {
+                        if let Some(cga) = instances.inst_array.get(&last_ident) {
                             // This is something like Shape<D> for const generic array D: [i32; N].
-                            let cga = instances.inst_array.get(&last_ident).unwrap();
                             for j in 0..cga.length {
                                 generic_args_result.push(format!("{}{}", cga.name, j));
                             }
@@ -1613,17 +1611,8 @@ fn desugar_cga(
                     Expr::Block(block_expr) => {
                         // TODO (hme): Would be great to get rid of this syntax.
                         // This is something like Tensor<E, {[...]}>
-                        if block_expr.block.stmts.len() != 1 {
-                            return Err(syn_err(
-                                block_expr.span(),
-                                &format!(
-                                    "Expected exactly 1 statement in block expression, got {}",
-                                    block_expr.block.stmts.len()
-                                ),
-                            ));
-                        }
-                        let statement = &block_expr.block.stmts[0];
-                        let Stmt::Expr(statement_expr, _) = statement else {
+                        let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice()
+                        else {
                             return Err(syn_err(block_expr.span(), "Unexpected block expression."));
                         };
                         match statement_expr {
@@ -1647,7 +1636,9 @@ fn desugar_cga(
                                     Expr::Path(len_path) => {
                                         // This is something like Tensor<E, {[-1; N]}>
                                         let num_rep_var = len_path.to_token_stream().to_string();
-                                        if !instances.inst_u32.contains_key(&num_rep_var) {
+                                        let Some(&num_repetitions) =
+                                            instances.inst_u32.get(&num_rep_var)
+                                        else {
                                             return Err(syn_err(
                                                 len_path.span(),
                                                 &format!(
@@ -1655,12 +1646,9 @@ fn desugar_cga(
                                                     num_rep_var
                                                 ),
                                             ));
-                                        }
-                                        let num_repetitions =
-                                            *instances.inst_u32.get(&num_rep_var).unwrap();
-                                        for _ in 0..num_repetitions {
-                                            generic_args_result.push(thing_to_repeat.clone());
-                                        }
+                                        };
+                                        generic_args_result
+                                            .extend(vec![thing_to_repeat; num_repetitions as _]);
                                         num_repetitions
                                     }
                                     Expr::Lit(len_lit) => {
@@ -1677,9 +1665,8 @@ fn desugar_cga(
                                                     ),
                                                 )
                                             })?;
-                                        for _ in 0..num_repetitions {
-                                            generic_args_result.push(thing_to_repeat.clone());
-                                        }
+                                        generic_args_result
+                                            .extend(vec![thing_to_repeat; num_repetitions as _]);
                                         num_repetitions
                                     }
                                     _ => {
@@ -1764,9 +1751,8 @@ fn get_cga_type(
                             })?
                             .ident
                             .to_string();
-                        if const_instances.inst_array.contains_key(&last_ident) {
+                        if let Some(cga) = const_instances.inst_array.get(&last_ident) {
                             // This is something like Shape<D> for const generic array D: [i32; N].
-                            let cga = const_instances.inst_array.get(&last_ident).unwrap();
                             n.push(cga.length);
                             cgas.push(Some(generic_arg.to_token_stream().to_string()));
                         }
@@ -1783,77 +1769,57 @@ fn get_cga_type(
                     _ => {}
                 }
             }
-            GenericArgument::Const(const_param) => {
-                // println!("expand GenericArgument::Const? {const_param:#?}");
-                if let Expr::Block(block_expr) = const_param {
-                    // TODO (hme): Would be great to get rid of this syntax.
-                    // This is something like Tensor<E, {[...]}>
-                    if block_expr.block.stmts.len() != 1 {
-                        return Err(syn_err(
-                            block_expr.span(),
-                            &format!(
-                                "Expected exactly 1 statement in block expression, got {}",
-                                block_expr.block.stmts.len()
-                            ),
-                        ));
+            GenericArgument::Const(Expr::Block(block_expr)) => {
+                // TODO (hme): Would be great to get rid of this syntax.
+                // This is something like Tensor<E, {[...]}>
+                let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice() else {
+                    return Err(syn_err(block_expr.span(), "Unexpected block expression."));
+                };
+                match statement_expr {
+                    Expr::Array(array_expr) => {
+                        // This is something like Tensor<E, {[1, 2, -1]}>
+                        n.push(array_expr.elems.len() as u32);
+                        cgas.push(Some(generic_arg.to_token_stream().to_string()));
                     }
-                    let statement = &block_expr.block.stmts[0];
-                    let Stmt::Expr(statement_expr, _) = statement else {
-                        return Err(syn_err(block_expr.span(), "Unexpected block expression."));
-                    };
-                    match statement_expr {
-                        Expr::Array(array_expr) => {
-                            // This is something like Tensor<E, {[1, 2, -1]}>
-                            n.push(array_expr.elems.len() as u32);
-                            cgas.push(Some(generic_arg.to_token_stream().to_string()));
-                        }
-                        Expr::Repeat(repeat_expr) => {
-                            // println!("Expr::Repeat: {:?}", repeat_expr.expr);
-                            let _thing_to_repeat = repeat_expr.expr.to_token_stream().to_string();
-                            match repeat_expr.len.as_ref() {
-                                Expr::Path(len_path) => {
-                                    // This is something like Tensor<E, {[-1; N]}>
-                                    let num_rep_var = len_path.to_token_stream().to_string();
-                                    if !const_instances.inst_u32.contains_key(&num_rep_var) {
-                                        return Err(syn_err(
-                                            len_path.span(),
-                                            &format!(
-                                                "Expected instance for generic argument {}",
-                                                num_rep_var
-                                            ),
-                                        ));
-                                    }
-                                    let num_rep =
-                                        const_instances.inst_u32.get(&num_rep_var).unwrap();
-                                    n.push(*num_rep);
-                                    cgas.push(Some(generic_arg.to_token_stream().to_string()));
-                                }
-                                Expr::Lit(len_lit) => {
-                                    // This is something like Tensor<E, {[-1; 3]}>
-                                    let num_repetitions: u32 = len_lit
-                                        .to_token_stream()
-                                        .to_string()
-                                        .parse::<u32>()
-                                        .map_err(|e| {
-                                            syn_err(
-                                                len_lit.span(),
-                                                &format!(
-                                                    "Failed to parse repeat length as u32: {e}"
-                                                ),
-                                            )
-                                        })?;
-                                    n.push(num_repetitions);
-                                    cgas.push(Some(generic_arg.to_token_stream().to_string()));
-                                }
-                                _ => {
-                                    return Err(syn_err(ty.span(), "Unexpected repeat expression."))
-                                }
+                    Expr::Repeat(repeat_expr) => {
+                        // println!("Expr::Repeat: {:?}", repeat_expr.expr);
+                        let _thing_to_repeat = repeat_expr.expr.to_token_stream().to_string();
+                        match repeat_expr.len.as_ref() {
+                            Expr::Path(len_path) => {
+                                // This is something like Tensor<E, {[-1; N]}>
+                                let num_rep_var = len_path.to_token_stream().to_string();
+                                let Some(&num_rep) = const_instances.inst_u32.get(&num_rep_var)
+                                else {
+                                    return Err(syn_err(
+                                        len_path.span(),
+                                        &format!(
+                                            "Expected instance for generic argument {}",
+                                            num_rep_var
+                                        ),
+                                    ));
+                                };
+                                n.push(num_rep);
+                                cgas.push(Some(generic_arg.to_token_stream().to_string()));
                             }
-                        }
-                        _ => {
-                            return Err(syn_err(block_expr.span(), "Unexpected block expression."))
+                            Expr::Lit(len_lit) => {
+                                // This is something like Tensor<E, {[-1; 3]}>
+                                let num_repetitions: u32 = len_lit
+                                    .to_token_stream()
+                                    .to_string()
+                                    .parse::<u32>()
+                                    .map_err(|e| {
+                                        syn_err(
+                                            len_lit.span(),
+                                            &format!("Failed to parse repeat length as u32: {e}"),
+                                        )
+                                    })?;
+                                n.push(num_repetitions);
+                                cgas.push(Some(generic_arg.to_token_stream().to_string()));
+                            }
+                            _ => return Err(syn_err(ty.span(), "Unexpected repeat expression.")),
                         }
                     }
+                    _ => return Err(syn_err(block_expr.span(), "Unexpected block expression.")),
                 }
             }
             _ => {}

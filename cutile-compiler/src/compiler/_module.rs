@@ -264,18 +264,17 @@ impl CUDATileModules {
         if !self.modules.contains_key(module_name) {
             return JITError::generic(&format!("undefined module: `{module_name}`"));
         }
-        match self.functions.get(function_name) {
-            Some(function) => Ok(function),
-            None => JITError::generic(&format!("undefined function: `{function_name}`")),
-        }
+        self.functions
+            .get(function_name)
+            .ok_or(JITError::generic_err(&format!(
+                "undefined function: `{function_name}`"
+            )))
     }
 
     pub fn get_fn_entry_attrs(&self, fn_item: &ItemFn) -> Result<SingleMetaList, JITError> {
-        let entry_attrs = get_meta_list_by_last_segment("entry", &fn_item.attrs);
-        let Some(entry_attrs) = entry_attrs else {
-            return JITError::generic("function is missing a required `#[entry(...)]` attribute");
-        };
-        Ok(entry_attrs)
+        get_meta_list_by_last_segment("entry", &fn_item.attrs).ok_or(JITError::generic_err(
+            "function is missing a required `#[entry(...)]` attribute",
+        ))
     }
 
     pub fn get_entry_arg_bool_by_function_name(

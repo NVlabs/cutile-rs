@@ -308,31 +308,29 @@ impl<T: WithDType> Partition<Tensor<T>> {
     ///
     /// Panics if the tensor rank is greater than 3.
     pub fn grid(&self) -> Result<(u32, u32, u32), Error> {
-        let check_i32 = |x: &i32| *x > 0;
-        if !self.object.shape.iter().all(check_i32) {
+        if !self.object.shape.iter().all(|&x| x > 0) {
             // TODO (hme): This check may be relaxed or unnecessary if we let shapes be u32.
             //  Doing so can't break future features around dynamic shape dims in tile kernels.
             return tensor_error_result("Shape dimensions must be positive.");
         }
-        let to_u32 = |x: &i32| *x as u32;
-        let shape = self.object.shape.iter().map(to_u32).collect::<Vec<u32>>();
+        let shape = self
+            .object
+            .shape
+            .iter()
+            .map(|&x| x as _)
+            .collect::<Vec<_>>();
         let partition_shape = self
             .partition_shape
             .iter()
-            .map(to_u32)
-            .collect::<Vec<u32>>();
-        let rank = shape.len();
-        match rank {
-            1 => Ok((u32::div_ceil(shape[0], partition_shape[0]), 1, 1)),
-            2 => Ok((
-                u32::div_ceil(shape[0], partition_shape[0]),
-                u32::div_ceil(shape[1], partition_shape[1]),
-                1,
-            )),
-            3 => Ok((
-                u32::div_ceil(shape[0], partition_shape[0]),
-                u32::div_ceil(shape[1], partition_shape[1]),
-                u32::div_ceil(shape[2], partition_shape[2]),
+            .map(|&x| x as _)
+            .collect::<Vec<_>>();
+        match (shape.as_slice(), partition_shape.as_slice()) {
+            ([x], [px, ..]) => Ok((u32::div_ceil(*x, *px), 1, 1)),
+            ([x, y], [px, py, ..]) => Ok((u32::div_ceil(*x, *px), u32::div_ceil(*y, *py), 1)),
+            ([x, y, z], [px, py, pz, ..]) => Ok((
+                u32::div_ceil(*x, *px),
+                u32::div_ceil(*y, *py),
+                u32::div_ceil(*z, *pz),
             )),
             _ => tensor_error_result("Mutable tensor must be at most rank 3."),
         }
@@ -539,26 +537,21 @@ impl<T: WithDType> Tensor<T> {
     /// - The rank is greater than 4
     pub fn reshape<const RANK: usize>(mut self, shape: [usize; RANK]) -> Self {
         // Make sure it's a valid shape for this tensor.
-        let shape = shape.iter().map(|x| *x as i32).collect::<Vec<_>>();
+        let shape = shape.iter().map(|&x| x as _).collect::<Vec<_>>();
         assert_eq!(
             shape.iter().product::<i32>(),
             self.shape.iter().product::<i32>()
         );
         self.shape = shape.to_vec();
-        match RANK {
-            1 => self.strides = vec![1],
-            2 => self.strides = vec![shape[1], 1],
-            3 => self.strides = vec![shape[1] * shape[2], shape[2], 1],
-            4 => {
-                self.strides = vec![
-                    shape[1] * shape[2] * shape[3],
-                    shape[2] * shape[3],
-                    shape[3],
-                    1,
-                ]
+        self.strides = match *shape.as_slice() {
+            [_] => vec![1],
+            [_, shape1] => vec![shape1, 1],
+            [_, shape1, shape2] => vec![shape1 * shape2, shape2, 1],
+            [_, shape1, shape2, shape3] => {
+                vec![shape1 * shape2 * shape3, shape2 * shape3, shape3, 1]
             }
             _ => unimplemented!("Static reshape of rank {}", RANK),
-        }
+        };
         self
     }
     pub fn reshape_dyn(mut self, shape: &[usize]) -> Self {

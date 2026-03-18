@@ -1096,7 +1096,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         let fn_params = get_sig_param_names(&fn_item.sig);
         for hint_param in cuda_tile_op_hint_params {
-            let Some(i) = fn_params.iter().position(|s| *s == *hint_param) else {
+            let Some(i) = fn_params.iter().position(|s| s == hint_param) else {
                 return self.jit_error_result(
                     &call_expr.span(),
                     &format!("Failed to compile hint param {hint_param}"),
@@ -1234,7 +1234,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         let fn_params = get_sig_param_names(&fn_item.sig);
         for hint_param in cuda_tile_op_hint_params {
-            let Some(i) = fn_params.iter().position(|s| *s == *hint_param) else {
+            let Some(i) = fn_params.iter().position(|s| s == hint_param) else {
                 return self.jit_error_result(
                     &call_expr.span(),
                     &format!("Failed to compile hint param {hint_param}"),
@@ -1359,7 +1359,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             };
             let closure_info = parse_closure(closure_expr);
 
-            if closure_info.params.len() != 2 {
+            let [param0, param1] = closure_info.params.as_slice() else {
                 return self.jit_error_result(
                     &call_expr.args[1].span(),
                     &format!(
@@ -1367,18 +1367,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         closure_info.params.len()
                     ),
                 );
-            }
+            };
 
             let mut closure_variables = ctx.clone();
-            let param0_name = &closure_info.params[0].name;
-            let param1_name = &closure_info.params[1].name;
 
             closure_variables.vars.insert(
-                param0_name.clone(),
+                param0.name.clone(),
                 TileRustValue::new_value_kind_like(arg0, elem_compiled_ty.clone()),
             );
             closure_variables.vars.insert(
-                param1_name.clone(),
+                param1.name.clone(),
                 TileRustValue::new_value_kind_like(arg1, elem_compiled_ty.clone()),
             );
 
@@ -1522,7 +1520,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             };
             let closure_info = parse_closure(closure_expr);
 
-            if closure_info.params.len() != 2 {
+            let [param0, param1] = closure_info.params.as_slice() else {
                 return self.jit_error_result(
                     &call_expr.args[1].span(),
                     &format!(
@@ -1530,18 +1528,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         closure_info.params.len()
                     ),
                 );
-            }
+            };
 
             let mut closure_variables = ctx.clone();
-            let param0_name = &closure_info.params[0].name;
-            let param1_name = &closure_info.params[1].name;
 
             closure_variables.vars.insert(
-                param0_name.clone(),
+                param0.name.clone(),
                 TileRustValue::new_value_kind_like(arg0, elem_compiled_ty.clone()),
             );
             closure_variables.vars.insert(
-                param1_name.clone(),
+                param1.name.clone(),
                 TileRustValue::new_value_kind_like(arg1, elem_compiled_ty.clone()),
             );
 
@@ -1710,8 +1706,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             };
             let param_names = get_sig_param_names(&fn_item.sig);
             for field_meta_expr_str in output_meta_data {
-                let field_meta_expr_parts = field_meta_expr_str.split(".").collect::<Vec<&str>>();
-                let field_meta_expr_param = field_meta_expr_parts[0];
+                let field_meta_expr_param = field_meta_expr_str.split(".").next().unwrap();
                 let mut succeeded = false;
                 for (param_name, call_expr_arg) in param_names.iter().zip(call_expr.args.iter()) {
                     if param_name == field_meta_expr_param {
@@ -1760,14 +1755,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             if let Some(value) = op_arg.value {
                 arg_values.push(value);
             } else if let Some(fields) = op_arg.fields {
-                let op_path = op_param.split(".").collect::<Vec<&str>>();
-                if op_path.len() <= 1 {
+                let &[_, .., field] = op_param.split(".").collect::<Vec<_>>().as_slice() else {
                     return self.jit_error_result(
                         &call_expr_arg.span(),
                         &format!("Field expression required for struct param {call_expr_arg_str}, got {op_param}"),
                     );
-                }
-                let field = *op_path.last().unwrap();
+                };
                 match fields.get(field) {
                     Some(field_value) => {
                         if let Some(value) = field_value.value {
@@ -1825,8 +1818,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
         // Add attribute flags.
         for named_attr in cuda_tile_op_named_attributes.iter() {
-            let name_attr_split = named_attr.split("=").collect::<Vec<&str>>();
-            let (attr_name, attr_value) = (name_attr_split[0], name_attr_split[1]);
+            let &[attr_name, attr_value] = named_attr.split("=").collect::<Vec<_>>().as_slice()
+            else {
+                panic!("invalid cuda_tile_op_named_attributes");
+            };
 
             if attr_name.starts_with("signedness") && attr_value == "inferred_signedness" {
                 let elem_ty = compiled_args
@@ -1864,18 +1859,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
         let fn_params = get_sig_param_names(&fn_item.sig);
         for (fn_param, call_expr_arg) in fn_params.iter().zip(call_expr.args.iter()) {
-            if maybe_next_attr_param.is_none() {
+            let Some(next_attr) = maybe_next_attr_param else {
                 break;
-            }
-            let next_attr: &String = maybe_next_attr_param.as_ref().unwrap();
+            };
             let op_attr = next_attr.split(":").collect::<Vec<_>>();
-            if op_attr.len() != 2 {
+            let &[attr_id, attr_ty] = op_attr.as_slice() else {
                 return self.jit_error_result(
                     &call_expr.span(),
                     &format!("Expected 2-element attribute, got {}", op_attr.len()),
                 );
-            }
-            let (attr_id, attr_ty): (&str, &str) = (op_attr[0], op_attr[1]);
+            };
             match attr_ty {
                 "array" => {
                     if attr_id != fn_param {
@@ -1946,20 +1939,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         Expr::Path(path_expr) => {
                             let path_expr_string = path_expr.to_token_stream().to_string();
                             let ty_val_split = path_expr_string.split(" :: ").collect::<Vec<_>>();
-                            if ty_val_split.len() != 2 {
+                            let &[ty, const_val] = ty_val_split.as_slice() else {
                                 return self.jit_error_result(
                                     &path_expr.span(),
                                     "Unexpected dense value.",
                                 );
-                            }
-                            let (ty, const_val) =
-                                (ty_val_split[0].to_string(), ty_val_split[1].to_string());
-                            match const_val.as_str() {
-                                "ZERO" => (get_const_hex(ty.as_str(), "zero")?, ty.clone()),
-                                "ONE" => (get_const_hex(ty.as_str(), "one")?, ty.clone()),
-                                "NEG_INFINITY" => (get_const_hex(ty.as_str(), "min")?, ty.clone()),
-                                "INFINITY" => (get_const_hex(ty.as_str(), "max")?, ty.clone()),
-                                "E" => (get_const_hex(ty.as_str(), "e")?, ty.clone()),
+                            };
+                            match const_val {
+                                "ZERO" => (get_const_hex(ty, "zero")?, ty.to_string()),
+                                "ONE" => (get_const_hex(ty, "one")?, ty.to_string()),
+                                "NEG_INFINITY" => (get_const_hex(ty, "min")?, ty.to_string()),
+                                "INFINITY" => (get_const_hex(ty, "max")?, ty.to_string()),
+                                "E" => (get_const_hex(ty, "e")?, ty.to_string()),
                                 _ => {
                                     return self.jit_error_result(
                                         &call_expr_arg.span(),

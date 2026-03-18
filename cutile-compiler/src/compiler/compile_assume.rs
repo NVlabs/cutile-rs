@@ -94,7 +94,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let assume = assume.value(assume_val);
         let predicate = match assume_op_rust_function {
             "assume_div_by" => {
-                if predicate_args.len() != 1 {
+                let [arg0] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -102,14 +102,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.div_by<{}>", predicate_args[0]),
-                )?
+                };
+                self.parse_named_attr("predicate", &format!("#cuda_tile.div_by<{}>", arg0))?
             }
             "assume_div_by_every_along" => {
-                if predicate_args.len() != 3 {
+                let [arg0, arg1, arg2] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -117,17 +114,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
+                };
                 self.parse_named_attr(
                     "predicate",
-                    &format!(
-                        "#cuda_tile.div_by<{}, every {} along {}>",
-                        predicate_args[0], predicate_args[1], predicate_args[2]
-                    ),
+                    &format!("#cuda_tile.div_by<{}, every {} along {}>", arg0, arg1, arg2),
                 )?
             }
             "assume_bounds_lower" => {
-                if predicate_args.len() != 1 {
+                let [arg0] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -135,14 +129,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.bounded<{}, ?>", predicate_args[0]),
-                )?
+                };
+                self.parse_named_attr("predicate", &format!("#cuda_tile.bounded<{}, ?>", arg0))?
             }
             "assume_bounds_upper" => {
-                if predicate_args.len() != 1 {
+                let [arg0] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -150,14 +141,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.bounded<?, {}>", predicate_args[0]),
-                )?
+                };
+                self.parse_named_attr("predicate", &format!("#cuda_tile.bounded<?, {}>", arg0))?
             }
             "assume_bounds" => {
-                if predicate_args.len() != 2 {
+                let [arg0, arg1] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -165,17 +153,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
+                };
                 self.parse_named_attr(
                     "predicate",
-                    &format!(
-                        "#cuda_tile.bounded<{}, {}>",
-                        predicate_args[0], predicate_args[1]
-                    ),
+                    &format!("#cuda_tile.bounded<{}, {}>", arg0, arg1),
                 )?
             }
             "assume_same_elements_1d" => {
-                if predicate_args.len() != 1 {
+                let [arg0] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -183,14 +168,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
+                };
                 self.parse_named_attr(
                     "predicate",
-                    &format!("#cuda_tile.same_elements<[{}]>", predicate_args[0]),
+                    &format!("#cuda_tile.same_elements<[{}]>", arg0),
                 )?
             }
             "assume_same_elements_2d" => {
-                if predicate_args.len() != 2 {
+                let [arg0, arg1] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -198,17 +183,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
+                };
                 self.parse_named_attr(
                     "predicate",
-                    &format!(
-                        "#cuda_tile.same_elements<[{}, {}]>",
-                        predicate_args[0], predicate_args[1]
-                    ),
+                    &format!("#cuda_tile.same_elements<[{}, {}]>", arg0, arg1),
                 )?
             }
             "assume_same_elements_3d" => {
-                if predicate_args.len() != 3 {
+                let [arg0, arg1, arg2] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -216,17 +198,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
+                };
                 self.parse_named_attr(
                     "predicate",
-                    &format!(
-                        "#cuda_tile.same_elements<[{}, {}, {}]>",
-                        predicate_args[0], predicate_args[1], predicate_args[2]
-                    ),
+                    &format!("#cuda_tile.same_elements<[{}, {}, {}]>", arg0, arg1, arg2),
                 )?
             }
             "assume_same_elements_4d" => {
-                if predicate_args.len() != 4 {
+                let [arg0, arg1, arg2, arg3] = predicate_args else {
                     return self.jit_error_result(
                         span,
                         &format!(
@@ -234,12 +213,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             predicate_args.len()
                         ),
                     );
-                }
+                };
                 self.parse_named_attr(
                     "predicate",
                     &format!(
                         "#cuda_tile.same_elements<[{}, {}, {}, {}]>",
-                        predicate_args[0], predicate_args[1], predicate_args[2], predicate_args[3]
+                        arg0, arg1, arg2, arg3
                     ),
                 )?
             }

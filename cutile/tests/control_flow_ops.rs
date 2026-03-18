@@ -200,7 +200,7 @@ fn compile_if_result_test() -> () {
             .sync()
             .expect("Failed.");
         let result: Vec<i64> = result.unpartition().to_host_vec().sync().expect("Failed.");
-        assert!(result.iter().all(|x| *x == 4));
+        assert!(result.iter().all(|&x| x == 4));
 
         // If false, triple and add 3.
         let arg: Tensor<i64> = ones([16]).sync().expect("Failed.");
@@ -208,7 +208,7 @@ fn compile_if_result_test() -> () {
             .sync()
             .expect("Failed.");
         let result: Vec<i64> = result.unpartition().to_host_vec().sync().expect("Failed.");
-        assert!(result.iter().all(|x| *x == 6));
+        assert!(result.iter().all(|&x| x == 6));
     });
 }
 
@@ -223,7 +223,7 @@ fn execute_break_test() -> () {
             .expect("Failed.");
         let result: Vec<f32> = result.unpartition().to_host_vec().sync().expect("Failed.");
         assert!(
-            result.iter().all(|x| *x == 4.0),
+            result.iter().all(|&x| x == 4.0),
             "Expected all elements to be 4.0, got: {:?}",
             result
         );

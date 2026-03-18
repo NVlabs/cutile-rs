@@ -92,12 +92,13 @@ pub fn parse_named_attr<'c>(
     name: &str,
     attr_str: &str,
 ) -> Result<(Identifier<'c>, Attribute<'c>), JITError> {
-    let Some(attr) = Attribute::parse(context, attr_str) else {
-        return SourceLocation::unknown().jit_error_result(&format!(
-            "failed to parse attribute `{name}` with value `{attr_str}`"
-        ));
-    };
-    Ok((Identifier::new(context, name), attr))
+    Attribute::parse(context, attr_str)
+        .map(|attr| (Identifier::new(context, name), attr))
+        .ok_or_else(|| {
+            SourceLocation::unknown().jit_error(&format!(
+                "failed to parse attribute `{name}` with value `{attr_str}`"
+            ))
+        })
 }
 
 /// Creates a named MLIR 64-bit integer attribute.
@@ -139,7 +140,7 @@ pub fn cuda_tile_tile_ty_from_type_instance<'c>(
 ) -> Result<Type<'c>, JITError> {
     match type_instance {
         TypeInstance::StructuredType(structured_type) => {
-            if !structured_type.shape.iter().all(|x| *x > 0) {
+            if !structured_type.shape.iter().all(|&x| x > 0) {
                 return SourceLocation::unknown().jit_error_result(&format!(
                     "all shape dimensions must be positive, got {:?}",
                     structured_type.shape

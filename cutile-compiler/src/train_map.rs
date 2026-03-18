@@ -35,12 +35,10 @@ impl<'a, K: Eq + Hash, V> TrainMap<'a, K, V> {
 
     /// Returns all keys from this map and its parent chain.
     pub fn keys(&self) -> Vec<&K> {
-        let mut keys = self.map.keys().collect::<Vec<_>>();
-        if let Some(parent) = self.parent {
-            // TODO (hme): This is inefficient.
-            keys.extend(parent.keys().into_iter().collect::<Vec<_>>())
-        }
-        keys
+        self.map
+            .keys()
+            .chain(self.parent.map(|parent| parent.keys()).unwrap_or_default())
+            .collect()
     }
 
     /// Looks up a key, falling back to parent maps if not found locally.
@@ -48,13 +46,9 @@ impl<'a, K: Eq + Hash, V> TrainMap<'a, K, V> {
     where
         K: Borrow<Q>,
     {
-        if let Some(value) = self.map.get(key) {
-            Some(value)
-        } else if let Some(parent) = self.parent {
-            parent.get(key)
-        } else {
-            None
-        }
+        self.map
+            .get(key)
+            .or_else(|| self.parent.and_then(|parent| parent.get(key)))
     }
 
     /// Inserts a key-value pair into the local map.

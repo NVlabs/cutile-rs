@@ -95,9 +95,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         gpu_name: String,
     ) -> Result<Self, JITError> {
         if !modules.modules.contains_key(module_name) {
-            return Err(JITError::Generic(format!(
-                "Undefined module: {module_name}"
-            )));
+            return JITError::generic(&format!("Undefined module: {module_name}"));
         }
 
         let (_, function) = modules

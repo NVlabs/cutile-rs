@@ -466,16 +466,16 @@ impl GenericVars {
         self.inst_i32 = self.inst_i32.merge_if_eq(other.inst_i32);
         self.inst_array = self.inst_array.merge_if_eq(other.inst_array);
         self.len2array = self.len2array.merge_if_eq(other.len2array);
-        if !self.ordered_param_vars.is_empty() && !other.ordered_param_vars.is_empty() {
-            if self.ordered_param_vars != other.ordered_param_vars {
-                return SourceLocation::unknown().jit_error_result(&format!(
-                    "Ordered param vars mismatch: {:?} != {:?}",
-                    self.ordered_param_vars, other.ordered_param_vars
-                ));
+        match (
+            self.ordered_param_vars.as_slice(),
+            other.ordered_param_vars.as_slice(),
+        ) {
+            ([], _) | (_, []) => self.ordered_param_vars.extend(other.ordered_param_vars),
+            (a, b) if a != b => {
+                return SourceLocation::unknown()
+                    .jit_error_result(&format!("Ordered param vars mismatch: {:?} != {:?}", a, b));
             }
-        } else {
-            // At least one is empty. Take the value of the other.
-            self.ordered_param_vars.extend(other.ordered_param_vars);
+            _ => (),
         }
         Ok(self)
     }
@@ -919,9 +919,8 @@ impl Instantiable for TypeInstanceStructuredType {
                     match const_expr {
                         Expr::Block(block_expr) => {
                             // This is something like Tensor<E, {[...]}>
-                            assert_eq!(block_expr.block.stmts.len(), 1);
-                            let statement = &block_expr.block.stmts[0];
-                            let Stmt::Expr(statement_expr, _) = statement else {
+                            let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice()
+                            else {
                                 panic!("Unexpected block expression.")
                             };
                             match statement_expr {
@@ -1618,11 +1617,13 @@ impl GenericArgInference {
                     // println!("expand GenericArgument::Const? {const_param:#?}");
                     match (arg_const, param_const) {
                         (Expr::Block(arg_expr), Expr::Block(param_expr)) => {
-                            assert_eq!(arg_expr.block.stmts.len(), 1);
-                            let Stmt::Expr(arg_stmt_expr, _) = &arg_expr.block.stmts[0] else {
+                            let [Stmt::Expr(arg_stmt_expr, _)] = arg_expr.block.stmts.as_slice()
+                            else {
                                 panic!("Unexpected block expression.")
                             };
-                            let Stmt::Expr(param_stmt_expr, _) = &param_expr.block.stmts[0] else {
+                            let [Stmt::Expr(param_stmt_expr, _)] =
+                                param_expr.block.stmts.as_slice()
+                            else {
                                 panic!("Unexpected block expression.")
                             };
                             match (arg_stmt_expr, param_stmt_expr) {
@@ -1924,8 +1925,8 @@ impl GenericArgInference {
                     // println!("expand GenericArgument::Const? {const_param:#?}");
                     match param_const {
                         Expr::Block(param_expr) => {
-                            assert_eq!(param_expr.block.stmts.len(), 1);
-                            let Stmt::Expr(param_stmt_expr, _) = &mut param_expr.block.stmts[0]
+                            let [Stmt::Expr(param_stmt_expr, _)] =
+                                param_expr.block.stmts.as_mut_slice()
                             else {
                                 panic!("Unexpected block expression.")
                             };
@@ -2051,9 +2052,7 @@ pub fn get_cga_from_generic_argument(
         }
         GenericArgument::Const(Expr::Block(block_expr)) => {
             // This is something like Tensor<E, {[...]}>
-            assert_eq!(block_expr.block.stmts.len(), 1);
-            let statement = &block_expr.block.stmts[0];
-            let Stmt::Expr(statement_expr, _) = statement else {
+            let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice() else {
                 panic!("Unexpected block expression.")
             };
             match statement_expr {

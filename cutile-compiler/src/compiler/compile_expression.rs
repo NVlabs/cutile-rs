@@ -917,14 +917,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let return_type = if let Some(return_type) = return_type {
                         return_type
                     } else {
-                        if values.is_empty() {
+                        let Some(value) = values.first() else {
                             return self.jit_error_result(
                                 &array_expr.span(),
                                 "unable to infer type for empty array; add a type annotation",
                             );
-                        }
-                        let ty: &TileRustType = &values[0].ty;
-                        let ty_string = ty.rust_ty.to_token_stream().to_string();
+                        };
+                        let ty_string = value.ty.rust_ty.to_token_stream().to_string();
                         let ty: syn::Type = match syn::parse2::<syn::Type>(
                             format!("[{ty_string}]").parse().unwrap(),
                         ) {
@@ -1002,14 +1001,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let return_type = if let Some(return_type) = return_type {
                         return_type
                     } else {
-                        if values.is_empty() {
+                        let Some(value) = values.first() else {
                             return self.jit_error_result(
                                 &repeat_expr.span(),
                                 "unable to infer type for zero-length repeat expression; add a type annotation",
                             );
-                        }
-                        let ty: &TileRustType = &values[0].ty;
-                        let ty_string = ty.rust_ty.to_token_stream().to_string();
+                        };
+                        let ty_string = value.ty.rust_ty.to_token_stream().to_string();
                         let ty: syn::Type = match syn::parse2::<syn::Type>(
                             format!("[{ty_string}]").parse().unwrap(),
                         ) {

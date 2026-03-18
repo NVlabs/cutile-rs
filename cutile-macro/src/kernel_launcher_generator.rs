@@ -180,39 +180,6 @@ impl RequiredGenerics {
     }
 }
 
-/// Joins a vector of strings into a nested cons-cell tuple structure.
-///
-/// Converts a list of values into a right-associated nested tuple structure
-/// used by async combinators. For example, `["a", "b", "c"]` becomes `"(a, (b, c))"`.
-///
-/// ## Parameters
-///
-/// - `vals`: Vector of string representations of values to join
-///
-/// ## Returns
-///
-/// A string representing the nested tuple structure
-///
-/// ## Examples
-///
-/// - `[]` → `"()"`
-/// - `["a"]` → `"a"`
-/// - `["a", "b"]` → `"(a, b)"`
-/// - `["a", "b", "c"]` → `"(a, (b, c))"`
-pub fn join_as_cons_tuple(vals: &[String]) -> String {
-    if vals.is_empty() {
-        return "()".to_string();
-    }
-    if vals.len() == 1 {
-        return vals[0].clone();
-    };
-    let mut cons = vals.last().expect("Impossible").clone();
-    for i in (0..vals.len() - 1).rev() {
-        cons = format!("({}, {})", vals[i], cons);
-    }
-    cons
-}
-
 /// Wraps an expression in a `value()` call if needed for async combinators.
 ///
 /// Helper function used when building async launcher code. If `wrap_as_val` is true,
@@ -258,22 +225,25 @@ pub fn zip_cons(inputs: &[String], var_name: &str, wrap_as_val: bool) -> ExprBlo
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
-    if inputs.is_empty() {
-        return zip_block;
+    match inputs {
+        [] => zip_block,
+        [inputs @ .., last] => inputs.iter().rfold(
+            {
+                zip_block.block.stmts.push(parse_stmt(format!(
+                    "let {var_name} = {};",
+                    zippable(last, wrap_as_val)
+                )));
+                zip_block
+            },
+            |mut zip_block, input| {
+                zip_block.block.stmts.push(parse_stmt(format!(
+                    "let {var_name} = zip!({}, {var_name});",
+                    zippable(input, wrap_as_val)
+                )));
+                zip_block
+            },
+        ),
     }
-    let mut i = inputs.len() - 1;
-    zip_block.block.stmts.push(parse_stmt(format!(
-        "let {var_name} = {};",
-        zippable(&inputs[i], wrap_as_val)
-    )));
-    while i != 0 {
-        i -= 1;
-        zip_block.block.stmts.push(parse_stmt(format!(
-            "let {var_name} = zip!({}, {var_name});",
-            zippable(&inputs[i], wrap_as_val)
-        )));
-    }
-    zip_block
 }
 
 /// Generates async code to zip inputs, then flatten them into a flat tuple.
@@ -305,35 +275,59 @@ pub fn zip_and_then_flatten(inputs: &[String], var_name: &str, wrap_as_val: bool
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
-    if inputs.is_empty() {
-        zip_block
-            .block
-            .stmts
-            .push(parse_stmt(format!("let {var_name} = value(());")));
-        return zip_block;
+    match inputs {
+        [] => {
+            zip_block
+                .block
+                .stmts
+                .push(parse_stmt(format!("let {var_name} = value(());")));
+            zip_block
+        }
+        [inputs @ .., last] => {
+            let mut zip_block = inputs.iter().rfold(
+                {
+                    zip_block.block.stmts.push(parse_stmt(format!(
+                        "let {var_name} = {};",
+                        zippable(last, wrap_as_val)
+                    )));
+                    zip_block
+                },
+                |mut zip_block, input| {
+                    zip_block.block.stmts.push(parse_stmt(format!(
+                        "let {var_name} = zip!({}, {var_name});",
+                        zippable(input, wrap_as_val)
+                    )));
+                    zip_block
+                },
+            );
+            zip_block.block.stmts.push(parse_stmt(format!(
+                r#"
+                    let {var_name} = {var_name}.and_then(|{}| {{
+                        value(({}))
+                    }});
+                "#,
+                // Converts whole inputs into a right-associated nested tuple
+                // - `[]` → `"()"`
+                // - `["a"]` → `"a"`
+                // - `["a", "b"]` → `"(a, b)"`
+                // - `["a", "b", "c"]` → `"(a, (b, c))"`
+                inputs
+                    .iter()
+                    .rfold(last.to_string(), |acc, input| format!("({input}, {acc})",)),
+                // Converts whole inputs into a flat tuple
+                // - `[]` → `"()"`
+                // - `["a"]` → `"(a, )"`
+                // - `["a", "b"]` → `"(a, b, )"`
+                // - `["a", "b", "c"]` → `"(a, b, c, )"`
+                inputs
+                    .iter()
+                    .flat_map(|input| [input, ", "])
+                    .chain([last, ", "])
+                    .collect::<String>(),
+            )));
+            zip_block
+        }
     }
-    let mut i = inputs.len() - 1;
-    zip_block.block.stmts.push(parse_stmt(format!(
-        "let {var_name} = {};",
-        zippable(&inputs[i], wrap_as_val)
-    )));
-    while i != 0 {
-        i -= 1;
-        zip_block.block.stmts.push(parse_stmt(format!(
-            "let {var_name} = zip!({}, {var_name});",
-            zippable(&inputs[i], wrap_as_val)
-        )));
-    }
-    zip_block.block.stmts.push(parse_stmt(format!(
-        r#"
-            let {var_name} = {var_name}.and_then(|{}| {{
-                value({})
-            }});
-        "#,
-        join_as_cons_tuple(inputs),
-        to_tuple_string(inputs)
-    )));
-    zip_block
 }
 
 /// Generates a type alias name for a kernel argument.
@@ -390,32 +384,6 @@ pub fn generate_launcher_arg_types(
     (
         launcher_args_type.clone(),
         quote! { type #launcher_args_type = ( #(#arg_tys,)* ); },
-    )
-}
-
-/// Converts a vector of strings into a flat tuple string representation.
-///
-/// Helper function that formats argument names into a comma-separated tuple string.
-/// Used when generating async launcher code.
-///
-/// ## Parameters
-///
-/// - `args`: Vector of argument names/expressions
-///
-/// ## Returns
-///
-/// A string like `"(arg1, arg2, arg3,)"` with trailing comma
-///
-/// ## Example
-///
-/// `["x", "y", "z"]` → `"(x, y, z,)"`
-pub fn to_tuple_string(args: &[String]) -> String {
-    format!(
-        "({})",
-        args.iter()
-            .map(|s| format!("{s},"))
-            .collect::<Vec<String>>()
-            .join("")
     )
 }
 
@@ -476,7 +444,12 @@ pub fn generate_kernel_launcher(
 
     // Generate launcher signature.
     let param_names = get_sig_param_names(&item.sig);
-    let param_names_tuple_str = to_tuple_string(&param_names);
+    // Converts param_names into a flat tuple
+    let param_names_tuple_str = if param_names.is_empty() {
+        "()".to_string()
+    } else {
+        format!("({}, )", param_names.join(", "))
+    };
     let (input_types, _output_type) = get_sig_types(&item.sig, None);
     let mut stride_args = vec![];
     let mut builder_statements = vec![];
@@ -558,7 +531,7 @@ pub fn generate_kernel_launcher(
     let generic_args = required_generics.get_generic_args();
     let (launcher_args_type, launcher_arg_type_def) =
         generate_launcher_arg_types(&generic_args, &arg_types, launcher_name, launcher_args_name);
-    let launcher_args_type_str = launcher_args_type.to_token_stream().to_string();
+    let launcher_args_type_str = launcher_args_type.to_token_stream();
     let device_op_param: GenericParam =
         parse_quote! { DI: DeviceOperation<Output=#launcher_args_type> };
     let device_op_arg: GenericArgument = parse_quote! { DI };
@@ -1015,106 +988,98 @@ pub fn infer_shape_params_from_tensor_type(
     // We assume this is a variadic type.
     for generic_arg in &type_generic_args.args {
         match generic_arg {
-            GenericArgument::Type(type_param) => {
-                // Currently, this is either shape or element_type.
-                if let syn::Type::Path(type_path) = type_param {
-                    let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
-                    match required_generics.get_ty(&last_ident) {
-                        SupportedGenericType::TypeParam => {
-                            // This is an element type.
-                            required_generics
-                                .launcher_type_params
-                                .push(last_ident.clone());
-                            required_generics.expressions.insert(
-                                last_ident.clone(),
-                                Some(format!("vec![{var_name}.dtype().as_str().to_string()]")),
-                            );
-                        }
-                        SupportedGenericType::ConstArray => {
-                            // This is a CGA type.
-                            if is_mutable {
-                                required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
-                            } else {
-                                // This might make sense for a small tensor.
-                                required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
-                            }
-                        }
-                        SupportedGenericType::ConstScalar => {
-                            return type_path.err(
-                                "Unexpected constant scalar type in tensor generic argument.",
-                            );
-                        }
-                        SupportedGenericType::Unknown => {}
+            GenericArgument::Type(syn::Type::Path(type_path)) => {
+                let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
+                match required_generics.get_ty(&last_ident) {
+                    SupportedGenericType::TypeParam => {
+                        // This is an element type.
+                        required_generics
+                            .launcher_type_params
+                            .push(last_ident.clone());
+                        required_generics.expressions.insert(
+                            last_ident.clone(),
+                            Some(format!("vec![{var_name}.dtype().as_str().to_string()]")),
+                        );
                     }
+                    SupportedGenericType::ConstArray => {
+                        // This is a CGA type.
+                        if is_mutable {
+                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                        } else {
+                            // This might make sense for a small tensor.
+                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                        }
+                    }
+                    SupportedGenericType::ConstScalar => {
+                        return type_path
+                            .err("Unexpected constant scalar type in tensor generic argument.");
+                    }
+                    SupportedGenericType::Unknown => {}
                 }
             }
-            GenericArgument::Const(const_param) => {
-                // println!("expand GenericArgument::Const? {const_param:#?}");
-                if let Expr::Block(block_expr) = const_param {
-                    // This is something like Tensor<E, {[...]}>
-                    if block_expr.block.stmts.len() != 1 {
-                        return block_expr.err(&format!(
-                            "Expected exactly 1 statement in block expression, got {}.",
-                            block_expr.block.stmts.len()
-                        ));
-                    }
-                    let statement = &block_expr.block.stmts[0];
-                    let Stmt::Expr(statement_expr, _) = statement else {
-                        return block_expr
-                            .err("Unexpected block expression: expected an expression statement.");
-                    };
-                    match statement_expr {
-                        Expr::Array(array_expr) => {
-                            // This is something like Tensor<E, {[1, 2, -1]}>
-                            for (i, elem) in array_expr.elems.iter().enumerate() {
-                                match elem {
-                                    Expr::Lit(_lit) => {
-                                        // Nothing to do to build generic arg expressions.
-                                        continue;
-                                    }
-                                    Expr::Unary(_unary_expr) => {
-                                        // Nothing to do to build generic arg expressions.
-                                        continue;
-                                    }
-                                    Expr::Path(path) => {
-                                        let ident = get_ident_from_path_expr(path).to_string();
-                                        match required_generics.get_ty(&ident) {
-                                            SupportedGenericType::TypeParam => {
-                                                // This is an element type.
-                                                return path.err("Unexpected type param in array type expression.");
-                                            }
-                                            SupportedGenericType::ConstArray => {
-                                                // This is a CGA type.
-                                                return path.err("Unexpected const generic array param in array type expression.");
-                                            }
-                                            SupportedGenericType::ConstScalar => {
-                                                if is_mutable {
-                                                    required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.partition_shape[{i}].to_string()]")));
-                                                } else {
-                                                    required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.shape[{i}].to_string()]")));
-                                                }
-                                            }
-                                            SupportedGenericType::Unknown => {}
+            GenericArgument::Const(Expr::Block(block_expr)) => {
+                // This is something like Tensor<E, {[...]}>
+                let [Stmt::Expr(statement_expr, _)] = block_expr.block.stmts.as_slice() else {
+                    return block_expr
+                        .err("Unexpected block expression: expected an expression statement.");
+                };
+                match statement_expr {
+                    Expr::Array(array_expr) => {
+                        // This is something like Tensor<E, {[1, 2, -1]}>
+                        for (i, elem) in array_expr.elems.iter().enumerate() {
+                            match elem {
+                                Expr::Lit(_lit) => {
+                                    // Nothing to do to build generic arg expressions.
+                                    continue;
+                                }
+                                Expr::Unary(_unary_expr) => {
+                                    // Nothing to do to build generic arg expressions.
+                                    continue;
+                                }
+                                Expr::Path(path) => {
+                                    let ident = get_ident_from_path_expr(path).to_string();
+                                    match required_generics.get_ty(&ident) {
+                                        SupportedGenericType::TypeParam => {
+                                            // This is an element type.
+                                            return path.err(
+                                                "Unexpected type param in array type expression.",
+                                            );
                                         }
+                                        SupportedGenericType::ConstArray => {
+                                            // This is a CGA type.
+                                            return path.err("Unexpected const generic array param in array type expression.");
+                                        }
+                                        SupportedGenericType::ConstScalar => {
+                                            if is_mutable {
+                                                required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.partition_shape[{i}].to_string()]")));
+                                            } else {
+                                                required_generics.expressions.insert(
+                                                    ident.clone(),
+                                                    Some(format!(
+                                                        "vec![{var_name}.shape[{i}].to_string()]"
+                                                    )),
+                                                );
+                                            }
+                                        }
+                                        SupportedGenericType::Unknown => {}
                                     }
-                                    _ => {
-                                        return elem.err(
-                                            "Unsupported array element in tensor shape expression.",
-                                        );
-                                    }
+                                }
+                                _ => {
+                                    return elem.err(
+                                        "Unsupported array element in tensor shape expression.",
+                                    );
                                 }
                             }
                         }
-                        Expr::Repeat(repeat_expr) => {
-                            // TODO (hme): Unclear under what circumstance it would be beneficial to support this.
-                            return repeat_expr
-                                .err("Repeat expressions in tensor shape are not yet supported.");
-                        }
-                        _ => {
-                            return block_expr.err(
-                                "Unexpected block expression in tensor const generic argument.",
-                            );
-                        }
+                    }
+                    Expr::Repeat(repeat_expr) => {
+                        // TODO (hme): Unclear under what circumstance it would be beneficial to support this.
+                        return repeat_expr
+                            .err("Repeat expressions in tensor shape are not yet supported.");
+                    }
+                    _ => {
+                        return block_expr
+                            .err("Unexpected block expression in tensor const generic argument.");
                     }
                 }
             }

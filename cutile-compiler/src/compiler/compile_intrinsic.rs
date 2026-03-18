@@ -162,7 +162,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                let op = compiler_op_function.split("_").collect::<Vec<&str>>()[0];
+                let op = compiler_op_function.split("_").next().unwrap();
                 let tile_binary_op = get_binary_op_from_op_str(op)?;
                 let mut operands =
                     self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
@@ -962,7 +962,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
 
         // Get static tile values.
-        let TypeParam::Tile(partition_tile) = &partition_value.ty.params[0] else {
+        let [TypeParam::Tile(partition_tile), ..] = partition_value.ty.params.as_slice() else {
             return self
                 .jit_error_result(&call_expr.span(), "the type parameter must be a Tile type");
         };
@@ -975,7 +975,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let static_tile = tile_param_inst.shape.clone(); // This is const.
 
         // Get static shape values.
-        let TypeParam::TensorView(partition_tensor) = &partition_value.ty.params[1] else {
+        let [_, TypeParam::TensorView(partition_tensor), ..] = partition_value.ty.params.as_slice()
+        else {
             return self.jit_error_result(
                 &call_expr.span(),
                 "Tensor type param should be a TensorView.",
@@ -997,7 +998,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         // Get optional dim_map.
         // If there's a dim map, the number of type parameters is 3.
         let dim_map = if partition_value.ty.params.len() == 3 {
-            let TypeParam::DimMap(dim_map) = &partition_value.ty.params[2] else {
+            let [_, _, TypeParam::DimMap(dim_map)] = partition_value.ty.params.as_slice() else {
                 return self.jit_error_result(
                     &call_expr.span(),
                     "the type parameter must be a DimMap type",
@@ -1016,11 +1017,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             };
             dim_map_param_inst.shape.clone()
         } else {
-            let mut r = vec![];
-            for i in 0..static_shape.len() {
-                r.push(i as i32);
-            }
-            r
+            (0..static_shape.len()).map(|x| x as _).collect()
         };
 
         // Get dynamic shape values.
