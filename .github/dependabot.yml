@@ -13,6 +13,6 @@ updates:
     labels:
       - CI
     groups:
-      gha-all:
+      all-actions:
         patterns:
           - "*"
