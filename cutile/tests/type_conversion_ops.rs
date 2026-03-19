@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile::{api::*, tensor::*, tile_kernel::*};
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
+use half::bf16;
+use std::sync::Arc;
 
 mod common;
 
@@ -46,7 +49,6 @@ mod type_conversion_ops_module {
         output.store(extended);
     }
 
-    
     #[cutile::entry()]
     fn bf16_conversion_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
         // Exercises bf16 <-> f32 tile conversion lowering
@@ -55,9 +57,34 @@ mod type_conversion_ops_module {
         let downcast: Tile<bf16, S> = convert_tile(upcast);
         output.store(downcast);
     }
+
+    #[cutile::entry()]
+    fn bf16_to_f32_conversion_kernel<const S: [i32; 1]>(
+        output: &mut Tensor<f32, S>,
+        input: &Tensor<bf16, { [-1] }>,
+    ) {
+        // Runtime test kernel for bf16 -> f32 tile conversion
+        let x: Tile<bf16, S> = load_tile_like_1d(input, output);
+        let y: Tile<f32, S> = convert_tile(x);
+        output.store(y);
+    }
+
+    #[cutile::entry()]
+    fn f32_to_bf16_conversion_kernel<const S: [i32; 1]>(
+        output: &mut Tensor<bf16, S>,
+        input: &Tensor<f32, { [-1] }>,
+    ) {
+        // Runtime test kernel for f32 -> bf16 tile conversion
+        let x: Tile<f32, S> = load_tile_like_1d(input, output);
+        let y: Tile<bf16, S> = convert_tile(x);
+        output.store(y);
+    }
 }
 
 use type_conversion_ops_module::_module_asts;
+use type_conversion_ops_module::bf16_conversion_kernel_sync;
+use type_conversion_ops_module::bf16_to_f32_conversion_kernel_sync;
+use type_conversion_ops_module::f32_to_bf16_conversion_kernel_sync;
 
 #[test]
 fn compile_conversion_ops() -> () {
@@ -205,6 +232,96 @@ fn compile_bf16_conversion() -> () {
         assert!(
             module_op_str.contains("bf16"),
             "Expected bf16 type in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn execute_bf16_f32_roundtrip() -> () {
+    common::with_test_stack(|| {
+        let input_host = Arc::new(vec![
+            bf16::from_f32(-3.5),
+            bf16::from_f32(-1.0),
+            bf16::from_f32(-0.0),
+            bf16::from_f32(0.0),
+            bf16::from_f32(0.125),
+            bf16::from_f32(0.1),
+            bf16::from_f32(1.1),
+            bf16::from_f32(42.0),
+        ]);
+
+        let input: Tensor<bf16> = copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("Failed.");
+        let (result,) = bf16_conversion_kernel_sync(input.partition([4]))
+            .sync()
+            .expect("Failed.");
+
+        let result_host: Vec<bf16> = result.unpartition().to_host_vec().sync().expect("Failed.");
+
+        // This kernel performs bf16 -> f32 -> bf16, so bf16 bit patterns should round-trip.
+        assert_eq!(
+            result_host, *input_host,
+            "Expected bf16 values to round-trip through f32 conversion"
+        );
+    });
+}
+
+#[test]
+fn execute_bf16_to_f32_conversion() -> () {
+    common::with_test_stack(|| {
+        let input_host = Arc::new(vec![
+            bf16::from_f32(-3.5),
+            bf16::from_f32(-1.0),
+            bf16::from_f32(-0.0),
+            bf16::from_f32(0.0),
+            bf16::from_f32(0.125),
+            bf16::from_f32(0.1),
+            bf16::from_f32(1.1),
+            bf16::from_f32(42.0),
+        ]);
+
+        let input: Tensor<bf16> = copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("Failed.");
+        let input = Arc::new(input);
+        let output: Tensor<f32> = zeros([input_host.len()]).sync().expect("Failed.");
+
+        let (result, _) = bf16_to_f32_conversion_kernel_sync(output.partition([4]), input)
+            .sync()
+            .expect("Failed.");
+
+        let result_host: Vec<f32> = result.unpartition().to_host_vec().sync().expect("Failed.");
+        let expected: Vec<f32> = input_host.iter().map(|x| x.to_f32()).collect();
+
+        assert_eq!(
+            result_host, expected,
+            "Expected bf16->f32 conversion output to match host-side bf16::to_f32"
+        );
+    });
+}
+
+#[test]
+fn execute_f32_to_bf16_conversion() -> () {
+    common::with_test_stack(|| {
+        let input_host = Arc::new(vec![-3.5f32, -1.0, -0.0, 0.0, 0.125, 0.1, 1.1, 42.0]);
+
+        let input: Tensor<f32> = copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("Failed.");
+        let input = Arc::new(input);
+        let output: Tensor<bf16> = zeros([input_host.len()]).sync().expect("Failed.");
+
+        let (result, _) = f32_to_bf16_conversion_kernel_sync(output.partition([4]), input)
+            .sync()
+            .expect("Failed.");
+
+        let result_host: Vec<bf16> = result.unpartition().to_host_vec().sync().expect("Failed.");
+        let expected: Vec<bf16> = input_host.iter().map(|x| bf16::from_f32(*x)).collect();
+
+        assert_eq!(
+            result_host, expected,
+            "Expected f32->bf16 conversion output to match host-side bf16::from_f32"
         );
     });
 }
