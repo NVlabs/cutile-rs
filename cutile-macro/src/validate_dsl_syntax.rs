@@ -104,10 +104,10 @@ use crate::error::{Error, SpannedError};
 // * mut T for unsafe kernels.
 pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
     let (input_types, _output_type) = get_sig_types(&item.sig, None);
-    for (_i, ty) in input_types.iter().enumerate() {
+    for ty in input_types.iter() {
         match ty {
             Type::Reference(_) => {
-                let Some(ident) = get_type_ident(&ty) else {
+                let Some(ident) = get_type_ident(ty) else {
                     return ty.err("Not a supported parameter type.");
                 };
                 let type_name = ident.to_string();
@@ -136,7 +136,7 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
             _ => {
                 ty.err(&format!(
                     "{} is not a supported parameter type.",
-                    ty.to_token_stream().to_string()
+                    ty.to_token_stream()
                 ))?;
             }
         }

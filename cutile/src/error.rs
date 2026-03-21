@@ -82,24 +82,24 @@ impl error::Error for Error {}
 
 /// Creates a `Error::Tensor` from the given message string.
 pub fn tensor_error(err_str: &str) -> Error {
-    return Error::Tensor(TensorError(err_str.to_string()));
+    Error::Tensor(TensorError(err_str.to_string()))
 }
 
 /// Returns `Err(Error::Tensor(...))` with the given message string.
 pub fn tensor_error_result<R>(err_str: &str) -> Result<R, Error> {
-    return Err(tensor_error(err_str));
+    Err(tensor_error(err_str))
 }
 
 // Kernel Launch
 
 /// Creates a `Error::KernelLaunch` from the given message string.
 pub fn kernel_launch_error(err_str: &str) -> Error {
-    return Error::KernelLaunch(KernelLaunchError(err_str.to_string()));
+    Error::KernelLaunch(KernelLaunchError(err_str.to_string()))
 }
 
 /// Returns `Err(Error::KernelLaunch(...))` with the given message string.
 pub fn kernel_launch_error_result<R>(err_str: &str) -> Result<R, Error> {
-    return Err(kernel_launch_error(err_str));
+    Err(kernel_launch_error(err_str))
 }
 
 // anyhow

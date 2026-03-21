@@ -472,7 +472,7 @@ pub fn get_variadic_method_data(
         Some(op_name) => Ok(Some((
             op_name,
             get_variadic_op_data(op_name)
-                .expect(format!("{op_name} is not a variadic op.").as_str()),
+                .unwrap_or_else(|| panic!("{op_name} is not a variadic op.")),
         ))),
         None => Ok(None),
     }
@@ -1130,7 +1130,7 @@ impl ConstGenericArrayTypeListIterator {
 impl Iterator for ConstGenericArrayTypeListIterator {
     type Item = Result<Vec<ConstGenericArrayType>, Error>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.state.len() == 0 {
+        if self.state.is_empty() {
             // First pass should always contain something.
             for item in &mut self.iterators {
                 match item.next() {
@@ -1145,34 +1145,32 @@ impl Iterator for ConstGenericArrayTypeListIterator {
                 }
             }
             Some(Ok(self.state.clone()))
+        } else if self.done {
+            None
         } else {
-            if self.done {
-                None
-            } else {
-                for _i in 0..self.iterators.len() {
-                    // Traverse in reverse to remain consistent with traversal order of individual ConstGenericArrayIterator.
-                    // The traversal is a mixed-radix counter.
-                    // We're done when the most significant position is None.
-                    let i = (self.iterators.len() - 1) - _i;
-                    let iter = &mut self.iterators[i];
-                    let item: Option<ConstGenericArrayType> = iter.next();
-                    match item {
-                        Some(item) => {
-                            self.state[i] = item;
-                            break;
+            for _i in 0..self.iterators.len() {
+                // Traverse in reverse to remain consistent with traversal order of individual ConstGenericArrayIterator.
+                // The traversal is a mixed-radix counter.
+                // We're done when the most significant position is None.
+                let i = (self.iterators.len() - 1) - _i;
+                let iter = &mut self.iterators[i];
+                let item: Option<ConstGenericArrayType> = iter.next();
+                match item {
+                    Some(item) => {
+                        self.state[i] = item;
+                        break;
+                    }
+                    None => {
+                        if i == 0 {
+                            self.done = true;
+                            return None;
                         }
-                        None => {
-                            if i == 0 {
-                                self.done = true;
-                                return None;
-                            }
-                            self.iterators[i] = iter.renew();
-                            self.state[i] = self.iterators[i].next().unwrap();
-                        }
+                        self.iterators[i] = iter.renew();
+                        self.state[i] = self.iterators[i].next().unwrap();
                     }
                 }
-                Some(Ok(self.state.clone()))
             }
+            Some(Ok(self.state.clone()))
         }
     }
 }

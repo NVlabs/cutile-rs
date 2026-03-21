@@ -311,7 +311,7 @@ pub mod core {
     pub fn check_partition_access<E: ElementType, const S: [i32; N]>(
         part: &Partition<E, S>,
         index: [i32; N],
-    ) -> () {
+    ) {
         // This is either instantiated, in which case an actual bounds check takes place,
         // or the check is performed statically and nothing is emitted.
         // The bounds check is implemented as an assertion.
@@ -1340,7 +1340,7 @@ pub mod core {
             // TODO (hme): Bounds checks.
             let tensor_token: Token = get_tensor_token(self);
             let p: Partition<E, R> = make_partition_view(self, tile, tensor_token);
-            return p;
+            p
         }
         pub fn partition_permuted<'a, const R: [i32; N], const I: [i32; N]>(
             &'a self,
@@ -1351,7 +1351,7 @@ pub mod core {
             let tensor_token: Token = get_tensor_token(self);
             let p: Partition<E, R> =
                 make_partition_view_permuted(self, tile, dim_map, tensor_token);
-            return p;
+            p
         }
         pub unsafe fn partition_mut<'a, const R: [i32; N]>(
             &'a mut self,
@@ -1400,7 +1400,7 @@ pub mod core {
         ///     output.store(tile);
         /// }
         /// ```
-        pub fn store(&mut self, result: Tile<E, S>) -> () {
+        pub fn store(&mut self, result: Tile<E, S>) {
             store_tile(self, result);
         }
     }
@@ -1463,7 +1463,7 @@ pub mod core {
     pub fn set_tensor_token<E: ElementType, const S: [i32; N]>(
         tensor: &Tensor<E, S>,
         token: Token,
-    ) -> () {
+    ) {
         unreachable!()
     }
 
@@ -1564,9 +1564,9 @@ pub mod core {
         /// let tile = partition.load([5]); // Load 6th tile (64 elements starting at 5*64)
         /// ```
         pub fn load(&self, index: [i32; N]) -> Tile<E, D> {
-            check_partition_access(&self, index);
+            check_partition_access(self, index);
             let result: Tile<E, D> = load_from_view(self, index);
-            return result;
+            result
         }
     }
 
@@ -3631,7 +3631,7 @@ pub mod core {
     pub fn store_tile<E: ElementType, const S: [i32; N]>(
         y: &mut Tensor<E, S>,
         result: Tile<E, S>,
-    ) -> () {
+    ) {
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(y);
         let mut y_partition: PartitionMut<E, S> =
@@ -3667,7 +3667,7 @@ pub mod core {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(x);
-        let x_partition: Partition<E, S> = make_partition_view(&x, tile_shape, tensor_token);
+        let x_partition: Partition<E, S> = make_partition_view(x, tile_shape, tensor_token);
         let tile_x: Tile<E, S> = load_from_view(&x_partition, [pid.0, pid.1]);
         tile_x
     }
@@ -3710,7 +3710,7 @@ pub mod core {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(x);
-        let x_partition: Partition<E1, S> = make_partition_view(&x, tile_shape, tensor_token);
+        let x_partition: Partition<E1, S> = make_partition_view(x, tile_shape, tensor_token);
         let tile_x: Tile<E1, S> = load_from_view(&x_partition, [pid.0]);
         tile_x
     }

@@ -138,16 +138,13 @@ impl<T: Send, DO: DeviceOperation<Output = T>> Unpin for DeviceFuture<T, DO> {}
 impl<T: Send, DO: DeviceOperation<Output = T>> Future for DeviceFuture<T, DO> {
     type Output = Result<T, DeviceError>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.state {
-            DeviceFutureState::Failed => {
-                self.state = DeviceFutureState::Complete;
-                let error = self
-                    .error
-                    .take()
-                    .expect("Failed state must carry an error.");
-                return Poll::Ready(Err(error));
-            }
-            _ => {}
+        if self.state == DeviceFutureState::Failed {
+            self.state = DeviceFutureState::Complete;
+            let error = self
+                .error
+                .take()
+                .expect("Failed state must carry an error.");
+            return Poll::Ready(Err(error));
         }
 
         // If this is being polled, it needs a waker.

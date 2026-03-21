@@ -203,8 +203,8 @@ pub trait DeviceOperation:
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
         let ctx = ExecutionContext::new(stream.clone());
         // This is okay since we synchronize immediately.
-        let res = unsafe { self.execute(&ctx) };
-        res
+        
+        unsafe { self.execute(&ctx) }
     }
     /// Execute on an **explicit stream** and block until the GPU finishes.
     ///
@@ -413,9 +413,9 @@ impl<T: Send> IntoDeviceOperation<T> for T {
         value(self)
     }
 }
-impl Into<Value<f32>> for f32 {
-    fn into(self) -> Value<f32> {
-        Value::new(self)
+impl From<f32> for Value<f32> {
+    fn from(val: f32) -> Self {
+        Value::new(val)
     }
 }
 
@@ -615,12 +615,12 @@ where
         Ok(())
     }
     unsafe fn left(&self) -> T1 {
-        let left = self.left.replace(None).unwrap();
-        left
+        
+        self.left.replace(None).unwrap()
     }
     unsafe fn right(&self) -> T2 {
-        let right = self.right.replace(None).unwrap();
-        right
+        
+        self.right.replace(None).unwrap()
     }
 }
 

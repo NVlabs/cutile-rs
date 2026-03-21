@@ -489,7 +489,7 @@ pub(crate) fn candle_tensor_to_vec<T: WithDType>(
 ) -> (Vec<T>, Vec<i32>, Vec<i32>) {
     let shape: Vec<i32> = tensor.shape().dims().iter().map(|x| *x as i32).collect();
     let strides: Vec<i32> = tensor.stride().iter().map(|x| *x as i32).collect();
-    let size: usize = tensor.shape().dims().iter().fold(1, |acc, x| acc * x);
+    let size: usize = tensor.shape().dims().iter().product();
     let vec = tensor.reshape((size,)).unwrap().to_vec1().unwrap();
     (vec, shape, strides)
 }

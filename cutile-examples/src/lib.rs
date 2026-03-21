@@ -51,10 +51,10 @@ pub fn fmha_ref_exec<T: WithDType>(
     let qk_scaled = qk.mul(&sm_scale_tensor).expect("Failed to scale qk.");
     let qk_softmax = softmax(&qk_scaled, 3).expect("Failed to softmax qk.");
 
-    let qkv = qk_softmax
+     // (m x m) @ (m x d)
+    qk_softmax
         .broadcast_matmul(&v_host)
-        .expect("Failed to execute qk @ v."); // (m x m) @ (m x d)
-    qkv // (b, h, m, d)
+        .expect("Failed to execute qk @ v.") // (b, h, m, d)
 }
 
 /// Computes the theoretical peak (speed-of-light) tensor core TFLOPS for a Blackwell GPU.

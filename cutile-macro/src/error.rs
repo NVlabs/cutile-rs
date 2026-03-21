@@ -30,7 +30,7 @@ impl From<syn::Error> for Error {
 impl Error {
     pub fn to_compile_error(&self) -> TokenStream2 {
         match self {
-            Self::Syn(err) => err.to_compile_error().into(),
+            Self::Syn(err) => err.to_compile_error(),
         }
     }
 }

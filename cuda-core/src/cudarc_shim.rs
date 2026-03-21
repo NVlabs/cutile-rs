@@ -202,7 +202,7 @@ impl CudaContext {
     /// Records an error into the context's error state if the result is `Err`.
     pub fn record_err<T>(&self, result: Result<T, DriverError>) {
         if let Err(err) = result {
-            self.error_state.store(err.0 as u32, Ordering::Relaxed)
+            self.error_state.store(err.0, Ordering::Relaxed)
         }
     }
 }
@@ -814,7 +814,7 @@ pub mod ctx {
 
     /// Sets flags on the current context.
     pub fn set_flags(flags: cuda_bindings::CUctx_flags) -> Result<(), DriverError> {
-        unsafe { cuda_bindings::cuCtxSetFlags(flags as u32).result() }
+        unsafe { cuda_bindings::cuCtxSetFlags(flags).result() }
     }
 
     /// Blocks until all work in the current context is complete.
@@ -859,7 +859,7 @@ pub mod stream {
     pub fn create(kind: StreamKind) -> Result<cuda_bindings::CUstream, DriverError> {
         let mut stream = MaybeUninit::uninit();
         unsafe {
-            cuda_bindings::cuStreamCreate(stream.as_mut_ptr(), kind.flags() as u32).result()?;
+            cuda_bindings::cuStreamCreate(stream.as_mut_ptr(), kind.flags()).result()?;
             Ok(stream.assume_init())
         }
     }
@@ -889,7 +889,7 @@ pub mod stream {
         event: cuda_bindings::CUevent,
         flags: cuda_bindings::CUevent_wait_flags,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuStreamWaitEvent(stream, event, flags as u32).result()
+        cuda_bindings::cuStreamWaitEvent(stream, event, flags).result()
     }
 
     /// Attaches memory to a stream for managed memory visibility.
@@ -902,7 +902,7 @@ pub mod stream {
         num_bytes: usize,
         flags: cuda_bindings::CUmemAttach_flags,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuStreamAttachMemAsync(stream, dptr, num_bytes, flags as u32).result()
+        cuda_bindings::cuStreamAttachMemAsync(stream, dptr, num_bytes, flags).result()
     }
 
     /// Enqueues a host function callback on the stream.
@@ -1028,7 +1028,7 @@ pub mod event {
     ) -> Result<cuda_bindings::CUevent, DriverError> {
         let mut event = MaybeUninit::uninit();
         unsafe {
-            cuda_bindings::cuEventCreate(event.as_mut_ptr(), flags as u32).result()?;
+            cuda_bindings::cuEventCreate(event.as_mut_ptr(), flags).result()?;
             Ok(event.assume_init())
         }
     }
@@ -1125,7 +1125,7 @@ pub mod memory {
         flags: sys::CUmemAttach_flags,
     ) -> Result<sys::CUdeviceptr, DriverError> {
         let mut dev_ptr = MaybeUninit::uninit();
-        sys::cuMemAllocManaged(dev_ptr.as_mut_ptr(), num_bytes, flags as u32).result()?;
+        sys::cuMemAllocManaged(dev_ptr.as_mut_ptr(), num_bytes, flags).result()?;
         Ok(dev_ptr.assume_init())
     }
 

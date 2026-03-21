@@ -108,7 +108,7 @@ fn write_ir(
 ) {
     let filename = format!("{module_name}_{function_name}_{cache_hash_str}.{extension}");
     let path = PathBuf::from(dir).join(filename);
-    fs::write(path.clone(), contents).expect(format!("Failed to write {path:?}").as_str()); // Writes the string as bytes
+    fs::write(path.clone(), contents).unwrap_or_else(|_| panic!("Failed to write {path:?}")); // Writes the string as bytes
     println!("IR written to {path:?}");
 }
 
@@ -174,7 +174,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         // A hit to the thread local kernel cache returns the compiled function.
         let func = get_cuda_function(device_id, &key)?;
         let validator = get_function_validator(device_id, &key)?;
-        return Ok((func, validator));
+        Ok((func, validator))
     } else {
         let gpu_name = get_gpu_name(device_id);
         // A miss compiles, caches, and returns the compiled function.
@@ -277,7 +277,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         );
         insert_cuda_function(device_id, &key, (module, function.clone()))?;
         insert_function_validator(device_id, &key, validator.clone())?;
-        return Ok((function, validator));
+        Ok((function, validator))
     }
 }
 
@@ -314,7 +314,7 @@ pub fn infer_launch_grid(
 ) -> Result<(u32, u32, u32), Error> {
     if grid != (0, 0, 0) {
         // A launch grid was specified.
-        if inferred_grids.len() > 0 {
+        if !inferred_grids.is_empty() {
             validate_grids(grid, inferred_grids).with_context(|| {
                 "Specified launch grid does not match inferred tensor partition grid"
             })?;
@@ -322,7 +322,7 @@ pub fn infer_launch_grid(
         return Ok(grid);
     }
     // Try to infer launch grid.
-    if inferred_grids.len() == 0 {
+    if inferred_grids.is_empty() {
         return kernel_launch_error_result("Launch grid required.");
     }
     let grid = inferred_grids[0];
@@ -455,7 +455,7 @@ where
         inferred_grids: &[(u32, u32, u32)],
     ) -> Result<(u32, u32, u32), Error> {
         let grid = self.get_launch_grid();
-        infer_launch_grid(grid, &inferred_grids)
+        infer_launch_grid(grid, inferred_grids)
     }
     /// Returns the currently configured launch grid dimensions.
     fn get_launch_grid(&self) -> (u32, u32, u32);

@@ -161,7 +161,7 @@ impl RequiredGenerics {
         let mut type_params = vec![];
         for name in &self.names {
             let is_launcher_type_param = self.launcher_type_params.contains(name);
-            if is_launcher_type_param && self.get_ty(&name) == SupportedGenericType::TypeParam {
+            if is_launcher_type_param && self.get_ty(name) == SupportedGenericType::TypeParam {
                 type_params.push(format!("{}: Send + WithDType", name.clone()));
             }
         }
@@ -172,8 +172,8 @@ impl RequiredGenerics {
         let mut type_params = vec![];
         for name in &self.names {
             let is_launcher_type_param = self.launcher_type_params.contains(name);
-            if is_launcher_type_param && self.get_ty(&name) == SupportedGenericType::TypeParam {
-                type_params.push(format!("{}", name.clone()));
+            if is_launcher_type_param && self.get_ty(name) == SupportedGenericType::TypeParam {
+                type_params.push(name.clone().to_string());
             }
         }
         syn::parse2::<AngleBracketedGenericArguments>(
@@ -203,7 +203,7 @@ impl RequiredGenerics {
 /// - `["a", "b"]` → `"(a, b)"`
 /// - `["a", "b", "c"]` → `"(a, (b, c))"`
 pub fn join_as_cons_tuple(vals: &Vec<String>) -> String {
-    if vals.len() == 0 {
+    if vals.is_empty() {
         return "()".to_string();
     }
     if vals.len() == 1 {
@@ -233,7 +233,7 @@ fn zippable(expr: &str, wrap_as_val: bool) -> String {
     if !wrap_as_val {
         return expr.to_string();
     }
-    return format!("value({})", expr);
+    format!("value({})", expr)
 }
 
 /// Generates async code to zip inputs into a cons-cell tuple structure.
@@ -261,7 +261,7 @@ pub fn zip_cons(inputs: &Vec<String>, var_name: &str, wrap_as_val: bool) -> Expr
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
-    if inputs.len() == 0 {
+    if inputs.is_empty() {
         return zip_block;
     }
     let mut i = inputs.len() - 1;
@@ -308,7 +308,7 @@ pub fn zip_and_then_flatten(inputs: &Vec<String>, var_name: &str, wrap_as_val: b
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
-    if inputs.len() == 0 {
+    if inputs.is_empty() {
         zip_block
             .block
             .stmts
@@ -385,7 +385,7 @@ pub fn generate_launcher_arg_types(
     launcher_args_name: &str,
 ) -> (Type, TokenStream2) {
     let launcher_args_ident = Ident::new(launcher_args_name, Span::call_site());
-    let launcher_args_type: Type = if generic_args.args.len() > 0 {
+    let launcher_args_type: Type = if !generic_args.args.is_empty() {
         parse_quote! { #launcher_args_ident #generic_args }
     } else {
         parse_quote! { #launcher_args_ident }
@@ -496,7 +496,7 @@ pub fn generate_kernel_launcher(
         // Added support for * mut T to allow for unsafe kernels.
         match ty {
             Type::Reference(ref_ty) => {
-                let res = get_tensor_code(i, var_name, &ref_ty, &mut required_generics)?;
+                let res = get_tensor_code(i, var_name, ref_ty, &mut required_generics)?;
                 arg_types.push(res.fn_arg.ty.as_ref().clone());
                 stride_args.push(res.stride_expr_str);
                 builder_statements.extend(res.builder_statements);
@@ -589,7 +589,7 @@ pub fn generate_kernel_launcher(
         r#"let {param_names_tuple_str}: {launcher_args_type_str} = input.execute(ctx)?;"#
     )));
 
-    if required_generics.names.len() > 0 {
+    if !required_generics.names.is_empty() {
         launcher_method.block.stmts.push(parse_stmt(format!(
             r#"
             let function_generics: Vec<String> = if self.function_generics.is_some() {{
@@ -859,7 +859,7 @@ fn get_tensor_code(
     let Some(type_ident) = type_ident else {
         return ty.err("Expected a named type identifier for tensor parameter.");
     };
-    if type_ident.to_string() != "Tensor" {
+    if type_ident != "Tensor" {
         return ty.err(&format!("Expected Tensor type, got {}.", type_ident));
     }
     let Some(GenericArgument::Type(syn::Type::Path(element_type_path))) =
@@ -1018,111 +1018,105 @@ pub fn infer_shape_params_from_tensor_type(
         match generic_arg {
             GenericArgument::Type(type_param) => {
                 // Currently, this is either shape or element_type.
-                match type_param {
-                    syn::Type::Path(type_path) => {
-                        let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
-                        match required_generics.get_ty(&last_ident) {
-                            SupportedGenericType::TypeParam => {
-                                // This is an element type.
-                                required_generics
-                                    .launcher_type_params
-                                    .push(last_ident.clone());
-                                required_generics.expressions.insert(
-                                    last_ident.clone(),
-                                    Some(format!("vec![{var_name}.dtype().as_str().to_string()]")),
-                                );
-                            }
-                            SupportedGenericType::ConstArray => {
-                                // This is a CGA type.
-                                if is_mutable {
-                                    required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
-                                } else {
-                                    // This might make sense for a small tensor.
-                                    required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
-                                }
-                            }
-                            SupportedGenericType::ConstScalar => {
-                                return type_path.err(
-                                    "Unexpected constant scalar type in tensor generic argument.",
-                                );
-                            }
-                            SupportedGenericType::Unknown => {}
+                if let syn::Type::Path(type_path) = type_param {
+                    let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
+                    match required_generics.get_ty(&last_ident) {
+                        SupportedGenericType::TypeParam => {
+                            // This is an element type.
+                            required_generics
+                                .launcher_type_params
+                                .push(last_ident.clone());
+                            required_generics.expressions.insert(
+                                last_ident.clone(),
+                                Some(format!("vec![{var_name}.dtype().as_str().to_string()]")),
+                            );
                         }
+                        SupportedGenericType::ConstArray => {
+                            // This is a CGA type.
+                            if is_mutable {
+                                required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                            } else {
+                                // This might make sense for a small tensor.
+                                required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                            }
+                        }
+                        SupportedGenericType::ConstScalar => {
+                            return type_path.err(
+                                "Unexpected constant scalar type in tensor generic argument.",
+                            );
+                        }
+                        SupportedGenericType::Unknown => {}
                     }
-                    _ => {}
                 }
             }
             GenericArgument::Const(const_param) => {
                 // println!("expand GenericArgument::Const? {const_param:#?}");
-                match const_param {
-                    Expr::Block(block_expr) => {
-                        // This is something like Tensor<E, {[...]}>
-                        if block_expr.block.stmts.len() != 1 {
-                            return block_expr.err(&format!(
-                                "Expected exactly 1 statement in block expression, got {}.",
-                                block_expr.block.stmts.len()
-                            ));
-                        }
-                        let statement = &block_expr.block.stmts[0];
-                        let Stmt::Expr(statement_expr, _) = statement else {
-                            return block_expr.err(
-                                "Unexpected block expression: expected an expression statement.",
-                            );
-                        };
-                        match statement_expr {
-                            Expr::Array(array_expr) => {
-                                // This is something like Tensor<E, {[1, 2, -1]}>
-                                for (i, elem) in array_expr.elems.iter().enumerate() {
-                                    match elem {
-                                        Expr::Lit(_lit) => {
-                                            // Nothing to do to build generic arg expressions.
-                                            continue;
-                                        }
-                                        Expr::Unary(_unary_expr) => {
-                                            // Nothing to do to build generic arg expressions.
-                                            continue;
-                                        }
-                                        Expr::Path(path) => {
-                                            let ident = get_ident_from_path_expr(path).to_string();
-                                            match required_generics.get_ty(&ident) {
-                                                SupportedGenericType::TypeParam => {
-                                                    // This is an element type.
-                                                    return path.err("Unexpected type param in array type expression.");
-                                                }
-                                                SupportedGenericType::ConstArray => {
-                                                    // This is a CGA type.
-                                                    return path.err("Unexpected const generic array param in array type expression.");
-                                                }
-                                                SupportedGenericType::ConstScalar => {
-                                                    if is_mutable {
-                                                        required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.partition_shape[{i}].to_string()]")));
-                                                    } else {
-                                                        required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.shape[{i}].to_string()]")));
-                                                    }
-                                                }
-                                                SupportedGenericType::Unknown => {}
+                if let Expr::Block(block_expr) = const_param {
+                    // This is something like Tensor<E, {[...]}>
+                    if block_expr.block.stmts.len() != 1 {
+                        return block_expr.err(&format!(
+                            "Expected exactly 1 statement in block expression, got {}.",
+                            block_expr.block.stmts.len()
+                        ));
+                    }
+                    let statement = &block_expr.block.stmts[0];
+                    let Stmt::Expr(statement_expr, _) = statement else {
+                        return block_expr.err(
+                            "Unexpected block expression: expected an expression statement.",
+                        );
+                    };
+                    match statement_expr {
+                        Expr::Array(array_expr) => {
+                            // This is something like Tensor<E, {[1, 2, -1]}>
+                            for (i, elem) in array_expr.elems.iter().enumerate() {
+                                match elem {
+                                    Expr::Lit(_lit) => {
+                                        // Nothing to do to build generic arg expressions.
+                                        continue;
+                                    }
+                                    Expr::Unary(_unary_expr) => {
+                                        // Nothing to do to build generic arg expressions.
+                                        continue;
+                                    }
+                                    Expr::Path(path) => {
+                                        let ident = get_ident_from_path_expr(path).to_string();
+                                        match required_generics.get_ty(&ident) {
+                                            SupportedGenericType::TypeParam => {
+                                                // This is an element type.
+                                                return path.err("Unexpected type param in array type expression.");
                                             }
+                                            SupportedGenericType::ConstArray => {
+                                                // This is a CGA type.
+                                                return path.err("Unexpected const generic array param in array type expression.");
+                                            }
+                                            SupportedGenericType::ConstScalar => {
+                                                if is_mutable {
+                                                    required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.partition_shape[{i}].to_string()]")));
+                                                } else {
+                                                    required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.shape[{i}].to_string()]")));
+                                                }
+                                            }
+                                            SupportedGenericType::Unknown => {}
                                         }
-                                        _ => {
-                                            return elem.err("Unsupported array element in tensor shape expression.");
-                                        }
+                                    }
+                                    _ => {
+                                        return elem.err("Unsupported array element in tensor shape expression.");
                                     }
                                 }
                             }
-                            Expr::Repeat(repeat_expr) => {
-                                // TODO (hme): Unclear under what circumstance it would be beneficial to support this.
-                                return repeat_expr.err(
-                                    "Repeat expressions in tensor shape are not yet supported.",
-                                );
-                            }
-                            _ => {
-                                return block_expr.err(
-                                    "Unexpected block expression in tensor const generic argument.",
-                                );
-                            }
+                        }
+                        Expr::Repeat(repeat_expr) => {
+                            // TODO (hme): Unclear under what circumstance it would be beneficial to support this.
+                            return repeat_expr.err(
+                                "Repeat expressions in tensor shape are not yet supported.",
+                            );
+                        }
+                        _ => {
+                            return block_expr.err(
+                                "Unexpected block expression in tensor const generic argument.",
+                            );
                         }
                     }
-                    _ => {}
                 }
             }
             _ => {}

@@ -339,9 +339,9 @@ impl<T: WithDType> Partition<Tensor<T>> {
     }
 }
 
-impl<T> Into<Arc<T>> for Partition<T> {
-    fn into(self) -> Arc<T> {
-        Arc::new(self.unpartition())
+impl<T> From<Partition<T>> for Arc<T> {
+    fn from(val: Partition<T>) -> Self {
+        Arc::new(val.unpartition())
     }
 }
 

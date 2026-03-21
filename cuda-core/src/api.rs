@@ -80,7 +80,7 @@ pub unsafe fn malloc_async(num_bytes: usize, stream: &Arc<CudaStream>) -> sys::C
 ///
 /// # Safety
 /// `dptr` must have been allocated with `malloc_async` and must not be used after this call.
-pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<CudaStream>) -> () {
+pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<CudaStream>) {
     crate::memory::free_async(dptr, stream.cu_stream()).expect("Free async failed.")
 }
 
@@ -93,7 +93,7 @@ pub unsafe fn memcpy_htod_async<T>(
     src: *const T,
     num_elements: usize,
     stream: &Arc<CudaStream>,
-) -> () {
+) {
     let num_bytes = num_elements * mem::size_of::<T>();
     unsafe { crate::memory::memcpy_htod_async(dst, src, num_bytes, stream.cu_stream()) }
         .expect("memcpy_htod_async failed.")
@@ -108,7 +108,7 @@ pub unsafe fn memcpy_dtoh_async<T>(
     src: sys::CUdeviceptr,
     num_elements: usize,
     stream: &Arc<CudaStream>,
-) -> () {
+) {
     let num_bytes = num_elements * mem::size_of::<T>();
     unsafe { crate::memory::memcpy_dtoh_async(dst, src, num_bytes, stream.cu_stream()) }
         .expect("memcpy_dtoh_async failed.")
@@ -123,7 +123,7 @@ pub unsafe fn memcpy_dtod_async<T>(
     src: sys::CUdeviceptr,
     num_elements: usize,
     stream: &Arc<CudaStream>,
-) -> () {
+) {
     let num_bytes = num_elements * mem::size_of::<T>();
     unsafe { crate::memory::memcpy_dtod_async(dst, src, num_bytes, stream.cu_stream()) }
         .expect("memcpy_dtod_async failed.")

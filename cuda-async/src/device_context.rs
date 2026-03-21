@@ -273,8 +273,8 @@ where
 /// default `.await` / `.sync()` path.
 pub fn global_policy(device_id: usize) -> Result<Arc<GlobalSchedulingPolicy>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
-        let policy = device_context.policy.clone();
-        policy
+        
+        device_context.policy.clone()
     })
 }
 
@@ -309,7 +309,7 @@ where
 /// set_default_device(1);
 /// let tensor = api::zeros([1024, 1024]).await; // runs on GPU 1
 /// ```
-pub fn set_default_device(default_device_id: usize) -> () {
+pub fn set_default_device(default_device_id: usize) {
     DEVICE_CONTEXTS.with(|ctx| {
         ctx.default_device.set(default_device_id);
     })

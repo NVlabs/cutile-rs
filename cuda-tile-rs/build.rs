@@ -120,8 +120,7 @@ fn main() {
                 llvm_path.display()
             );
             println!(
-                "cargo:rustc-env={}={}",
-                "TABLEGEN_210_PREFIX",
+                "cargo:rustc-env=TABLEGEN_210_PREFIX={}",
                 llvm_path.display()
             );
 
@@ -138,7 +137,7 @@ fn main() {
                 LLVM_LIB_PATH_VAR,
                 llvm_lib_path.display()
             );
-            println!("cargo:warning={}", "Defaultling to download mode.");
+            println!("cargo:warning=Defaultling to download mode.");
         }
     }
 
