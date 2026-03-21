@@ -1,8 +1,13 @@
 # cuTile Rust
-The main user-facing crate of this repository.
-This includes the core DSL, a collection of basic kernels written using the DSL,
-the cuTile Rust host-side Tensor type, 
-and various traits and functions for working with cuTile Rust tensors using cuda-async.
+This is the main user-facing crate in the workspace.
+It provides:
+
+- the kernel authoring DSL exposed through `#[cutile::module]`
+- host-side tensor API in `cutile::api`
+- built-in kernels and launch utilities layered on top of `cuda-async`
+
+For full workspace setup, examples, and environment requirements, start with the repository [README](../README.md).
 
 # Tests
-- Run a specific test and see its output via `cargo test --test span_source_location -- --no-capture`.
+- Run the crate test suite with `cargo test -p cutile`.
+- Run a specific test and see its output with `cargo test -p cutile --test span_source_location -- --no-capture`.
