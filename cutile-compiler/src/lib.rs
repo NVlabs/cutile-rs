@@ -85,10 +85,7 @@ mod tests {
     fn parse_partition_view_type() {
         let context = context_all();
         let _location = Location::unknown(&context);
-        let cuda_tile_type = Type::parse(
-            &context,
-            "!cuda_tile.partition_view<tile=(1024x1x32), !cuda_tile.tensor_view<?x?x?xf32, strides=[?,?,?]>>",
-        );
+        let cuda_tile_type = Type::parse(&context, "!cuda_tile.partition_view<tile=(1024x1x32), !cuda_tile.tensor_view<?x?x?xf32, strides=[?,?,?]>>");
 
         assert!(cuda_tile_type.is_some());
     }

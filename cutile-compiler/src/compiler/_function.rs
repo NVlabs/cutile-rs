@@ -110,8 +110,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 modules
                     .resolve_span(module_name, &function.span())
                     .jit_error(&format!(
-                        "function `{function_name}` is missing a required `#[entry(...)]` attribute"
-                    ))
+                    "function `{function_name}` is missing a required `#[entry(...)]` attribute"
+                ))
             })?;
         let entry_attrs = EntryAttrs { entry_attrs };
 

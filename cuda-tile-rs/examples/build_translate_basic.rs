@@ -4,6 +4,7 @@
  */
 
 use cuda_tile_rs::util::{operation_parse, parse_named_attr};
+use melior::Context;
 use melior::dialect::DialectRegistry;
 use melior::ir::attribute::{StringAttribute, TypeAttribute};
 use melior::ir::r#type::FunctionType;
@@ -11,7 +12,6 @@ use melior::ir::{
     Attribute, Block, BlockLike, Identifier, Location, Region, RegionLike, Type, Value, ValueLike,
 };
 use melior::utility::{register_all_dialects, register_all_llvm_translations};
-use melior::Context;
 use std::error::Error;
 use std::process::Command;
 

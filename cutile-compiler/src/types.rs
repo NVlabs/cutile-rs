@@ -769,12 +769,8 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                     match elem {
                                         Expr::Lit(lit) => {
                                             let val = match &lit.lit {
-                                                Lit::Int(int_lit) => {
-                                                    int_lit.base10_parse::<i32>().unwrap()
-                                                }
-                                                _ => unimplemented!(
-                                                    "Unexpected array element {elem:#?} in {array_expr:#?}"
-                                                ),
+                                                Lit::Int(int_lit) => int_lit.base10_parse::<i32>().unwrap(),
+                                                _ => unimplemented!("Unexpected array element {elem:#?} in {array_expr:#?}"),
                                             };
                                             _result.push(val);
                                         }
@@ -784,9 +780,7 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                             if unary_expr_str == "- 1" {
                                                 _result.push(-1);
                                             } else {
-                                                panic!(
-                                                    "Unexpected unary expression {unary_expr_str:#?} in {array_expr:#?}"
-                                                )
+                                                panic!("Unexpected unary expression {unary_expr_str:#?} in {array_expr:#?}")
                                             }
                                         }
                                         Expr::Path(path) => {
@@ -812,34 +806,28 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                 // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                                 let repeat_expr_expr = &*repeat_expr.expr;
                                 let thing_to_repeat = match repeat_expr_expr {
-                                    Expr::Lit(lit) => match &lit.lit {
-                                        Lit::Int(int_lit) => int_lit.base10_parse::<i32>().unwrap(),
-                                        _ => unimplemented!(
-                                            "Unexpected repeat expr {repeat_expr_expr:#?} in {repeat_expr:#?}"
-                                        ),
+                                    Expr::Lit(lit) => {
+                                        match &lit.lit {
+                                            Lit::Int(int_lit) => int_lit.base10_parse::<i32>().unwrap(),
+                                            _ => unimplemented!("Unexpected repeat expr {repeat_expr_expr:#?} in {repeat_expr:#?}"),
+                                        }
                                     },
-                                    Expr::Unary(unary_expr) => {
-                                        let unary_expr_str =
-                                            unary_expr.to_token_stream().to_string();
+                                    Expr::Unary(unary_expr ) => {
+                                        let unary_expr_str = unary_expr.to_token_stream().to_string();
                                         if unary_expr_str == "- 1" {
                                             -1
                                         } else {
-                                            unimplemented!(
-                                                "Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"
-                                            )
+                                            unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}")
                                         }
-                                    }
+                                    },
                                     Expr::Path(path) => {
                                         let ident = get_ident_from_path_expr(path);
-                                        match generic_vars.inst_i32.get(ident.to_string().as_str())
-                                        {
+                                        match generic_vars.inst_i32.get(ident.to_string().as_str()) {
                                             Some(val) => *val,
-                                            None => panic!("Undefined generic parameter {ident}"),
+                                            None => panic!("Undefined generic parameter {ident}")
                                         }
-                                    }
-                                    _ => unimplemented!(
-                                        "Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"
-                                    ),
+                                    },
+                                    _ => unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"),
                                 };
                                 let num_rep = match &*repeat_expr.len {
                                     Expr::Path(len_path) => {

@@ -182,9 +182,7 @@ fn ocean_fmha_causal(c: &mut Criterion) {
         let batch_size = max_ctx_len / seq_len;
         let num_heads = 8;
         let head_dim = 512 / num_heads;
-        println!(
-            "seq_len: {seq_len}, batch_size: {batch_size}, num_heads: {num_heads}, head_dim: {head_dim}"
-        );
+        println!("seq_len: {seq_len}, batch_size: {batch_size}, num_heads: {num_heads}, head_dim: {head_dim}");
         println!("total_tokens: {}", seq_len * batch_size);
         let num_ops = (2 * seq_len * seq_len * head_dim * num_heads * batch_size) as f64;
 

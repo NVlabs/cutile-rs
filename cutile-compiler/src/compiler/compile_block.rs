@@ -266,7 +266,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                                 "failed to compile initializer: `{}`",
                                                 init.expr.to_token_stream().to_string()
                                             ),
-                                        );
+                                        )
                                     }
                                 }
                             }
@@ -274,16 +274,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &local.span(),
                                     "let bindings must have an initializer expression",
-                                );
+                                )
                             }
                         };
                     }
                     Stmt::Item(item) => {
+                        let mut binding_name: Option<String> = None;
+                        let mut ct_ty: Option<TileRustType> = None;
                         match item {
                             Item::Const(const_item) => {
                                 // This is like a let binding.
-                                let binding_name: Option<String> = Some(const_item.ident.to_string());
-                                let ct_ty: Option<TileRustType> = self.compile_type(
+                                binding_name = Some(const_item.ident.to_string());
+                                ct_ty = self.compile_type(
                                     &*const_item.ty,
                                     generic_args,
                                     &HashMap::new(),
