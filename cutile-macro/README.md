@@ -1,17 +1,21 @@
 # cuTile Rust Macros
 
-Defines the `cutile::module` and various other macros to expand cuTile Rust code into
-unreachable code for type checking, JITable ASTs, and safe kernel launch functions.
+This crate defines the procedural macros behind `cutile::module`.
+It expands cuTile Rust modules into:
+
+- type-checkable Rust items
+- JIT-compilable AST builders
+- generated host-side kernel launch functions
 
 # Debugging
 
 Generate backtraces:
-```
+```bash
 export RUSTFLAGS="-Zproc-macro-backtrace -Zmacro-backtrace"; export RUST_BACKTRACE=1;
 ```
 
 Dump the generated kernel launch code to a given directory:
-```
+```bash
 export DUMP_KERNEL_LAUNCHER_DIR="temp"
 ```
 # Description and Limitations
@@ -135,3 +139,11 @@ fn kernel<const S: [i32; 2]>(a: f32, y: Type<S>) {
 
 Since `user_function` does not take a variable length CGA, the cuTile Rust macro does not need to rewrite it.
 In other words, the expression `user_function(a, y.shape())` compiles because there is only one `user_function`.
+
+# Testing
+
+Run the macro crate tests with:
+
+```bash
+cargo test -p cutile-macro
+```
