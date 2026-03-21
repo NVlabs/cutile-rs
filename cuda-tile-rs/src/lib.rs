@@ -80,13 +80,13 @@ mod tests {
 
     use crate::cuda_tile::{self};
     use crate::util::{attribute_parse, operation_parse, type_parse};
-    use melior::Context;
     use melior::dialect::DialectRegistry;
-    use melior::ir::RegionLike;
     use melior::ir::attribute::StringAttribute;
     use melior::ir::operation::{OperationBuilder, OperationLike};
+    use melior::ir::RegionLike;
     use melior::ir::{Attribute, Block, Identifier, Location, Module, Region};
     use melior::utility::{register_all_dialects, register_all_llvm_translations};
+    use melior::Context;
 
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
     static REGISTER_GLOBALS: Once = Once::new();

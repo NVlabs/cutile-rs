@@ -31,6 +31,7 @@ members = [
 [workspace.package]
 version = "0.0.1-alpha"
 edition = "2021"
+rust-version = "1.89"
 license = "Apache-2.0"
 authors = ["Melih Elibol"]
 repository = "https://github.com/nvlabs/cutile-rs"

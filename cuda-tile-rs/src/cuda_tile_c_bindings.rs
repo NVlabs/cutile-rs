@@ -201,7 +201,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Returns a cuda_tile RoundingModeAttr with the given rounding mode string."]
     pub fn mlirCudaTileRoundingModeAttrGet(ctx: MlirContext, value: MlirStringRef)
-    -> MlirAttribute;
+        -> MlirAttribute;
 }
 unsafe extern "C" {
     #[doc = " Returns the rounding mode string of the given cuda_tile RoundingModeAttr."]
@@ -287,7 +287,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Returns a cuda_tile PaddingValueAttr with the given padding value string."]
     pub fn mlirCudaTilePaddingValueAttrGet(ctx: MlirContext, value: MlirStringRef)
-    -> MlirAttribute;
+        -> MlirAttribute;
 }
 unsafe extern "C" {
     #[doc = " Returns the padding value string of the given cuda_tile PaddingValueAttr."]

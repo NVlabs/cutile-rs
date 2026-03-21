@@ -203,7 +203,7 @@ pub trait DeviceOperation:
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
         let ctx = ExecutionContext::new(stream.clone());
         // This is okay since we synchronize immediately.
-        
+
         unsafe { self.execute(&ctx) }
     }
     /// Execute on an **explicit stream** and block until the GPU finishes.
@@ -602,25 +602,27 @@ where
         if !self.computed.load(Ordering::Acquire) {
             // Safety: This block is guaranteed to execute at most once.
             // Put the input in a box so the pointer is dropped when this block exits.
-            let input = self.input.replace(None).ok_or(device_error(
+            let input = unsafe { (&mut *self.input.get()).take() }.ok_or(device_error(
                 context.get_device_id(),
                 "Select operation failed.",
             ))?;
             let (left, right) = input.execute(context)?;
             // Update internal state.
-            self.left.replace(Some(left));
-            self.right.replace(Some(right));
+            unsafe {
+                *self.left.get() = Some(left);
+                *self.right.get() = Some(right);
+            }
             self.computed.store(true, Ordering::Release);
         }
         Ok(())
     }
     unsafe fn left(&self) -> T1 {
-        
-        self.left.replace(None).unwrap()
+        let left = unsafe { (&mut *self.left.get()).take() }.unwrap();
+        left
     }
     unsafe fn right(&self) -> T2 {
-        
-        self.right.replace(None).unwrap()
+        let right = unsafe { (&mut *self.right.get()).take() }.unwrap();
+        right
     }
 }
 

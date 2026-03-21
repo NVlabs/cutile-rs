@@ -1061,9 +1061,8 @@ pub fn infer_shape_params_from_tensor_type(
                     }
                     let statement = &block_expr.block.stmts[0];
                     let Stmt::Expr(statement_expr, _) = statement else {
-                        return block_expr.err(
-                            "Unexpected block expression: expected an expression statement.",
-                        );
+                        return block_expr
+                            .err("Unexpected block expression: expected an expression statement.");
                     };
                     match statement_expr {
                         Expr::Array(array_expr) => {
@@ -1100,16 +1099,17 @@ pub fn infer_shape_params_from_tensor_type(
                                         }
                                     }
                                     _ => {
-                                        return elem.err("Unsupported array element in tensor shape expression.");
+                                        return elem.err(
+                                            "Unsupported array element in tensor shape expression.",
+                                        );
                                     }
                                 }
                             }
                         }
                         Expr::Repeat(repeat_expr) => {
                             // TODO (hme): Unclear under what circumstance it would be beneficial to support this.
-                            return repeat_expr.err(
-                                "Repeat expressions in tensor shape are not yet supported.",
-                            );
+                            return repeat_expr
+                                .err("Repeat expressions in tensor shape are not yet supported.");
                         }
                         _ => {
                             return block_expr.err(

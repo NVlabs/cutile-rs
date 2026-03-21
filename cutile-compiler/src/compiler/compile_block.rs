@@ -279,13 +279,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         };
                     }
                     Stmt::Item(item) => {
-                        let mut binding_name: Option<String> = None;
-                        let mut ct_ty: Option<TileRustType> = None;
                         match item {
                             Item::Const(const_item) => {
                                 // This is like a let binding.
-                                binding_name = Some(const_item.ident.to_string());
-                                ct_ty = self.compile_type(
+                                let binding_name: Option<String> = Some(const_item.ident.to_string());
+                                let ct_ty: Option<TileRustType> = self.compile_type(
                                     &*const_item.ty,
                                     generic_args,
                                     &HashMap::new(),

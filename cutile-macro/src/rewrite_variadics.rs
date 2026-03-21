@@ -299,10 +299,7 @@ fn get_ident_generic_args(
                     // This is a type of the form T<...>
                     Ok((last_seg.ident.clone(), type_params.clone()))
                 }
-                _ => Err(syn_err(
-                    type_path.span(),
-                    "Unexpected generic arguments",
-                )),
+                _ => Err(syn_err(type_path.span(), "Unexpected generic arguments")),
             }
         }
         Type::Reference(ref_type) => get_ident_generic_args(&ref_type.elem, vtd),
@@ -1185,7 +1182,7 @@ pub fn variadic_impl(attributes: &SingleMetaList, item: ItemImpl) -> Result<Vec<
 }
 
 /// Expands a variadic impl method into rank-specific versions.
- fn variadic_impl_fn_gen(
+fn variadic_impl_fn_gen(
     attributes: &SingleMetaList,
     self_ty: &Type,
     item: &ImplItemFn,
@@ -1211,7 +1208,7 @@ pub fn variadic_impl(attributes: &SingleMetaList, item: ItemImpl) -> Result<Vec<
 }
 
 /// Rewrites a single impl method using the given const instantiations.
- fn rewrite_impl_fn(
+fn rewrite_impl_fn(
     self_ty: &Type,
     item: &ImplItemFn,
     const_instances: &ConstInstances,
@@ -1224,10 +1221,7 @@ pub fn variadic_impl(attributes: &SingleMetaList, item: ItemImpl) -> Result<Vec<
 }
 
 /// Desugars const generic arrays in a function signature's generics, inputs, and output.
- fn rewrite_fn_sig(
-    sig: &mut Signature,
-    const_instances: &ConstInstances,
-) -> Result<(), Error> {
+fn rewrite_fn_sig(sig: &mut Signature, const_instances: &ConstInstances) -> Result<(), Error> {
     desugar_generics(&mut sig.generics, const_instances)?;
     let mut desugared_inputs = sig.inputs.clone();
     for input in desugared_inputs.iter_mut() {
@@ -1309,7 +1303,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
 }
 
 /// Expands const generic array params in a `Generics` clause into individual const params.
- fn desugar_generics(
+fn desugar_generics(
     generics: &mut Generics,
     const_instances: &ConstInstances,
 ) -> Result<(), Error> {
@@ -1363,7 +1357,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
 }
 
 /// Expands a CGA path into angle-bracketed individual const generic arguments.
- fn expand_cga(
+fn expand_cga(
     path: &Path,
     instances: &ConstInstances,
 ) -> Result<AngleBracketedGenericArguments, Error> {
@@ -1401,16 +1395,13 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
     } else {
         Err(syn_err(
             path.span(),
-            &format!(
-                "{} is not a const generic array.",
-                path.to_token_stream()
-            ),
+            &format!("{} is not a const generic array.", path.to_token_stream()),
         ))
     }
 }
 
 /// Desugars variadic types in a path, replacing CGA syntax with concrete type names and args.
- fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> {
+fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> {
     let mut result_path = path.clone();
     for (i, seg) in path.segments.iter().enumerate() {
         let param_name = seg.ident.to_string();
@@ -1474,7 +1465,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
 }
 
 /// Desugars variadic types within angle-bracketed generic arguments.
- fn desugar_generic_arguments(
+fn desugar_generic_arguments(
     generic_args: &mut AngleBracketedGenericArguments,
     const_instances: &ConstInstances,
 ) -> Result<(), Error> {
@@ -1487,10 +1478,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
             _ => {
                 return Err(syn_err(
                     span,
-                    &format!(
-                        "Unsupported generic argument {}",
-                        arg.to_token_stream()
-                    ),
+                    &format!("Unsupported generic argument {}", arg.to_token_stream()),
                 ))
             }
         }
@@ -1499,7 +1487,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
 }
 
 /// Recursively desugars const generic array syntax within a type.
- fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, Error> {
+fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, Error> {
     // Desugar const generic arrays as they appear as const generic arguments.
     Ok(match ty {
         Type::Path(type_path) => {
@@ -1574,7 +1562,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
 
 // TODO (hme): A lot of repetition between this and get_cga_type.
 /// Desugars CGA generic arguments on a type, producing a concrete ident and expanded args.
- fn desugar_cga(
+fn desugar_cga(
     instances: &ConstInstances,
     type_ident: &Ident,
     generic_args: &AngleBracketedGenericArguments,
@@ -1753,7 +1741,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
 }
 
 /// Extracts the `ConstGenericArrayType` from a type expression, if it is a variadic type.
- fn get_cga_type(
+fn get_cga_type(
     ty: &Type,
     const_instances: &ConstInstances,
 ) -> Result<Option<ConstGenericArrayType>, Error> {
@@ -1827,8 +1815,7 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
                         }
                         Expr::Repeat(repeat_expr) => {
                             // println!("Expr::Repeat: {:?}", repeat_expr.expr);
-                            let _thing_to_repeat =
-                                repeat_expr.expr.to_token_stream().to_string();
+                            let _thing_to_repeat = repeat_expr.expr.to_token_stream().to_string();
                             match &*repeat_expr.len {
                                 Expr::Path(len_path) => {
                                     // This is something like Tensor<E, {[-1; N]}>
@@ -1865,18 +1852,12 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
                                     cgas.push(Some(generic_arg.to_token_stream().to_string()));
                                 }
                                 _ => {
-                                    return Err(syn_err(
-                                        ty.span(),
-                                        "Unexpected repeat expression.",
-                                    ))
+                                    return Err(syn_err(ty.span(), "Unexpected repeat expression."))
                                 }
                             }
                         }
                         _ => {
-                            return Err(syn_err(
-                                block_expr.span(),
-                                "Unexpected block expression.",
-                            ))
+                            return Err(syn_err(block_expr.span(), "Unexpected block expression."))
                         }
                     }
                 }
@@ -2059,12 +2040,7 @@ impl RewriteVariadicsPass {
                     self.rewrite_sig(&mut result.sig, &const_instances)?;
                     impl_items.push(TraitItem::Fn(result));
                 }
-                _ => {
-                    return Err(syn_err(
-                        concrete_item.span(),
-                        "Unsupported impl item",
-                    ))
-                }
+                _ => return Err(syn_err(concrete_item.span(), "Unsupported impl item")),
             }
         }
         item.items = impl_items;
@@ -2154,12 +2130,7 @@ impl RewriteVariadicsPass {
                         }
                     }
                 }
-                _ => {
-                    return Err(syn_err(
-                        concrete_item.span(),
-                        "Unsupported impl item.",
-                    ))
-                }
+                _ => return Err(syn_err(concrete_item.span(), "Unsupported impl item.")),
             }
         }
         item.items = impl_items;
@@ -2334,12 +2305,7 @@ impl RewriteVariadicsPass {
                             }
                             continue; // Skip normal single-variable logic
                         }
-                        _ => {
-                            return Err(syn_err(
-                                local.span(),
-                                "Local pattern type not supported",
-                            ))
-                        }
+                        _ => return Err(syn_err(local.span(), "Local pattern type not supported")),
                     }
                     if binding_name.is_none() {
                         return Err(syn_err(local.span(), "Unable to rewrite expr."));
@@ -2540,10 +2506,7 @@ impl RewriteVariadicsPass {
                             expr_span,
                             "Failed to compute type for index expression",
                         )),
-                        Some(_other) => Err(syn_err(
-                            expr_span,
-                            "Index expression not supported",
-                        )),
+                        Some(_other) => Err(syn_err(expr_span, "Index expression not supported")),
                     }
                 }
             }
@@ -2784,12 +2747,7 @@ impl RewriteVariadicsPass {
                             )
                         }
                         PathArguments::None => (last_seg.ident.clone(), PathArguments::None),
-                        _ => {
-                            return Err(syn_err(
-                                struct_expr.span(),
-                                "Unexpected Path arguments.",
-                            ))
-                        }
+                        _ => return Err(syn_err(struct_expr.span(), "Unexpected Path arguments.")),
                     };
                     *last_seg = PathSegment {
                         ident: last_type_ident,
@@ -2914,10 +2872,7 @@ impl RewriteVariadicsPass {
                 // The compiler will handle parsing and compilation of closure bodies
                 Ok(return_type)
             }
-            _ => Err(syn_err(
-                expr.span(),
-                "Expression type not supported",
-            )),
+            _ => Err(syn_err(expr.span(), "Expression type not supported")),
         }
     }
 

@@ -1,6 +1,10 @@
 # cuTile Rust
-cuTile Rust (`cutile-rs`) is a research project providing a safe, tile-based kernel programming DSL for the Rust programming language.
-It features a safe host-side API for passing tensors to asynchronously executed kernel functions.
+cuTile Rust (`cutile-rs`) is a research project for writing tile-based GPU kernels in Rust.
+The workspace combines:
+
+- a safe user-facing DSL for authoring kernels
+- a safe host-side API astyn executed kernel functions
+- an MLIR-based compiler pipeline backed by the CUDA Tile compiler
 
 # Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
@@ -14,7 +18,7 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 - **NVIDIA GPU** with `sm_80` or >= `sm_100` compute capability. `sm_90` is not yet supported.
 - **CUDA** 13.2.
 - **LLVM** 21 with MLIR.
-- **Rust** 1.75+ (nightly required for some features)
+- **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
 
 ## Install
@@ -24,12 +28,13 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 To install Rust:
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup default nightly
+rustup default stable
 ```
 
 ### CUDA
 
-Install CUDA 13.2 on your OS by following these instructions: https://developer.nvidia.com/cuda-downloads
+Install CUDA 13.2 for your OS by following the official instructions:
+https://developer.nvidia.com/cuda-downloads
 
 ### LLVM
 
@@ -42,9 +47,15 @@ sudo apt-get install libmlir-21-dev mlir-21-tools
 ```
 
 ## Configure Environment
-  - Set the env var `CUDA_TOOLKIT_PATH` to CUDA 13.2.
-  - Ensure `llvm-config` points to LLVM 21. Required by `melior`.
-  - Set the env var `CUDA_TILE_USE_LLVM_INSTALL_DIR` to llvm-21 (e.g. `/usr/lib/llvm-21`). Required by `cuda-tile-rs`.
+
+- Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
+- Ensure `llvm-config` points to LLVM 21. This is required by `melior`.
+- Set `CUDA_TILE_USE_LLVM_INSTALL_DIR` to your LLVM 21 install directory (for example `/usr/lib/llvm-21`). This is required by `cuda-tile-rs`.
+- Initialize the CUDA Tile submodule before building:
+
+```bash
+git submodule update --init --recursive
+```
 
 The environment needs access to `llvm-config` in order to resolve llvm (and mlir)-related dependencies.
 You can configure multiple llvm builds using `update-alternatives`:
@@ -53,20 +64,24 @@ sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/lib/llv
 sudo update-alternatives --config llvm-config
 ```
 
-Example `.env/config.toml`:
+Example `.cargo/config.toml`:
 ```toml
 [env]
-CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13", relative = false }
+CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false }
 CUDA_TILE_USE_LLVM_INSTALL_DIR = { value = "/usr/lib/llvm-21", relative = false }
 ```
 
 ### Building cuda-tile-rs
 
-This project depends on the cuda-tile MLIR dialect. Please follow the instructions [here](cuda-tile-rs/README.md) to set it up.
+This workspace depends on the `cuda-tile` submodule and the `cuda-tile-rs` crate. See [cuda-tile-rs/README.md](cuda-tile-rs/README.md) for the crate-specific setup and testing steps.
 
 ## Verifying Installation
 
-Run the hello world example via `cargo run -p cutile-examples --example hello_world`.
+Run the hello world example:
+
+```bash
+cargo run -p cutile-examples --example hello_world
+```
 
 If everything works, you should see: `Hello, I am tile <0, 0, 0> in a kernel with <1, 1, 1> tiles.`
 
@@ -119,7 +134,7 @@ a distinct sub-tensor from the partitioning of `z` as the `&mut Tensor<...>` ker
 Each tile thread has exclusive access to a distinct sub-tensor within the partition of `z`,
 allowing for safe parallel mutable access.
 
-- To run the above example, run `cargo run -p cutile-examples --example add_basic`.
+- Run the above example via `cargo run -p cutile-examples --example add_basic`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
 # Tests

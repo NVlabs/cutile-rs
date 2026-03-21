@@ -51,7 +51,7 @@ pub fn fmha_ref_exec<T: WithDType>(
     let qk_scaled = qk.mul(&sm_scale_tensor).expect("Failed to scale qk.");
     let qk_softmax = softmax(&qk_scaled, 3).expect("Failed to softmax qk.");
 
-     // (m x m) @ (m x d)
+    // (m x m) @ (m x d)
     qk_softmax
         .broadcast_matmul(&v_host)
         .expect("Failed to execute qk @ v.") // (b, h, m, d)

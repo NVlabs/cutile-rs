@@ -12,6 +12,18 @@ use crate::compiler::utils::TileBinaryOp;
 
 // TODO (hme): Look into bounds for types other than i64.
 
+fn div_ceil_i64(lhs: i64, rhs: i64) -> i64 {
+    let quotient = lhs / rhs;
+    let remainder = lhs % rhs;
+    if remainder == 0 {
+        quotient
+    } else if (lhs > 0) == (rhs > 0) {
+        quotient + 1
+    } else {
+        quotient
+    }
+}
+
 /// An inclusive interval `[start, end]` over a copyable type.
 #[derive(Debug, Copy, Clone)]
 pub struct Bounds<T: Copy + PartialEq> {
@@ -204,7 +216,7 @@ pub fn bounds_from_bop(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> O
                 (0, _) => None,
                 _ => Some(match op {
                     TileBinaryOp::Div | TileBinaryOp::TrueDiv => *a / *b,
-                    TileBinaryOp::CeilDiv => bop_bounds(a, b, |a, b| i64::div_ceil(a, b)),
+                    TileBinaryOp::CeilDiv => bop_bounds(a, b, div_ceil_i64),
                     _ => unreachable!(),
                 }),
             }

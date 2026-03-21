@@ -3628,10 +3628,7 @@ pub mod core {
     /// store_tile(tensor, tile);
     /// ```
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn store_tile<E: ElementType, const S: [i32; N]>(
-        y: &mut Tensor<E, S>,
-        result: Tile<E, S>,
-    ) {
+    pub fn store_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>, result: Tile<E, S>) {
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(y);
         let mut y_partition: PartitionMut<E, S> =

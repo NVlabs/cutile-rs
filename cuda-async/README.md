@@ -140,3 +140,11 @@ async fn main() {
 ```
 
 For an in-depth example, check out the data-parallel MLP example [here](../cutile-examples/examples/async_mlp.rs).
+
+# Testing
+
+Run the crate tests with:
+
+```bash
+cargo test -p cuda-async
+```

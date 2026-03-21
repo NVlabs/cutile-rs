@@ -272,10 +272,7 @@ where
 /// Useful when you need to schedule operations on a specific device outside the
 /// default `.await` / `.sync()` path.
 pub fn global_policy(device_id: usize) -> Result<Arc<GlobalSchedulingPolicy>, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        
-        device_context.policy.clone()
-    })
+    with_global_device_context(device_id, |device_context| device_context.policy.clone())
 }
 
 pub unsafe fn with_deallocator_stream<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>

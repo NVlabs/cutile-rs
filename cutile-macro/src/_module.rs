@@ -57,7 +57,7 @@
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -74,6 +74,47 @@ use crate::kernel_launcher_generator::generate_kernel_launcher;
 use crate::rewrite_variadics::*;
 use crate::validate_dsl_syntax::validate_entry_point_parameters;
 use cutile_compiler::syn_utils::*;
+
+fn line_column_to_offset(source: &str, loc: LineColumn) -> Option<usize> {
+    let mut line_start = 0usize;
+    let mut current_line = 1usize;
+
+    for line in source.split_inclusive('\n') {
+        if current_line == loc.line {
+            let column_offset = byte_offset_for_char_column(line, loc.column)?;
+            return Some(line_start + column_offset);
+        }
+        line_start += line.len();
+        current_line += 1;
+    }
+
+    if current_line == loc.line {
+        let tail = &source[line_start..];
+        let column_offset = byte_offset_for_char_column(tail, loc.column)?;
+        return Some(line_start + column_offset);
+    }
+
+    None
+}
+
+fn byte_offset_for_char_column(line: &str, column: usize) -> Option<usize> {
+    if column == 0 {
+        return Some(0);
+    }
+
+    if column == line.chars().count() {
+        return Some(line.len());
+    }
+
+    line.char_indices().nth(column).map(|(idx, _)| idx)
+}
+
+fn source_slice_from_file(path: &str, start: LineColumn, end: LineColumn) -> Option<String> {
+    let source = fs::read_to_string(path).ok()?;
+    let start_offset = line_column_to_offset(&source, start)?;
+    let end_offset = line_column_to_offset(&source, end)?;
+    source.get(start_offset..end_offset).map(str::to_string)
+}
 
 /// Returns the path to the CUDA tile AST module.
 ///
@@ -827,21 +868,27 @@ pub fn module_asts(
     // span covering the entire `ItemMod` by joining the span of the opening
     // `mod` keyword with the span of the closing `}`.
     //
-    // If `source_text()` is unavailable (returns `None`), we fall back to
-    // `TokenStream::to_string()`.  This fallback strips comments, which means
-    // reported line numbers may be shifted earlier by the number of removed
-    // comment lines.  This is acceptable as a degraded-but-functional mode.
+    // If `source_text()` is unavailable (for example on a stable compiler),
+    // we reconstruct the exact source slice from the original file using the
+    // span start/end positions. Only if that fails do we fall back to
+    // `TokenStream::to_string()`.
     let source_text = {
-        // Try to build a span covering the whole module: visibility/mod keyword .. closing brace.
         let full_span = item
             .content
             .as_ref()
             .and_then(|(brace, _)| item_start_span.join(brace.span.close()));
+        let file_slice = item.content.as_ref().and_then(|(brace, _)| {
+            source_slice_from_file(
+                &source_file.to_string(),
+                item_start_span.start(),
+                brace.span.close().end(),
+            )
+        });
 
-        // Use source_text() on the full span, falling back to TokenStream stringification.
         full_span
             .and_then(|sp| sp.source_text())
-            .unwrap_or(raw_item_source)
+            .or(file_slice)
+            .unwrap_or_else(|| raw_item_source)
     };
 
     let result = quote! {
@@ -852,9 +899,9 @@ pub fn module_asts(
             // When `Span::source_text()` was available, this is the verbatim
             // original source (with comments), so `syn::parse_str` produces
             // spans whose line/column correspond 1-to-1 with the original
-            // file layout.  In the fallback path the text may lack comments,
-            // but the span arithmetic still produces useful (if shifted)
-            // locations.
+            // file layout. When `source_text()` is unavailable, the macro
+            // reconstructs the exact source slice from the original file so
+            // stable builds preserve line numbers too.
             let source_text: &str = #source_text;
             let parsed_mod: syn::ItemMod = syn::parse_str(source_text)
                 .expect("module_asts: failed to re-parse captured source text");

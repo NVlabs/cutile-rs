@@ -6,11 +6,6 @@
 //! Async runtime for CUDA device operations, providing futures-based kernel launching
 //! and device memory management.
 
-#![feature(slice_ptr_get)]
-#![feature(type_alias_impl_trait)]
-#![feature(associated_type_defaults)]
-#![feature(unsafe_cell_access)]
-
 pub mod device_box;
 pub mod device_context;
 pub mod device_future;

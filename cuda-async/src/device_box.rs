@@ -53,8 +53,12 @@ impl<T: Send + ?Sized> Drop for DeviceBox<T> {
             with_deallocator_stream(self._device_id, |stream| {
                 free_async(self.cudptr, stream);
             })
-            .unwrap_or_else(|_| panic!("Failed to free device pointer on device_id={}",
-                    self._device_id))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Failed to free device pointer on device_id={}",
+                    self._device_id
+                )
+            })
         }
     }
 }

@@ -5,7 +5,6 @@
 
 //! JIT compiler that translates Rust DSL modules into CUDA Tile MLIR and compiles them to GPU cubins.
 
-#![feature(trim_prefix_suffix, int_roundings)]
 #![allow(non_snake_case)]
 extern crate core;
 
