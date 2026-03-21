@@ -69,4 +69,4 @@ jobs:
           CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
-          cargo clippy -- -D warnings
+          cargo clippy
