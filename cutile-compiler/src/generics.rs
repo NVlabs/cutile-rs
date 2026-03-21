@@ -899,9 +899,14 @@ impl Instantiable for TypeInstanceStructuredType {
                                 );
                             } else if generic_vars.inst_i32.contains_key(&last_ident) {
                                 // This is something like N for const generic N: i32.
-                                panic!("Unexpected const arg {last_ident} for variadic type {maybe_generic_ty:#?}");
+                                panic!(
+                                    "Unexpected const arg {last_ident} for variadic type {maybe_generic_ty:#?}"
+                                );
                             } else {
-                                panic!("Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}", maybe_generic_ty.to_token_stream().to_string());
+                                panic!(
+                                    "Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}",
+                                    maybe_generic_ty.to_token_stream().to_string()
+                                );
                             }
                         }
                         syn::Type::Ptr(_) => {
@@ -916,7 +921,10 @@ impl Instantiable for TypeInstanceStructuredType {
                             primitive_type = Some(TypInstancePrimitiveType::PtrType(ptr_inst));
                         }
                         syn::Type::Reference(type_ref) => {
-                            unimplemented!("TypeInstanceStructuredType::instantiate: Type::Reference not supported: {:#?}", type_ref);
+                            unimplemented!(
+                                "TypeInstanceStructuredType::instantiate: Type::Reference not supported: {:#?}",
+                                type_ref
+                            );
                         }
                         _ => {}
                     }
@@ -939,27 +947,41 @@ impl Instantiable for TypeInstanceStructuredType {
                                         match elem {
                                             Expr::Lit(lit) => {
                                                 let val = match &lit.lit {
-                                                    Lit::Int(int_lit) => int_lit.base10_parse::<i32>().unwrap(),
-                                                    _ => unimplemented!("Unexpected array element {elem:#?} in {array_expr:#?}"),
+                                                    Lit::Int(int_lit) => {
+                                                        int_lit.base10_parse::<i32>().unwrap()
+                                                    }
+                                                    _ => unimplemented!(
+                                                        "Unexpected array element {elem:#?} in {array_expr:#?}"
+                                                    ),
                                                 };
                                                 _shape.push(val);
-                                            },
-                                            Expr::Unary(unary_expr ) => {
-                                                let unary_expr_str = unary_expr.to_token_stream().to_string();
+                                            }
+                                            Expr::Unary(unary_expr) => {
+                                                let unary_expr_str =
+                                                    unary_expr.to_token_stream().to_string();
                                                 if unary_expr_str == "- 1" {
                                                     _shape.push(-1);
                                                 } else {
-                                                    panic!("Unexpected unary expression {unary_expr_str:#?} in {array_expr:#?}")
+                                                    panic!(
+                                                        "Unexpected unary expression {unary_expr_str:#?} in {array_expr:#?}"
+                                                    )
                                                 }
-                                            },
+                                            }
                                             Expr::Path(path) => {
                                                 let ident = get_ident_from_path_expr(path);
-                                                match generic_vars.inst_i32.get(ident.to_string().as_str()) {
+                                                match generic_vars
+                                                    .inst_i32
+                                                    .get(ident.to_string().as_str())
+                                                {
                                                     Some(val) => _shape.push(*val),
-                                                    None => panic!("Undefined generic parameter {ident}")
+                                                    None => panic!(
+                                                        "Undefined generic parameter {ident}"
+                                                    ),
                                                 }
-                                            },
-                                            _ => unimplemented!("Unexpected array element {elem:#?} in {array_expr:#?}"),
+                                            }
+                                            _ => unimplemented!(
+                                                "Unexpected array element {elem:#?} in {array_expr:#?}"
+                                            ),
                                         }
                                     }
                                     let shape_str = _shape
@@ -979,28 +1001,40 @@ impl Instantiable for TypeInstanceStructuredType {
                                     // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                                     let repeat_expr_expr = &*repeat_expr.expr;
                                     let thing_to_repeat = match repeat_expr_expr {
-                                        Expr::Lit(lit) => {
-                                            match &lit.lit {
-                                                Lit::Int(int_lit) => int_lit.base10_parse::<i32>().unwrap(),
-                                                _ => unimplemented!("Unexpected repeat expr {repeat_expr_expr:#?} in {repeat_expr:#?}"),
+                                        Expr::Lit(lit) => match &lit.lit {
+                                            Lit::Int(int_lit) => {
+                                                int_lit.base10_parse::<i32>().unwrap()
                                             }
+                                            _ => unimplemented!(
+                                                "Unexpected repeat expr {repeat_expr_expr:#?} in {repeat_expr:#?}"
+                                            ),
                                         },
-                                        Expr::Unary(unary_expr ) => {
-                                            let unary_expr_str = unary_expr.to_token_stream().to_string();
+                                        Expr::Unary(unary_expr) => {
+                                            let unary_expr_str =
+                                                unary_expr.to_token_stream().to_string();
                                             if unary_expr_str == "- 1" {
                                                 -1
                                             } else {
-                                                unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}")
+                                                unimplemented!(
+                                                    "Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"
+                                                )
                                             }
-                                        },
+                                        }
                                         Expr::Path(path) => {
                                             let ident = get_ident_from_path_expr(path);
-                                            match generic_vars.inst_i32.get(ident.to_string().as_str()) {
+                                            match generic_vars
+                                                .inst_i32
+                                                .get(ident.to_string().as_str())
+                                            {
                                                 Some(val) => *val,
-                                                None => panic!("Undefined generic parameter {ident}")
+                                                None => {
+                                                    panic!("Undefined generic parameter {ident}")
+                                                }
                                             }
-                                        },
-                                        _ => unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"),
+                                        }
+                                        _ => unimplemented!(
+                                            "Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"
+                                        ),
                                     };
                                     let num_rep = match &*repeat_expr.len {
                                         Expr::Path(len_path) => {
@@ -1050,7 +1084,9 @@ impl Instantiable for TypeInstanceStructuredType {
                 shape,
             }),
             _ => {
-                panic!("Unable to parse {maybe_generic_ty:#?} \n primitive_type = {primitive_type:#?} \n shape = {shape:#?}");
+                panic!(
+                    "Unable to parse {maybe_generic_ty:#?} \n primitive_type = {primitive_type:#?} \n shape = {shape:#?}"
+                );
             }
         }
     }
@@ -1205,7 +1241,9 @@ impl GenericArgInference {
                 // they are either "type" or "const."
                 GenericArgument::Type(arg_ty) => {
                     let Some(arg_type_ident) = get_type_ident(arg_ty) else {
-                        panic!("apply_provided_generics_fn_call: Failed to get ident for type {arg_ty:#?}");
+                        panic!(
+                            "apply_provided_generics_fn_call: Failed to get ident for type {arg_ty:#?}"
+                        );
                     };
                     let var_string = arg_type_ident.to_string();
                     let var_str = var_string.as_str();
@@ -1304,7 +1342,9 @@ impl GenericArgInference {
                 // they are either "type" or "const."
                 GenericArgument::Type(arg_ty) => {
                     let Some(arg_type_ident) = get_type_ident(arg_ty) else {
-                        panic!("apply_provided_generics_fn_call: Failed to get ident for type {arg_ty:#?}");
+                        panic!(
+                            "apply_provided_generics_fn_call: Failed to get ident for type {arg_ty:#?}"
+                        );
                     };
                     let var_string = arg_type_ident.to_string();
                     let var_str = var_string.as_str();
@@ -1648,34 +1688,46 @@ impl GenericArgInference {
                                         if self.param2arg.contains_key(&param_var) {
                                             let arg_elem = &arg_array_expr.elems[i];
                                             let arg_val = match arg_elem {
-                                                Expr::Lit(lit) => {
-                                                    match &lit.lit {
-                                                        Lit::Int(_int_lit) => arg_elem.to_token_stream().to_string(),
-                                                        _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
+                                                Expr::Lit(lit) => match &lit.lit {
+                                                    Lit::Int(_int_lit) => {
+                                                        arg_elem.to_token_stream().to_string()
                                                     }
+                                                    _ => unimplemented!(
+                                                        "Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"
+                                                    ),
                                                 },
                                                 Expr::Unary(_unary_expr) => {
                                                     arg_elem.to_token_stream().to_string()
                                                     // unary_expr.to_token_stream().to_string()
-                                                },
+                                                }
                                                 Expr::Path(_path) => {
                                                     arg_elem.to_token_stream().to_string()
                                                     // get_ident_from_type_path(path).to_string()
-                                                },
-                                                _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
+                                                }
+                                                _ => unimplemented!(
+                                                    "Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"
+                                                ),
                                             };
-                                            let replaced_arg = self.param2arg.insert(param_var.to_string(), Some((GenericArgType::GenericConstExpr, arg_val.to_string())));
+                                            let replaced_arg = self.param2arg.insert(
+                                                param_var.to_string(),
+                                                Some((
+                                                    GenericArgType::GenericConstExpr,
+                                                    arg_val.to_string(),
+                                                )),
+                                            );
                                             if let Some(Some((_arg_type, arg))) = replaced_arg {
                                                 assert_eq!(arg, arg_val.to_string());
                                             }
                                         }
                                     }
-                                },
+                                }
                                 (_, Expr::Repeat(_param_expr)) => {
                                     // TODO (hme): Check that this is okay.
                                     // If param is comprised of variadic literals, then skip it.
                                 }
-                                _ => panic!("Unexpected block expression:\nparam=\n{param_stmt_expr:#?}\narg=\n{arg_stmt_expr:#?}")
+                                _ => panic!(
+                                    "Unexpected block expression:\nparam=\n{param_stmt_expr:#?}\narg=\n{arg_stmt_expr:#?}"
+                                ),
                             }
                         }
                         _ => unimplemented!(
@@ -1781,7 +1833,9 @@ impl GenericArgInference {
                             // This is not a generic parameter.
                         }
                         Some(None) => {
-                            panic!("Failed to infer generic parameter {param_ident_str} \n{arg_map:#?}")
+                            panic!(
+                                "Failed to infer generic parameter {param_ident_str} \n{arg_map:#?}"
+                            )
                         }
                         Some(Some((GenericArgType::Type, target_ty))) => {
                             result = syn::parse2::<Type>(target_ty.parse().unwrap()).unwrap();
@@ -1887,7 +1941,9 @@ impl GenericArgInference {
                                     // This is not a generic parameter.
                                 }
                                 Some(None) => {
-                                    panic!("Failed to infer generic parameter {param_ident_str} \n{arg_map:#?}")
+                                    panic!(
+                                        "Failed to infer generic parameter {param_ident_str} \n{arg_map:#?}"
+                                    )
                                 }
                                 Some(Some((GenericArgType::Type, target_ty))) => {
                                     *arg =

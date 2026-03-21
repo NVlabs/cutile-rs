@@ -70,7 +70,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         {
             Some(op_attrs) => op_attrs,
             None => {
-                return self.jit_error_result(&call_expr.func.span(), "undefined operation call")
+                return self.jit_error_result(&call_expr.func.span(), "undefined operation call");
             }
         };
         let op_name = match op_attrs.parse_string("name") {
@@ -79,7 +79,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 return self.jit_error_result(
                     &call_expr.func.span(),
                     &format!("missing operation name for function `{rust_function_name:?}"),
-                )
+                );
             }
         };
 
@@ -280,7 +280,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
                         memory_scope
                     ),
-                )
+                );
             }
         };
 
@@ -534,7 +534,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
                         memory_scope
                     ),
-                )
+                );
             }
         };
 
@@ -736,7 +736,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
                         memory_scope
                     ),
-                )
+                );
             }
         };
 
@@ -951,7 +951,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
                         memory_scope
                     ),
-                )
+                );
             }
         };
 
@@ -1719,7 +1719,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "Return type required for {}",
                             call_expr.to_token_stream().to_string()
                         ),
-                    )
+                    );
                 }
                 _ => {}
             }
@@ -1841,7 +1841,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         return self.jit_error_result(
                             &call_expr.args[i].span(),
                             &format!("Failed to access field {op_param} for {call_expr_arg_str}"),
-                        )
+                        );
                     }
                 }
             } else if op_arg.values.is_some() {
@@ -1955,14 +1955,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &call_expr.args[i].span(),
                                     "Attribute type not implemented.",
-                                )
+                                );
                             }
                         },
                         _ => {
                             return self.jit_error_result(
                                 &call_expr.args[i].span(),
                                 &format!("Unexpected call arg {call_expr_arg_str} for {next_attr}"),
-                            )
+                            );
                         }
                     }
                 }
@@ -1983,7 +1983,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &call_expr.args[i].span(),
                                     "Constant not supported",
-                                )
+                                );
                             }
                         },
                         Expr::Path(path_expr) => {
@@ -2007,7 +2007,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     return self.jit_error_result(
                                         &call_expr.args[i].span(),
                                         "Constant not supported",
-                                    )
+                                    );
                                 }
                             }
                         }
@@ -2015,7 +2015,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &call_expr.args[i].span(),
                                 "Unsupported expression for named attribute.",
-                            )
+                            );
                         }
                     };
                     if return_type.cuda_tile_ty.is_none() {
@@ -2065,7 +2065,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 "Rounding mode must be a string literal. Valid values: \
                              \"nearest_even\", \"positive_inf\", \"negative_inf\", \
                              \"nearest_int_to_zero\", \"approx\".",
-                            )
+                            );
                         }
                     };
                     const VALID_MODES: &[&str] = &[
@@ -2164,7 +2164,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     return self.jit_error_result(
                         &call_expr.span(),
                         &format!("Attribute type not implemented: {attr_ty}"),
-                    )
+                    );
                 }
             }
         }
@@ -2515,7 +2515,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 return self.jit_error_result(
                     &mac.path.span(),
                     &format!("unrecognized macro `{}`", mac_ident),
-                )
+                );
             }
         }
     }

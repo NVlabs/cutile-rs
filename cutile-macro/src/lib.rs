@@ -119,7 +119,6 @@
 //! - `cutile` crate - The runtime library and core types
 //! - `cuda-tile` crate - The MLIR compiler backend
 
-#![feature(proc_macro_diagnostic)]
 #![allow(dead_code)]
 #![allow(unused_assignments)]
 #![allow(non_snake_case)]

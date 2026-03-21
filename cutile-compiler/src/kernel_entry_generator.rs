@@ -661,13 +661,13 @@ pub fn get_tensor_shape(
                                             &format!(
                                                 "Unexpected repeat expression: {repeat_expr:#?}"
                                             ),
-                                        )
+                                        );
                                     }
                                 }
                             }
                             _ => {
                                 return SourceLocation::unknown()
-                                    .jit_error_result("Unexpected block expression.")
+                                    .jit_error_result("Unexpected block expression.");
                             }
                         }
                     }

@@ -1140,7 +1140,7 @@ impl Iterator for ConstGenericArrayTypeListIterator {
                     None => {
                         return Some(call_site_error(
                             "ConstGenericArrayTypeListIterator: iterator was empty on first pass.",
-                        ))
+                        ));
                     }
                 }
             }

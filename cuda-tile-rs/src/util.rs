@@ -4,9 +4,9 @@
  */
 
 use melior::{
-    Context, StringRef,
-    ir::{Attribute, Identifier, Operation, Type, operation::OperationLike},
+    ir::{operation::OperationLike, Attribute, Identifier, Operation, Type},
     pass::PassManager,
+    Context, StringRef,
 };
 use mlir_sys::mlirPassManagerRunOnOp;
 use mlir_sys::{mlirAttributeParseGet, mlirOperationCreateParse};

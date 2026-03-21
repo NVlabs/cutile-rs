@@ -419,7 +419,9 @@ fn get_concrete_op_or_method_ident_from_types(
         let Some(vtd) = get_vtd(ty)? else {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("Unable to infer type for argument {idx} for call to {op_or_method_ident}. Expected {expected_type_name}. Required by calls to variadic functions and methods."),
+                &format!(
+                    "Unable to infer type for argument {idx} for call to {op_or_method_ident}. Expected {expected_type_name}. Required by calls to variadic functions and methods."
+                ),
             ));
         };
         // Get the cga_instances from const_instances. These are ordered.
@@ -427,7 +429,10 @@ fn get_concrete_op_or_method_ident_from_types(
         let Some(cga_instances) = get_cga_type(ty, const_instances)? else {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unable to get cga instances for type: {}", ty.to_token_stream().to_string()),
+                &format!(
+                    "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unable to get cga instances for type: {}",
+                    ty.to_token_stream().to_string()
+                ),
             ));
         };
         // This is a variadic type with cga instances.
@@ -435,13 +440,20 @@ fn get_concrete_op_or_method_ident_from_types(
         if expected_type_name != type_name {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected positional argument type: {:#?}", (idx, ty.to_token_stream().to_string())),
+                &format!(
+                    "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected positional argument type: {:#?}",
+                    (idx, ty.to_token_stream().to_string())
+                ),
             ));
         }
         if vod_cga_var_names.len() != cga_instances.n.len() {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances for {type_name}, got {:?}.", vod_cga_var_names.len(), cga_instances.n),
+                &format!(
+                    "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances for {type_name}, got {:?}.",
+                    vod_cga_var_names.len(),
+                    cga_instances.n
+                ),
             ));
         }
         for i in 0..vod_cga_var_names.len() {
@@ -461,7 +473,9 @@ fn get_concrete_op_or_method_ident_from_types(
                 if current_var_length != cga_var_length {
                     return Err(syn_err(
                         op_or_method_ident.span(),
-                        &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): CGA instance var length mismatch. Expected {current_var_length} but got {cga_var_length} for cga {cga_var_name}."),
+                        &format!(
+                            "get_concrete_op_ident_from_types({op_or_method_ident}, ...): CGA instance var length mismatch. Expected {current_var_length} but got {cga_var_length} for cga {cga_var_name}."
+                        ),
                     ));
                 }
             } else {
@@ -476,17 +490,22 @@ fn get_concrete_op_or_method_ident_from_types(
     if const_length_values.len() > vod.const_length_vars.len() {
         return Err(syn_err(
             op_or_method_ident.span(),
-            &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected number of cga instances: {:#?} ", const_length_values),
+            &format!(
+                "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected number of cga instances: {:#?} ",
+                const_length_values
+            ),
         ));
     } else if const_length_values.len() < vod.const_length_vars.len() {
         // Try to get the last cga instance from the output type.
         if output_type.is_none() {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("Unable to infer call to {}. Try binding it to a statically typed variable. \nDebug info:\n const_length_values={:#?}, vod.const_length_vars={:#?}",
+                &format!(
+                    "Unable to infer call to {}. Try binding it to a statically typed variable. \nDebug info:\n const_length_values={:#?}, vod.const_length_vars={:#?}",
                     op_or_method_ident.to_string(),
                     const_length_values,
-                    vod.const_length_vars),
+                    vod.const_length_vars
+                ),
             ));
         }
         let output_type = output_type.clone().unwrap();
@@ -506,7 +525,10 @@ fn get_concrete_op_or_method_ident_from_types(
         if cga_instances.is_none() {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unable to get cga instances for output type: {}", output_type.to_token_stream().to_string()),
+                &format!(
+                    "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unable to get cga instances for output type: {}",
+                    output_type.to_token_stream().to_string()
+                ),
             ));
         }
         let cga_instances = cga_instances.unwrap();
@@ -515,13 +537,20 @@ fn get_concrete_op_or_method_ident_from_types(
         if expected_type_name != vtd.name {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected output type: {}", output_type.to_token_stream().to_string()),
+                &format!(
+                    "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected output type: {}",
+                    output_type.to_token_stream().to_string()
+                ),
             ));
         }
         if vod_cga_var_names.len() != cga_instances.n.len() {
             return Err(syn_err(
                 op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances, got {}.", vod_cga_var_names.len(), cga_instances.n.len()),
+                &format!(
+                    "get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances, got {}.",
+                    vod_cga_var_names.len(),
+                    cga_instances.n.len()
+                ),
             ));
         }
         for i in 0..vod_cga_var_names.len() {
@@ -538,7 +567,9 @@ fn get_concrete_op_or_method_ident_from_types(
                 if *const_length_values.get(cga_var_length_var).unwrap() != cga_var_length {
                     return Err(syn_err(
                         op_or_method_ident.span(),
-                        &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): CGA instance var length mismatch for output type."),
+                        &format!(
+                            "get_concrete_op_ident_from_types({op_or_method_ident}, ...): CGA instance var length mismatch for output type."
+                        ),
                     ));
                 }
             } else {
@@ -550,7 +581,9 @@ fn get_concrete_op_or_method_ident_from_types(
     if const_length_values.len() != vod.const_length_vars.len() {
         return Err(syn_err(
             op_or_method_ident.span(),
-            &format!("Unable to infer type for argument(s) {missing_idx:?} for call to {op_or_method_ident}. Expected {missing_types:?}. Required by calls to variadic functions and methods."),
+            &format!(
+                "Unable to infer type for argument(s) {missing_idx:?} for call to {op_or_method_ident}. Expected {missing_types:?}. Required by calls to variadic functions and methods."
+            ),
         ));
     }
 
@@ -592,7 +625,11 @@ fn get_concrete_op_or_method_ident_from_types(
                 if output_type.is_none() {
                     return Err(syn_err(
                         op_or_method_ident.span(),
-                        &format!("Failed to infer return type generic args {:?} \nop={} \nvod_cga_name_to_context_cga_name={vod_cga_name_to_context_cga_name:#?}", missing_cgas, op_or_method_ident.to_string()),
+                        &format!(
+                            "Failed to infer return type generic args {:?} \nop={} \nvod_cga_name_to_context_cga_name={vod_cga_name_to_context_cga_name:#?}",
+                            missing_cgas,
+                            op_or_method_ident.to_string()
+                        ),
                     ));
                 }
                 output_type
@@ -1295,7 +1332,9 @@ pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<Item
     if get_variadic_op_data(&op_name).is_none() {
         return Err(syn_err(
             item.sig.ident.span(),
-            &format!("Variadic op data not found for {op_name}. VariadicOpData entry is required for ops with cuda_tile::variadic_op annotation."),
+            &format!(
+                "Variadic op data not found for {op_name}. VariadicOpData entry is required for ops with cuda_tile::variadic_op annotation."
+            ),
         ));
     }
     let cgas = parse_var_cgas(&item.sig.generics);
@@ -1496,7 +1535,7 @@ pub(self) fn desugar_generic_arguments(
                         "Unsupported generic argument {}",
                         arg.to_token_stream().to_string()
                     ),
-                ))
+                ));
             }
         }
     }
@@ -1709,7 +1748,7 @@ pub(self) fn desugar_cga(
                                         return Err(syn_err(
                                             generic_args.span(),
                                             "Unexpected repeat expression.",
-                                        ))
+                                        ));
                                     }
                                 };
                                 expanded_param_name = match &variadic_type_data {
@@ -1721,7 +1760,7 @@ pub(self) fn desugar_cga(
                                 return Err(syn_err(
                                     block_expr.span(),
                                     "Unexpected block expression.",
-                                ))
+                                ));
                             }
                         }
                     }
@@ -1874,7 +1913,7 @@ pub(self) fn get_cga_type(
                                         return Err(syn_err(
                                             ty.span(),
                                             "Unexpected repeat expression.",
-                                        ))
+                                        ));
                                     }
                                 }
                             }
@@ -1882,7 +1921,7 @@ pub(self) fn get_cga_type(
                                 return Err(syn_err(
                                     block_expr.span(),
                                     "Unexpected block expression.",
-                                ))
+                                ));
                             }
                         }
                     }
@@ -2071,7 +2110,7 @@ impl RewriteVariadicsPass {
                     return Err(syn_err(
                         concrete_item.span(),
                         &format!("Unsupported impl item"),
-                    ))
+                    ));
                 }
             }
         }
@@ -2140,7 +2179,10 @@ impl RewriteVariadicsPass {
                     match attributes {
                         Some(attributes) => {
                             if variadic_trait_vtd.is_some() {
-                                return Err(syn_err(fn_impl.sig.ident.span(), "variadic_impl_fn attributes are not supported for variadic traits."));
+                                return Err(syn_err(
+                                    fn_impl.sig.ident.span(),
+                                    "variadic_impl_fn attributes are not supported for variadic traits.",
+                                ));
                             }
                             clear_attributes(
                                 HashSet::from(["cuda_tile :: variadic_impl_fn"]),
@@ -2174,7 +2216,7 @@ impl RewriteVariadicsPass {
                     return Err(syn_err(
                         concrete_item.span(),
                         &format!("Unsupported impl item."),
-                    ))
+                    ));
                 }
             }
         }
@@ -2250,7 +2292,7 @@ impl RewriteVariadicsPass {
                                 return Err(syn_err(
                                     fn_param.span(),
                                     &format!("Unexpected function param pattern."),
-                                ))
+                                ));
                             }
                         }
                     };
@@ -2327,7 +2369,7 @@ impl RewriteVariadicsPass {
                                     return Err(syn_err(
                                         pat_type.span(),
                                         &format!("let binding LHS not implemented."),
-                                    ))
+                                    ));
                                 }
                             }
                             binding_ty = Some(*pat_type.ty.clone());
@@ -2357,7 +2399,7 @@ impl RewriteVariadicsPass {
                             return Err(syn_err(
                                 local.span(),
                                 &format!("Local pattern type not supported"),
-                            ))
+                            ));
                         }
                     }
                     if binding_name.is_none() {
@@ -2408,7 +2450,7 @@ impl RewriteVariadicsPass {
                                     "{}\nOnly const local item definitions are supported.",
                                     item.to_token_stream().to_string()
                                 ),
-                            ))
+                            ));
                         }
                     };
                     let Some(binding_name) = binding_name else {
@@ -2442,7 +2484,7 @@ impl RewriteVariadicsPass {
                                     return Err(syn_err(
                                         assign_expr.span(),
                                         &format!("Expr::Assign not supported"),
-                                    ))
+                                    ));
                                 }
                             }
                             // The computed binding type ty is expected to be None.
@@ -2811,7 +2853,7 @@ impl RewriteVariadicsPass {
                                 return Err(syn_err(
                                     struct_expr.span(),
                                     "Unexpected Path arguments.",
-                                ))
+                                ));
                             }
                         };
                         *last_seg = PathSegment {
@@ -2827,7 +2869,7 @@ impl RewriteVariadicsPass {
                     match &mut field.member {
                         Member::Named(_named) => {}
                         Member::Unnamed(_idx) => {
-                            return Err(syn_err(struct_expr.span(), "Tuples not supported."))
+                            return Err(syn_err(struct_expr.span(), "Tuples not supported."));
                         }
                     }
                 }
@@ -2892,7 +2934,7 @@ impl RewriteVariadicsPass {
                                     return Err(syn_err(
                                         mac_expr.span(),
                                         &format!("Unexpected token {:?}", token),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -2996,7 +3038,7 @@ impl RewriteVariadicsPass {
                     return Err(syn_err(
                         expr.receiver.span(),
                         &format!("Unable to infer receiver type"),
-                    ))
+                    ));
                 }
             };
         // This may be a primitive which implements a supported variadic trait.
@@ -3074,7 +3116,7 @@ impl RewriteVariadicsPass {
                         return Err(syn_err(
                             expr.func.span(),
                             &format!("Unexpected function call expression."),
-                        ))
+                        ));
                     }
                 };
                 let mut maybe_input_types = vec![];

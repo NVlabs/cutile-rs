@@ -141,7 +141,7 @@ impl<'c, 'a> TileRustType<'c> {
                     "failed to compile type `{}` (resolved to `{}`)",
                     rust_ty.to_token_stream().to_string(),
                     type_str
-                ))
+                ));
             }
         };
         Ok(TileRustType {
@@ -180,7 +180,7 @@ impl<'c, 'a> TileRustType<'c> {
                     "failed to compile type `{}` (resolved to `{}`)",
                     rust_ty.to_token_stream().to_string(),
                     type_str
-                ))
+                ));
             }
         };
         Ok(TileRustType {

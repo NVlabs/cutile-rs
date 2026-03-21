@@ -244,7 +244,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 "Unexpected param {param} for {:?}",
                                 ty.to_token_stream().to_string()
                             ),
-                        )
+                        );
                     }
                 }
             }
@@ -450,7 +450,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     return self.jit_error_result(
                                         &method_call_expr.method.span(),
                                         &format!("Unable to find output type: {type_param_name}"),
-                                    )
+                                    );
                                 }
                             }
                         }
@@ -609,7 +609,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 "Type derivation for {} not supported.",
                                 call_expr.func.to_token_stream().to_string()
                             ),
-                        )
+                        );
                     }
                 }
             }

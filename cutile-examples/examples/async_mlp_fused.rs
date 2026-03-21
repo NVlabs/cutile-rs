@@ -2,8 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-#![feature(type_alias_impl_trait)]
-
 use cuda_async::device_context;
 use cuda_async::device_context::global_policy;
 use cuda_async::device_operation::*;

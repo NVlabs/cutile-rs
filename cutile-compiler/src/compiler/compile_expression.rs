@@ -742,7 +742,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &struct_expr.span(),
                                     "unnamed (tuple) struct fields are not supported",
-                                )
+                                );
                             }
                         };
                         let struct_name = struct_expr.path.segments[0].ident.to_string();
@@ -773,7 +773,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &field.expr.span(),
                                     &format!("failed to compile value for field `{field_name}`"),
-                                )
+                                );
                             }
                         };
                         fields.insert(field_name, field_value);
@@ -825,7 +825,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &ref_expr.span(),
                                 "this reference expression form is not supported",
-                            )
+                            );
                         }
                     }
                 }
@@ -842,7 +842,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &elem.span(),
                                     "failed to compile tuple element",
-                                )
+                                );
                             }
                         };
                     }
@@ -860,7 +860,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     &format!(
                                         "failed to parse inferred tuple type `({ty_string})`: {e}"
                                     ),
-                                )
+                                );
                             }
                         };
                     let ct_ty = match self.compile_type(&ty, generic_vars, &HashMap::new())? {
@@ -869,7 +869,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &tuple_expr.span(),
                                 "unable to compile inferred tuple type",
-                            )
+                            );
                         }
                     };
                     Ok(Some(TileRustValue::new_compound(values, ct_ty)))
@@ -900,7 +900,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                                 "unexpected element type `{}`",
                                                 return_type.rust_ty.to_token_stream().to_string()
                                             ),
-                                        )
+                                        );
                                     }
                                 }
                             }
@@ -912,7 +912,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &elem.span(),
                                     "failed to compile array element",
-                                )
+                                );
                             }
                         };
                     }
@@ -944,7 +944,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &array_expr.span(),
                                     "unable to compile inferred array type",
-                                )
+                                );
                             }
                         }
                     } else {
@@ -1029,7 +1029,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 return self.jit_error_result(
                                     &repeat_expr.span(),
                                     "unable to compile inferred repeat type",
-                                )
+                                );
                             }
                         }
                     } else {
@@ -1059,7 +1059,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &path_expr.span(),
                                 &format!("undefined variable `{}`", var_name),
-                            )
+                            );
                         }
                     };
                     Ok(Some(value.clone()))
@@ -1140,7 +1140,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &call_expr.func.span(),
                                 &format!("Call to {} not supported.", &call_expr_func_str),
-                            )
+                            );
                         }
                     }
                 }
@@ -1258,7 +1258,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     return self.jit_error_result(
                                         &lit_expr.span(),
                                         "Lit expression not implemented",
-                                    )
+                                    );
                                 }
                             };
                             let Some(cuda_tile_ty) =
@@ -1269,7 +1269,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     "unable to determine type for numeric literal; add a type annotation",
                                 );
                             };
-                            let op_str = format!("%0 = cuda_tile.constant <{cuda_tile_ty}: {lit_string}> : !cuda_tile.tile<{cuda_tile_ty}>");
+                            let op_str = format!(
+                                "%0 = cuda_tile.constant <{cuda_tile_ty}: {lit_string}> : !cuda_tile.tile<{cuda_tile_ty}>"
+                            );
                             let op = operation_parse(&self.context, op_str.as_str(), None);
                             if op.is_none() {
                                 return self.jit_error_result(
@@ -1316,7 +1318,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &unary_expr.span(),
                                 "Non-const unary expressions not supported.",
-                            )
+                            );
                         }
                     }
                 }
@@ -1338,7 +1340,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 &format!(
                                     "unsupported cast from `{src_elem_ty}` to `{dst_elem_ty}`"
                                 ),
-                            )
+                            );
                         }
                     }
                     Ok(Some(src_expr))
@@ -1382,7 +1384,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &lit_expr.span(),
                                 "Lit expression not implemented",
-                            )
+                            );
                         }
                     };
                     let Some(cuda_tile_ty) =
@@ -1393,7 +1395,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "unable to determine type for numeric literal; add a type annotation",
                         );
                     };
-                    let op_str = format!("%0 = cuda_tile.constant <{cuda_tile_ty}: {lit_string}> : !cuda_tile.tile<{cuda_tile_ty}>");
+                    let op_str = format!(
+                        "%0 = cuda_tile.constant <{cuda_tile_ty}: {lit_string}> : !cuda_tile.tile<{cuda_tile_ty}>"
+                    );
                     let op = operation_parse(&self.context, op_str.as_str(), None);
                     if op.is_none() {
                         return self.jit_error_result(
@@ -1519,7 +1523,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         return self.jit_error_result(
                                             &mac_expr.span(),
                                             "unexpected token in macro arguments",
-                                        )
+                                        );
                                     }
                                 }
                             }
@@ -1637,7 +1641,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
                 _ => {
                     return self
-                        .jit_error_result(&expr.span(), "this expression form is not supported")
+                        .jit_error_result(&expr.span(), "this expression form is not supported");
                 }
             }
         }) // stacker::maybe_grow
