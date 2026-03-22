@@ -212,7 +212,8 @@ use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOperation};
 use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
-use cuda_core::{malloc_async, CudaStream};
+use cuda_core::device_context::device_alloc_async;
+use cuda_core::CudaStream,
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -463,7 +464,11 @@ impl<T: WithDType> Tensor<T> {
             value(MaybeUninit::new(unsafe {
                 Self {
                     device_box: DeviceBox::from_raw_parts(
-                        malloc_async(num_bytes, ctx.get_cuda_stream()),
+                        device_alloc_async(
+                            num_bytes,
+                            ctx.get_cuda_stream(),
+                            ctx.get_device_id(),
+                        ),
                         len,
                         ctx.get_device_id(),
                     ),
