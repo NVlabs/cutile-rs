@@ -440,12 +440,11 @@ fn get_concrete_op_or_method_ident_from_types(
                 &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances for {type_name}, got {:?}.", vod_cga_var_names.len(), cga_instances.n),
             ));
         }
-        for (cga_var_name, (&cga_var_length, cga_arg_string)) in vod_cga_var_names.iter().zip(
-            cga_instances
-                .n
-                .iter()
-                .zip(cga_instances.cga_arg_strings.iter()),
-        ) {
+        for ((cga_var_name, &cga_var_length), cga_arg_string) in vod_cga_var_names
+            .iter()
+            .zip(cga_instances.n.iter())
+            .zip(cga_instances.cga_arg_strings.iter())
+        {
             let cga_var_length_var = vod.cga_map.get(cga_var_name).ok_or_else(|| {
                 syn_err(
                     op_or_method_ident.span(),
@@ -776,9 +775,7 @@ impl ConstInstances {
         var_cgas: &[VarCGAParameter],
     ) -> Result<Self, Error> {
         let mut result = self.clone();
-        for i in 0..n_list.len() {
-            let n: u32 = n_list[i];
-            let cga = &var_cgas[i];
+        for (&n, cga) in n_list.iter().zip(var_cgas.iter()) {
             if result.inst_u32.contains_key(&cga.length_var) {
                 return Err(syn_err(
                     Span::call_site(),
@@ -998,7 +995,7 @@ pub fn variadic_struct(
     let maybe_constructor_name = attributes.parse_string("constructor");
     let vtd = vtd.unwrap();
     let num_cgas = vtd.num_cgas();
-    if cgas.len() as u32 != num_cgas {
+    if cgas.len() != num_cgas {
         return Err(syn_err(
             item.ident.span(),
             &format!(
@@ -1027,18 +1024,21 @@ pub fn variadic_struct(
             let mut type_params: Vec<String> = vec![];
             let mut type_args: Vec<String> = vec![];
             let mut constructors: Vec<String> = vec![];
-            for cga_idx in 0..num_cgas {
+            for (((&n, cga_name), cga_index_type), cga_dim_type) in var_cga_iter_item
+                .vec_of_cga_lengths()
+                .iter()
+                .zip(vtd.cga_names)
+                .zip(vtd.cga_index_types)
+                .zip(vtd.cga_dim_types)
+            {
+                // for cga_idx in 0..num_cgas {
                 // n_list.len() == cgas.len()
                 // and we know (from above) cgas.len() == num_cgas
-                let n = var_cga_iter_item.vec_of_cga_lengths()[cga_idx as usize];
-                let cga_name: &str = vtd.cga_names[cga_idx as usize];
-                let cga_index_type: &str = vtd.cga_index_types[cga_idx as usize];
                 // Expand the cga into const generics of type cga_index_type.
                 for dim_idx in 0..n {
                     type_params.push(format!("const {cga_name}{dim_idx}: {cga_index_type}"));
                     type_args.push(format!("{cga_name}{dim_idx}"));
                 }
-                let cga_dim_type: &DimType = &vtd.cga_dim_types[cga_idx as usize];
                 match cga_dim_type {
                     DimType::Mixed => {
                         // This CGA in this struct is mixed static/dynamic.
@@ -1400,7 +1400,7 @@ fn expand_cga(
 /// Desugars variadic types in a path, replacing CGA syntax with concrete type names and args.
 fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> {
     let mut result_path = path.clone();
-    for (i, seg) in path.segments.iter().enumerate() {
+    for (seg, result_seg) in path.segments.iter().zip(result_path.segments.iter_mut()) {
         let param_name = seg.ident.to_string();
         // Is it a variadic type or is it expecting a variadic type parameter?
         if instances.inst_array.contains_key(&param_name) {
@@ -1419,20 +1419,19 @@ fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> 
             //     generic_args_result.push(format!("{}{}", cga.name, j));
             // }
             // let last_seg_args = syn::parse::<AngleBracketedGenericArguments>(format!("<{}>", generic_args_result.join(",")).parse().unwrap()).unwrap();
-            // let result_seg = PathSegment{ident: seg.ident.clone(), arguments: PathArguments::AngleBracketed(last_seg_args)};
-            // result_path.segments[i] = result_seg.clone();
+            // *result_seg = PathSegment{ident: seg.ident.clone(), arguments: PathArguments::AngleBracketed(last_seg_args)};
         } else {
-            let (last_type_ident, last_seg_args) = match &seg.arguments {
+            *result_seg = match &seg.arguments {
                 // The type takes a const generic array as a type param:
                 // f(..., shape: Shape<D>) -> ()
                 PathArguments::AngleBracketed(type_params) => {
                     // This is a type of the form T<...>
                     let (type_ident, last_seg_args) =
                         desugar_cga(instances, &seg.ident, type_params)?;
-                    (
-                        type_ident.clone(),
-                        PathArguments::AngleBracketed(last_seg_args),
-                    )
+                    PathSegment {
+                        ident: type_ident.clone(),
+                        arguments: PathArguments::AngleBracketed(last_seg_args),
+                    }
                 }
                 PathArguments::None => {
                     // It's a type without type params.
@@ -1446,15 +1445,13 @@ fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> 
                             "Variadic type arguments are required to desugar variadic types.",
                         ));
                     }
-                    (seg.ident.clone(), PathArguments::None)
+                    PathSegment {
+                        ident: seg.ident.clone(),
+                        arguments: PathArguments::None,
+                    }
                 }
                 _ => return Err(syn_err(seg.ident.span(), "Unexpected Path arguments.")),
             };
-            let result_seg = PathSegment {
-                ident: last_type_ident,
-                arguments: last_seg_args,
-            };
-            result_path.segments[i] = result_seg.clone();
         }
     }
     // println!("desugar_path {}: {:#?}", result_path.segments.len(), result_path.to_token_stream());

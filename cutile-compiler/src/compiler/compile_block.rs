@@ -117,9 +117,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                                     ),
                                                 );
                                             }
-                                            for (i, var_name) in tuple_var_names.iter().enumerate()
+                                            for (element, var_name) in elements.iter().zip(tuple_var_names.iter())
                                             {
-                                                let mut elem_value = elements[i].clone();
+                                                let mut elem_value = element.clone();
                                                 elem_value.mutability = if mutability {
                                                     Mutability::Mutable
                                                 } else {
@@ -205,8 +205,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                             ),
                                         );
                                     }
-                                    for (i, var_name) in tuple_var_names.iter().enumerate() {
-                                        let mut elem_value = elements[i].clone();
+                                    for (element, var_name) in
+                                        elements.iter().zip(tuple_var_names.iter())
+                                    {
+                                        let mut elem_value = element.clone();
                                         elem_value.mutability = if mutability {
                                             Mutability::Mutable
                                         } else {

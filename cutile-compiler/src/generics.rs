@@ -248,10 +248,9 @@ impl GenericVars {
             ));
         }
 
-        let num_args = expr_generic_args.args.len();
-        for i in 0..num_args {
-            let generic_arg = &expr_generic_args.args[i];
-            let generic_param = &generics.params[i];
+        for (generic_arg, generic_param) in
+            expr_generic_args.args.iter().zip(generics.params.iter())
+        {
             match (generic_arg, generic_param) {
                 (GenericArgument::Const(const_arg), GenericParam::Const(const_param)) => {
                     // Instantiate a const generic param from a const arg expr.
@@ -1165,9 +1164,7 @@ impl GenericArgInference {
     pub fn map_args_to_params(&mut self, call_arg_rust_tys: &[syn::Type], self_ty: Option<&Type>) {
         let (fn_arg_types, _return_type) = get_sig_types(&self.sig, self_ty);
         // Get the generic parameters in this function signature.
-        for i in 0..call_arg_rust_tys.len() {
-            let call_arg_rust_ty = &call_arg_rust_tys[i];
-            let fn_arg_types = &fn_arg_types[i];
+        for (call_arg_rust_ty, fn_arg_types) in call_arg_rust_tys.iter().zip(fn_arg_types.iter()) {
             self.add_generic_args(fn_arg_types, call_arg_rust_ty);
         }
     }
@@ -1181,9 +1178,7 @@ impl GenericArgInference {
             return;
         };
         assert_eq!(expr_generic_args.args.len(), self.params.len());
-        for i in 0..expr_generic_args.args.len() {
-            let param = &self.params[i];
-            let arg = &expr_generic_args.args[i];
+        for (param, arg) in self.params.iter().zip(expr_generic_args.args.iter()) {
             if let Some(Some(_)) = self.param2arg.get(param) {
                 // The type for this has already been inferred.
                 // Our compiler doesn't need to check anything. Rust already has.
@@ -1280,9 +1275,7 @@ impl GenericArgInference {
             )
         };
         assert_eq!(expr_generic_args.args.len(), method_params.len());
-        for i in 0..expr_generic_args.args.len() {
-            let param = &self.params[i];
-            let arg = &expr_generic_args.args[i];
+        for (param, arg) in self.params.iter().zip(expr_generic_args.args.iter()) {
             if let Some(Some(_)) = self.param2arg.get(param) {
                 // The type for this has already been inferred.
                 // Our compiler doesn't need to check anything. Rust already has.
@@ -1524,9 +1517,11 @@ impl GenericArgInference {
             "{arg_generic_args:#?}\n!=\n{param_generic_args:#?}"
         );
 
-        for i in 0..arg_generic_args.args.len() {
-            let arg_arg = &arg_generic_args.args[i];
-            let param_arg = &param_generic_args.args[i];
+        for (arg_arg, param_arg) in arg_generic_args
+            .args
+            .iter()
+            .zip(param_generic_args.args.iter())
+        {
             // Supports:
             // E -> f32
             // *mut E -> *mut f32
@@ -1633,25 +1628,23 @@ impl GenericArgInference {
                             match (arg_stmt_expr, param_stmt_expr) {
                                 (Expr::Array(arg_array_expr), Expr::Array(param_array_expr)) => {
                                     // Something like (Tensor<f32, {[...]}>, Tensor<E, {[...]}>)
-                                    for i in 0..arg_array_expr.elems.iter().len() {
-                                        let param_elem = &param_array_expr.elems[i];
+                                    for (param_elem, arg_elem) in param_array_expr.elems.iter().zip(arg_array_expr.elems.iter()) {
                                         let param_var = param_elem.to_token_stream().to_string();
                                         if self.param2arg.contains_key(&param_var) {
-                                            let arg_elem = &arg_array_expr.elems[i];
                                             let arg_val = match arg_elem {
                                                 Expr::Lit(lit) => {
                                                     match &lit.lit {
-                                                        Lit::Int(_int_lit) => arg_elem.to_token_stream().to_string(),
+                                                        Lit::Int(_int_lit) => arg_elem.to_token_stream(),
                                                         _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
                                                     }
                                                 },
                                                 Expr::Unary(_unary_expr) => {
-                                                    arg_elem.to_token_stream().to_string()
-                                                    // unary_expr.to_token_stream().to_string()
+                                                    arg_elem.to_token_stream()
+                                                    // unary_expr.to_token_stream()
                                                 },
                                                 Expr::Path(_path) => {
-                                                    arg_elem.to_token_stream().to_string()
-                                                    // get_ident_from_type_path(path).to_string()
+                                                    arg_elem.to_token_stream()
+                                                    // get_ident_from_type_path(path)
                                                 },
                                                 _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
                                             };

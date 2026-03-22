@@ -306,9 +306,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 );
                             }
                             let mut result = vec![];
-                            for i in 0..dim_map.len() {
-                                // Permute by moving item from dim_map[i] -> i.
-                                result.push(val_arr[dim_map[i] as usize].clone());
+                            for remapped_i in dim_map {
+                                // Permute by moving item from remapped_i -> i.
+                                result.push(val_arr[remapped_i as usize].clone());
                             }
                             result
                         };
@@ -453,7 +453,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 .map(|&ty| (ty, location))
                                 .collect::<Vec<_>>(),
                         );
-                        for (i, name) in (0..local_block.argument_count()).zip(local_var_names) {
+                        for (i, name) in local_var_names.iter().enumerate() {
                             let value: Value = local_block.argument(i).unwrap().into();
                             let ty = tile_rust_iter_operand_type.clone();
                             let tile_rust_val = TileRustValue::new_value_kind_like(value, ty);
@@ -1064,11 +1064,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 ),
             );
         }
-        for i in 0..len {
+        for (i, (&remapped_i, &static_tile_dim)) in
+            dim_map.iter().zip(static_tile.iter()).enumerate()
+        {
             // Because the indices may be remapped via a permutation of the tile dimensions,
             // we need to remap the tensor's shape as well.
-            let remapped_i = dim_map[i] as usize;
-            let static_tile_dim = static_tile[i];
+            let remapped_i = remapped_i as usize;
             let static_shape_dim = static_shape[remapped_i];
             let is_static_shape_dim = static_shape_dim != -1;
             let index_value = indexes.remove(0);

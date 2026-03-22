@@ -384,13 +384,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
                 let mut call_arg_rust_tys = vec![];
                 let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
-                for (i, param_name) in get_sig_param_names(&impl_method.sig).iter().enumerate() {
-                    if i < call_arg_values.len() {
-                        let call_arg_val = &call_arg_values[i];
-                        let call_arg_ty = call_arg_val.ty.clone();
-                        call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
-                        arg_types.insert(param_name.to_string(), call_arg_ty);
-                    }
+                for (param_name, call_arg_val) in get_sig_param_names(&impl_method.sig)
+                    .iter()
+                    .zip(call_arg_values.iter())
+                {
+                    let call_arg_ty = call_arg_val.ty.clone();
+                    call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
+                    arg_types.insert(param_name.to_string(), call_arg_ty);
                 }
 
                 let mut generic_arg_inf = GenericArgInference::new_method(&impl_item, &impl_method);
@@ -502,14 +502,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
                         let mut call_arg_rust_tys = vec![];
                         let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
-                        for (i, param_name) in get_sig_param_names(&fn_item.sig).iter().enumerate()
+                        for (param_name, call_arg_val) in get_sig_param_names(&fn_item.sig).iter().zip(call_arg_values.iter())
                         {
-                            if i < call_arg_values.len() {
-                                let call_arg_val = &call_arg_values[i];
-                                let call_arg_ty = call_arg_val.ty.clone();
-                                call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
-                                arg_types.insert(param_name.to_string(), call_arg_ty);
-                            }
+                            let call_arg_ty = call_arg_val.ty.clone();
+                            call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
+                            arg_types.insert(param_name.to_string(), call_arg_ty);
                         }
 
                         let mut generic_arg_inf =

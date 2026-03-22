@@ -77,19 +77,24 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
 
-            for i in 0..param_names.len() {
-                let param_name = &param_names[i];
-                let param_type = &input_params[i];
-                let mut param_val = call_arg_values[i].clone();
+            for ((((param_name, param_type), call_arg_value), call_expr_arg), &mutability) in
+                param_names
+                    .iter()
+                    .zip(input_params.iter())
+                    .zip(call_arg_values.iter())
+                    .zip(call_expr.args.iter())
+                    .zip(sig_param_mutability.iter())
+            {
+                let mut param_val = call_arg_value.clone();
                 // TODO (hme): This may not be enough, depending on what level of inspection we require of compound / struct types.
                 param_val.ty.rust_ty = param_type.clone();
-                param_val.mutability = if sig_param_mutability[i] {
+                param_val.mutability = if mutability {
                     Mutability::Mutable
                 } else {
                     Mutability::Immutable
                 };
                 call_variables.vars.insert(param_name.clone(), param_val);
-                if let Some(call_arg_name) = get_ident_from_expr(&call_expr.args[i]) {
+                if let Some(call_arg_name) = get_ident_from_expr(call_expr_arg) {
                     outer2inner_map.insert(call_arg_name.to_string(), param_name.clone());
                 };
             }
@@ -221,20 +226,24 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             call_variables.module_scope.push(module_name.clone());
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&impl_method.sig);
-            for i in 0..param_names.len() {
-                let param_name = &param_names[i];
-                let param_type = &input_params[i];
-                let mut param_val = call_arg_values[i].clone();
+            for ((((param_name, param_type), call_arg_value), arg), &mutability) in param_names
+                .iter()
+                .zip(input_params.iter())
+                .zip(call_arg_values.iter())
+                .zip(args.iter())
+                .zip(sig_param_mutability.iter())
+            {
+                let mut param_val = call_arg_value.clone();
                 // TODO (hme): This may not be enough, depending on what level of inspection we require of compound / struct types.
                 param_val.ty.rust_ty = param_type.clone();
-                param_val.mutability = if sig_param_mutability[i] {
+                param_val.mutability = if mutability {
                     Mutability::Mutable
                 } else {
                     Mutability::Immutable
                 };
                 call_variables.vars.insert(param_name.clone(), param_val);
                 // Including self here.
-                if let Some(call_arg_name) = get_ident_from_expr(&args[i]) {
+                if let Some(call_arg_name) = get_ident_from_expr(arg) {
                     outer2inner_map.insert(call_arg_name.to_string(), param_name.clone());
                 };
             }

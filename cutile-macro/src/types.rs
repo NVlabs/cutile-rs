@@ -216,8 +216,8 @@ impl VariadicTypeData {
     }
 
     /// Returns the number of const generic arrays this type has.
-    pub fn num_cgas(&self) -> u32 {
-        self.cga_names.len() as u32
+    pub fn num_cgas(&self) -> usize {
+        self.cga_names.len()
     }
 
     /// Creates an iterator over all rank combinations for this type.
@@ -1133,42 +1133,39 @@ impl Iterator for ConstGenericArrayTypeListIterator {
     fn next(&mut self) -> Option<Self::Item> {
         if self.state.is_empty() {
             // First pass should always contain something.
-            for item in &mut self.iterators {
-                match item.next() {
-                    Some(item) => {
-                        self.state.push(item);
-                    }
-                    None => {
-                        return Some(call_site_error(
-                            "ConstGenericArrayTypeListIterator: iterator was empty on first pass.",
-                        ))
-                    }
+            for iter in self.iterators.iter_mut() {
+                if let Some(item) = iter.next() {
+                    self.state.push(item);
+                } else {
+                    return Some(call_site_error(
+                        "ConstGenericArrayTypeListIterator: iterator was empty on first pass.",
+                    ));
                 }
             }
             Some(Ok(self.state.clone()))
         } else if self.done {
             None
         } else {
-            for _i in 0..self.iterators.len() {
+            for (i, (iter, state)) in self
+                .iterators
+                .iter_mut()
+                .zip(self.state.iter_mut())
+                .enumerate()
+                .rev()
+            {
                 // Traverse in reverse to remain consistent with traversal order of individual ConstGenericArrayIterator.
                 // The traversal is a mixed-radix counter.
                 // We're done when the most significant position is None.
-                let i = (self.iterators.len() - 1) - _i;
-                let iter = &mut self.iterators[i];
-                let item: Option<ConstGenericArrayType> = iter.next();
-                match item {
-                    Some(item) => {
-                        self.state[i] = item;
-                        break;
+                if let Some(item) = iter.next() {
+                    *state = item;
+                    break;
+                } else {
+                    if i == 0 {
+                        self.done = true;
+                        return None;
                     }
-                    None => {
-                        if i == 0 {
-                            self.done = true;
-                            return None;
-                        }
-                        self.iterators[i] = iter.renew();
-                        self.state[i] = self.iterators[i].next().unwrap();
-                    }
+                    *iter = iter.renew();
+                    *state = iter.next().unwrap();
                 }
             }
             Some(Ok(self.state.clone()))

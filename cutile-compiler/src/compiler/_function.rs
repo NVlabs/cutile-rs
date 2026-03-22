@@ -315,9 +315,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut cuda_tile_argument_types = vec![];
         let mut cuda_tile_return_types = vec![];
 
-        for (i, r_param_type) in r_params.iter().enumerate() {
+        for (var_name, r_param_type) in var_names.iter().zip(r_params.iter()) {
             let mut type_params: HashMap<String, TypeParam> = HashMap::new();
-            if let Some(strides) = stride_args.get(var_names[i].as_str()) {
+            if let Some(strides) = stride_args.get(var_name) {
                 type_params.insert(
                     "strides".to_string(),
                     TypeParam::Strides(TypeParamStrides::from(
@@ -390,16 +390,20 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 );
                 let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
                 let mut ctx: CompilerContext = CompilerContext::empty();
-                for (i, name) in var_names.iter().enumerate() {
-                    let ty = cuda_tile_argument_types[i].clone();
+                for (i, ((ty, &mutability), var_name)) in cuda_tile_argument_types
+                    .iter()
+                    .zip(sig_param_mutability.iter())
+                    .zip(var_names.iter())
+                    .enumerate()
+                {
                     let value: Value = func_block.argument(i).unwrap().into();
-                    let mut val = TileRustValue::new_value_kind_like(value, ty);
-                    val.mutability = if sig_param_mutability[i] {
+                    let mut val = TileRustValue::new_value_kind_like(value, ty.clone());
+                    val.mutability = if mutability {
                         Mutability::Mutable
                     } else {
                         Mutability::Immutable
                     };
-                    ctx.vars.insert(name.clone(), val);
+                    ctx.vars.insert(var_name.clone(), val);
                 }
 
                 // Add const generics as variables.
@@ -464,20 +468,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         generic_args: &GenericVars,
         ctx: &mut CompilerContext<'c, 'c>,
     ) -> Result<Vec<TileRustValue<'c, 'c>>, JITError> {
-        let mut result = vec![];
-        for arg in args {
-            let value = self
-                .compile_expression(builder, arg, generic_args, ctx, None)?
-                .ok_or(self.jit_error(
-                    &arg.span(),
-                    &format!(
-                        "Failed to compile argument: {:?}",
-                        arg.to_token_stream().to_string()
-                    ),
-                ))?;
-            result.push(value);
-        }
-        Ok(result)
+        args.iter()
+            .map(|arg| {
+                self.compile_expression(builder, arg, generic_args, ctx, None)?
+                    .ok_or(self.jit_error(
+                        &arg.span(),
+                        &format!(
+                            "Failed to compile argument: {:?}",
+                            arg.to_token_stream().to_string()
+                        ),
+                    ))
+            })
+            .collect()
     }
 
     // TODO (hme): Get rid of this. It's useful but may emit unused ops.
@@ -490,20 +492,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         generic_args: &GenericVars,
         ctx: &mut CompilerContext<'c, 'c>,
     ) -> Result<Vec<TileRustValue<'c, 'c>>, JITError> {
-        let mut result = vec![];
-        for arg in args {
-            let value = self
-                .compile_expression(builder, arg, generic_args, ctx, None)?
-                .ok_or(self.jit_error(
-                    &arg.span(),
-                    &format!(
-                        "Failed to compile argument: {:?}",
-                        arg.to_token_stream().to_string()
-                    ),
-                ))?;
-            result.push(value);
-        }
-        Ok(result)
+        args.iter()
+            .map(|arg| {
+                self.compile_expression(builder, arg, generic_args, ctx, None)?
+                    .ok_or(self.jit_error(
+                        &arg.span(),
+                        &format!(
+                            "Failed to compile argument: {:?}",
+                            arg.to_token_stream().to_string()
+                        ),
+                    ))
+            })
+            .collect()
     }
 
     pub(crate) fn compile_constant<T: Into<i64>>(

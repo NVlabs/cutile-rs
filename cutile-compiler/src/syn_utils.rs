@@ -410,12 +410,7 @@ pub fn get_fn_arg_var_name(arg: &FnArg) -> String {
 
 /// Collects parameter names from a function signature.
 pub fn get_sig_param_names(sig: &Signature) -> Vec<String> {
-    let mut result = vec![];
-    for arg in &sig.inputs {
-        let name = get_fn_arg_var_name(arg);
-        result.push(name);
-    }
-    result
+    sig.inputs.iter().map(get_fn_arg_var_name).collect()
 }
 
 /// Extracts angle-bracketed generic arguments from a call expression (e.g. `foo::<T, 3>(...)`).
@@ -484,9 +479,10 @@ where
 
 /// Returns `(input_types, return_type)` for a function signature.
 pub fn get_sig_types(sig: &Signature, self_ty: Option<&Type>) -> (Vec<Type>, Type) {
-    let mut input_tys: Vec<Type> = vec![];
-    for input in sig.inputs.iter() {
-        match input {
+    let input_tys = sig
+        .inputs
+        .iter()
+        .map(|input| match input {
             FnArg::Typed(fn_param) => {
                 let _name = {
                     match fn_param.pat.as_ref() {
@@ -494,19 +490,17 @@ pub fn get_sig_types(sig: &Signature, self_ty: Option<&Type>) -> (Vec<Type>, Typ
                         _ => panic!("Unexpected function param pattern {:#?}.", fn_param.pat),
                     }
                 };
-                let ty = fn_param.ty.as_ref();
-                input_tys.push(ty.clone());
+                fn_param.ty.as_ref().clone()
             }
             FnArg::Receiver(_fn_self) => {
                 assert!(
                     self_ty.is_some(),
                     "bind_parameters for impls requires self_ty."
                 );
-                let self_ty = self_ty.unwrap().clone();
-                input_tys.push(self_ty);
+                self_ty.unwrap().clone()
             }
-        }
-    }
+        })
+        .collect();
     let ret_ty = get_sig_output_type(sig);
     (input_tys, ret_ty)
 }

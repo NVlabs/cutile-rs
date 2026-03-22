@@ -486,8 +486,7 @@ pub fn generate_kernel_launcher(
 
     let mut required_generics: RequiredGenerics = RequiredGenerics::new(&item.sig.generics);
     // println!("required_generics: {}", required_generics.get_required_generics().to_token_stream().to_string());
-    for (i, ty) in input_types.iter().enumerate() {
-        let var_name = &param_names[i];
+    for (i, (var_name, ty)) in param_names.iter().zip(input_types.iter()).enumerate() {
         // Currently only supporting scalars, &Tensor, and &mut Tensor.
         // This should be enough to do everything safely.
         // Added support for * mut T to allow for unsafe kernels.
@@ -683,12 +682,23 @@ pub fn generate_kernel_launcher(
         pub #unsafety fn #launcher_async_ident #generic_params() -> #kernel_return_type {}
     })
     .unwrap();
-    let mut function_params = vec![];
+    let function_params = arg_types
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("arg{i}"))
+        .collect::<Vec<_>>();
+    let type_params = arg_types
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("DI{i}"))
+        .collect::<Vec<_>>();
     launcher_async.sig.generics.make_where_clause();
-    for (i, _arg_ty) in arg_types.iter().enumerate() {
-        let function_param = format!("arg{}", i);
-        let type_param = format!("DI{}", i);
-        let type_bound = format!("DeviceOperation<Output={}>", arg_aliases[i]);
+    for ((function_param, type_param), arg_alias) in function_params
+        .iter()
+        .zip(type_params.iter())
+        .zip(arg_aliases.iter())
+    {
+        let type_bound = format!("DeviceOperation<Output={}>", arg_alias);
         launcher_async.sig.inputs.push(FnArg::Typed(
             syn::parse2::<PatType>(
                 format!("{}: {}", function_param, type_param)
@@ -712,7 +722,6 @@ pub fn generate_kernel_launcher(
             )
             .unwrap(),
         );
-        function_params.push(function_param);
     }
     let input_zips = zip_and_then_flatten(&function_params, "input", false);
     launcher_async.block.stmts.extend(input_zips.block.stmts);
@@ -730,9 +739,7 @@ pub fn generate_kernel_launcher(
         pub #unsafety fn #launcher_sync_ident #generic_params() -> #kernel_return_type {}
     })
     .unwrap();
-    for (i, _arg_ty) in arg_types.iter().enumerate() {
-        let function_param = &function_params[i];
-        let type_param = &arg_aliases[i];
+    for (function_param, type_param) in function_params.iter().zip(arg_aliases.iter()) {
         launcher_sync.sig.inputs.push(FnArg::Typed(
             syn::parse2::<PatType>(
                 format!("{}: {}", function_param, type_param)

@@ -562,19 +562,20 @@ impl<T: WithDType> Tensor<T> {
         self
     }
     pub fn reshape_dyn(mut self, shape: &[usize]) -> Self {
-        let shape = shape.iter().map(|x| *x as i32).collect::<Vec<_>>();
+        let shape = shape.iter().map(|&x| x as _).collect::<Vec<_>>();
         assert_eq!(
             shape.iter().product::<i32>(),
             self.shape.iter().product::<i32>()
         );
         self.shape = shape.to_vec();
-        let mut stride = 1;
-        let mut strides = Vec::with_capacity(shape.len());
-        for i in (0..shape.len()).rev() {
-            strides.insert(0, stride);
-            stride *= shape[i]
-        }
-        self.strides = strides;
+        self.strides = vec![0; shape.len()];
+        self.strides
+            .iter_mut()
+            .zip(shape)
+            .rfold(1, |acc, (stride, shape)| {
+                *stride = acc;
+                acc * shape
+            });
         self
     }
 }

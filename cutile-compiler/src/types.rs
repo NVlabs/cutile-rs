@@ -681,19 +681,17 @@ pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
 
 /// Returns a per-parameter mutability flag for a function signature.
 pub fn get_sig_param_mutability(sig: &Signature) -> Vec<bool> {
-    let mut result = vec![];
-    for arg in &sig.inputs {
-        let is_mutable = match arg {
+    sig.inputs
+        .iter()
+        .map(|arg| match arg {
             FnArg::Receiver(receiver) => receiver.mutability.is_some(),
             FnArg::Typed(fn_param) => {
                 let pat_mutability = get_pat_mutability(&fn_param.pat);
                 let ty_mutability = get_type_mutability(&fn_param.ty);
                 pat_mutability || ty_mutability
             }
-        };
-        result.push(is_mutable);
-    }
-    result
+        })
+        .collect()
 }
 
 /// Returns `true` if the pattern is marked mutable.
