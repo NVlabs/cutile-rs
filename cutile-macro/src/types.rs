@@ -132,7 +132,6 @@ pub fn concrete_name(name: &str, n: &[u32]) -> String {
 }
 
 /// Classifies how dimensions are specified in a const generic array.
-#[derive(Debug, Clone, PartialEq)]
 /// Describes whether a const-generic array parameter allows dynamic dimensions.
 ///
 /// In cutile, shapes can be either fully static (all dimensions known at
@@ -144,7 +143,9 @@ pub fn concrete_name(name: &str, n: &[u32]) -> String {
 ///   - Example: `Tile<f32, {[128, 64]}>` - shape known at compile-time
 /// - **`Mixed`**: Dimensions can be static or dynamic (`-1`)
 ///   - Example: `Tensor<f32, {[-1, 64]}>` - first dimension determined at runtime
+///
 /// Whether a const-generic array parameter allows dynamic (`-1`) dimensions.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DimType {
     /// All dimensions must be compile-time constants (no `-1` allowed)
     Static,
@@ -204,7 +205,7 @@ impl VariadicTypeData {
     /// let vtd = get_variadic_type_data("Tile").unwrap();
     /// assert_eq!(vtd.concrete_name(&vec![2]), "Tile_2");
     /// ```
-    pub fn concrete_name(&self, n: &Vec<u32>) -> String {
+    pub fn concrete_name(&self, n: &[u32]) -> String {
         concrete_name(self.name, n)
     }
 
@@ -220,7 +221,7 @@ impl VariadicTypeData {
     }
 
     /// Creates an iterator over all rank combinations for this type.
-    pub fn iter(&self, n_vec: &Vec<u32>) -> ConstGenericArrayTypeIterator {
+    pub fn iter(&self, n_vec: &[u32]) -> ConstGenericArrayTypeIterator {
         ConstGenericArrayTypeIterator::new(n_vec)
     }
 }
@@ -987,7 +988,7 @@ pub struct ConstGenericArrayType {
 /// assert_eq!(suffix, "_2_3");
 /// ```
 /// Generates a function name suffix from CGA rank values (e.g., `[2, 3]` → `"2__3"`).
-pub fn get_variadic_function_suffix(const_ga_lengths: &Vec<u32>) -> String {
+pub fn get_variadic_function_suffix(const_ga_lengths: &[u32]) -> String {
     const_ga_lengths
         .iter()
         .map(|x| x.to_string())
@@ -1034,10 +1035,10 @@ impl ConstGenericArrayTypeIterator {
     /// ## Returns
     ///
     /// An iterator that will generate all combinations
-    pub fn new(n_vec: &Vec<u32>) -> Self {
+    pub fn new(n_vec: &[u32]) -> Self {
         Self {
             i: 0,
-            n_vec: n_vec.clone(),
+            n_vec: n_vec.to_vec(),
             i_max: n_vec.iter().product(),
         }
     }

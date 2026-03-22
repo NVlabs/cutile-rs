@@ -233,15 +233,10 @@ fn module_inner(
                     // println!("{use_item:#?}");
                     let mut use_tree = &use_item.tree;
                     let mut module_ast_use_path = vec![];
-                    loop {
-                        match use_tree {
-                            UseTree::Path(path) => {
-                                let path_ident_str = path.ident.to_string();
-                                module_ast_use_path.push(path_ident_str);
-                                use_tree = &path.tree;
-                            }
-                            _ => break,
-                        }
+                    while let UseTree::Path(path) = use_tree {
+                        let path_ident_str = path.ident.to_string();
+                        module_ast_use_path.push(path_ident_str);
+                        use_tree = &path.tree;
                     }
                     let module_ast_call_str = format!(
                         "{}::{}()",
@@ -636,7 +631,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
     let module_name = module_ident.to_string();
     let function_name = item.sig.ident.to_string();
     let function_entry_name = format!("{}_entry", function_name);
-    let launcher_name = function_name.to_case(Case::UpperCamel).to_string();
+    let launcher_name = function_name.to_case(Case::UpperCamel);
     let launcher_args_name = format!("{}Args", launcher_name);
     let unsafety = item.sig.unsafety;
 
@@ -888,7 +883,7 @@ pub fn module_asts(
         full_span
             .and_then(|sp| sp.source_text())
             .or(file_slice)
-            .unwrap_or_else(|| raw_item_source)
+            .unwrap_or(raw_item_source)
     };
 
     let result = quote! {

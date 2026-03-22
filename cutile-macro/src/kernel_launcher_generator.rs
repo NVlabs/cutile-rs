@@ -123,10 +123,7 @@ impl RequiredGenerics {
     }
     /// Returns `true` if the given generic parameter has not yet been inferred.
     pub(crate) fn is_required(&self, s: &str) -> bool {
-        match self.expressions.get(s) {
-            None | Some(None) => true,
-            _ => false,
-        }
+        matches!(self.expressions.get(s), None | Some(None))
     }
     /// Builds a runtime expression string that concatenates all inferred generic values.
     pub(crate) fn to_expr_str(&self) -> String {
@@ -173,7 +170,7 @@ impl RequiredGenerics {
         for name in &self.names {
             let is_launcher_type_param = self.launcher_type_params.contains(name);
             if is_launcher_type_param && self.get_ty(name) == SupportedGenericType::TypeParam {
-                type_params.push(name.clone().to_string());
+                type_params.push(name.to_string());
             }
         }
         syn::parse2::<AngleBracketedGenericArguments>(
@@ -202,7 +199,7 @@ impl RequiredGenerics {
 /// - `["a"]` → `"a"`
 /// - `["a", "b"]` → `"(a, b)"`
 /// - `["a", "b", "c"]` → `"(a, (b, c))"`
-pub fn join_as_cons_tuple(vals: &Vec<String>) -> String {
+pub fn join_as_cons_tuple(vals: &[String]) -> String {
     if vals.is_empty() {
         return "()".to_string();
     }
@@ -257,7 +254,7 @@ fn zippable(expr: &str, wrap_as_val: bool) -> String {
 /// Currently unused (marked with `#[allow(dead_code)]`). See `zip_and_then_flatten`
 /// for the actively used version.
 #[allow(dead_code)]
-pub fn zip_cons(inputs: &Vec<String>, var_name: &str, wrap_as_val: bool) -> ExprBlock {
+pub fn zip_cons(inputs: &[String], var_name: &str, wrap_as_val: bool) -> ExprBlock {
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
@@ -304,7 +301,7 @@ pub fn zip_cons(inputs: &Vec<String>, var_name: &str, wrap_as_val: bool) -> Expr
 /// let result = zip!(a, zip!(b, c));
 /// let result = result.and_then(|(a, (b, c))| value((a, b, c)));
 /// ```
-pub fn zip_and_then_flatten(inputs: &Vec<String>, var_name: &str, wrap_as_val: bool) -> ExprBlock {
+pub fn zip_and_then_flatten(inputs: &[String], var_name: &str, wrap_as_val: bool) -> ExprBlock {
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
@@ -412,7 +409,7 @@ pub fn generate_launcher_arg_types(
 /// ## Example
 ///
 /// `["x", "y", "z"]` → `"(x, y, z,)"`
-pub fn to_tuple_string(args: &Vec<String>) -> String {
+pub fn to_tuple_string(args: &[String]) -> String {
     format!(
         "({})",
         args.iter()
@@ -673,15 +670,10 @@ pub fn generate_kernel_launcher(
     .unwrap();
 
     // These are the type aliases generated for the argument types for this kernel function.
-    let arg_aliases = {
-        let mut r = vec![];
-        for i in 0..arg_types.len() {
-            r.push(arg_types[i].to_token_stream().to_string());
-            // let arg_alias = kernel_arg_alias(launcher_name, i);
-            // r.push(arg_alias);
-        }
-        r
-    };
+    let arg_aliases = arg_types
+        .iter()
+        .map(|i| i.to_token_stream().to_string())
+        .collect::<Vec<_>>();
 
     // Generate launcher async function. Uses apply function.
     // This operates on and returns a flat tuple of arguments.
