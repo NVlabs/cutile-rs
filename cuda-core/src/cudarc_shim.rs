@@ -336,6 +336,72 @@ impl CudaStream {
     }
 }
 
+/// An owned CUDA memory pool, destroyed on drop.
+///
+/// Wraps a `CUmemoryPool` created via `cuMemPoolCreate`. For the device's
+/// default pool (obtained via `cuDeviceGetDefaultMemPool`), use the raw
+/// handle directly - default pools are not owned and must not be destroyed.
+#[derive(Debug)]
+pub struct CudaMemPool {
+    pool: cuda_bindings::CUmemoryPool,
+    ctx: Arc<CudaContext>,
+}
+
+unsafe impl Send for CudaMemPool {}
+unsafe impl Sync for CudaMemPool {}
+
+impl CudaMemPool {
+    /// Creates a new memory pool on the given context's device.
+    ///
+    /// # Safety
+    /// The context must be valid and current.
+    pub unsafe fn new(ctx: &Arc<CudaContext>) -> Result<Self, DriverError> {
+        ctx.bind_to_thread()?;
+        let mut props: cuda_bindings::CUmemPoolProps = std::mem::zeroed();
+        props.allocType = cuda_bindings::CUmemAllocationType_enum_CU_MEM_ALLOCATION_TYPE_PINNED;
+        props.handleTypes = cuda_bindings::CUmemAllocationHandleType_enum_CU_MEM_HANDLE_TYPE_NONE;
+        props.location.type_ = cuda_bindings::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE;
+        props.location.id = ctx.cu_device() as i32;
+
+        let mut pool = MaybeUninit::uninit();
+        cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), &props).result()?;
+        Ok(Self {
+            pool: pool.assume_init(),
+            ctx: ctx.clone(),
+        })
+    }
+
+    /// Returns the raw `CUmemoryPool` handle for use in allocation calls.
+    pub fn handle(&self) -> cuda_bindings::CUmemoryPool {
+        self.pool
+    }
+}
+
+impl Drop for CudaMemPool {
+    fn drop(&mut self) {
+        self.ctx.record_err(self.ctx.bind_to_thread());
+        self.ctx.record_err(
+            unsafe { cuda_bindings::cuMemPoolDestroy(self.pool) }.result()
+        );
+    }
+}
+
+impl CudaContext {
+    /// Returns the default async memory pool for this device.
+    /// 
+    /// The default pool is managed by the driver and must **not** be destroyed.
+    /// Use the return handle with `malloc_from_pool_async` or to configure
+    /// pool attributes.
+    pub fn default_mem_pool(&self) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
+        self.bind_to_thread()?;
+        let mut pool = MaybeUninit::uninit();
+        unsafe {
+            cuda_bindings::cuDeviceGetDefaultMemPool(pool.as_mut_ptr(), self.cu_device).result()?;
+        }
+        Ok(unsafe { pool.assume_init() })
+    }
+}
+
 /// Owns a CUDA event and its parent context reference.
 #[derive(Debug)]
 pub struct CudaEvent {
@@ -1103,6 +1169,20 @@ pub mod memory {
     ) -> Result<sys::CUdeviceptr, DriverError> {
         let mut dev_ptr = MaybeUninit::uninit();
         sys::cuMemAllocAsync(dev_ptr.as_mut_ptr(), num_bytes, stream).result()?;
+        Ok(dev_ptr.assume_init())
+    }
+
+    /// Allocates device memory asynchronously from a specific memory pool.
+    ///
+    /// # Safety
+    /// `stream` must be a valid stream handle. `pool` must be a valid memory pool handle.
+    pub unsafe fn malloc_from_pool_async(
+        stream: sys::CUstream,
+        num_bytes: usize,
+        pool: sys::CUmemoryPool,
+    ) -> Result<sys::CUdeviceptr, DriverError> {
+        let mut dev_ptr = MaybeUninit::uninit();
+        sys::cuMemAllocFromPoolAsync(dev_ptr.as_mut_ptr(), num_bytes, pool, steam).result()?;
         Ok(dev_ptr.assume_init())
     }
 

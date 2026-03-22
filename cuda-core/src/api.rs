@@ -76,6 +76,19 @@ pub unsafe fn malloc_async(num_bytes: usize, stream: &Arc<CudaStream>) -> sys::C
     crate::memory::malloc_async(stream.cu_stream(), num_bytes).expect("Malloc async failed.")
 }
 
+/// Asynchronously allocates `num_bytes` of device memory from a specific pool.
+///
+/// # Safety
+/// `stream` must be a valid cuda stream. `pool` must be a valid memory pool handle.
+pub unsafe fn malloc_from_pool_async(
+    num_bytes: usize,
+    stream: &Arc<CudaStream>,
+    pool: sys::CUmemoryPool,
+) -> sys::CUdeviceptr {
+    crate::memory::malloc_from_pool_async(stream.cu_stream(), num_bytes, pool)
+        .expect("Malloc from pool async failed.")
+}
+
 /// Asynchronously frees device memory on the given stream.
 ///
 /// # Safety
