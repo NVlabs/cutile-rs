@@ -88,6 +88,7 @@ pub struct AsyncDeviceContext {
     context: Arc<CudaContext>,
     deallocator_stream: Arc<CudaStream>,
     policy: Arc<GlobalSchedulingPolicy>,
+    pool: Option<cuda_core::sys::CUmemoryPool>,
     functions: DeviceFunctions,
     validators: DeviceFunctionValidators,
 }
@@ -165,6 +166,7 @@ pub fn new_device_context(
         context,
         deallocator_stream,
         policy: Arc::new(policy),
+        pool: None,
         functions: HashMap::new(),
         validators: HashMap::new(),
     })
@@ -282,6 +284,42 @@ where
     with_global_device_context(device_id, |device_context| {
         f(&device_context.deallocator_stream)
     })
+}
+
+/// Set the memory pool for all subsequent allocations on `device_id`.
+///
+/// Pass `None` to revert to the default async collection path (`cuMemAllocAsync`).
+/// The caller is responsible for ensuring the pool outlives all tensors allocated from it.
+///
+/// # Safety
+/// `pool` must be a valid `CUmemoryPool` handle, or `None`.
+pub unsafe fn set_device_pool(
+    device_id: usize,
+    pool: Option<cuda_core::sys::CUmemoryPool>,
+) -> Result<(), DeviceError> {
+    with_global_device_context_mut(device_id, |dc| {
+        dc.pool = pool;
+    })
+}
+
+/// Allocate device memory, routing through the configured pool if one is set.
+/// 
+/// This is the pool-aware replacement for calling `cuda_core::malloc_async` directly.
+/// If no pool is configured for `device_id`, falls back to cuMemAllocAsync`.
+///
+/// # Safety
+/// `stream` must be a valid CUDA stream.
+pub unsafe fn device_alloc_async(
+    num_bytes: usize,
+    stream: &Arc<cuda_core::CudaStream>,
+    device_id: usize,
+) -> cuda_core::sys::CUdeviceptr {
+    let pool = with_global_device_context(device_id, |dc| dc.pool)
+        .expect("Failed to get device context for allocation.");
+    match pool {
+        Some(pool) => cuda_core::malloc_from_pool_async(num_bytes, stream, pool),
+        None => cuda_core::malloc_async(num_bytes, stream),
+    }
 }
 
 pub fn with_cuda_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
