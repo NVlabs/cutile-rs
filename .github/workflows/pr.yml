@@ -69,7 +69,7 @@ jobs:
           CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
-          cargo clippy
+          cargo clippy -- --deny clippy::all --allow clippy::missing-safety-doc
 
       - name: Test (compile only)
         env:
@@ -77,4 +77,4 @@ jobs:
           CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
-          cargo test --no-run
+          cargo test --all
