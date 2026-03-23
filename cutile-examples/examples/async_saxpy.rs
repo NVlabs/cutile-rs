@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_operation::{DeviceOperation, IntoDeviceOperation, Zippable};
-use cutile;
 use cutile::api::{arange, DeviceOperationReshape};
 use cutile::candle_core::WithDType;
 use cutile::error::Error;

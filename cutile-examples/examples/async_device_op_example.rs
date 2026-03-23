@@ -54,9 +54,9 @@ async fn main() -> Result<(), DeviceError> {
 
     let ((x_host_2, y_host_2), dptrs) = op.await?;
 
-    assert!(x_host_1.iter().all(|v| *v == 1));
+    assert!(x_host_1.iter().all(|&v| v == 1));
     println!("x_host_2 of len {:?} ok", x_host_2.len());
-    assert!(y_host_2.iter().all(|v| *v == 1));
+    assert!(y_host_2.iter().all(|&v| v == 1));
     println!("y_host_2 of len {:?} ok", y_host_2.len());
 
     // Drop.

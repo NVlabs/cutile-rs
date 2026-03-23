@@ -29,7 +29,7 @@ mod my_module {
     }
 }
 
-fn main() -> () {
+fn main() {
     let a = api::ones([32]).arc();
     let b = api::ones([32]).arc();
     let c = api::zeros([32]).partition([4]);

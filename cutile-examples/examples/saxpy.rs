@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_core::CudaContext;
-use cutile;
 use cutile::api::arange;
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec};
