@@ -6,7 +6,6 @@
 
 use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
-use cutile;
 use cutile::error::Error;
 use cutile::tile_kernel::TileKernel;
 

@@ -143,6 +143,7 @@ mod my_module {
 use cutile_examples::fmha_ref_exec;
 use my_module::fmha as fmha_kernel;
 
+#[allow(clippy::too_many_arguments)]
 fn fmha(
     b: usize,   // batch size.
     h: usize,   // number of heads (query).

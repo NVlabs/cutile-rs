@@ -6,7 +6,6 @@ extern crate core;
 
 use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
-use cutile;
 use cutile::api::DeviceOpReshape;
 use cutile::api::{arange, zeros};
 use cutile::error::Error;
@@ -115,14 +114,7 @@ fn main() -> Result<(), Error> {
     let src_vec: Vec<f32> = src.to_host_vec().sync_on(&stream)?;
     let out_host = to_candle_tensor(&out_vec, &[b * h, d, m]);
     let answer_host = to_candle_tensor(&src_vec, &[b, h, m, d]);
-    let answer_host = answer_host
-        .permute((
-            dim_map[0] as usize,
-            dim_map[1] as usize,
-            dim_map[2] as usize,
-            dim_map[3] as usize,
-        ))
-        .unwrap();
+    let answer_host = answer_host.permute(dim_map).unwrap();
     let answer_host = answer_host.reshape((b * h, d, m)).unwrap();
     for i in 0..(b * h) {
         let answer_mat = answer_host
