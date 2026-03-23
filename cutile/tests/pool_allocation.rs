@@ -20,6 +20,7 @@ use cuda_core::CudaContext;
 use cuda_core::CudaMemPool;
 use cutile:api;
 use cutile::tensor::ToHostVec;
+use std::sync::Arc;
 
 mod common;
 
@@ -33,19 +34,19 @@ mod common;
 ///
 /// # Safety
 /// Must be called from a thread with a valid CUDA context for `device_id`.
-unsafe fn setup_pool(device_id: usize) -> CudaMemPool {
+unsafe fn setup_pool(device_id: usize) -> Arc<CudaMemPool> {
     let ctx = CudaContext::new(device_id).expect("Failed to create CudaContext.");
-    let pool = CudaMemPool::new(&ctx).expect("Failed to create CudaMemPool.");
-    set_device_pool(device_id, Some(pool.handle())).expect("Failed to set device pool.")
+    let pool = Arc::new(
+        CudaMemPool::new(&ctx).expect("Failed to create CudaMemPool.")
+    );
+    set_device_pool(device_id, Some(pool.clone()))
+        .expect("Failed to set device pool.");
     pool
 }
 
 /// Clears the pool from the thread-local context so subsequent allocations
 /// fall back to the default `cuMemAllocAsync` path.
-///
-/// # Safety
-/// Must be called form a thread with a valid CUDA context for `device_id`.
-unsafe fn teardown_pool(device_id: usize) {
+fn teardown_pool(device_id: usize) {
     set_device_pool(device_id, None).expect("Failed to clear device pool.");
 }
 
@@ -87,7 +88,7 @@ fn pool_alloc_zeros_roundtrip() {
             "Expected all zeros, got non-zero values." 
         );
 
-        unsafe { teardown_pool(device_id )};
+        teardown_pool(device_id);
         drop(pool);
     });
 }
@@ -115,7 +116,7 @@ fn pool_alloc_ones_roundtrip() {
             "Expected all ones from pool-allocated tensor."
         );
 
-        unsafe { teardown_pool(device_id) };
+        teardown_pool(device_id);
         drop(pool);
     });
 }
@@ -146,7 +147,7 @@ fn pool_alloc_arange_roundtrip() {
             );
         }
 
-        unsafe { teardown_pool(device_id) };
+        teardown_pool(device_id);
         drop(pool);
     });
 }
@@ -168,7 +169,7 @@ fn revert_to_default_after_pool_cleared() {
             .expect("Failed to allocate from pool.");
 
         // Revert to default.
-        unsafe { teardown_pool(device_id) };
+        teardown_pool(device_id);
 
         // Allocate from default path.
         let t_default = api::ones::<f32>([128])
@@ -223,7 +224,7 @@ fn multiple_allocs_from_same_pool() {
         assert_eq!(v_range[0], 0.0, "arange start mismatch.");
         assert_eq!(v_range[255], 255.0, "arange end mismatch.");
 
-        unsafe { teardown_pool(device_id) };
+        teardown_pool(device_id);
         drop(pool);
     });
 }
@@ -251,7 +252,7 @@ fn pool_alloc_multidimensional() {
             "2D pool-allocated tensor has incorrect values."
         );
 
-        unsafe { teardown_pool(device_id) };
+        teardown_pool(device_id);
         drop(pool);
     })
 }
@@ -288,7 +289,7 @@ fn pool_alloc_device_copy() {
 
         assert_eq!(v_src, v_dst, "Device copy produced different values.");
 
-        unsafe { teardown_pool(device_id) };
+        teardown_pool(device_id);
         drop(pool);
     });
 }
@@ -314,6 +315,32 @@ fn default_path_wihout_pool_unchanged() {
         assert!(
             host_vec.iter().all(|&v| v == 0.0),
             "Default path produced incorrect values."
+        );
+    });
+}
+
+/// Attempting to attach a pool created on device N to a difference device
+/// must return an error, not silently accepting a cross-device handle.
+#[test]
+fn set_pool_rejects_device_mismatch() {
+    common::with_test_stack(|| {
+        let device_count = CudaContext::device_count()
+            .expect("Failed to query device count.");
+        if device_count < 2 {
+            eprintln!("Skipping device mismatch test - only {} device(s).", device_count);
+            return;
+        }
+
+        let ctx_1 = CudaContext::new(1).expect("Failed to create context on device 1.");
+        let pool_on_1 = Arc::new(unsafe {
+            CudaMemPool::new(&ctx_1).expect("Failed to create pool on device 1.")
+        });
+
+        // Attaching device-1's pool to device 0 must fail.
+        let result = set_device_pool(0, Some(pool1_on_1));
+        assert!(
+            result.is_err(),
+            "set_device_pool should reject cross-device pool, but got Ok.",
         );
     });
 }
