@@ -144,6 +144,7 @@ use cutile::candle_core;
 use cutile_examples::fmha_ref_exec;
 use my_module::fmha_sync;
 
+#[allow(clippy::too_many_arguments)]
 fn fmha(
     b: usize,   // batch size.
     h: usize,   // number of heads (query).

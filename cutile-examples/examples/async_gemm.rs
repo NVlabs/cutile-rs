@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_operation::*;
-use cutile;
 use cutile::api::{self, copy_to_host};
 use cutile::candle_core::WithDType;
 use cutile::half::f16;
@@ -76,13 +75,13 @@ fn gemm<T1: WithDType + Debug, T2: WithDType + Debug>(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), cuda_async::error::DeviceError> {
-    type IN = f16;
-    type OUT = f32;
+    type In = f16;
+    type Out = f32;
     let (m, n, k) = (64, 64, 16);
-    let x = api::randn(IN::zero(), IN::one(), [m, k]).arc().await?; // impl DeviceOperation
-    let y = api::randn(IN::zero(), IN::one(), [k, n]).arc().await?; // impl DeviceOperation
-    let z = gemm::<OUT, IN>(x.clone(), y.clone()).await?;
-    let z_host: Vec<OUT> = z.to_host_vec().await?;
+    let x = api::randn(In::zero(), In::one(), [m, k]).arc().await?; // impl DeviceOperation
+    let y = api::randn(In::zero(), In::one(), [k, n]).arc().await?; // impl DeviceOperation
+    let z = gemm::<Out, In>(x.clone(), y.clone()).await?;
+    let z_host: Vec<Out> = z.to_host_vec().await?;
     let x_host = copy_to_host(&x).await?;
     let y_host = copy_to_host(&y).await?;
     let answer_host: Vec<f16> = x_host
@@ -92,7 +91,7 @@ async fn main() -> Result<(), cuda_async::error::DeviceError> {
         .unwrap()
         .to_vec1()
         .unwrap();
-    for i in 0..(m * n) as usize {
+    for i in 0..(m * n) {
         println!(
             "z_host[{i}] == answer_host[{i}]? {} == {}",
             z_host[i], answer_host[i]

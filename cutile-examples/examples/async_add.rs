@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_operation::{DeviceOperation, IntoDeviceOperation};
-use cutile;
 use cutile::api::{arange, ones, zeros};
 use cutile::tensor::ToHostVec;
 use cutile::tile_kernel::IntoDeviceOperationPartition;
