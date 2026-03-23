@@ -407,7 +407,7 @@ pub fn generate_entry_point(
                                         s.parse::<i32>().unwrap_or_else(|_| panic!("{s}"))
                                     }
                                 })
-                                .collect::<Vec<i32>>(),
+                                .collect(),
                         }))
                     }
                     syn::Type::Path(type_path) => {

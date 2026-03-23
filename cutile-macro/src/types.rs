@@ -93,7 +93,7 @@ use crate::error::{call_site_error, Error};
 pub fn get_variadic_type_suffix(n: &[u32]) -> String {
     n.iter()
         .map(|v| v.to_string())
-        .collect::<Vec<String>>()
+        .collect::<Vec<_>>()
         .join("_")
 }
 
@@ -992,7 +992,7 @@ pub fn get_variadic_function_suffix(const_ga_lengths: &[u32]) -> String {
     const_ga_lengths
         .iter()
         .map(|x| x.to_string())
-        .collect::<Vec<String>>()
+        .collect::<Vec<_>>()
         .join("__")
 }
 

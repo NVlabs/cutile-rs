@@ -2756,7 +2756,7 @@ impl RewriteVariadicsPass {
                                             .args
                                             .iter()
                                             .map(|x| x.to_token_stream().to_string())
-                                            .collect::<Vec<String>>();
+                                            .collect();
                                     } else {
                                         is_consts = true;
                                         args.push(const_var);

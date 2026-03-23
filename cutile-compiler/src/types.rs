@@ -410,11 +410,7 @@ impl MLIRVariadicArg {
             }
             None => None,
         };
-        let shape = inst
-            .shape
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>();
+        let shape = inst.shape.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         MLIRVariadicArg {
             primitive_type_str,
             shape,
@@ -480,24 +476,17 @@ pub fn is_element_type_ptr(
 /// Parses a pointer type string, returning `(is_mutable, pointee_type)`.
 pub fn get_ptr_type(rust_ptr: &str) -> Option<(bool, String)> {
     // This also serves to check whether this is actually a pointer.
-    let res = if rust_ptr.starts_with("* mut ") {
-        (
-            true,
-            rust_ptr.split("* mut ").collect::<Vec<_>>()[1]
-                .trim()
-                .to_string(),
-        )
+    let (is_mutable, pointee_type) = if rust_ptr.starts_with("* mut ") {
+        (true, rust_ptr.split("* mut ").collect::<Vec<_>>()[1].trim())
     } else if rust_ptr.starts_with("* const ") {
         (
             false,
-            rust_ptr.split("* const ").collect::<Vec<_>>()[1]
-                .trim()
-                .to_string(),
+            rust_ptr.split("* const ").collect::<Vec<_>>()[1].trim(),
         )
     } else {
         return None;
     };
-    Some(res)
+    Some((is_mutable, pointee_type.to_string()))
 }
 
 /// Like [`get_ptr_type`] but also resolves generic type variables.
@@ -508,28 +497,21 @@ pub fn get_ptr_type_instance(
 ) -> Option<(bool, String)> {
     // This also serves to check whether this is actually a pointer.
     let (prefix, maybe_element_type) = if rust_ptr.starts_with("* mut ") {
-        (
-            true,
-            rust_ptr.split("* mut ").collect::<Vec<_>>()[1]
-                .trim()
-                .to_string(),
-        )
+        (true, rust_ptr.split("* mut ").collect::<Vec<_>>()[1].trim())
     } else if rust_ptr.starts_with("* const ") {
         (
             false,
-            rust_ptr.split("* const ").collect::<Vec<_>>()[1]
-                .trim()
-                .to_string(),
+            rust_ptr.split("* const ").collect::<Vec<_>>()[1].trim(),
         )
     } else {
         return None;
     };
-    if is_element_type(&maybe_element_type, primitives) {
-        Some((prefix, maybe_element_type))
+    if is_element_type(maybe_element_type, primitives) {
+        Some((prefix, maybe_element_type.to_string()))
     } else {
         generic_vars
             .inst_types
-            .get(&maybe_element_type)
+            .get(maybe_element_type)
             .map(|element_type| (prefix, element_type.to_string()))
     }
 }

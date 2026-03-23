@@ -716,18 +716,17 @@ pub struct DeviceVec<T> {
 
 impl<T: WithDType> DeviceVec<Tensor<T>> {
     pub fn from(v: Vec<Tensor<T>>) -> DeviceVec<Tensor<T>> {
-        let i64vec: Arc<Vec<i64>> = v
+        let i64vec = v
             .iter()
             .map(|x| x.cu_deviceptr() as i64)
-            .collect::<Vec<_>>()
-            .into();
-        let device_vec: Arc<Tensor<i64>> = i64vec
+            .collect::<Vec<_>>();
+        let device_vec = Arc::new(i64vec)
             .copy_to_device_tensor()
             .sync()
             .expect("Failed to execute device operation.")
             .reshape([v.len()])
             .into();
-        let host_vec: Vec<Arc<Tensor<T>>> = v.into_iter().map(Arc::new).collect::<Vec<_>>();
+        let host_vec = v.into_iter().map(Arc::new).collect::<Vec<_>>();
         DeviceVec {
             _ty: PhantomData,
             host_vec,

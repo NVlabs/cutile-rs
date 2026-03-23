@@ -847,7 +847,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let ty_string = rust_types
                         .iter()
                         .map(|rust_ty| rust_ty.to_token_stream().to_string())
-                        .collect::<Vec<String>>()
+                        .collect::<Vec<_>>()
                         .join(", ");
                     let ty: syn::Type =
                         match syn::parse2::<syn::Type>(format!("({ty_string})").parse().unwrap()) {
@@ -1477,10 +1477,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         let const_var = ident.to_string();
                                         if let Some(cga) = generic_vars.inst_array.get(&const_var) {
                                             is_cga = true;
-                                            args = cga
-                                                .iter()
-                                                .map(|x| x.to_string())
-                                                .collect::<Vec<String>>();
+                                            args = cga.iter().map(|x| x.to_string()).collect();
                                         } else {
                                             is_consts = true;
                                             let mut is_const =

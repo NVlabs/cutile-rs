@@ -53,7 +53,7 @@ pub fn array_attr<'c, T: Clone + Display + Debug>(
         .to_vec()
         .iter()
         .map(|x| format!("{x:#?}"))
-        .collect::<Vec<String>>()
+        .collect::<Vec<_>>()
         .join(",");
     Attribute::parse(
         context,
@@ -443,12 +443,7 @@ pub fn update_type_meta<'c>(
     outer2inner_vars: &HashMap<String, String>,
     _field_name: String,
 ) {
-    let outer_keys_ = outer_block_vars.var_keys();
-    let outer_keys = outer_keys_
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<String>>();
-    for outer_key in &outer_keys {
+    for outer_key in outer_block_vars.var_keys().iter() {
         let Some(outer_val) = outer_block_vars.vars.get(outer_key) else {
             // This should never fail.
             continue;

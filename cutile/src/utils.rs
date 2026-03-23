@@ -119,16 +119,14 @@ pub fn pretty_print_matrix<T: WithDType>(mat: &candle_core::Tensor) {
         range
             .into_iter()
             .map(|x| format!("{:^9}", x))
-            .collect::<Vec<String>>()
-            .join("")
+            .collect::<String>()
     );
     for j in 0..mat.shape().dims()[iter_dim] {
         let out_vec = mat.get_on_dim(iter_dim, j).unwrap().to_vec1::<T>().unwrap();
         let out_vec = out_vec
             .iter()
             .map(|x| format!("{:^8.1}|", x))
-            .collect::<Vec<String>>()
-            .join("");
+            .collect::<String>();
         println!("|{}", out_vec);
     }
 }

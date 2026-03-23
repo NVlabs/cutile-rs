@@ -30,14 +30,14 @@ pub struct SingleMetaList {
 
 impl SingleMetaList {
     /// Construct from a `syn::Attribute` that contains a meta list.
-    pub fn from_attribute(attr: Attribute) -> Self {
-        let Meta::List(meta_list) = attr.meta else {
+    pub fn from_attribute(attr: &Attribute) -> Self {
+        let Meta::List(meta_list) = &attr.meta else {
             panic!("Unexpected attribute list {:#?}", attr.meta)
         };
         let tokens = meta_list.tokens.clone();
         let mut result = syn::parse2::<SingleMetaList>(tokens).unwrap();
         result.name = Some(meta_list.path.to_token_stream().to_string());
-        result.meta_list = Some(meta_list);
+        result.meta_list = Some(meta_list.clone());
         result
     }
     /// Returns the attribute path as a single string.
@@ -46,24 +46,21 @@ impl SingleMetaList {
     }
     /// Returns the attribute path split by `::` separators.
     pub fn name_as_vec(&self) -> Option<Vec<&str>> {
-        self.name
-            .as_ref()
-            .map(|s| s.as_str().split(" :: ").collect())
+        self.name.as_ref().map(|s| s.split(" :: ").collect())
     }
     fn get_value(&self, name: &str) -> Option<&Expr> {
-        for item in &self.variables {
-            match item {
-                Meta::NameValue(name_value) => {
-                    let meta_ident = name_value.path.get_ident();
-                    let meta_name = meta_ident.unwrap().to_string();
-                    if name == meta_name {
-                        return Some(&name_value.value);
-                    }
-                }
-                _ => continue,
+        self.variables.iter().find_map(|item| {
+            let Meta::NameValue(name_value) = item else {
+                return None;
+            };
+            let meta_ident = name_value.path.get_ident();
+            let meta_name = meta_ident.unwrap().to_string();
+            if name == meta_name {
+                Some(&name_value.value)
+            } else {
+                None
             }
-        }
-        None
+        })
     }
     /// Returns the raw expression for a named key-value entry.
     pub fn parse_custom_expr(&self, name: &str) -> Option<&Expr> {
@@ -71,26 +68,23 @@ impl SingleMetaList {
     }
     /// Parses a named entry as an array of string literals.
     pub fn parse_string_arr(&self, name: &str) -> Option<Vec<String>> {
-        let value = self.get_value(name);
-        match value {
-            Some(val) => {
-                let Expr::Array(ref arr) = val else {
-                    panic!("{name} is not an array: {val:#?}")
-                };
-                let mut res = vec![];
-                for val in &arr.elems {
-                    let Expr::Lit(ref lit) = val else {
+        self.get_value(name).map(|val| {
+            let Expr::Array(arr) = val else {
+                panic!("{name} is not an array: {val:#?}")
+            };
+            arr.elems
+                .iter()
+                .map(|val| {
+                    let Expr::Lit(lit) = val else {
                         panic!("{name} is not a literal: {val:#?}")
                     };
-                    let Lit::Str(ref lit_str) = lit.lit else {
+                    let Lit::Str(lit_str) = &lit.lit else {
                         panic!("{name} is not a string: {lit:#?}")
                     };
-                    res.push(lit_str.value().clone());
-                }
-                Some(res)
-            }
-            None => None,
-        }
+                    lit_str.value().clone()
+                })
+                .collect()
+        })
     }
     /// Parses a named entry as a single string literal.
     pub fn parse_string(&self, name: &str) -> Option<String> {
@@ -157,14 +151,10 @@ impl Parse for SingleMetaList {
 
 impl From<SingleMetaList> for Vec<Attribute> {
     fn from(val: SingleMetaList) -> Self {
-        let mut res = vec![];
-        for meta in val.variables {
-            let attr: Attribute = parse_quote! {
-                #[noname(#meta)]
-            };
-            res.push(attr);
-        }
-        res
+        val.variables
+            .iter()
+            .map(|meta| parse_quote! { #[noname(#meta)] })
+            .collect()
     }
 }
 
@@ -185,67 +175,66 @@ pub fn clear_attributes(attr_names: HashSet<&str>, attrs: &mut Vec<Attribute>) {
             }
             _ => true,
         })
-        .collect::<Vec<Attribute>>();
+        .collect();
 }
 
 /// Finds an attribute by path string, optionally matching only the last segment.
 pub fn get_attribute(
     lookup_str: &str,
-    outer_attrs: &Vec<Attribute>,
+    outer_attrs: &[Attribute],
     last_seg_only: bool,
 ) -> Option<Attribute> {
-    for attr in outer_attrs {
-        let Meta::List(meta_list) = &attr.meta else {
-            continue;
-        };
-        let parsed_str = if last_seg_only {
-            meta_list
-                .path
-                .segments
-                .last()
-                .unwrap()
-                .to_token_stream()
-                .to_string()
-        } else {
-            meta_list.path.to_token_stream().to_string()
-        };
-        if parsed_str == lookup_str {
-            return Some(attr.clone());
-        }
-    }
-    None
+    outer_attrs
+        .iter()
+        .find(|attr| {
+            let Meta::List(meta_list) = &attr.meta else {
+                return false;
+            };
+            let parsed_str = if last_seg_only {
+                meta_list.path.segments.last().unwrap().to_token_stream()
+            } else {
+                meta_list.path.to_token_stream()
+            }
+            .to_string();
+            parsed_str == lookup_str
+        })
+        .cloned()
 }
 
 /// Looks up an attribute by full path and parses it as a [`SingleMetaList`].
-pub fn get_meta_list(attr_name: &str, outer_attrs: &Vec<Attribute>) -> Option<SingleMetaList> {
-    get_attribute(attr_name, outer_attrs, false).map(SingleMetaList::from_attribute)
+pub fn get_meta_list(attr_name: &str, outer_attrs: &[Attribute]) -> Option<SingleMetaList> {
+    get_attribute(attr_name, outer_attrs, false)
+        .as_ref()
+        .map(SingleMetaList::from_attribute)
 }
 
 /// Like [`get_meta_list`] but matches only the last path segment.
 pub fn get_meta_list_by_last_segment(
     last_seg: &str,
-    outer_attrs: &Vec<Attribute>,
+    outer_attrs: &[Attribute],
 ) -> Option<SingleMetaList> {
-    get_attribute(last_seg, outer_attrs, true).map(SingleMetaList::from_attribute)
+    get_attribute(last_seg, outer_attrs, true)
+        .as_ref()
+        .map(SingleMetaList::from_attribute)
 }
 
 /// Finds the first `cuda_tile::*` attribute and parses it as a [`SingleMetaList`].
-pub fn get_cuda_tile_meta_list(outer_attrs: &Vec<Attribute>) -> Option<SingleMetaList> {
-    let mut found: Option<SingleMetaList> = None;
-    for attr in outer_attrs {
+pub fn get_cuda_tile_meta_list(outer_attrs: &[Attribute]) -> Option<SingleMetaList> {
+    outer_attrs.iter().fold(None, |acc, attr| {
         let Meta::List(meta_list) = &attr.meta else {
-            continue;
+            return acc;
         };
         let name = meta_list.path.to_token_stream().to_string();
-        let name_parts = name.split(" :: ").collect::<Vec<&str>>();
+        let name_parts = name.split(" :: ").collect::<Vec<_>>();
         if name_parts.first() == Some(&"cuda_tile") {
-            if found.is_some() {
+            if acc.is_some() {
                 panic!("Found multiple cuda_tile attributes {outer_attrs:#?}")
             }
-            found = Some(SingleMetaList::from_attribute(attr.clone()));
+            Some(SingleMetaList::from_attribute(attr))
+        } else {
+            acc
         }
-    }
-    found
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -445,9 +434,10 @@ where
     T: FromStr + From<i32>,
     T::Err: Display,
 {
-    let mut result = vec![];
-    for arg in &generic_args.args {
-        match arg {
+    generic_args
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
             GenericArgument::Const(expr) => {
                 let Expr::Lit(lit) = expr else {
                     panic!("Unexpected expression.")
@@ -456,25 +446,22 @@ where
                     panic!("Unexpected expression.")
                 };
                 let x = int_expr.base10_parse::<T>().expect("Failed to parse int.");
-                result.push(x);
+                Some(x)
             }
-            GenericArgument::Type(ty) => {
-                if let Type::Path(path_ty) = ty {
-                    if let Some(const_var) = path_ty.path.get_ident() {
-                        if let Some(generic_vars) = generic_vars {
-                            if let Some(const_val) =
-                                generic_vars.inst_i32.get(&const_var.to_string())
-                            {
-                                result.push(T::from(*const_val));
-                            }
+            GenericArgument::Type(Type::Path(path_ty)) => {
+                if let Some(const_var) = path_ty.path.get_ident() {
+                    if let Some(generic_vars) = generic_vars {
+                        if let Some(&const_val) = generic_vars.inst_i32.get(&const_var.to_string())
+                        {
+                            return Some(T::from(const_val));
                         }
                     }
                 }
+                None
             }
-            _ => continue,
-        };
-    }
-    result
+            _ => None,
+        })
+        .collect()
 }
 
 /// Returns `(input_types, return_type)` for a function signature.
@@ -627,50 +614,52 @@ pub fn maybe_generic_args(ty: &Type) -> Option<AngleBracketedGenericArguments> {
 
 /// Extracts type and const generic param names (skipping lifetimes).
 pub fn get_supported_generic_params(generics: &Generics) -> Vec<(String, Option<Type>)> {
-    let mut param_names: Vec<(String, Option<Type>)> = vec![];
-    for param in &generics.params {
-        match param {
+    generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
             GenericParam::Type(type_param) => {
                 let name = type_param.ident.to_string();
-                param_names.push((name, None));
+                Some((name, None))
             }
             GenericParam::Const(const_param) => {
                 let name = const_param.ident.to_string();
                 let ty = const_param.ty.clone();
-                param_names.push((name, Some(ty)));
+                Some((name, Some(ty)))
             }
-            GenericParam::Lifetime(_lifetime_param) => continue,
-            #[allow(unreachable_patterns)]
-            _ => panic!("Unexpected generic parameter {:#?}", param),
-        }
-    }
-    param_names
+            GenericParam::Lifetime(_lifetime_param) => None,
+        })
+        .collect()
 }
 
 /// Removes lifetime arguments from angle-bracketed generic arguments in place.
 pub fn strip_generic_args_lifetimes(gen_args: &mut AngleBracketedGenericArguments) {
-    let mut res = gen_args.args.clone();
-    res.clear();
-    for gen_arg in gen_args.args.iter() {
-        if let GenericArgument::Lifetime(_gen_arg_lifetime) = gen_arg {
-            continue;
-        }
-        res.push(gen_arg.clone());
-    }
-    gen_args.args = res;
+    gen_args.args = gen_args
+        .args
+        .iter()
+        .filter_map(|gen_arg| {
+            if let GenericArgument::Lifetime(_) = gen_arg {
+                None
+            } else {
+                Some(gen_arg.clone())
+            }
+        })
+        .collect();
 }
 
 /// Removes lifetime parameters from generics in place.
 pub fn strip_generics_lifetimes(generics: &mut Generics) {
-    let mut res = generics.params.clone();
-    res.clear();
-    for gen_param in generics.params.iter() {
-        if let GenericParam::Lifetime(_) = gen_param {
-            continue;
-        }
-        res.push(gen_param.clone());
-    }
-    generics.params = res;
+    generics.params = generics
+        .params
+        .iter()
+        .filter_map(|gen_param| {
+            if let GenericParam::Lifetime(_lifetime_param) = gen_param {
+                None
+            } else {
+                Some(gen_param.clone())
+            }
+        })
+        .collect();
 }
 
 /// Pretty-prints a single `syn::Item` via `prettyplease`.
@@ -710,31 +699,27 @@ pub struct ClosureInfo {
 /// - `|x, y| x + y` -> params: [x, y], body: x + y
 /// - `|acc: i32, x: i32| acc + x` -> params: [acc: i32, x: i32], body: acc + x
 pub fn parse_closure(closure_expr: &ExprClosure) -> ClosureInfo {
-    let mut params = Vec::new();
-
-    for input in &closure_expr.inputs {
-        match input {
-            Pat::Ident(pat_ident) => {
-                // Simple parameter: |x| ...
-                params.push(ClosureParam {
-                    name: pat_ident.ident.to_string(),
-                    ty: None,
-                });
-            }
+    let params = closure_expr
+        .inputs
+        .iter()
+        .map(|input| match input {
+            Pat::Ident(pat_ident) => ClosureParam {
+                name: pat_ident.ident.to_string(),
+                ty: None,
+            },
             Pat::Type(pat_type) => {
-                // Typed parameter: |x: i32| ...
                 if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-                    params.push(ClosureParam {
+                    ClosureParam {
                         name: pat_ident.ident.to_string(),
-                        ty: Some((*pat_type.ty).clone()),
-                    });
+                        ty: Some(pat_type.ty.as_ref().clone()),
+                    }
                 } else {
                     panic!("Unsupported closure parameter pattern: {:#?}", pat_type.pat);
                 }
             }
             _ => panic!("Unsupported closure parameter pattern: {:#?}", input),
-        }
-    }
+        })
+        .collect();
 
     ClosureInfo {
         params,

@@ -727,7 +727,7 @@ pub fn generate_kernel_launcher(
         function_params
             .iter()
             .map(|var| zippable(var, true))
-            .collect::<Vec<String>>()
+            .collect::<Vec<_>>()
             .join(", ")
     );
 
@@ -1004,10 +1004,10 @@ pub fn infer_shape_params_from_tensor_type(
                     SupportedGenericType::ConstArray => {
                         // This is a CGA type.
                         if is_mutable {
-                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<_>>()")));
                         } else {
                             // This might make sense for a small tensor.
-                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<_>>()")));
                         }
                     }
                     SupportedGenericType::ConstScalar => {
