@@ -6,7 +6,7 @@ Thank you for your interest in contributing to cuTile Rust! Based on the type of
    - File an [issue](https://github.com/NVIDIA/cutile-rs/issues/new/choose) describing what you encountered or what you want to see changed.
    - For bug reports, please include the following information:
      - Your OS (e.g., Ubuntu 22.04)
-     - Your GPU and GPU architecture (e.g., NVIDIA A100, Ampere)
+     - Your GPU and GPU architecture (e.g., NVIDIA A100, sm_80)
      - The error you're seeing (full error message / stack trace)
      - A minimal example to reproduce the error (if possible)
 2. You want to implement a feature, improvement, or bug fix:

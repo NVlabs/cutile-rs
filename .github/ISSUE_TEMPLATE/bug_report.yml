@@ -20,7 +20,7 @@ body:
     attributes:
       label: GPU and GPU Architecture
       description: What GPU and architecture are you using?
-      placeholder: e.g., NVIDIA A100 (Ampere), NVIDIA RTX 4090 (Ada Lovelace), etc.
+      placeholder: e.g., NVIDIA A100 (sm_80), NVIDIA B200 (sm_100), etc.
     validations:
       required: true
   - type: textarea
