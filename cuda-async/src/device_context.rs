@@ -7,7 +7,7 @@
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin};
-use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
+use cuda_core::{CudaContext, CudaFunction, CudaMemPool, CudaModule, CudaStream};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -88,7 +88,7 @@ pub struct AsyncDeviceContext {
     context: Arc<CudaContext>,
     deallocator_stream: Arc<CudaStream>,
     policy: Arc<GlobalSchedulingPolicy>,
-    pool: Option<cuda_core::sys::CUmemoryPool>,
+    pool: Option<Arc<CudaMemPool>>,
     functions: DeviceFunctions,
     validators: DeviceFunctionValidators,
 }
@@ -286,18 +286,39 @@ where
     })
 }
 
-/// Set the memory pool for all subsequent allocations on `device_id`.
+/// Set the memory pool for all subsequent allocations on `device_id`
+/// **for the calling thread only**.
 ///
-/// Pass `None` to revert to the default async collection path (`cuMemAllocAsync`).
-/// The caller is responsible for ensuring the pool outlives all tensors allocated from it.
+/// `AsyncDeviceContext` is thread-local. This configuration is not visible
+/// to other threads. Each thread that needs pool-routed allocation must call
+/// this independently.
 ///
-/// # Safety
-/// `pool` must be a valid `CUmemoryPool` handle, or `None`.
-pub unsafe fn set_device_pool(
+/// Pass `None` to revert to the default `cuMemAllocAsync` path.
+///
+/// The pool is held via `Arc`, so it cannot be desroyed while any device
+/// context still references it. 
+/// 
+/// # Errors
+///
+/// Returns `DeviceError:Context` if the pool's device ordinal does not
+/// match `device_id`, preventing cross-device mismatches.
+pub fn set_device_pool(
     device_id: usize,
-    pool: Option<cuda_core::sys::CUmemoryPool>,
+    pool: Option<Arc<CudaMemPool>>,
 ) -> Result<(), DeviceError> {
-    with_global_device_context_mut(device_id, |dc| {
+    if let Some(ref p) = pool {
+        if p.device_ordinal() != device_id {
+            return Err(device_error(
+                device_id,
+                &format!(
+                    "Pool belongs to device {}, but target device is {}.",
+                    p.device_ordinal(),
+                    device_id,
+                ),
+            ));
+        }
+    }
+    with_global_device_context(device_id, |dc| {
         dc.pool = pool;
     })
 }
@@ -314,10 +335,12 @@ pub unsafe fn device_alloc_async(
     stream: &Arc<cuda_core::CudaStream>,
     device_id: usize,
 ) -> cuda_core::sys::CUdeviceptr {
-    let pool = with_global_device_context(device_id, |dc| dc.pool)
+    let pool_handle = with_global_device_context(device_id, |dc| {
+        dc.pool.as_ref().map(|p| p.handle())
+    })
         .expect("Failed to get device context for allocation.");
-    match pool {
-        Some(pool) => cuda_core::malloc_from_pool_async(num_bytes, stream, pool),
+    match pool_handle {
+        Some(handle) => cuda_core::malloc_from_pool_async(num_bytes, stream, handle),
         None => cuda_core::malloc_async(num_bytes, stream),
     }
 }
