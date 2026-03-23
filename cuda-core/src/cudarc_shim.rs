@@ -1182,7 +1182,7 @@ pub mod memory {
         pool: sys::CUmemoryPool,
     ) -> Result<sys::CUdeviceptr, DriverError> {
         let mut dev_ptr = MaybeUninit::uninit();
-        sys::cuMemAllocFromPoolAsync(dev_ptr.as_mut_ptr(), num_bytes, pool, steam).result()?;
+        sys::cuMemAllocFromPoolAsync(dev_ptr.as_mut_ptr(), num_bytes, pool, stream).result()?;
         Ok(dev_ptr.assume_init())
     }
 
