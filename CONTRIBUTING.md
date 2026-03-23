@@ -3,7 +3,12 @@
 Thank you for your interest in contributing to cuTile Rust! Based on the type of contribution, it will fall into two categories:
 
 1. You want to report a bug, feature request, or documentation issue:
-   - File an issue describing what you encountered or what you want to see changed.
+   - File an [issue](https://github.com/NVIDIA/cutile-rs/issues/new/choose) describing what you encountered or what you want to see changed.
+   - For bug reports, please include the following information:
+     - Your OS (e.g., Ubuntu 22.04)
+     - Your GPU and GPU architecture (e.g., NVIDIA A100, Ampere)
+     - The error you're seeing (full error message / stack trace)
+     - A minimal example to reproduce the error (if possible)
 2. You want to implement a feature, improvement, or bug fix:
    - At this time we do not accept code contributions to the `cuda-bindings` crate.
    - For all other crates, please ensure that your commits are signed [following GitHub’s instruction](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification).

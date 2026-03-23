@@ -1,0 +1,41 @@
+name: Bug Report
+description: Report a bug to help us improve cuTile Rust
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please fill out the information below to help us diagnose and fix the issue.
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running?
+      placeholder: e.g., Ubuntu 22.04, Windows 11, etc.
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and GPU Architecture
+      description: What GPU and architecture are you using?
+      placeholder: e.g., NVIDIA A100 (Ampere), NVIDIA RTX 4090 (Ada Lovelace), etc.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error Description
+      description: What error are you seeing? Include the full error message and/or stack trace.
+      placeholder: Paste the error output here.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal Reproduction Example
+      description: Please provide a minimal code example that reproduces the error. This greatly helps us fix the issue faster.
+      render: rust
+    validations:
+      required: false
