@@ -345,6 +345,7 @@ impl CudaStream {
 pub struct CudaMemPool {
     pool: cuda_bindings::CUmemoryPool,
     ctx: Arc<CudaContext>,
+    device_ordinal: usize,
 }
 
 unsafe impl Send for CudaMemPool {}
@@ -368,12 +369,18 @@ impl CudaMemPool {
         Ok(Self {
             pool: pool.assume_init(),
             ctx: ctx.clone(),
+            device_ordinal: ctx.ordinal(),
         })
     }
 
     /// Returns the raw `CUmemoryPool` handle for use in allocation calls.
     pub fn handle(&self) -> cuda_bindings::CUmemoryPool {
         self.pool
+    }
+
+    /// Returns the device ordinal this pool was created on.
+    pub fn device_ordinal(&self) -> usize {
+        self.device_ordinal
     }
 }
 
