@@ -140,7 +140,7 @@ use crate::kernels::creation::{arange_apply, full_apply};
 use crate::tensor::{IntoPartition, Tensor, Unpartition};
 use candle_core::{FloatDType, WithDType};
 use cuda_async::device_box::DeviceBox;
-use cuda_async::device_context::with_default_device_policy;
+use cuda_async::device_context::{device_alloc_async, with_default_device_policy};
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
     value, DeviceOperation, ExecutionContext, Unzippable1, Unzippable2,
@@ -148,7 +148,6 @@ use cuda_async::device_operation::{
 use cuda_async::error::{device_error, DeviceError};
 use cuda_async::scheduling_policies::SchedulingPolicy;
 use cuda_core::curand::RNG;
-use cuda_async::device_context::device_alloc_async;
 use cuda_core::{memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
 use half::f16;
 use std::alloc::{alloc, Layout};
@@ -183,7 +182,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToDevice<T> {
         let num_elements = tensor.size();
         let num_bytes = element_size * num_elements;
         let src = tensor.cu_deviceptr();
-        let dst = malloc_async(num_bytes, ctx.get_cuda_stream(), ctx.get_device_id());
+        let dst = device_alloc_async(num_bytes, ctx.get_cuda_stream(), ctx.get_device_id());
         memcpy_dtod_async::<T>(dst, src, num_elements, ctx.get_cuda_stream());
         let device_box = DeviceBox::<[T]>::from_raw_parts(dst, num_elements, ctx.get_device_id());
         Ok(Tensor {
