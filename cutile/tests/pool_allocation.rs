@@ -29,18 +29,15 @@ mod common;
 // ---------------------------------------------------------------------------
  
 /// Creates a `CudaMemPool` on the default device and configures the thread-local
-/// context to allocate from it. Returns the pool (caller must keep it alive until
-/// all tensors allocated from it have been dropped.)
+/// context to allocate from it. Returns the `Arc<CudaMemPool>` - the context
+/// holds a clone, so the pool stays alive as long as either reference exists.
 ///
 /// # Safety
 /// Must be called from a thread with a valid CUDA context for `device_id`.
 unsafe fn setup_pool(device_id: usize) -> Arc<CudaMemPool> {
     let ctx = CudaContext::new(device_id).expect("Failed to create CudaContext.");
-    let pool = Arc::new(
-        CudaMemPool::new(&ctx).expect("Failed to create CudaMemPool.")
-    );
-    set_device_pool(device_id, Some(pool.clone()))
-        .expect("Failed to set device pool.");
+    let pool = Arc::new(CudaMemPool::new(&ctx).expect("Failed to create CudaMemPool."));
+    set_device_pool(device_id, Some(pool.clone())).expect("Failed to set device pool.");
     pool
 }
 
@@ -51,7 +48,7 @@ fn teardown_pool(device_id: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests - pool lifecycle
 // ---------------------------------------------------------------------------
 
 /// Smoke test: full pool lifecycle.
@@ -73,20 +70,12 @@ fn pool_alloc_zeros_roundtrip() {
         // Pool must outlive tensors - declared first, dropped last.
         let pool = unsafe { setup_pool(device_id )};
 
-        let tensor = api::zeros::<f32([256])
-            .sync()
-            .expect("Failed to allocate zeros tensor from pool.");
+        let tensor = api::zeros::<f32>([256]).sync().expect("Failed to allocate zeros tensor from pool.");
 
-        let host_vec = tensor
-            .to_host_vec()
-            .sync()
-            .expect("failed to copy tensor to host.");
+        let host_vec = tensor.to_host_vec().sync().expect("failed to copy tensor to host.");
 
         assert_eq!(host_vec.len(), 256, "Unexpected tensor length.");
-        assert!(
-            host_vec.iter().all(|&v| v == 0.0),
-            "Expected all zeros, got non-zero values." 
-        );
+        assert!(host_vec.iter().all(|&v| v == 0.0), "Expected all zeros, got non-zero values.");
 
         teardown_pool(device_id);
         drop(pool);
@@ -101,20 +90,12 @@ fn pool_alloc_ones_roundtrip() {
         let device_id = get_default_device();
         let pool = unsafe { setup_pool(device_id) };
 
-        let tensor = api::ones::<f32>([512])
-            .sync()
-            .expect("Failed to allocate ones tensor from pool");
+        let tensor = api::ones::<f32>([512]).sync().expect("Failed to allocate ones tensor from pool");
 
-        let host_vec = tensor
-            .to_host_vec()
-            .sync()
-            .expect("Failed to copy tensor to host.");
+        let host_vec = tensor.to_host_vec().sync().expect("Failed to copy tensor to host.");
 
         assert_eq!(host_vec.len(), 512)
-        assert!(
-            host_vec.iter().all(|&v| v == 1.0),
-            "Expected all ones from pool-allocated tensor."
-        );
+        assert!(host_vec.iter().all(|&v| v == 1.0), "Expected all ones from pool-allocated tensor.");
 
         teardown_pool(device_id);
         drop(pool);
@@ -129,14 +110,9 @@ fn pool_alloc_arange_roundtrip() {
         let device_id = get_default_device();
         let pool = unsafe { setup_pool(device_id) };
 
-        let tensor = api::arange::<f32>(128)
-            .sync()
-            .expect("Failed to allocate arange tensor from pool.");
+        let tensor = api::arange::<f32>(128).sync().expect("Failed to allocate arange tensor from pool.");
         
-        let host_vec = tensor
-            .to_host_vec()
-            .sync()
-            .expect("Failed to copy tensor to host.");
+        let host_vec = tensor.to_host_vec().sync().expect("Failed to copy tensor to host.");
         
         assert_eq!(host_vec.len(), 128);
         for (i, &v) in host_vec.iter().enumerate() {
@@ -152,9 +128,12 @@ fn pool_alloc_arange_roundtrip() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Tests — fallback and multi-alloc
+// ---------------------------------------------------------------------------
+
 /// After clearing the pool, allocations must revert to the default `cuMemAllocAsync`
-/// path. This test allocates one tensor from a pool, clears it, then allocates
-/// another tensor without a pool, and verifies both produce correct results.
+/// path. Both pool-era and post-pool tensors must produce correct values.
 ///
 /// Catches regressions where `set_device_pool(None)` leaves stale state.
 #[test]
@@ -164,33 +143,20 @@ fn revert_to_default_after_pool_cleared() {
         let pool = unsafe { setup_pool(device_id) };
 
         // Allocate from pool.
-        let t_pool = api::ones::<f32([128])
-            .sync()
-            .expect("Failed to allocate from pool.");
+        let t_pool = api::ones::<f32>([128]).sync().expect("Failed to allocate from pool.");
 
         // Revert to default.
         teardown_pool(device_id);
 
         // Allocate from default path.
-        let t_default = api::ones::<f32>([128])
-            .sync()
-            .expect("Failed to allocate from default path after clearing pool.");
+        let t_default = api::ones::<f32>([128]).sync().expect("Failed to allocate from default path after clearing pool.");
 
         // Both must produce correct values.
-        let v_pool = t_pool
-            .to_host_vec()
-            .sync()
-            .expect("Failed to read pool tensor.");
-        let v_default = t_default
-            .to_host_vec()
-            .sync()
-            .expect("Failed to read default tensor.");
+        let v_pool = t_pool.to_host_vec().sync().expect("Failed to read pool tensor.");
+        let v_default = t_default.to_host_vec().sync().expect("Failed to read default tensor.");
 
         assert!(v_pool.iter().all(|&v| v == 1.0), "Pool tensor corrupted.");
-        assert!(
-            v_default.iter().all(|&v| v == 1.0), 
-            "Default tensor corrupted after pool revert."
-        );
+        assert!(v_default.iter().all(|&v| v == 1.0), "Default tensor corrupted after pool revert.");
 
         drop(pool);
     });
@@ -205,15 +171,9 @@ fn multiple_allocs_from_same_pool() {
         let device_id = get_default_device();
         let pool = unsafe { setup_pool(device_id) };
 
-        let t_zeros = api::zeros::<f32>([256])
-            .sync()
-            .expect("Failed to allocate zeros.");
-        let t_ones = api::ones::<f32>([256])
-            .sync()
-            .expect("Failed to allocate ones.");
-        let t_range = api::arange::<f32>(256)
-            .sync()
-            .expect("Failed to allocate arange.");
+        let t_zeros = api::zeros::<f32>([256]).sync().expect("Failed to allocate zeros.");
+        let t_ones = api::ones::<f32>([256]).sync().expect("Failed to allocate ones.");
+        let t_range = api::arange::<f32>(256).sync().expect("Failed to allocate arange.");
         
         let v_zeros = t_zeros.to_host_vec().sync().expect("readback zeros");
         let v_ones = t_ones.to_host_vec().sync().expect("readback ones");
@@ -229,6 +189,10 @@ fn multiple_allocs_from_same_pool() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Tests — shape and copy paths
+// ---------------------------------------------------------------------------
+
 /// Multi-dimensional tensors allocated from a pool - verifies that shape/stride
 /// metadata is unaffected by the allocation path change.
 #[test]
@@ -237,20 +201,12 @@ fn pool_alloc_multidimensional() {
         let device_id = get_default_device();
         let pool = unsafe { setup_pool(device_id) };
 
-        let tensor = api::ones::<f32>([16, 32])
-            .sync()
-            .expect("Failed to allocate 2D tensor from pool.");
+        let tensor = api::ones::<f32>([16, 32]).sync().expect("Failed to allocate 2D tensor from pool.");
 
-        let host_vec = tensor
-            .to_host_vec()
-            .sync()
-            .expect("Failed to copy 2D tensor to host.");
+        let host_vec = tensor.to_host_vec().sync().expect("Failed to copy 2D tensor to host.");
         
         assert_eq!(host_vec.len(), 16 * 32, "Unexpected 2D tensor length.");
-        assert!(
-            host_vec.iter().all(|&v| v == 1.0),
-            "2D pool-allocated tensor has incorrect values."
-        );
+        assert!(host_vec.iter().all(|&v| v == 1.0), "2D pool-allocated tensor has incorrect values.");
 
         teardown_pool(device_id);
         drop(pool);
@@ -268,24 +224,12 @@ fn pool_alloc_device_copy() {
         let device_id = get_default_device();
         let pool = unsafe { setup_pool(device_id) };
 
-        let src = api::arange::<f32>(64)
-            .arc()
-            .sync()
-            .expect("Failed to allocate source tensor from pool.");
+        let src = api::arange::<f32>(64).arc().sync().expect("Failed to allocate source tensor from pool.");
 
-        let dst = src
-            .copy()
-            .sync()
-            .expect("Failed to copy tensor (device-to-device) from pool.");
+        let dst = src.copy().sync().expect("Failed to copy tensor (device-to-device) from pool.");
 
-        let v_src = src
-            .to_host_vec()
-            .sync()
-            .expect("Failed to read source.");
-        let v_dst = dst
-            .to_host_vec()
-            .sync()
-            .expect("Failed to read copy.");
+        let v_src = src.to_host_vec().sync().expect("Failed to read source.");
+        let v_dst = dst.to_host_vec().sync().expect("Failed to read copy.");
 
         assert_eq!(v_src, v_dst, "Device copy produced different values.");
 
@@ -294,28 +238,23 @@ fn pool_alloc_device_copy() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Tests — regression and validation
+// ---------------------------------------------------------------------------
+
 /// Allocations without any pool configured must continue to work exactly
 /// as before - this is the baseline regression test ensuring the routing
-/// change doesn't break the default even when `set_device_pool` has
-/// never been called.
+/// change doesn't break the default.
 #[test]
 fn default_path_wihout_pool_unchanged() {
     common::with_test_stack(|| {
         // No pool setup - go straight to allocation.
-        let tensor = api::zeros::<f32>([1024])
-            .sync()
-            .expect("Default allocation path failed.");
+        let tensor = api::zeros::<f32>([1024]).sync().expect("Default allocation path failed.");
 
-        let host_vec = tensor
-            .to_host_vec()
-            .sync()
-            .expect("Failed to read default-path tensor.");
+        let host_vec = tensor.to_host_vec().sync().expect("Failed to read default-path tensor.");
 
         assert_eq!(host_vec.len(), 1024);
-        assert!(
-            host_vec.iter().all(|&v| v == 0.0),
-            "Default path produced incorrect values."
-        );
+        assert!(host_vec.iter().all(|&v| v == 0.0), "Default path produced incorrect values.");
     });
 }
 
@@ -324,23 +263,17 @@ fn default_path_wihout_pool_unchanged() {
 #[test]
 fn set_pool_rejects_device_mismatch() {
     common::with_test_stack(|| {
-        let device_count = CudaContext::device_count()
-            .expect("Failed to query device count.");
+        let device_count = CudaContext::device_count().expect("Failed to query device count.");
         if device_count < 2 {
             eprintln!("Skipping device mismatch test - only {} device(s).", device_count);
             return;
         }
 
         let ctx_1 = CudaContext::new(1).expect("Failed to create context on device 1.");
-        let pool_on_1 = Arc::new(unsafe {
-            CudaMemPool::new(&ctx_1).expect("Failed to create pool on device 1.")
-        });
+        let pool_on_1 = Arc::new(unsafe { CudaMemPool::new(&ctx_1).expect("Failed to create pool on device 1.") });
 
         // Attaching device-1's pool to device 0 must fail.
         let result = set_device_pool(0, Some(pool1_on_1));
-        assert!(
-            result.is_err(),
-            "set_device_pool should reject cross-device pool, but got Ok.",
-        );
+        assert!(result.is_err(), "set_device_pool should reject cross-device pool, but got Ok.");
     });
 }
