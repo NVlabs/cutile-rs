@@ -213,7 +213,7 @@ use cuda_async::device_operation::{value, DeviceOperation};
 use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::device_context::device_alloc_async;
-use cuda_core::CudaStream,
+use cuda_core::CudaStream;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
