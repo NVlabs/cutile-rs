@@ -177,7 +177,7 @@ fn set_default_device_changes_value() {
 fn new_device_context_with_invalid_device_returns_driver_error() {
     // Device ordinal 9999 should not exist on any reasonable system.
     let policy = unsafe { StreamPoolRoundRobin::new(9999, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE) };
-    let result = new_device_context(9999, GlobalSchedulingPolicy::RoundRobin(policy));
+    let result = new_device_context(9999, GlobalSchedulingPolicy::RoundRobin(policy), None);
     match result {
         Err(DeviceError::Driver(_)) => { /* expected */ }
         Err(other) => panic!("expected Driver variant, got: {other:?}"),
