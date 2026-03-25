@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared helpers for test runner scripts.
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+OVERALL_SUCCESS=true
+
+print_header() {
+    local title="$1"
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}${title}${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+}
+
+run_step() {
+    local step_name="$1"
+    shift
+
+    echo -e "${YELLOW}>>> ${step_name}${NC}"
+    if "$@"; then
+        echo -e "${GREEN}✓ ${step_name} completed successfully${NC}"
+        echo ""
+        return 0
+    else
+        echo -e "${RED}✗ ${step_name} failed${NC}"
+        echo ""
+        OVERALL_SUCCESS=false
+        return 1
+    fi
+}
+
+run_examples() {
+    local examples_dir="$1"
+    shift
+    local skip_examples=("$@")
+    local examples_passed=0
+    local examples_failed=0
+    local failed_examples=()
+
+    mapfile -t examples < <(find "$examples_dir" -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
+
+    for example in "${examples[@]}"; do
+        local should_skip=false
+        for skip in "${skip_examples[@]}"; do
+            if [[ "$example" == "$skip" ]]; then
+                should_skip=true
+                break
+            fi
+        done
+        if [[ "$should_skip" == true ]]; then
+            echo "Skipping example: $example"
+            continue
+        fi
+
+        echo -e "  Running example: ${example}"
+        if cargo run --example "$example" --quiet >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} ${example}"
+            ((examples_passed++))
+        else
+            echo -e "  ${RED}✗${NC} ${example}"
+            ((examples_failed++))
+            failed_examples+=("$example")
+            OVERALL_SUCCESS=false
+        fi
+    done
+
+    echo ""
+    if [[ $examples_failed -eq 0 ]]; then
+        echo -e "${GREEN}✓ All ${examples_passed} examples passed${NC}"
+    else
+        echo -e "${RED}✗ ${examples_failed} examples failed, ${examples_passed} passed${NC}"
+        echo -e "${RED}Failed examples: ${failed_examples[*]}${NC}"
+    fi
+    echo ""
+}
+
+run_benches() {
+    local benches_dir="$1"
+    local benches_passed=0
+    local benches_failed=0
+    local failed_benches=()
+
+    mapfile -t benches < <(find "$benches_dir" -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
+
+    for bench in "${benches[@]}"; do
+        echo -e "  Running benchmark: ${bench}"
+        if cargo bench --bench "$bench" --quiet >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} ${bench}"
+            ((benches_passed++))
+        else
+            echo -e "  ${RED}✗${NC} ${bench}"
+            ((benches_failed++))
+            failed_benches+=("$bench")
+            OVERALL_SUCCESS=false
+        fi
+    done
+
+    echo ""
+    if [[ $benches_failed -eq 0 ]]; then
+        echo -e "${GREEN}✓ All ${benches_passed} benchmarks validated${NC}"
+    else
+        echo -e "${RED}✗ ${benches_failed} benchmarks failed, ${benches_passed} passed${NC}"
+        echo -e "${RED}Failed benchmarks: ${failed_benches[*]}${NC}"
+    fi
+    echo ""
+}
+
+print_summary_and_exit() {
+    local success_message="$1"
+    local failure_message="$2"
+
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}Summary${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    if [[ "$OVERALL_SUCCESS" == true ]]; then
+        echo -e "${GREEN}✓ ${success_message}${NC}"
+        exit 0
+    else
+        echo -e "${RED}✗ ${failure_message}${NC}"
+        exit 1
+    fi
+}
