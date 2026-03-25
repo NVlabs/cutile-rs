@@ -136,7 +136,8 @@
 //!
 //! ## Feature Flags
 //!
-//! This crate currently has no optional features.
+//! - `cuda` (default): Enables runtime modules and CUDA-backed execution.
+//! - Without `cuda`: Core DSL types and MLIR compilation remain available, but runtime modules are disabled.
 //!
 //! ## Safety
 //!
@@ -166,18 +167,32 @@
 //! - **Architecture & Design** - How cutile works under the hood
 
 pub mod _core;
+#[cfg(feature = "cuda")]
 pub mod error;
 pub use _core::core;
+#[cfg(feature = "cuda")]
 pub mod api;
+#[cfg(feature = "cuda")]
 pub mod kernels;
+#[cfg(feature = "cuda")]
 pub mod tensor;
+#[cfg(feature = "cuda")]
 pub mod tile_kernel;
+#[cfg(feature = "cuda")]
 pub mod utils;
 
+#[cfg(feature = "cuda")]
 pub use cuda_async;
+#[cfg(feature = "cuda")]
 pub use cuda_core;
+#[cfg(feature = "cuda")]
 pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;
+// TODO (hme): Coordinate with Candle about our dependence on this.
+#[cfg(feature = "cuda")]
+pub use candle_core;
+#[cfg(feature = "cuda")]
+pub use candle_core::{FloatDType, WithDType};

@@ -68,6 +68,6 @@ cuda-async = { path = "cuda-async", version = "0.0.1-alpha" }
 cuda-tile-rs = { path = "cuda-tile-rs", version = "0.0.1-alpha" }
 cutile-compiler = { path = "cutile-compiler", version = "0.0.1-alpha" }
 cutile-macro = { path = "cutile-macro", version = "0.0.1-alpha" }
-cutile = { path = "cutile", version = "0.0.1-alpha" }
+cutile = { path = "cutile", version = "0.0.1-alpha", default-features = false }
 cutile-examples = { path = "cutile-examples", version = "0.0.1-alpha" }
 cutile-benchmarks = { path = "cutile-benchmarks", version = "0.0.1-alpha" }

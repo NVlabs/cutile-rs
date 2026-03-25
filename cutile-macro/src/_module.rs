@@ -182,6 +182,8 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = parse_macro_input!(attributes as SingleMetaList);
     let is_core = attrs.parse_bool("core").unwrap_or(false);
     let is_tile_rust_crate = attrs.parse_bool("tile_rust_crate").unwrap_or(false);
+    let mlir_only = attrs.parse_bool("mlir_only").unwrap_or(false);
+
     let tile_rust_crate_root = Ident::new(
         if is_tile_rust_crate {
             "crate"
@@ -200,9 +202,12 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let mut module_item = parse_macro_input!(item as ItemMod);
     module_item.attrs = attrs.into();
 
+    let skip_runtime = is_core || mlir_only;
+
     match module_inner(
         &module_item,
         is_core,
+        skip_runtime,
         &tile_rust_crate_root,
         raw_item_source,
     ) {
@@ -215,6 +220,7 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
 fn module_inner(
     module_item: &ItemMod,
     is_core: bool,
+    skip_runtime: bool,
     tile_rust_crate_root: &Ident,
     raw_item_source: String,
 ) -> Result<TokenStream2, Error> {
@@ -310,7 +316,7 @@ fn module_inner(
         tile_rust_crate_root,
         raw_item_source,
     );
-    let res = if entry_functions.is_empty() {
+    let res = if skip_runtime || entry_functions.is_empty() {
         quote! {
             pub mod #name {
                 #![allow(nonstandard_style)]
