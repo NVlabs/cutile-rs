@@ -93,12 +93,11 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         &self,
         waker_state: Arc<StreamCallbackState>,
     ) -> Result<(), DeviceError> {
-        let ctx = self
-            .execution_context
-            .as_ref()
-            .ok_or(DeviceError::Internal(
+        let ctx = self.execution_context.as_ref().ok_or_else(|| {
+            DeviceError::Internal(
                 "Cannot execute future without setting stream on which to execute.".to_string(),
-            ))?;
+            )
+        })?;
         ctx.get_cuda_stream().launch_host_function(move || {
             waker_state.signal();
         })?;
@@ -106,18 +105,19 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
     }
     /// Executes the stored device operation on the associated stream.
     fn execute(&mut self) -> Result<(), DeviceError> {
-        let ctx = self
-            .execution_context
-            .as_ref()
-            .ok_or(DeviceError::Internal(
+        let ctx = self.execution_context.as_ref().ok_or_else(|| {
+            DeviceError::Internal(
                 "Cannot execute future without setting stream on which to execute.".to_string(),
-            ))?;
+            )
+        })?;
         // TODO (hme): We may need to hold a reference to device_operation,
         //  to ensure kernel launch structs (and their args) are dropped
         //  when the future completes vs. when this function completes.
-        let operation = self.device_operation.take().ok_or(DeviceError::Internal(
-            "Unable to execute future: No operation has been set.".to_string(),
-        ))?;
+        let operation = self.device_operation.take().ok_or_else(|| {
+            DeviceError::Internal(
+                "Unable to execute future: No operation has been set.".to_string(),
+            )
+        })?;
         let out = unsafe { operation.execute(ctx) }?;
         self.result = Some(out);
         Ok(())

@@ -76,9 +76,9 @@ impl AsyncKernelLaunch {
     /// # Safety
     /// The caller must ensure the kernel arguments and launch config are valid.
     unsafe fn launch(mut self, stream: &Arc<CudaStream>) -> Result<(), DeviceError> {
-        let cfg = self.cfg.ok_or(DeviceError::Launch(
-            "Await called before launching the kernel.".to_string(),
-        ))?;
+        let cfg = self.cfg.ok_or_else(|| {
+            DeviceError::Launch("Await called before launching the kernel.".to_string())
+        })?;
         launch_kernel(
             self.func.cu_function(),
             cfg.grid_dim,

@@ -211,7 +211,7 @@ impl SchedulingPolicy for StreamPoolRoundRobin {
         let stream_pool = self
             .stream_pool
             .as_ref()
-            .ok_or(device_error(self.device_id, "Stream pool not initialized."))?;
+            .ok_or_else(|| device_error(self.device_id, "Stream pool not initialized."))?;
         let stream = stream_pool[stream_idx].clone();
         op.sync_on(&stream)
     }
@@ -226,7 +226,7 @@ impl SchedulingPolicy for StreamPoolRoundRobin {
         let stream_pool = self
             .stream_pool
             .as_ref()
-            .ok_or(device_error(self.device_id, "Stream pool not initialized."))?;
+            .ok_or_else(|| device_error(self.device_id, "Stream pool not initialized."))?;
         let stream = stream_pool[stream_idx].clone();
         let mut future = DeviceFuture::new();
         future.device_operation = Some(op);

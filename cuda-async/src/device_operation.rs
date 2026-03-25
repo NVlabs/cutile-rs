@@ -596,10 +596,12 @@ where
         if !self.computed.load(Ordering::Acquire) {
             // Safety: This block is guaranteed to execute at most once.
             // Put the input in a box so the pointer is dropped when this block exits.
-            let input = unsafe { (&mut *self.input.get()).take() }.ok_or(device_error(
-                context.get_device_id(),
-                "Select operation failed.",
-            ))?;
+            let input = self.input.get();
+            let input = unsafe { input.as_mut() };
+            let input = input
+                .unwrap()
+                .take()
+                .ok_or_else(|| device_error(context.get_device_id(), "Select operation failed."))?;
             let (left, right) = input.execute(context)?;
             // Update internal state.
             unsafe {
@@ -611,10 +613,14 @@ where
         Ok(())
     }
     unsafe fn left(&self) -> T1 {
-        unsafe { (&mut *self.left.get()).take() }.unwrap()
+        let cell = self.left.get();
+        let cell = unsafe { cell.as_mut() };
+        cell.unwrap().take().unwrap()
     }
     unsafe fn right(&self) -> T2 {
-        unsafe { (&mut *self.right.get()).take() }.unwrap()
+        let cell = self.right.get();
+        let cell = unsafe { cell.as_mut() };
+        cell.unwrap().take().unwrap()
     }
 }
 

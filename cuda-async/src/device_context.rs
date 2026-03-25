@@ -218,7 +218,7 @@ where
                 init_device_contexts_default()?;
                 ctx.devices
                     .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
+                    .ok_or_else(|| device_error(device_id, "Failed to initialize context"))?
             }
         };
         if !hashmap.contains_key(&device_id) {
@@ -226,7 +226,7 @@ where
         }
         let device_context = hashmap
             .get(&device_id)
-            .ok_or(device_error(device_id, "Failed to get context"))?;
+            .ok_or_else(|| device_error(device_id, "Failed to get context"))?;
         let r = f(device_context);
         ctx.devices.replace(Some(hashmap));
         Ok(r)
@@ -244,7 +244,7 @@ where
                 init_device_contexts_default()?;
                 ctx.devices
                     .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
+                    .ok_or_else(|| device_error(device_id, "Failed to initialize context"))?
             }
         };
         if !hashmap.contains_key(&device_id) {
@@ -252,7 +252,7 @@ where
         }
         let device_context = hashmap
             .get_mut(&device_id)
-            .ok_or(device_error(device_id, "Failed to get context"))?;
+            .ok_or_else(|| device_error(device_id, "Failed to get context"))?;
         let r = f(device_context);
         ctx.devices.replace(Some(hashmap));
         Ok(r)
@@ -386,7 +386,7 @@ pub fn get_cuda_function(
         let entry = device_context
             .functions
             .get(&key)
-            .ok_or(device_error(device_id, "Failed to get cuda function."))?;
+            .ok_or_else(|| device_error(device_id, "Failed to get cuda function."))?;
         Ok(entry.1.clone())
     })?
 }
@@ -412,7 +412,7 @@ pub fn get_function_validator(
         let entry = device_context
             .validators
             .get(&key)
-            .ok_or(device_error(device_id, "Failed to get function validator."))?;
+            .ok_or_else(|| device_error(device_id, "Failed to get function validator."))?;
         Ok(entry.clone())
     })?
 }
