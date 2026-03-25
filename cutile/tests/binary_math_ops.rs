@@ -37,10 +37,9 @@ mod binary_math_ops_module {
         output.store(result);
     }
 
-    
     #[cutile::entry()]
     fn bf16_binary_arith_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
-        // Covers bf16 binary arithmetic lowering 
+        // Covers bf16 binary arithmetic lowering
         let x: Tile<bf16, S> = load_tile_mut(output);
         let y: Tile<bf16, S> = load_tile_mut(output);
 
