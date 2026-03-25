@@ -21,6 +21,9 @@ jobs:
       image: nvidia/cuda:13.2.0-devel-ubuntu24.04
       env:
         DEBIAN_FRONTEND: noninteractive
+    env:
+      CUDA_TOOLKIT_PATH: /usr/local/cuda-13
+      CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
     timeout-minutes: 30
     steps:
       - name: Install basic dependencies
@@ -48,33 +51,21 @@ jobs:
           update-alternatives --install /usr/bin/llvm-config llvm-config /usr/lib/llvm-21/bin/llvm-config 1
 
       - name: Build
-        env:
-          CUDA_TOOLKIT_PATH: /usr/local/cuda-13
-          CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
           cargo build
 
       - name: Format check
-        env:
-          CUDA_TOOLKIT_PATH: /usr/local/cuda-13
-          CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
           cargo fmt -- --check
 
       - name: Clippy
-        env:
-          CUDA_TOOLKIT_PATH: /usr/local/cuda-13
-          CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
           cargo clippy
 
       - name: Test (compile only)
-        env:
-          CUDA_TOOLKIT_PATH: /usr/local/cuda-13
-          CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
         run: |
           source "${HOME}/.cargo/env"
           cargo test --no-run
