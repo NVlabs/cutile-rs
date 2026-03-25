@@ -143,7 +143,7 @@ allowing for safe parallel mutable access.
 - cuTile Rust Library: `cargo test --package cutile`
 - Examples: run an individual example, for example `cargo run -p cutile-examples --example async_gemm`
 - Benchmarks: `cargo bench`
-- Everything: `./scripts/run_all_tests.sh` (or pipe to a log file: `./scripts/run_all_tests.sh 2>&1 | tee test_run.log`)
+- Everything: `./scripts/run_all.sh` (or pipe to a log file: `./scripts/run_all.sh 2>&1 | tee test_run.log`)
 
 # License
 The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).

@@ -7,7 +7,11 @@ set -u
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_runner_common.sh"
 
-print_header "Running GPU tests, examples, and benchmarks"
+print_header "Running GPU tests"
+
+run_step \
+    "cutile error-quality tests" \
+    cargo test -p cutile --test error_quality --quiet
 
 run_step \
     "cutile-compiler GPU runtime tests" \
@@ -39,14 +43,6 @@ run_step \
     "cutile GPU error-quality tests" \
     cargo test -p cutile --test gpu --quiet
 
-echo -e "${YELLOW}>>> Running cutile-examples (GPU)${NC}"
-cd "$REPO_ROOT/cutile-examples" || exit 1
-run_examples "$REPO_ROOT/cutile-examples/examples"
-
-echo -e "${YELLOW}>>> Running cutile-benchmarks (GPU)${NC}"
-cd "$REPO_ROOT/cutile-benchmarks" || exit 1
-run_benches "$REPO_ROOT/cutile-benchmarks/benches"
-
 print_summary_and_exit \
-    "All GPU tests, examples, and benchmarks passed!" \
-    "Some GPU checks failed. See output above for details."
+    "All GPU tests passed!" \
+    "Some GPU tests failed. See output above for details."

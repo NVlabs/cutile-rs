@@ -14,10 +14,6 @@ run_step \
     cargo test -p cuda-tile-rs --quiet
 
 run_step \
-    "cuda-tile-rs translation example" \
-    cargo run -p cuda-tile-rs --example build_translate_basic --quiet
-
-run_step \
     "cutile-compiler CPU unit tests" \
     cargo test -p cutile-compiler --lib --quiet
 
@@ -28,10 +24,6 @@ run_step \
 run_step \
     "cutile library tests" \
     cargo test -p cutile --lib --quiet
-
-run_step \
-    "cutile CPU error-quality tests" \
-    cargo test -p cutile --test error_quality --quiet
 
 print_summary_and_exit \
     "All CPU tests passed!" \

@@ -13,7 +13,13 @@ CPU_STATUS=$?
 "$SCRIPT_DIR/run_gpu_tests.sh"
 GPU_STATUS=$?
 
-if [[ $CPU_STATUS -eq 0 && $GPU_STATUS -eq 0 ]]; then
+"$SCRIPT_DIR/run_examples.sh"
+EXAMPLES_STATUS=$?
+
+"$SCRIPT_DIR/run_benchmarks.sh"
+BENCHMARKS_STATUS=$?
+
+if [[ $CPU_STATUS -eq 0 && $GPU_STATUS -eq 0 && $EXAMPLES_STATUS -eq 0 && $BENCHMARKS_STATUS -eq 0 ]]; then
     exit 0
 fi
 
