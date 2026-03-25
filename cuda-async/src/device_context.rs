@@ -313,12 +313,12 @@ where
 ///
 /// Pass `None` to revert to the default `cuMemAllocAsync` path.
 ///
-/// The pool is held via `Arc`, so it cannot be desroyed while any device
+/// The pool is held via `Arc`, so it cannot be destroyed while any device
 /// context still references it. 
 /// 
 /// # Errors
 ///
-/// Returns `DeviceError:Context` if the pool's device ordinal does not
+/// Returns `DeviceError::Context` if the pool's device ordinal does not
 /// match `device_id`, preventing cross-device mismatches.
 pub fn set_device_pool(
     device_id: usize,
@@ -344,13 +344,13 @@ pub fn set_device_pool(
 /// Allocate device memory, routing through the configured pool if one is set.
 /// 
 /// This is the pool-aware replacement for calling `cuda_core::malloc_async` directly.
-/// If no pool is configured for `device_id`, falls back to cuMemAllocAsync`.
+/// If no pool is configured for `device_id`, falls back to `cuMemAllocAsync`.
 ///
 /// # Safety
 /// `stream` must be a valid CUDA stream.
 ///
 /// # Errors
-/// Returns `DeviceError` if the context lookup or allocation failes (e.g., OOM)
+/// Returns `DeviceError` if the context lookup or allocation fails (e.g., OOM)
 pub unsafe fn device_alloc_async(
     num_bytes: usize,
     stream: &Arc<cuda_core::CudaStream>,

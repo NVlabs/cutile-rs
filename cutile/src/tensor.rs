@@ -215,9 +215,10 @@ use cuda_async::device_operation::{value, DeviceOperation, ExecutionContext};
 use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::CudaStream;
-use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::future::IntoFuture;
 use std::mem::MaybeUninit;
+use std::fmt::Debug;
 use std::ops::Index;
 use std::sync::Arc;
 

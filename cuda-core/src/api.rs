@@ -87,9 +87,8 @@ pub unsafe fn malloc_from_pool_async(
     num_bytes: usize,
     stream: &Arc<CudaStream>,
     pool: sys::CUmemoryPool,
-) -> sys::CUdeviceptr {
+) -> Result<sys::CUdeviceptr, crate::DriverError> {
     crate::memory::malloc_from_pool_async(stream.cu_stream(), num_bytes, pool)
-        .expect("Malloc from pool async failed.")
 }
 
 /// Asynchronously frees device memory on the given stream.

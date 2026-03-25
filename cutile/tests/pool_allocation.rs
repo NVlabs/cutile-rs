@@ -19,7 +19,8 @@ use cuda_async::device_operation::DeviceOperation;
 use cuda_core::CudaContext;
 use cuda_core::CudaMemPool;
 use cutile::api;
-use cutile::tensor::ToHostVec;
+use cutile::tensor::{CopyToDevice, CopyToDeviceTensor, ToHostVec};
+use candle_core;
 use std::sync::Arc;
 
 mod common;
@@ -64,7 +65,7 @@ fn teardown_pool(device_id: usize) {
 /// - `DeviceBox::drop` → `cuMemFreeAsync` (unchanged, handles pool provenance)
 #[test]
 fn pool_alloc_zeros_roundtrip() {
-    commoon::with_test_stack(|| {
+    common::with_test_stack(|| {
         let device_id = get_default_device();
 
         // Pool must outlive tensors - declared first, dropped last.
@@ -102,7 +103,7 @@ fn pool_alloc_ones_roundtrip() {
     });
 }
 
-// Pool allocations with `api::arange` - verifies the `arange_apply` kernel path,
+/// Pool allocations with `api::arange` - verifies the `arange_apply` kernel path,
 /// which writes sequential values into pool-allocated memory.
 #[test]
 fn pool_alloc_arange_roundtrip() {
@@ -238,6 +239,78 @@ fn pool_alloc_device_copy() {
     });
 }
 
+/// Host-to-device copy via `CopyHostToDevice::execute` (Candle Tensor path).
+/// 
+/// This exercises the `device_alloc_async` call site in `CopyHostToDevice`,
+/// which is distinct from both `Tensor::uninitialized` and `CopyDeviceToDevice`.
+#[test]
+fn pool_alloc_host_to_device_copy() {
+    common::with_test_stack(|| {
+        use candle_core::{DType, Device, Tensor as CandelTensor};
+        use cutile::tensor::CopyToDevice;
+
+        let device_id = get_default_device();
+        let pool = unsafe { setup_pool(device_id) };
+
+        // Create a CPU tensor via Candle, then copy to GPU through pool.
+        let cpu_tensor = Arc::new(
+            CandleTensor::arange(0f32, 64f32, &Device::Cpu)
+                .expect("Failed to create Candle tensor."),
+        );
+
+        let gpu_tensor: Arc<cutile::tensor::Tensor<f32>> = cpu_tensor
+            .copy_to_device()
+            .sync()
+            .expect("CopyHostToDEvice failed pool.");
+
+        let host_vec = gpu_tensor
+            .to_host_vec()
+            .sync()
+            .expect("Failed to read back host-to-device copy.");
+
+        assert_eq!(host_vec.len(), 64);
+        for (i, &v) in host_vec.iter().enumerate() {
+            assert_eq!(v, i as f32, "host-to-device mismatch at index {i}");
+        }
+
+        teardown_pool(device_id);
+        drop(pool);
+    });
+}
+
+/// Host Vec to device copy via `CopyHostVecToDevice::excute`.
+/// 
+/// This exercises the `device_alloc_async` call site in `CopyHostVecToDevice`.
+#[test]
+fn pool_alloc_host_vec_to_device_copy() {
+    common::with_test_stack(|| {
+        use cutile::tensor::CopyToDeviceTensor;
+
+        let device_id = get_default_device();
+        let pool = unsafe { setup_pool(device_id) };
+
+        let host_data: Arc<Vec<f32>> = Arc::new((0..128).map(|i| i as f32).collect());
+
+        let gpu_tensor = host_data
+            .copy_to_device_tensor()
+            .sync()
+            .expect("CopyHostVecToDevice failed with pool.");
+
+        let host_vec = gpu_tensor
+            .to_host_vec()
+            .sync()
+            .expect("Failed to read back host-vec-to-device copy.");
+
+        assert_eq!(host_vec.len(), 128);
+        for (i, &v) in host_vec.iter().enumerate() {
+            assert_eq!(v, i as f32, "host-vec-to-device mismatch at index {i}");
+        }
+
+        teardown_pool(device_id);
+        drop(pool);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Tests — regression and validation
 // ---------------------------------------------------------------------------
@@ -246,7 +319,7 @@ fn pool_alloc_device_copy() {
 /// as before - this is the baseline regression test ensuring the routing
 /// change doesn't break the default.
 #[test]
-fn default_path_wihout_pool_unchanged() {
+fn default_path_without_pool_unchanged() {
     common::with_test_stack(|| {
         // No pool setup - go straight to allocation.
         let tensor = api::zeros::<f32>([1024]).sync().expect("Default allocation path failed.");
@@ -258,7 +331,48 @@ fn default_path_wihout_pool_unchanged() {
     });
 }
 
-/// Attempting to attach a pool created on device N to a difference device
+/// Pool configured on a freshly initialized device context.
+/// 
+/// Unlike other tests which may hit a lazily-initialized context,
+/// this test forces a clean context initialization before setting
+/// the pool, exercising the path where pool is attached to a 
+/// brand-new context rather than mutated onto an existing one.
+#[test]
+fn pool_on_fresh_context_init() {
+    common::with_test_stack(|| {
+        use cuda_async::device_context::init_device_contexts;
+
+        let device_id = get_default_device();
+
+        // Explicitly initialize the context map before any lazy init happens.
+        init_device_contexts(device_id, 1)
+            .expect("Failed to explicitly init device contexts.");
+
+        let ctx = CudaContext::new(device_id).expect("Failed to create CudaContext.");
+        let pool = Arc::new(unsafe {
+            CudaMemPool::new(&ctx).expect("Failed to create CudaMemPool.")
+        });
+
+        // Attach pool to the freshly initialized context.
+        set_device_pool(device_id, Some(pool.clone()))
+            .expect("Failed to set pool on fresh context.");
+
+        let tensor = api::zeros::<f32>([128])
+            .sync()
+            .expect("Failed to allocate from pool on fresh context.");
+
+        let host_vec = tensor.to_host_vec().sync().expect("readback failed.");
+        assert!(
+            host_vec.iter().all(|&v| v == 0.0),
+            "Fresh context pool allocation produced incorrect values."
+        );
+
+        teardown_pool(device_id);
+        drop(pool);
+    });
+}
+
+/// Attempting to attach a pool created on device N to a different device
 /// must return an error, not silently accepting a cross-device handle.
 #[test]
 fn set_pool_rejects_device_mismatch() {
@@ -273,7 +387,7 @@ fn set_pool_rejects_device_mismatch() {
         let pool_on_1 = Arc::new(unsafe { CudaMemPool::new(&ctx_1).expect("Failed to create pool on device 1.") });
 
         // Attaching device-1's pool to device 0 must fail.
-        let result = set_device_pool(0, Some(pool1_on_1));
+        let result = set_device_pool(0, Some(pool_on_1));
         assert!(result.is_err(), "set_device_pool should reject cross-device pool, but got Ok.");
     });
 }
