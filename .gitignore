@@ -2,7 +2,6 @@
 .env
 .vscode
 .cargo
-Cargo.lock
 target
 
 **/*.bc
