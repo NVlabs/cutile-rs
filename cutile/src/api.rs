@@ -139,7 +139,6 @@ use crate::kernels::conversion::convert_apply;
 use crate::kernels::creation::{arange_apply, full_apply};
 use crate::tensor::{IntoPartition, Tensor, Unpartition};
 use candle_core::{FloatDType, WithDType};
-use cuda_async::device_box::DeviceBox;
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
@@ -184,12 +183,13 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToDevice<T> {
         let src = tensor.cu_deviceptr();
         let dst = malloc_async(num_bytes, ctx.get_cuda_stream());
         memcpy_dtod_async::<T>(dst, src, num_elements, ctx.get_cuda_stream());
-        let device_box = DeviceBox::<[T]>::from_raw_parts(dst, num_elements, ctx.get_device_id());
-        Ok(Tensor {
-            device_box,
-            shape: shape.clone(),
-            strides: strides.clone(),
-        })
+        Ok(Tensor::from_raw_parts(
+            dst,
+            num_bytes,
+            ctx.get_device_id(),
+            shape.clone(),
+            strides.clone(),
+        ))
     }
 }
 
@@ -255,12 +255,13 @@ impl<T: WithDType + Send> DeviceOperation for CopyHostToDevice<T> {
         let num_elements = vec.len();
         let dptr = malloc_async(element_size * num_elements, ctx.get_cuda_stream());
         memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
-        let device_box = DeviceBox::<[T]>::from_raw_parts(dptr, num_elements, ctx.get_device_id());
-        Ok(Tensor {
-            device_box,
-            shape: shape.clone(),
-            strides: strides.clone(),
-        })
+        Ok(Tensor::from_raw_parts(
+            dptr,
+            element_size * num_elements,
+            ctx.get_device_id(),
+            shape.clone(),
+            strides.clone(),
+        ))
     }
 }
 
@@ -318,7 +319,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToHost<T> {
         self,
         context: &ExecutionContext,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let src = self.tensor.device_box.cu_deviceptr();
+        let src = self.tensor.cu_deviceptr();
         let num_elements = self.tensor.size();
         let shape: Vec<usize> = self.tensor.shape.iter().map(|x| *x as usize).collect();
         let layout = Layout::array::<T>(num_elements).expect("overflow cannot happen");
@@ -386,7 +387,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToHostVec<T> {
         self,
         ctx: &ExecutionContext,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let cu_deviceptr = self.tensor.device_box.cu_deviceptr();
+        let cu_deviceptr = self.tensor.cu_deviceptr();
         let size = self.tensor.size();
         let layout = Layout::array::<T>(size).expect("overflow cannot happen");
         let async_ptr = unsafe { alloc(layout).cast::<T>() };
@@ -446,12 +447,13 @@ impl<T: WithDType + Send> DeviceOperation for CopyHostVecToDevice<T> {
         let strides = vec![1];
         let dptr = malloc_async(element_size * num_elements, ctx.get_cuda_stream());
         memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
-        let device_box = DeviceBox::<[T]>::from_raw_parts(dptr, num_elements, ctx.get_device_id());
-        Ok(Tensor {
-            device_box,
-            shape: shape.clone(),
-            strides: strides.clone(),
-        })
+        Ok(Tensor::from_raw_parts(
+            dptr,
+            element_size * num_elements,
+            ctx.get_device_id(),
+            shape.clone(),
+            strides.clone(),
+        ))
     }
 }
 

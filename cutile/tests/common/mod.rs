@@ -16,8 +16,9 @@
 /// - With assume variants: ~2.612 MB
 /// - With reduce/scan operations: ~2.7 MB
 /// - With all unary math operations: ~5 MB (after adding absf, negf, negi, floor)
-/// Using 5 MB provides adequate safety margin for all tests.
-pub const TEST_STACK_SIZE: usize = 5_000_000; // 5 MB
+/// - tensor_views module tests require a bit more headroom.
+/// Using 8 MB provides an adequate safety margin for all tests.
+pub const TEST_STACK_SIZE: usize = 8_000_000; // 8 MB
 
 /// Helper to run a test with the required stack size.
 ///
