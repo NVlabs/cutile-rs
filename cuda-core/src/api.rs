@@ -79,7 +79,10 @@ pub unsafe fn malloc_async(num_bytes: usize, stream: &Arc<CudaStream>) -> sys::C
 /// Asynchronously allocates `num_bytes` of device memory from a specific pool.
 ///
 /// # Safety
-/// `stream` must be a valid cuda stream. `pool` must be a valid memory pool handle.
+/// `stream` must be a valid CUDA stream. `pool` must be a valid memory pool handle.
+/// 
+/// # Errors
+/// Returns `DriverError` if allocation fails (e.g., OOM).
 pub unsafe fn malloc_from_pool_async(
     num_bytes: usize,
     stream: &Arc<CudaStream>,
@@ -95,21 +98,6 @@ pub unsafe fn malloc_from_pool_async(
 /// `dptr` must have been allocated with `malloc_async` and must not be used after this call.
 pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<CudaStream>) {
     crate::memory::free_async(dptr, stream.cu_stream()).expect("Free async failed.")
-}
-
-/// Asynchronously allocates `num_bytes` of device memory from a specific pool.
-///
-/// # Safety
-/// `stream` must be a valid CUDA stream. `pool` must be a valid memory pool handle.
-/// 
-/// # Errors
-/// Returns `DriverError` if allocation fails (e.g., OOM).
-pub unsafe fn malloc_from_pool_async(
-    num_bytes: usize,
-    stream: &Arc<CudaStream>,
-    pool: sys::CUmemoryPool,
-) -> Result<sys::CUdeviceptr, crate::DriverError> {
-    crate::memory::malloc_from_pool_async(stream.cu_stream(), num_bytes, pool)
 }
 
 /// Asynchronously copies `num_elements` of type `T` from host to device memory.

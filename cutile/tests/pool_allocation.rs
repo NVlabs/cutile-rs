@@ -18,7 +18,7 @@ use cuda_async::device_context::{get_default_device, set_device_pool};
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::CudaContext;
 use cuda_core::CudaMemPool;
-use cutile:api;
+use cutile::api;
 use cutile::tensor::ToHostVec;
 use std::sync::Arc;
 
@@ -94,7 +94,7 @@ fn pool_alloc_ones_roundtrip() {
 
         let host_vec = tensor.to_host_vec().sync().expect("Failed to copy tensor to host.");
 
-        assert_eq!(host_vec.len(), 512)
+        assert_eq!(host_vec.len(), 512);
         assert!(host_vec.iter().all(|&v| v == 1.0), "Expected all ones from pool-allocated tensor.");
 
         teardown_pool(device_id);

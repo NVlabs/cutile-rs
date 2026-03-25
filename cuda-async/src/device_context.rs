@@ -160,7 +160,7 @@ pub fn init_device_contexts_default() -> Result<(), DeviceError> {
 pub fn new_device_context(
     device_id: usize,
     mut policy: GlobalSchedulingPolicy,
-    pool: Option<Arch<CudaMemPool>>
+    pool: Option<Arc<CudaMemPool>>
 ) -> Result<AsyncDeviceContext, DeviceError> {
     if let Some(ref p) = pool {
         if p.device_ordinal() != device_id {
@@ -359,7 +359,6 @@ pub unsafe fn device_alloc_async(
     let pool_handle = with_global_device_context(device_id, |dc| {
         dc.pool.as_ref().map(|p| p.handle())
     })?;
-        .expect("Failed to get device context for allocation.");
     let dptr = match pool_handle {
         Some(handle) => cuda_core::malloc_from_pool_async(num_bytes, stream, handle)?,
         None => cuda_core::malloc_async(num_bytes, stream),

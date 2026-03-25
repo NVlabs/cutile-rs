@@ -182,7 +182,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToDevice<T> {
         let num_elements = tensor.size();
         let num_bytes = element_size * num_elements;
         let src = tensor.cu_deviceptr();
-        let dst = device_alloc_async(num_bytes, ctx.get_cuda_stream(), ctx.get_device_id());
+        let dst = device_alloc_async(num_bytes, ctx.get_cuda_stream(), ctx.get_device_id())?;
         memcpy_dtod_async::<T>(dst, src, num_elements, ctx.get_cuda_stream());
         let device_box = DeviceBox::<[T]>::from_raw_parts(dst, num_elements, ctx.get_device_id());
         Ok(Tensor {
@@ -253,7 +253,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyHostToDevice<T> {
         let (vec, shape, strides) = params;
         let element_size = std::mem::size_of::<T>();
         let num_elements = vec.len();
-        let dptr = device_alloc_async(element_size * num_elements, ctx.get_cuda_stream(), ctx.get_device_id());
+        let dptr = device_alloc_async(element_size * num_elements, ctx.get_cuda_stream(), ctx.get_device_id())?;
         memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
         let device_box = DeviceBox::<[T]>::from_raw_parts(dptr, num_elements, ctx.get_device_id());
         Ok(Tensor {
@@ -444,7 +444,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyHostVecToDevice<T> {
         let num_elements = vec.len();
         let shape = vec![num_elements as i32];
         let strides = vec![1];
-        let dptr = device_alloc_async(element_size * num_elements, ctx.get_cuda_stream(), ctx.get_device_id());
+        let dptr = device_alloc_async(element_size * num_elements, ctx.get_cuda_stream(), ctx.get_device_id())?;
         memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
         let device_box = DeviceBox::<[T]>::from_raw_parts(dptr, num_elements, ctx.get_device_id());
         Ok(Tensor {

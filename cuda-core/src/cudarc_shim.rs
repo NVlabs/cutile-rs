@@ -354,6 +354,10 @@ unsafe impl Sync for CudaMemPool {}
 impl CudaMemPool {
     /// Creates a new memory pool on the given context's device.
     ///
+    /// The pool's release threshold is set to `u64::MAX` by default, which
+    /// prevents the driver from returning pool memory to the OS after stream
+    /// synchronization. Call [`set_release_threshold`] to override.
+    ///
     /// # Safety
     /// The context must be valid and current.
     pub unsafe fn new(ctx: &Arc<CudaContext>) -> Result<Self, DriverError> {
@@ -366,11 +370,41 @@ impl CudaMemPool {
 
         let mut pool = MaybeUninit::uninit();
         cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), &props).result()?;
+        let pool = pool.assume_init();
+
+        // Retain all pool memory by default. Without this, the driver may
+        // return memory to the OS after stream sync, which defeats the purpose
+        // for inference and CUDA Graphs pre-allocation workflows.
+        let threshold: u64 = u64::MAX;
+        cuda_bindings::cuMemPoolSetAttribute(
+            pool,
+            cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+            &threshold as *const u64 as *mut std::ffi::c_void,
+        )
+        .result()?;
+
         Ok(Self {
-            pool: pool.assume_init(),
+            pool,
             ctx: ctx.clone(),
             device_ordinal: ctx.ordinal(),
         })
+    }
+
+    /// Sets the release threshold for this pool.
+    ///
+    /// Memory that is not actively in use may be returned to the OS when the
+    /// pool holds more than `threshold` bytes. Set to `u64::MAX` (the default)
+    /// to retain all memory, or `0` to let the driver reclaim eagerly.
+    pub fn set_release_threshold(&self, threshold: u64) -> Result<(), DriverError> {
+        self.ctx.bind_to_thread()?;
+        unsafe {
+            cuda_bindings::cuMemPoolSetAttribute(
+                self.pool,
+                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                &threshold as *const u64 as *mut std::ffi::c_void,
+            )
+            .result()
+        }
     }
 
     /// Returns the raw `CUmemoryPool` handle for use in allocation calls.
@@ -388,16 +422,15 @@ impl Drop for CudaMemPool {
     fn drop(&mut self) {
         self.ctx.record_err(self.ctx.bind_to_thread());
         self.ctx.record_err(
-            unsafe { cuda_bindings::cuMemPoolDestroy(self.pool) }.result()
-        );
+            unsafe { cuda_bindings::cuMemPoolDestroy(self.pool) }.result());
     }
 }
 
 impl CudaContext {
     /// Returns the default async memory pool for this device.
-    /// 
+    ///
     /// The default pool is managed by the driver and must **not** be destroyed.
-    /// Use the return handle with `malloc_from_pool_async` or to configure
+    /// Use the returned handle with `malloc_from_pool_async` or to configure
     /// pool attributes.
     pub fn default_mem_pool(&self) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
         self.bind_to_thread()?;
@@ -487,113 +520,6 @@ impl CudaEvent {
     /// Returns `true` if all work preceding this event has completed.
     pub fn is_complete(&self) -> bool {
         unsafe { event::query(self.cu_event) }.is_ok()
-    }
-}
-
-/// An owned CUDA memory pool, destroyed on drop.
-///
-/// Wraps a `CUmemoryPool` created via `cuMemPoolCreate`. For the device's
-/// default pool (obtained via `cuDeviceGetDefaultMemPool`), use the raw
-/// handle directly - default pools are not owned and must not be destroyed.
-#[derive(Debug)]
-pub struct CudaMemPool {
-    pool: cuda_bindings::CUmemoryPool,
-    ctx: Arc<CudaContext>,
-    device_ordinal: usize,
-}
-
-unsafe impl Send for CudaMemPool {}
-unsafe impl Sync for CudaMemPool {}
-
-impl CudaMemPool {
-    /// Create a new memory pool on the given context's device.
-    ///
-    /// The pool's release threshold is set to `u64::MAX` by default, which
-    /// prevents the driver from returning pool memory to the OS after stream
-    /// synchronization. Call [`set_release_threshold`] to override.
-    ///
-    /// # Safety
-    /// The context must be valid and current.
-    pub unsafe fn new(ctx: &Arc<CudaContext>) -> Result<Self, DriverError> {
-        ctx.bind_to_thread()?;
-        let mut props: cuda_bindings::CUmemPoolProps = std::mem::zeroed();
-        props.allocType = cuda_bindings::CUmemAllocationType_enum_CU_MUM_ALLOCATION_TYPE_PINNED;
-        props.handleTypes = cuda_bindings::CUmemAllocationHandleType_enum_CU_MEM_HANDLE_TYPE_NONE;
-        props.location.type_ = cuda_bindings::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.id = ctx.cu_device() as i32;
-
-        let mut pool = MaybeUninit::uninit();
-        cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), &props).result()?;
-        let pool = pool.assume_init();
-
-        // Retain all pool memory by default. Without this, the driver may
-        // return memory to the OS after stream sync, which defeats the purpose
-        // for inference and CUDA Graphs pre-allocation workflows.
-        let threshold: u64 = u64::MAX;
-        cuda_bindings::cuMemPoolSetAttribute(
-            pool,
-            cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
-            &threshold as *const u64 as *mut std::ffi::c_void,
-        )
-        .result()?;
-
-        Ok(Self {
-            pool,
-            ctx: ctx.clone(),
-            device_ordinal: ctx.ordinal(),
-        })
-    }
-
-    /// Sets the release threshold for this pool.
-    ///
-    /// Memory that is not actively in use may be returned to the OS when the
-    /// pool holds more than `threshold` bytes. Set to `u64::MAX` (the default)
-    /// to retain all memory, or `0` to let the driver reclaim eagerly.
-    pub fn set_release_threshold(&self, threshold: u64) -> Result<(), DriverError> {
-        self.ctx.bind_to_thread()?;
-        unsafe {
-            cuda_bindings::cuMemPoolSetAttribute(
-                self.pool,
-                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
-                &threshold as *const u64 as *mut std::ffi::c_void,
-            )
-            .result()
-        }
-    }
-
-    /// Returns the raw `CUmemoryPool` handle for use in allocation calls.
-    pub fn handle(&self) -> cuda_bindings::CUmemoryPool {
-        self.pool
-    }
-
-    /// Returns the device ordinal this pool was created on.
-    pub fn device_ordinal(&self) -> usize {
-        self.device_ordinal
-    }
-}
-
-impl Drop for CudaMemPool {
-    fn drop(&mut self) {
-        self.ctx.record_err(self.ctx.bind_to_thread());
-        self.ctx
-            .record_err(unsafe { cuda_bindings::cuMemPoolDestroy(self.pool) }.result());
-    }
-}
-
-impl CudaContext {
-    /// Returns the default async memory pool for this device.
-    ///
-    /// The default pool is managed by the driver and must **not** be destroyed.
-    /// Use the returned handle with `malloc_from_pool_async` or to configure
-    /// pool attributes.
-    pub fn default_mem_pool(&self) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
-        self.bind_to_thread()?;
-        let mut pool = MaybeUninit::uninit();
-        unsafe {
-            cuda_bindings::cuDeviceGetDefaultMemPool(pool.as_mut_ptr(), self.cu_device)
-                .result()?;
-        }
-        Ok(unsafe { pool.assume_init() })
     }
 }
 
