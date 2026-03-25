@@ -69,3 +69,11 @@ jobs:
         run: |
           source "${HOME}/.cargo/env"
           cargo test --no-run
+
+      - name: CPU only tests
+        run: |
+          source "${HOME}/.cargo/env"
+
+          # FIXME: Temporary hack for runtime linking
+          export LD_LIBRARY_PATH="${CUDA_TILE_USE_LLVM_INSTALL_DIR}/lib"
+          ./scripts/run_cpu_tests.sh
