@@ -39,5 +39,5 @@ tokio = { workspace = true }
 cutile-compiler = { workspace = true }
 cuda-async = { workspace = true }
 cuda-core = { workspace = true }
-cutile = { workspace = true }
+cutile = { workspace = true, features = ["cuda"] }
 cutile-examples = { workspace = true }

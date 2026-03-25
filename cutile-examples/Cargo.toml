@@ -10,10 +10,15 @@ repository.workspace = true
 readme = "README.md"
 publish = false
 
+[features]
+default = ["cuda"]
+cuda = ["cutile/cuda", "dep:cuda-core", "dep:cuda-async", "dep:tokio", "dep:candle-nn"]
+
 [dependencies]
-cutile-compiler = { workspace = true }
 cutile = { workspace = true }
-cuda-core = { workspace = true }
-cuda-async = { workspace = true }
-tokio = { workspace = true }
-candle-nn = { workspace = true }
+cutile-compiler = { workspace = true }
+melior = { workspace = true }
+cuda-core = { workspace = true, optional = true }
+cuda-async = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
