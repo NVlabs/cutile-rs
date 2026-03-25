@@ -155,7 +155,11 @@ impl<T: Send, DO: DeviceOperation<Output = T>> Future for DeviceFuture<T, DO> {
         if self.callback_state.is_none() {
             self.callback_state = Some(Arc::new(StreamCallbackState::new()));
         }
-        let waker_state = self.callback_state.as_ref().cloned().expect("Impossible.");
+        let waker_state = self
+            .callback_state
+            .as_ref()
+            .map(Arc::clone)
+            .expect("Impossible.");
         match self.state {
             DeviceFutureState::Idle => {
                 // Initialize the waker.
@@ -166,7 +170,7 @@ impl<T: Send, DO: DeviceOperation<Output = T>> Future for DeviceFuture<T, DO> {
                     return Poll::Ready(Err(e));
                 }
                 // Add the callback. We only want to do this once.
-                if let Err(e) = unsafe { self.register_callback(waker_state.clone()) } {
+                if let Err(e) = unsafe { self.register_callback(Arc::clone(&waker_state)) } {
                     self.state = DeviceFutureState::Complete;
                     return Poll::Ready(Err(e));
                 }

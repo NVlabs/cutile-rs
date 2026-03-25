@@ -212,8 +212,8 @@ impl SchedulingPolicy for StreamPoolRoundRobin {
             .stream_pool
             .as_ref()
             .ok_or_else(|| device_error(self.device_id, "Stream pool not initialized."))?;
-        let stream = stream_pool[stream_idx].clone();
-        op.sync_on(&stream)
+        let stream = &stream_pool[stream_idx];
+        op.sync_on(stream)
     }
     fn schedule<T: Send, O: DeviceOperation<Output = T>>(
         &self,
@@ -227,10 +227,12 @@ impl SchedulingPolicy for StreamPoolRoundRobin {
             .stream_pool
             .as_ref()
             .ok_or_else(|| device_error(self.device_id, "Stream pool not initialized."))?;
-        let stream = stream_pool[stream_idx].clone();
-        let mut future = DeviceFuture::new();
-        future.device_operation = Some(op);
-        future.execution_context = Some(ExecutionContext::new(stream));
+        let stream = &stream_pool[stream_idx];
+        let future = DeviceFuture {
+            device_operation: Some(op),
+            execution_context: Some(ExecutionContext::new(Arc::clone(stream))),
+            ..Default::default()
+        };
         Ok(future)
     }
 }
@@ -274,11 +276,12 @@ impl SingleStream {
         &self,
         op: O,
     ) -> DeviceFuture<T, O> {
-        let mut future = DeviceFuture::new();
-        future.device_operation = Some(op);
-        let stream = self.stream.as_ref().unwrap().clone();
-        future.execution_context = Some(ExecutionContext::new(stream));
-        future
+        let stream = self.stream.as_ref().unwrap();
+        DeviceFuture {
+            device_operation: Some(op),
+            execution_context: Some(ExecutionContext::new(Arc::clone(stream))),
+            ..Default::default()
+        }
     }
 }
 
@@ -297,7 +300,7 @@ impl SchedulingPolicy for SingleStream {
         Ok(self.schedule_single(op))
     }
     fn sync<T: Send, O: DeviceOperation<Output = T>>(&self, op: O) -> Result<T, DeviceError> {
-        let stream = self.stream.as_ref().unwrap().clone();
-        op.sync_on(&stream)
+        let stream = self.stream.as_ref().unwrap();
+        op.sync_on(stream)
     }
 }

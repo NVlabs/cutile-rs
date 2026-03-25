@@ -28,7 +28,7 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     pub fn new(cuda_stream: Arc<CudaStream>) -> Self {
-        let cuda_context = cuda_stream.context().clone();
+        let cuda_context = Arc::clone(cuda_stream.context());
         let device = cuda_context.ordinal();
         Self {
             cuda_stream,
@@ -126,8 +126,8 @@ impl ExecutionContext {
 /// Operations automatically implement `IntoFuture`, enabling use with `.await`:
 ///
 /// ```rust,ignore
-/// let x = api::randn(0.0, 1.0, [100, 100]).arc().await;
-/// let y = some_kernel(x.clone()).await;
+/// let x = api::randn(0.0, 1.0, [100, 100]).arc().await?;
+/// let y = some_kernel(Arc::clone(&x)).await;
 /// ```
 pub trait DeviceOperation:
     Send + Sized + IntoFuture<Output = Result<<Self as DeviceOperation>::Output, DeviceError>>
@@ -201,7 +201,7 @@ pub trait DeviceOperation:
         self,
         stream: &Arc<CudaStream>,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let ctx = ExecutionContext::new(Arc::clone(stream));
         // This is okay since we synchronize immediately.
 
         unsafe { self.execute(&ctx) }
@@ -215,7 +215,7 @@ pub trait DeviceOperation:
         self,
         stream: &Arc<CudaStream>,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let ctx = ExecutionContext::new(Arc::clone(stream));
         // This is okay since we synchronize immediately.
         let res = unsafe { self.execute(&ctx) };
         stream.synchronize().expect("Synchronize failed.");
@@ -568,11 +568,11 @@ where
         left: UnsafeCell::new(None),
         right: UnsafeCell::new(None),
     };
-    let select_arc = Arc::new(select);
+    let select = Arc::new(select);
     let out1 = SelectLeft {
-        select: select_arc.clone(),
+        select: Arc::clone(&select),
     };
-    let out2 = SelectRight { select: select_arc };
+    let out2 = SelectRight { select };
     (out1, out2)
 }
 
