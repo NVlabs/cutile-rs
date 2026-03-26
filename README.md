@@ -69,7 +69,12 @@ Example `.cargo/config.toml`:
 [env]
 CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false }
 CUDA_TILE_USE_LLVM_INSTALL_DIR = { value = "/usr/lib/llvm-21", relative = false }
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/llvm-21/lib"]
 ```
+
+The `rustflags` entry embeds an rpath into compiled binaries so that MLIR shared libraries (e.g. `libMLIR.so`) can be found at runtime without needing to set `LD_LIBRARY_PATH`.
 
 ### Building cuda-tile-rs
 
