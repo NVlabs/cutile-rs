@@ -12,6 +12,7 @@ extensions = [
     'myst_parser',           # Markdown support
     'sphinx_copybutton',     # Copy button on code blocks
     'sphinx_design',         # Cards, grids, tabs
+    'sphinx_sitemap',        # Generate sitemap.xml for SEO
 ]
 
 # Markdown configuration
@@ -103,3 +104,6 @@ html_show_sourcelink = False
 
 # Title in sidebar
 html_title = "cuTile Rust"
+
+# SEO
+html_baseurl = 'https://nvlabs.github.io/cutile-rs/'
