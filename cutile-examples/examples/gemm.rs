@@ -10,7 +10,7 @@ use cutile::candle_core::WithDType;
 use cutile::error::Error;
 use cutile::tensor::*;
 use cutile::tile_kernel::*;
-use my_module::gemm_sync;
+use my_module::gemm as gemm_kernel;
 use std::fmt::Debug;
 
 #[cutile::module]
@@ -57,7 +57,7 @@ fn gemm<T: WithDType + Debug>() -> Result<(), Error> {
     let z = api::zeros([m, n]).partition([bm, bn]).sync_on(&stream)?;
     let x = api::ones([m, k]).arc().sync_on(&stream)?;
     let y = api::ones([k, n]).arc().sync_on(&stream)?;
-    let launcher = gemm_sync(z, x.clone(), y.clone());
+    let launcher = gemm_kernel(z, x.clone(), y.clone());
     let (z, _x, _y) = launcher.generics(generics.clone()).sync_on(&stream)?;
     let z_host: Vec<T> = z.unpartition().to_host_vec().sync_on(&stream)?;
     for i in 0..10 {

@@ -31,12 +31,12 @@ mod hello_world_module {
     }
 }
 
-use hello_world_module::hello_world_kernel_sync;
+use hello_world_module::hello_world_kernel;
 
 fn main() -> Result<(), Error> {
     let ctx = CudaContext::new(0)?;
     let stream = ctx.new_stream()?;
-    let launcher = hello_world_kernel_sync();
+    let launcher = hello_world_kernel();
     launcher.grid((1, 1, 1)).sync_on(&stream)?;
     Ok(())
 }

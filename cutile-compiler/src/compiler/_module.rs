@@ -9,6 +9,7 @@
 use crate::ast::{Module, SourceLocation, SpanBase};
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
+use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::*;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
@@ -248,9 +249,14 @@ impl CUDATileModules {
         }
     }
 
+    pub fn get_function_by_name(&self, function_name: &str) -> Option<&(String, ItemFn)> {
+        let canonical_name = KernelNaming::canonical_public_name(function_name);
+        self.functions.get(canonical_name.as_str())
+    }
+
     pub fn get_cuda_tile_op_attrs(&self, ident: &str) -> Option<SingleMetaList> {
         // TODO (hme): This is slow but flexible.
-        match self.functions.get(ident) {
+        match self.get_function_by_name(ident) {
             Some((_, item_fn)) => get_meta_list("cuda_tile :: op", &item_fn.attrs),
             None => None,
         }
@@ -264,7 +270,7 @@ impl CUDATileModules {
         if !self.modules.contains_key(module_name) {
             return JITError::generic(&format!("undefined module: `{module_name}`"));
         }
-        match self.functions.get(function_name) {
+        match self.get_function_by_name(function_name) {
             Some(function) => Ok(function),
             None => JITError::generic(&format!("undefined function: `{function_name}`")),
         }

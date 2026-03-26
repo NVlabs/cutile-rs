@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use cutile::candle_core;
 use cutile::utils::pretty_print_matrix;
-use my_module::tensor_permute_sync;
+use my_module::tensor_permute;
 
 #[cutile::module]
 mod my_module {
@@ -111,7 +111,7 @@ fn main() -> Result<(), Error> {
     println!("out tile = {:?}", partition_shape_rank3);
     println!("grid = {:?}", grid);
     println!("generics: {:?}", generics);
-    let (src, dst) = unsafe { tensor_permute_sync(src.clone(), dst) }
+    let (src, dst) = unsafe { tensor_permute(src.clone(), dst) }
         .generics(generics.clone())
         .sync_on(&stream)?;
 

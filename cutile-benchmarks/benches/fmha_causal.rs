@@ -250,7 +250,7 @@ fn ocean_fmha_causal(c: &mut Criterion) {
                     let start = Instant::now();
                     for _i in 0..iters {
                         let (_, _, _, out_local, _, _, _) = unsafe {
-                            fmha_causal_sync(
+                            fmha_causal(
                                 q.clone(),
                                 k.clone(),
                                 v.clone(),

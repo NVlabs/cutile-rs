@@ -36,7 +36,7 @@ mod my_module {
     }
 }
 
-use my_module::add_ptr_sync;
+use my_module::add_ptr;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), cutile::error::Error> {
@@ -54,11 +54,8 @@ async fn main() -> Result<(), cutile::error::Error> {
     let y_ptr = y.device_pointer();
 
     // Prepare kernel launch. Note that, since we're passing in pointers, unsafe is required.
-    let op = unsafe { add_ptr_sync(z_ptr, x_ptr, y_ptr, len as i32) }.grid((
-        (len / tile_size) as u32,
-        1,
-        1,
-    ));
+    let op =
+        unsafe { add_ptr(z_ptr, x_ptr, y_ptr, len as i32) }.grid(((len / tile_size) as u32, 1, 1));
 
     // Spawn an asynchronous task to compute this operation.
     let op_handle = tokio::spawn(op.into_future());

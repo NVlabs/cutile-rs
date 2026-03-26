@@ -61,7 +61,7 @@ mod my_module {
     }
 }
 
-use my_module::rms_norm_sync;
+use my_module::rms_norm;
 
 fn main() -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
@@ -75,7 +75,7 @@ fn main() -> Result<(), Error> {
     let x: Arc<Tensor<f32>> = randn(0.0, 1.0, [m, n]).sync_on(&stream)?.into();
     let w: Arc<Tensor<f32>> = randn(0.0, 1.0, [n]).sync_on(&stream)?.into();
     let out: Partition<Tensor<f32>> = zeros([m, n]).sync_on(&stream)?.partition([1, n as i32]);
-    let (_x, _w, out, _eps) = rms_norm_sync(x, w, out, eps)
+    let (_x, _w, out, _eps) = rms_norm(x, w, out, eps)
         .generics(generics)
         .sync_on(&stream)?;
     let out_host: Vec<f32> = out.unpartition().to_host_vec().sync_on(&stream)?;

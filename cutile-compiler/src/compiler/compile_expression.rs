@@ -1102,8 +1102,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     ctx,
                                     return_type,
                                 )?)
-                            } else if let Some((module_name, fn_item)) =
-                                self.modules.functions.get(ident.to_string().as_str())
+                            } else if let Some((module_name, fn_item)) = self
+                                .modules
+                                .get_function_by_name(ident.to_string().as_str())
                             {
                                 if let Some(compiler_op_attrs) =
                                     get_meta_list("cuda_tile :: compiler_op", &fn_item.attrs)

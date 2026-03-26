@@ -473,7 +473,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 match &*call_expr.func {
                     Expr::Path(path_expr) => {
                         let ident = get_ident_from_path_expr(&path_expr);
-                        let Some((_, fn_item)) = self.modules.functions.get(&ident.to_string())
+                        let Some((_, fn_item)) =
+                            self.modules.get_function_by_name(&ident.to_string())
                         else {
                             return self.jit_error_result(
                                 &call_expr.func.span(),

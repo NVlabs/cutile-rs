@@ -54,8 +54,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
         let fn_item = self
             .modules
-            .functions
-            .get(rust_function_name.to_string().as_str());
+            .get_function_by_name(rust_function_name.as_str());
         if fn_item.is_none() {
             return self.jit_error_result(
                 &call_expr.func.span(),

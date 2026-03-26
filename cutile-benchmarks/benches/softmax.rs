@@ -83,7 +83,7 @@ fn softmax(c: &mut Criterion) {
                     let start = Instant::now();
                     for _i in 0..iters {
                         unsafe {
-                            let (_, local_out) = kernels::softmax_sync(x.clone(), out)
+                            let (_, local_out) = kernels::softmax(x.clone(), out)
                                 .generics(generics.clone())
                                 .async_on(&stream)
                                 .expect("Failed.");

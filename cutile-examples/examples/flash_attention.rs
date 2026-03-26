@@ -142,7 +142,7 @@ mod my_module {
 
 use cutile::candle_core;
 use cutile_examples::fmha_ref_exec;
-use my_module::fmha_sync;
+use my_module::fmha as fmha_kernel;
 
 fn fmha(
     b: usize,   // batch size.
@@ -184,7 +184,7 @@ fn fmha(
     let query_group_size = num_heads / kv_num_heads;
 
     let generics = vec![bm.to_string(), bn.to_string(), d.to_string()];
-    let (_, _, _, out, _, _) = fmha_sync(
+    let (_, _, _, out, _, _) = fmha_kernel(
         q.clone(),
         k.clone(),
         v.clone(),

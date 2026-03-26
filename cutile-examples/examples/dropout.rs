@@ -34,7 +34,7 @@ mod my_module {
     }
 }
 
-use my_module::dropout_sync;
+use my_module::dropout;
 
 fn main() -> Result<(), Error> {
     let ctx = CudaContext::new(0)?;
@@ -48,7 +48,7 @@ fn main() -> Result<(), Error> {
         .into();
     let x_keep: Arc<Tensor<f32>> = rand_f32([m], Some(seed)).sync_on(&stream)?.into();
     let out: Partition<Tensor<f32>> = zeros([m]).sync_on(&stream)?.partition([bm]);
-    let (_, _x, _x_keep, out) = dropout_sync(p, x, x_keep, out).sync_on(&stream)?;
+    let (_, _x, _x_keep, out) = dropout(p, x, x_keep, out).sync_on(&stream)?;
     let out_host: Vec<f32> = out.unpartition().to_host_vec().sync_on(&stream)?;
     for i in 0..out_host.len() {
         let x = out_host[i];

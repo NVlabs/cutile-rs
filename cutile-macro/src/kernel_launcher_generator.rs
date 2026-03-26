@@ -5,19 +5,24 @@
 //! Kernel launcher generation.
 //!
 //! This module generates launcher functions for GPU kernel entry points
-//! with support for both synchronous and asynchronous execution.
+//! with support for direct invocation and `.apply(...)`-based composition.
 //! These launchers provide a type-safe interface for invoking
 //! CUDA Tile kernels from Rust code.
 //!
 //! ## Overview
 //!
-//! For each function marked with `#[cutile::entry]`, this module generates
-//! an `_apply` function that:
+//! For each function marked with `#[cutile::entry]`, this module generates:
+//!
+//! - an unsuffixed launcher for materialized arguments
+//! - an `_apply` helper for `.apply(...)` composition
+//! - an internal helper for `DeviceOperation` arguments
+//!
+//! Together these helpers:
 //!
 //! 1. **Compiles** the kernel (with caching)
 //! 2. **Infers** generic parameters from input types
 //! 3. **Handles** tensor partitioning and grid inference
-//! 4. **Launches** the kernel asynchronously
+//! 4. **Launch** the kernel as a device operation
 //! 5. **Returns** results as device operations
 //!
 //! ## Generated Launcher Structure
@@ -30,11 +35,25 @@
 //!     input: &Tensor<T, {[-1]}>,
 //! ) { }
 //!
-//! // Generates this launcher:
+//! // Generates these launchers:
+//! pub fn my_kernel<T: Send + WithDType>(
+//!     output: Partition<Tensor<T>>,
+//!     input: Arc<Tensor<T>>,
+//! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
+//!     // Wraps materialized values and delegates to my_kernel_op
+//! }
+//!
+//! pub fn my_kernel_op<T: Send + WithDType>(
+//!     output: impl DeviceOperation<Output = Partition<Tensor<T>>>,
+//!     input: impl DeviceOperation<Output = Arc<Tensor<T>>>,
+//! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
+//!     // Launches from separate lazy arguments
+//! }
+//!
 //! pub fn my_kernel_apply<T: Send + WithDType>(
 //!     inputs: (Partition<Tensor<T>>, Arc<Tensor<T>>),
 //! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
-//!     // Compilation and launch logic
+//!     // Launches from one grouped lazy argument tuple
 //! }
 //! ```
 //!
@@ -59,6 +78,7 @@
 //! Launch grid dimensions are automatically inferred from partitioned tensors.
 //! If multiple partitions exist, their grids must match.
 
+use cutile_compiler::kernel_naming::KernelNaming;
 use cutile_compiler::syn_utils::*;
 use cutile_compiler::types::get_ptr_type;
 use proc_macro2::Ident;
@@ -216,10 +236,10 @@ pub fn join_as_cons_tuple(vals: &Vec<String>) -> String {
     cons
 }
 
-/// Wraps an expression in a `value()` call if needed for async combinators.
+/// Wraps an expression in a `value()` call if needed for device-operation combinators.
 ///
-/// Helper function used when building async launcher code. If `wrap_as_val` is true,
-/// wraps the expression in `value()` to create an async value.
+/// Helper function used when building launcher code. If `wrap_as_val` is true,
+/// wraps the expression in `value()` to create a device-operation value.
 ///
 /// ## Parameters
 ///
@@ -279,11 +299,11 @@ pub fn zip_cons(inputs: &Vec<String>, var_name: &str, wrap_as_val: bool) -> Expr
     zip_block
 }
 
-/// Generates async code to zip inputs, then flatten them into a flat tuple.
+/// Generates launcher code to zip inputs, then flatten them into a flat tuple.
 ///
 /// Similar to `zip_cons` but adds a final `and_then` step that flattens the
 /// nested cons-cell structure into a regular flat tuple. This is the standard
-/// approach used for async kernel launchers.
+/// approach used for op-based launcher helpers.
 ///
 /// ## Parameters
 ///
@@ -399,7 +419,7 @@ pub fn generate_launcher_arg_types(
 /// Converts a vector of strings into a flat tuple string representation.
 ///
 /// Helper function that formats argument names into a comma-separated tuple string.
-/// Used when generating async launcher code.
+/// Used when generating launcher code.
 ///
 /// ## Parameters
 ///
@@ -422,13 +442,14 @@ pub fn to_tuple_string(args: &Vec<String>) -> String {
     )
 }
 
-/// Generates the complete async launcher code for a GPU kernel.
+/// Generates the complete launcher code for a GPU kernel.
 ///
 /// This is the main function that transforms a kernel function (marked with `#[entry]`)
-/// into an async launcher that can be called from Rust code. It generates:
+/// into launcher helpers that can be called from Rust code. It generates:
 /// 1. Type aliases for kernel arguments
 /// 2. A launcher struct implementing `DeviceOperation`
-/// 3. An `execute` method that builds the kernel call and launches it
+/// 3. A direct launcher for materialized arguments
+/// 4. An `_apply` helper for `.apply(...)` composition
 ///
 /// ## Parameters
 ///
@@ -457,7 +478,7 @@ pub fn to_tuple_string(args: &Vec<String>) -> String {
 /// impl<T: WithDType> DeviceOperation for MyKernel<T> {
 ///     type Output = ();
 ///     unsafe fn execute(mut self, ctx: &ExecutionContext) -> Self::Output {
-///         // Async launcher logic here
+///         // Kernel launch logic here
 ///     }
 /// }
 /// ```
@@ -660,14 +681,12 @@ pub fn generate_kernel_launcher(
     let kernel_return_type = quote! {
         #launcher_ident #launch_output_type
     };
-    let apply_name = format!("{}_apply", function_name);
-    let launcher_apply_ident = Ident::new(
-        format!("{}_apply", function_name).as_str(),
-        Span::call_site(),
-    );
+    let kernel_naming = KernelNaming::new(function_name);
+    let apply_name = kernel_naming.apply_name();
+    let launcher_apply_ident = Ident::new(apply_name.as_str(), Span::call_site());
     let launcher_apply = syn::parse2::<ItemFn>(quote! {
-        pub #unsafety fn #launcher_apply_ident #struct_generics (input: DI) -> #kernel_return_type {
-            return #launcher_ident::launch(input);
+        pub #unsafety fn #launcher_apply_ident #generic_params (input: #launcher_args_type) -> #kernel_return_type {
+            return #launcher_ident::launch(value(input));
         }
     })
     .unwrap();
@@ -683,21 +702,21 @@ pub fn generate_kernel_launcher(
         r
     };
 
-    // Generate launcher async function. Uses apply function.
-    // This operates on and returns a flat tuple of arguments.
-    let async_name = format!("{}_async", function_name);
-    let launcher_async_ident = Ident::new(async_name.as_str(), Span::call_site());
-    let mut launcher_async = syn::parse2::<ItemFn>(quote! {
-        pub #unsafety fn #launcher_async_ident #generic_params() -> #kernel_return_type {}
+    // Generate internal op-based launcher. Uses the apply function and operates on
+    // a flat tuple of `DeviceOperation` arguments.
+    let op_name = kernel_naming.device_op_helper_name();
+    let launcher_op_ident = Ident::new(op_name.as_str(), Span::call_site());
+    let mut launcher_op = syn::parse2::<ItemFn>(quote! {
+        pub #unsafety fn #launcher_op_ident #generic_params() -> #kernel_return_type {}
     })
     .unwrap();
     let mut function_params = vec![];
-    launcher_async.sig.generics.make_where_clause();
+    launcher_op.sig.generics.make_where_clause();
     for (i, _arg_ty) in arg_types.iter().enumerate() {
         let function_param = format!("arg{}", i);
         let type_param = format!("DI{}", i);
         let type_bound = format!("DeviceOperation<Output={}>", arg_aliases[i]);
-        launcher_async.sig.inputs.push(FnArg::Typed(
+        launcher_op.sig.inputs.push(FnArg::Typed(
             syn::parse2::<PatType>(
                 format!("{}: {}", function_param, type_param)
                     .parse()
@@ -705,10 +724,10 @@ pub fn generate_kernel_launcher(
             )
             .unwrap(),
         ));
-        launcher_async.sig.generics.params.push(GenericParam::Type(
+        launcher_op.sig.generics.params.push(GenericParam::Type(
             syn::parse2::<TypeParam>(type_param.parse().unwrap()).unwrap(),
         ));
-        let where_clause = launcher_async
+        let where_clause = launcher_op
             .sig
             .generics
             .where_clause
@@ -723,25 +742,22 @@ pub fn generate_kernel_launcher(
         function_params.push(function_param);
     }
     let input_zips = zip_and_then_flatten(&function_params, "input", false);
-    launcher_async.block.stmts.extend(input_zips.block.stmts);
-    launcher_async
-        .block
-        .stmts
-        .push(parse_stmt(format!("return {}(input);", apply_name)));
+    launcher_op.block.stmts.extend(input_zips.block.stmts);
+    launcher_op.block.stmts.push(parse_stmt(format!(
+        "return {}::launch(input);",
+        launcher_ident
+    )));
 
-    // Generate launcher sync function. Uses async function.
-    let launcher_sync_ident = Ident::new(
-        format!("{}_sync", function_name).as_str(),
-        Span::call_site(),
-    );
-    let mut launcher_sync = syn::parse2::<ItemFn>(quote! {
-        pub #unsafety fn #launcher_sync_ident #generic_params() -> #kernel_return_type {}
+    // Generate the public launcher that accepts materialized arguments.
+    let launcher_direct_ident = Ident::new(kernel_naming.public_name(), Span::call_site());
+    let mut launcher_direct = syn::parse2::<ItemFn>(quote! {
+        pub #unsafety fn #launcher_direct_ident #generic_params() -> #kernel_return_type {}
     })
     .unwrap();
     for (i, _arg_ty) in arg_types.iter().enumerate() {
         let function_param = &function_params[i];
         let type_param = &arg_aliases[i];
-        launcher_sync.sig.inputs.push(FnArg::Typed(
+        launcher_direct.sig.inputs.push(FnArg::Typed(
             syn::parse2::<PatType>(
                 format!("{}: {}", function_param, type_param)
                     .parse()
@@ -751,7 +767,7 @@ pub fn generate_kernel_launcher(
         ));
     }
     let return_op = format!(
-        "return {async_name}({});",
+        "return {op_name}({});",
         function_params
             .iter()
             .map(|var| zippable(var, true))
@@ -759,7 +775,7 @@ pub fn generate_kernel_launcher(
             .join(", ")
     );
 
-    launcher_sync.block.stmts.push(parse_stmt(return_op));
+    launcher_direct.block.stmts.push(parse_stmt(return_op));
     Ok((
         required_generics,
         (launcher_args_type.clone(), launcher_arg_type_def),
@@ -769,8 +785,8 @@ pub fn generate_kernel_launcher(
                 #launcher_method
             }
             #launcher_apply
-            #launcher_async
-            #launcher_sync
+            #launcher_op
+            #launcher_direct
         },
     ))
 }
@@ -815,7 +831,7 @@ fn parse_expr(s: String) -> Expr {
 /// Code generation result for a tensor kernel parameter.
 ///
 /// Contains all the generated code components needed for a single tensor
-/// parameter in the async kernel launcher.
+/// parameter in the generated launcher.
 ///
 /// ## Fields
 ///

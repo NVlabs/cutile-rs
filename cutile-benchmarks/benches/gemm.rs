@@ -131,7 +131,7 @@ fn ocean_gemm(c: &mut Criterion) {
                 let start = Instant::now();
                 for _i in 0..iters {
                     unsafe {
-                        let (local_z, _, _, _) = gemm_sync(z, x.clone(), y.clone(), k as i32)
+                        let (local_z, _, _, _) = gemm(z, x.clone(), y.clone(), k as i32)
                             .generics(generics.clone())
                             .async_on(&stream)
                             .expect("Failed.");

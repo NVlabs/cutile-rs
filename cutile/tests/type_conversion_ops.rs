@@ -82,9 +82,9 @@ mod type_conversion_ops_module {
 }
 
 use type_conversion_ops_module::_module_asts;
-use type_conversion_ops_module::bf16_conversion_kernel_sync;
-use type_conversion_ops_module::bf16_to_f32_conversion_kernel_sync;
-use type_conversion_ops_module::f32_to_bf16_conversion_kernel_sync;
+use type_conversion_ops_module::bf16_conversion_kernel;
+use type_conversion_ops_module::bf16_to_f32_conversion_kernel;
+use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
 
 #[test]
 fn compile_conversion_ops() -> () {
@@ -253,7 +253,7 @@ fn execute_bf16_f32_roundtrip() -> () {
         let input: Tensor<bf16> = copy_host_vec_to_device(&input_host)
             .sync()
             .expect("Failed.");
-        let (result,) = bf16_conversion_kernel_sync(input.partition([4]))
+        let (result,) = bf16_conversion_kernel(input.partition([4]))
             .sync()
             .expect("Failed.");
 
@@ -287,7 +287,7 @@ fn execute_bf16_to_f32_conversion() -> () {
         let input = Arc::new(input);
         let output: Tensor<f32> = zeros([input_host.len()]).sync().expect("Failed.");
 
-        let (result, _) = bf16_to_f32_conversion_kernel_sync(output.partition([4]), input)
+        let (result, _) = bf16_to_f32_conversion_kernel(output.partition([4]), input)
             .sync()
             .expect("Failed.");
 
@@ -312,7 +312,7 @@ fn execute_f32_to_bf16_conversion() -> () {
         let input = Arc::new(input);
         let output: Tensor<bf16> = zeros([input_host.len()]).sync().expect("Failed.");
 
-        let (result, _) = f32_to_bf16_conversion_kernel_sync(output.partition([4]), input)
+        let (result, _) = f32_to_bf16_conversion_kernel(output.partition([4]), input)
             .sync()
             .expect("Failed.");
 

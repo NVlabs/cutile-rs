@@ -139,7 +139,7 @@ mod my_module {
     }
 }
 
-use my_module::fmha_sync;
+use my_module::fmha;
 
 fn idx4(
     a: usize,
@@ -246,7 +246,7 @@ fn run_attention_fmha(causal: bool) -> Result<(), Error> {
         (even_k as i32).to_string(),
     ];
 
-    let (_, _, _, out, _, _, _): (_, _, _, Partition<Tensor<f32>>, _, _, _) = fmha_sync(
+    let (_, _, _, out, _, _, _): (_, _, _, Partition<Tensor<f32>>, _, _, _) = fmha(
         q.clone(),
         k.clone(),
         v.clone(),

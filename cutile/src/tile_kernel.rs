@@ -361,7 +361,7 @@ pub fn infer_launch_grid(
 /// }
 ///
 /// // Launch with explicit grid
-/// my_module::hello_world_sync()
+/// my_module::hello_world()
 ///     .grid((4, 1, 1))
 ///     .sync_on(&stream);
 /// ```
@@ -396,6 +396,20 @@ pub fn infer_launch_grid(
 ///     .apply(add_apply)
 ///     .generics(vec!["f32".to_string(), "256".to_string()])
 ///     .await; // Automatically launches with grid (4, 1, 1)
+/// ```
+///
+/// When your inputs are already `DeviceOperation`s, prefer `.apply(...)`
+/// rather than a separate op-taking kernel wrapper:
+///
+/// ```rust,ignore
+/// let x = api::randn(0.0, 1.0, [256]);
+/// let y = api::randn(0.0, 1.0, [256]);
+/// let z = api::zeros([256]);
+///
+/// let result = zip!(z, x, y)
+///     .apply(add_apply)
+///     .generics(vec!["f32".to_string(), "256".to_string()])
+///     .await;
 /// ```
 ///
 /// ### Using with async composition

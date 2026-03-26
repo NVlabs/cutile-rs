@@ -16,7 +16,7 @@
 //! 1. **Syntax Validation** - Ensures kernel code follows DSL restrictions
 //! 2. **Variadic Expansion** - Generates specialized versions for different ranks (1D, 2D, 3D, 4D)
 //! 3. **Type System Integration** - Manages compile-time shape information and type metadata
-//! 4. **Launcher Generation** - Creates host-side async kernel launcher functions
+//! 4. **Launcher Generation** - Creates host-side kernel launcher functions
 //! 5. **AST Construction** - Builds intermediate representation for MLIR compilation
 //!
 //! ## Architecture
@@ -34,7 +34,7 @@
 //!       ↓
 //! [_module] ← Main orchestration
 //!       ↓
-//! [kernel_launcher_generator] ← Generate async launchers
+//! [kernel_launcher_generator] ← Generate kernel launchers
 //!       ↓
 //! Expanded Rust + AST builders
 //! ```
@@ -45,7 +45,7 @@
 //! - **[`validate_dsl_syntax`]** - Validates that kernel code follows DSL restrictions
 //! - **[`rewrite_variadics`]** - Handles variadic types and generates rank-specific versions
 //! - **[`types`]** - Type system including shape inference and metadata management
-//! - **[`kernel_launcher_generator`]** - Generates async kernel launcher functions
+//! - **[`kernel_launcher_generator`]** - Generates kernel launcher functions
 //!
 //! ## The `#[module]` Attribute
 //!
@@ -71,7 +71,8 @@
 //!
 //! The macro transforms this into:
 //! - An AST builder function for MLIR compilation
-//! - An async launcher function (`vector_add_apply`)
+//! - A direct launcher function (`vector_add`)
+//! - An `.apply(...)` helper (`vector_add_apply`)
 //! - Type metadata for shape inference
 //! - Proper handling of generic parameters
 //!
@@ -134,13 +135,14 @@ mod rewrite_variadics;
 mod types;
 mod validate_dsl_syntax;
 
-/// Transforms a Rust module into GPU kernel code with async launchers.
+/// Transforms a Rust module into GPU kernel code with kernel launchers.
 ///
 /// This procedural macro is the main entry point for writing GPU kernels in cuTile Rust.
 /// It processes a module containing kernel functions marked with `#[entry]` and generates:
 ///
 /// - MLIR AST builder functions for compilation to CUDA
-/// - Async launcher functions for host-side execution
+/// - Direct launcher functions for host-side execution
+/// - `.apply(...)` helpers for composing existing `DeviceOperation`s
 /// - Type metadata for shape inference and validation
 ///
 /// ## Basic Usage
@@ -157,7 +159,9 @@ mod validate_dsl_syntax;
 ///     }
 /// }
 ///
-/// // Generated: kernels::my_kernel_apply() async launcher function
+/// // Generated: kernels::my_kernel() direct launcher
+/// // Generated: kernels::my_kernel_op() helper for separate DeviceOperations
+/// // Generated: kernels::my_kernel_apply() composition helper
 /// ```
 ///
 /// ## Attributes
@@ -170,8 +174,9 @@ mod validate_dsl_syntax;
 /// For each `#[entry]` function, the macro generates:
 ///
 /// 1. **AST Builder** - `<function>_ast()` - Builds MLIR representation
-/// 2. **Async Launcher** - `<function>_apply()` - Host-side async execution wrapper
-/// 3. **Metadata** - Type information for shape inference
+/// 2. **Direct Launcher** - `<function>()` - Wraps materialized values as device operations
+/// 3. **Apply Helper** - `<function>_apply()` - Composition entry point for `.apply(...)`
+/// 4. **Metadata** - Type information for shape inference
 ///
 /// ## See Also
 ///

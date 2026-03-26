@@ -10,7 +10,7 @@ use cutile::candle_core::WithDType;
 use cutile::error::Error;
 use cutile::tensor::*;
 use cutile::tile_kernel::*;
-use my_module::gemm_sync;
+use my_module::gemm as gemm_kernel;
 use std::fmt::Debug;
 
 #[cutile::module]
@@ -75,7 +75,7 @@ fn gemm<T: WithDType + Debug>() -> Result<(), Error> {
         z.num_mb()
     );
     let grid = z.grid()?;
-    let (z, _x, _y) = gemm_sync(z, x, y)
+    let (z, _x, _y) = gemm_kernel(z, x, y)
         .const_grid(grid)
         .generics(generics)
         .sync_on(&stream)?;

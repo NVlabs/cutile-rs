@@ -3,13 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::{DeviceOperation, Zippable};
 use cutile::{
     self, api,
     tensor::Unpartition,
-    tile_kernel::{IntoDeviceOperationPartition, TensorDeviceOpToHostVec, TileKernel, Unzippable3},
+    tile_kernel::{
+        zip, IntoDeviceOperationPartition, TensorDeviceOpToHostVec, TileKernel, Unzippable3,
+    },
 };
-use my_module::add_async as add;
+use my_module::add;
 
 #[cutile::module]
 mod my_module {
@@ -31,8 +33,8 @@ fn main() -> () {
     let a = api::ones([32]).arc();
     let b = api::ones([32]).arc();
     let c = api::zeros([32]).partition([4]);
-    let c_host_vec = add(a, b, c)
-        .grid((8, 1, 1))
+    let c_host_vec = zip!(a, b, c)
+        .apply(|(a, b, c)| add(a, b, c).grid((8, 1, 1)))
         .unzip()
         .2
         .unpartition()

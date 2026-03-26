@@ -10,7 +10,7 @@ use cutile::half::f16;
 use cutile::num_traits::identities::*;
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel};
-use my_module::gemm_apply;
+use my_module::gemm_op;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -64,13 +64,10 @@ fn gemm<T1: WithDType + Debug, T2: WithDType + Debug>(
         bk.to_string(),
         k.to_string(),
     ];
-    let z = api::zeros([m, n]); // impl DeviceOperation
-    let args = zip!(
-        z.partition([bm, bn]),
-        x.device_operation(),
-        y.device_operation()
-    );
-    let (z, _x, _y) = args.apply(gemm_apply).generics(generics.to_vec()).unzip();
+    let z = api::zeros([m, n]).partition([bm, bn]); // impl DeviceOperation
+    let (z, _x, _y) = gemm_op(z, x.device_operation(), y.device_operation())
+        .generics(generics.to_vec())
+        .unzip();
     z.unpartition()
 }
 

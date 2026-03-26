@@ -44,7 +44,7 @@ mod my_module {
     }
 }
 
-use my_module::batch_matmul_sync;
+use my_module::batch_matmul;
 
 fn main() -> Result<(), Error> {
     let ctx = CudaContext::new(0)?;
@@ -67,9 +67,7 @@ fn main() -> Result<(), Error> {
         bk.to_string(),
         k.to_string(),
     ];
-    let (_a, _b, c) = batch_matmul_sync(a, b, c)
-        .generics(generics)
-        .sync_on(&stream)?;
+    let (_a, _b, c) = batch_matmul(a, b, c).generics(generics).sync_on(&stream)?;
     let c_host: Vec<f32> = c.unpartition().to_host_vec().sync_on(&stream)?;
 
     let expected = k as f32;

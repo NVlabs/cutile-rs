@@ -23,7 +23,7 @@ mod my_module {
     }
 }
 
-use my_module::saxpy_sync;
+use my_module::saxpy;
 
 // TODO (hme): Answer question about whether main should return Result<(), ...>
 fn main() -> Result<(), Error> {
@@ -35,7 +35,7 @@ fn main() -> Result<(), Error> {
     let input: Arc<Tensor<f32>> = arange(2usize.pow(5)).sync_on(&stream)?.into();
     let x = input.copy_sync(&stream)?.reshape([4, 8]).into();
     let y = input.copy_sync(&stream)?.reshape([4, 8]).partition([2, 2]);
-    let (a, _x, y) = saxpy_sync(a, x, y).sync_on(&stream)?;
+    let (a, _x, y) = saxpy(a, x, y).sync_on(&stream)?;
     let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;
     let input_host: Vec<f32> = input.to_host_vec().sync_on(&stream)?;
     for i in 0..input_host.len() {

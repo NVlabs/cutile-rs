@@ -16,7 +16,7 @@
 //! 2. **Validates** syntax and type constraints
 //! 3. **Transforms** items (functions, structs, traits, impls)
 //! 4. **Generates** MLIR AST builders
-//! 5. **Creates** async kernel launchers for entry points
+//! 5. **Creates** kernel launchers for entry points
 //! 6. **Emits** the expanded code
 //!
 //! ## Item Processing
@@ -48,10 +48,10 @@
 //!
 //! ## Kernel Launchers
 //!
-//! For each `#[entry]` function, an async launcher is generated that:
+//! For each `#[entry]` function, launchers are generated that:
 //! - Compiles the kernel to CUDA
 //! - Manages kernel invocation
-//! - Handles async execution
+//! - Support direct calls and `.apply(...)` composition
 //! - Provides type-safe parameter passing
 
 use convert_case::{Case, Casing};
@@ -73,6 +73,7 @@ use crate::error::{Error, SpannedError};
 use crate::kernel_launcher_generator::generate_kernel_launcher;
 use crate::rewrite_variadics::*;
 use crate::validate_dsl_syntax::validate_entry_point_parameters;
+use cutile_compiler::kernel_naming::KernelNaming;
 use cutile_compiler::syn_utils::*;
 
 fn line_column_to_offset(source: &str, loc: LineColumn) -> Option<usize> {
@@ -136,7 +137,7 @@ pub fn get_asts_ident() -> Ident {
 /// Transforms a Rust module containing GPU kernel code into:
 /// - Concrete Rust functions (possibly expanded from variadics)
 /// - MLIR AST builder functions
-/// - Async kernel launcher functions
+/// - Kernel launcher functions
 ///
 /// ## Processing Pipeline
 ///
@@ -146,7 +147,7 @@ pub fn get_asts_ident() -> Ident {
 ///    - Validate syntax (for functions)
 ///    - Generate AST representation
 ///    - Handle variadic expansion if needed
-///    - Generate kernel launcher if `#[entry]` function
+///    - Generate kernel launchers if `#[entry]` function
 /// 4. Generate module AST builder function
 /// 5. Emit expanded code with all dependencies
 ///
@@ -167,9 +168,11 @@ pub fn get_asts_ident() -> Ident {
 ///     pub fn _module_asts() -> Vec<Module> { ... }
 ///
 ///     // Concrete items (functions, structs, etc.)
-///     pub fn my_kernel(...) { ... }
+///     fn __cutile_user_impl_my_kernel(...) { ... }
 ///
 ///     // Kernel launchers (for #[entry] functions)
+///     pub fn my_kernel(...) -> impl DeviceOperation { ... }
+///     pub fn my_kernel_op(...) -> impl DeviceOperation { ... }
 ///     pub fn my_kernel_apply(...) -> impl DeviceOperation { ... }
 /// }
 /// ```
@@ -570,9 +573,10 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
 ///
 /// ## Entry Points
 ///
-/// Functions marked with `#[entry]` are validated and have async launchers generated.
+/// Functions marked with `#[entry]` are validated and have launchers generated.
 pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenStream2, Error> {
-    if get_meta_list_by_last_segment("entry", &item.attrs).is_some() {
+    let is_entry = get_meta_list_by_last_segment("entry", &item.attrs).is_some();
+    if is_entry {
         validate_entry_point_parameters(&item)?
     }
     let attributes = get_meta_list("cuda_tile :: variadic_op", &item.attrs);
@@ -588,6 +592,11 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         HashSet::from([format!("{} :: entry", tile_rust_crate_root).as_str()]),
         &mut item.attrs,
     );
+    if is_entry {
+        let kernel_naming = KernelNaming::new(item.sig.ident.to_string().as_str());
+        let internal_name = kernel_naming.user_impl_name();
+        item.sig.ident = Ident::new(internal_name.as_str(), item.sig.ident.span());
+    }
     let concrete_items = match attributes {
         Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
             "cuda_tile :: variadic_op" => variadic_op(&attributes, item.clone())?,
@@ -601,10 +610,10 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
     Ok(result)
 }
 
-/// Generates the complete async kernel launcher struct and implementations.
+/// Generates the complete kernel launcher struct and implementations.
 ///
 /// Creates a launcher struct that implements `TileKernel`, `DeviceOperation`, and
-/// `IntoFuture` for a kernel entry point. This enables the ergonomic async API
+/// `IntoFuture` for a kernel entry point. This enables the ergonomic launcher API
 /// for launching GPU kernels.
 ///
 /// ## Parameters
@@ -635,7 +644,8 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
 pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStream2, Error> {
     let module_name = module_ident.to_string();
     let function_name = item.sig.ident.to_string();
-    let function_entry_name = format!("{}_entry", function_name);
+    let kernel_naming = KernelNaming::new(function_name.as_str());
+    let function_entry_name = kernel_naming.entry_name();
     let launcher_name = function_name.to_case(Case::UpperCamel).to_string();
     let launcher_args_name = format!("{}Args", launcher_name);
     let unsafety = item.sig.unsafety;
@@ -645,7 +655,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             item,
             &module_name,
             &function_name,
-            &function_entry_name,
+            function_entry_name.as_str(),
             &launcher_name,
             &launcher_args_name,
         )?;
@@ -733,7 +743,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             }
         }
 
-        // Implements DeviceOperation, along with sync/async launcher functions.
+        // Implements DeviceOperation, along with the generated launcher functions.
         #device_op_impl
     };
 

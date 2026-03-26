@@ -240,7 +240,7 @@ fn ocean_fmha(c: &mut Criterion) {
                     let start = Instant::now();
                     for _i in 0..iters {
                         let (_, _, _, out_local, _, _) = unsafe {
-                            fmha_sync(
+                            fmha(
                                 q.clone(),
                                 k.clone(),
                                 v.clone(),

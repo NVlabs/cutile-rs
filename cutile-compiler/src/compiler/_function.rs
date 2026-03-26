@@ -22,6 +22,7 @@ use crate::error::JITError;
 use crate::error::SpannedJITError;
 use crate::generics::{GenericVars, TypeInstance};
 use crate::kernel_entry_generator::generate_entry_point;
+use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::*;
 use crate::types::*;
 use cuda_async::device_context::Validator;
@@ -99,10 +100,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 "Undefined module: {module_name}"
             )));
         }
+        let kernel_naming = KernelNaming::new(function_name);
 
         let (_, function) = modules
             .functions
-            .get(function_name)
+            .get(kernel_naming.public_name())
             .with_context(|| format!("Undefined function: {function_name}"))?;
 
         let entry_attrs =
@@ -145,14 +147,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
         if modules
             .functions
-            .get(entry.sig.ident.to_string().as_str())
+            .get(kernel_naming.entry_name().as_str())
             .is_some()
         {
             return modules
                 .resolve_span(module_name, &function.span())
                 .jit_error_result(&format!(
                     "Entry point namespace collision: {}",
-                    entry.sig.ident.to_string()
+                    kernel_naming.entry_name()
                 ));
         }
 

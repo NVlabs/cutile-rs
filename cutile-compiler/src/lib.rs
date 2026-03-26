@@ -22,6 +22,7 @@ pub mod cuda_tile_runtime_utils;
 pub mod error;
 pub mod generics;
 mod kernel_entry_generator;
+pub mod kernel_naming;
 pub mod syn_utils;
 pub mod train_map;
 pub mod types;

@@ -146,7 +146,7 @@ mod control_flow_ops_module {
     }
 }
 
-use control_flow_ops_module::{_module_asts, break_test_kernel_sync, if_return_test_kernel_sync};
+use control_flow_ops_module::{_module_asts, break_test_kernel, if_return_test_kernel};
 
 #[test]
 fn compile_control_flow_test() -> () {
@@ -196,7 +196,7 @@ fn compile_if_result_test() -> () {
     common::with_test_stack(|| {
         let arg: Tensor<i64> = ones([16]).sync().expect("Failed.");
         // If true, double and add 2.
-        let (result, _) = if_return_test_kernel_sync(arg.partition([4]), true)
+        let (result, _) = if_return_test_kernel(arg.partition([4]), true)
             .sync()
             .expect("Failed.");
         let result: Vec<i64> = result.unpartition().to_host_vec().sync().expect("Failed.");
@@ -204,7 +204,7 @@ fn compile_if_result_test() -> () {
 
         // If false, triple and add 3.
         let arg: Tensor<i64> = ones([16]).sync().expect("Failed.");
-        let (result, _) = if_return_test_kernel_sync(arg.partition([4]), false)
+        let (result, _) = if_return_test_kernel(arg.partition([4]), false)
             .sync()
             .expect("Failed.");
         let result: Vec<i64> = result.unpartition().to_host_vec().sync().expect("Failed.");
@@ -218,7 +218,7 @@ fn execute_break_test() -> () {
         // break_test_kernel loads output, doubles it twice (loop runs 2 iterations then breaks),
         // and stores the result. Starting from 1.0, we expect 1.0 * 2 * 2 = 4.0.
         let arg: Tensor<f32> = ones([16]).sync().expect("Failed.");
-        let (result,) = break_test_kernel_sync(arg.partition([4]))
+        let (result,) = break_test_kernel(arg.partition([4]))
             .sync()
             .expect("Failed.");
         let result: Vec<f32> = result.unpartition().to_host_vec().sync().expect("Failed.");

@@ -2,12 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::{DeviceOperation, IntoDeviceOperation};
+use cuda_async::device_operation::{DeviceOperation, IntoDeviceOperation, Zippable};
 use cutile;
 use cutile::api::{arange, ones, zeros};
 use cutile::tensor::ToHostVec;
-use cutile::tile_kernel::IntoDeviceOperationPartition;
-use my_module::{add_apply, add_async};
+use cutile::tile_kernel::{zip, IntoDeviceOperationPartition};
+use my_module::add_apply;
 use std::future::IntoFuture;
 
 #[cutile::module]
@@ -36,7 +36,7 @@ async fn main() -> Result<(), cuda_async::error::DeviceError> {
     let x = arange(len);
     let y = ones([len]);
     // Use function calling convention:
-    let add_op_1 = add_async(z.partition([2]), x.arc(), y.arc());
+    let add_op_1 = zip!(z.partition([2]), x.arc(), y.arc()).apply(add_apply);
     // or chain the invocation of the kernel via the DeviceOperation apply method:
     let add_op_2 = add_op_1.apply(add_apply);
     // Schedule the operation using the default scheduler.

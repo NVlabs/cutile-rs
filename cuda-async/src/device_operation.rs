@@ -105,7 +105,7 @@ impl ExecutionContext {
 /// let op2 = op1.and_then(|x| value(x * 2));
 ///
 /// // Execute synchronously (blocks until GPU completes)
-/// let result = op2.sync(); // returns 84
+/// let result = op2.sync().expect("Device operation failed."); // returns 84
 /// ```
 ///
 /// ```rust,ignore
@@ -150,8 +150,19 @@ pub trait DeviceOperation:
     ) -> Result<DeviceFuture<<Self as DeviceOperation>::Output, Self>, DeviceError> {
         policy.schedule(self)
     }
-    fn apply<O: Send, DO: DeviceOperation<Output = O>, F: Fn(Self) -> DO>(self, f: F) -> DO {
-        f(self)
+    /// Alias for [`DeviceOperation::and_then`].
+    ///
+    /// `apply` sequences on this operation's resolved output, rather than
+    /// transforming the operation object itself.
+    fn apply<O: Send, DO, F>(
+        self,
+        f: F,
+    ) -> AndThen<<Self as DeviceOperation>::Output, Self, O, DO, F>
+    where
+        DO: DeviceOperation<Output = O>,
+        F: FnOnce(<Self as DeviceOperation>::Output) -> DO,
+    {
+        self.and_then(f)
     }
     /// Chain a follow-up operation that runs **on the same stream** as `self`.
     ///

@@ -120,14 +120,16 @@ async fn main() -> Result<(), Error> {
         let (w0, w1) = (w.0.clone(), w.1.clone());
         let data = load_data([dim, dim]).arc();
         let out0 = api::zeros::<2, f32>([dim, dim]).partition([block_dim, block_dim]);
-        let (out0, _, _) = gemm_async(out0, data, value(w0))
-            .generics(fully_connected_layer.to_vec())
+        let fully_connected_layer = fully_connected_layer.to_vec();
+        let (out0, _, _) = gemm_op(out0, data, value(w0))
+            .generics(fully_connected_layer)
             .unzip();
         let out1 = api::zeros::<1, f32>([dim]).partition([block_dim]);
-        let (out1, _, _) = matvec_async(out1, out0.unpartition().arc(), value(w1))
-            .generics(output_layer.to_vec())
+        let output_layer = output_layer.to_vec();
+        let (out1, _, _) = matvec_op(out1, out0.unpartition().arc(), value(w1))
+            .generics(output_layer)
             .unzip();
-        let (out1,) = relu_async(out1).unzip();
+        let (out1,) = relu_op(out1).unzip();
         futures.push(tokio::spawn(out1.schedule(&devices[i])?));
     }
 

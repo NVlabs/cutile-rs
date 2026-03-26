@@ -9,7 +9,7 @@ use cutile::api::{randn, zeros};
 use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
 use cutile::tile_kernel::TileKernel;
-use kernels::rms_norm_sync;
+use kernels::rms_norm;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,11 +115,10 @@ fn ocean_rmsnorm(c: &mut Criterion) {
                 let start = Instant::now();
                 for _i in 0..iters {
                     unsafe {
-                        let (_x, _w, local_out, _eps) =
-                            rms_norm_sync(x.clone(), w.clone(), out, eps)
-                                .generics(generics.clone())
-                                .async_on(&stream)
-                                .expect("Failed.");
+                        let (_x, _w, local_out, _eps) = rms_norm(x.clone(), w.clone(), out, eps)
+                            .generics(generics.clone())
+                            .async_on(&stream)
+                            .expect("Failed.");
                         out = local_out;
                     }
                 }

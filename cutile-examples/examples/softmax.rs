@@ -31,7 +31,7 @@ mod my_module {
 }
 
 use cutile::utils::Float;
-use my_module::softmax_sync;
+use my_module::softmax;
 
 fn main() -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
@@ -46,7 +46,7 @@ fn main() -> Result<(), Error> {
         .copy_sync(&stream)?
         .reshape([m, n])
         .partition([bm, bn]);
-    let (_x, y) = softmax_sync(x, y).sync_on(&stream)?;
+    let (_x, y) = softmax(x, y).sync_on(&stream)?;
     let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;
     for i in (0..y_host.len()).step_by(8) {
         let x = y_host[i..i + 8].to_vec();

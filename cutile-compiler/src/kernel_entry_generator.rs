@@ -10,6 +10,7 @@ use crate::ast::SourceLocation;
 use crate::compiler::utils::OptimizationHints;
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
+use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::{get_fn_arg_var_name, get_ident_from_path_expr, get_ident_generic_args};
 use crate::types::{get_primitives_attrs, get_type_mutability};
 use cuda_async::device_context::{
@@ -369,8 +370,10 @@ pub fn generate_entry_point(
 ) -> Result<(ItemFn, Validator), JITError> {
     // Construct an entry point which takes tile and pointer parameters, constructs tensors views, and calls the original function.
     let mut fn_entry = fn_item.clone();
-    let fn_name = fn_entry.sig.ident.to_string();
-    let fn_entry_name = format!("{}_entry", fn_name);
+    let kernel_naming = KernelNaming::new(fn_item.sig.ident.to_string().as_str());
+    let fn_name = kernel_naming.public_name().to_string();
+    let fn_impl_name = kernel_naming.user_impl_name();
+    let fn_entry_name = kernel_naming.entry_name();
     fn_entry.sig.ident = Ident::new(fn_entry_name.as_str(), fn_item.sig.ident.span());
     // Generate entry point parameters, entry point body statements, and call arguments for function call.
     fn_entry.sig.inputs.clear();
@@ -485,7 +488,7 @@ pub fn generate_entry_point(
     };
     let final_stmnt = syn::parse2::<syn::Stmt>(
         format!(
-            "{unsafety_str} {{ {fn_name}::<{generic_args}>({}) }};",
+            "{unsafety_str} {{ {fn_impl_name}::<{generic_args}>({}) }};",
             final_stmnt_args_str.join(",")
         )
         .parse()

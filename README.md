@@ -90,7 +90,7 @@ If everything works, you should see: `Hello, I am tile <0, 0, 0> in a kernel wit
 ```rust
 use cuda_async::device_operation::DeviceOperation;
 use cutile::{self, api, tile_kernel::IntoDeviceOperationPartition};
-use my_module::add_async as add;
+use my_module::add_op;
 
 #[cutile::module]
 mod my_module {
@@ -109,11 +109,12 @@ mod my_module {
     }
 }
 
-fn main() -> () {
+fn main() -> Result<(), cutile::tile_kernel::DeviceError> {
     let x = api::ones([32, 32]).arc();
     let y = api::ones([32, 32]).arc();
     let z = api::zeros([32, 32]).partition([4, 4]);
-    let (_z, _x, _y) = add(z, x, y).sync();
+    let (_z, _x, _y) = add_op(z, x, y).sync()?;
+    Ok(())
 }
 ```
 
@@ -126,7 +127,7 @@ The kernel indicates that `z` must be mutable. Since the same tile kernel execut
 any `&mut Tensor<...>` requires the host to pass a `Partition<Tensor<T>>` as the argument. Any `&Tensor<...>` requires the
 host to pass an `Arc<Tensor<...>>` as an argument.
 
-The expression `add(z, x, y)` constructs a representation of a _kernel launcher_: A structure which encodes how the GPU applies the kernel to the given arguments. By default, because we have partitioned `z` into a grid of `4x4` subtensors, the kernel launcher will pick a _launch grid_ of `(8, 8, 1)`. Each `(x, y, z)` coordinate in the launch grid corresponds to a _tile thread_.
+The expression `add_op(z, x, y)` constructs a representation of a _kernel launcher_: A structure which encodes how the GPU applies the kernel to the given arguments. By default, because we have partitioned `z` into a grid of `4x4` subtensors, the kernel launcher will pick a _launch grid_ of `(8, 8, 1)`. Each `(x, y, z)` coordinate in the launch grid corresponds to a _tile thread_.
 
 The `sync` method picks the default device on the system and synchronously JIT-compiles the kernel to the default device's architecture and immediately executes the kernel with the provided arguments.
 Before executing the user-defined kernel on the device-side, each tile thread is initialized by selecting 
