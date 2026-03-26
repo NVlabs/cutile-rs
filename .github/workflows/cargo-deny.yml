@@ -20,9 +20,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Clone repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        run: |
+          curl -L https://github.com/EmbarkStudios/cargo-deny/releases/latest/download/cargo-deny-x86_64-unknown-linux-musl.tar.gz | tar xzf -
+          mv cargo-deny-*/cargo-deny /usr/local/bin/
 
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+        run: cargo deny check
