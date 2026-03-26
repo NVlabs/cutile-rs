@@ -28,7 +28,7 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     pub fn new(cuda_stream: Arc<CudaStream>) -> Self {
-        let cuda_context = cuda_stream.context().clone();
+        let cuda_context = Arc::clone(cuda_stream.context());
         let device = cuda_context.ordinal();
         Self {
             cuda_stream,
@@ -126,8 +126,8 @@ impl ExecutionContext {
 /// Operations automatically implement `IntoFuture`, enabling use with `.await`:
 ///
 /// ```rust,ignore
-/// let x = api::randn(0.0, 1.0, [100, 100]).arc().await;
-/// let y = some_kernel(x.clone()).await;
+/// let x = api::randn(0.0, 1.0, [100, 100]).arc().await?;
+/// let y = some_kernel(Arc::clone(&x)).await;
 /// ```
 pub trait DeviceOperation:
     Send + Sized + IntoFuture<Output = Result<<Self as DeviceOperation>::Output, DeviceError>>
@@ -201,7 +201,7 @@ pub trait DeviceOperation:
         self,
         stream: &Arc<CudaStream>,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let ctx = ExecutionContext::new(Arc::clone(stream));
         // This is okay since we synchronize immediately.
 
         unsafe { self.execute(&ctx) }
@@ -215,7 +215,7 @@ pub trait DeviceOperation:
         self,
         stream: &Arc<CudaStream>,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let ctx = ExecutionContext::new(Arc::clone(stream));
         // This is okay since we synchronize immediately.
         let res = unsafe { self.execute(&ctx) };
         stream.synchronize().expect("Synchronize failed.");
@@ -262,8 +262,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -305,8 +304,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -360,8 +358,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -394,8 +391,7 @@ impl<T: Send> IntoFuture for Value<T> {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -460,8 +456,7 @@ impl<O: Send, DO: DeviceOperation<Output = O>, F: FnOnce() -> DO> IntoFuture for
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -514,8 +509,7 @@ impl<T1: Send, T2: Send, A: DeviceOperation<Output = T1>, B: DeviceOperation<Out
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -574,11 +568,11 @@ where
         left: UnsafeCell::new(None),
         right: UnsafeCell::new(None),
     };
-    let select_arc = Arc::new(select);
+    let select = Arc::new(select);
     let out1 = SelectLeft {
-        select: select_arc.clone(),
+        select: Arc::clone(&select),
     };
-    let out2 = SelectRight { select: select_arc };
+    let out2 = SelectRight { select };
     (out1, out2)
 }
 
@@ -602,10 +596,12 @@ where
         if !self.computed.load(Ordering::Acquire) {
             // Safety: This block is guaranteed to execute at most once.
             // Put the input in a box so the pointer is dropped when this block exits.
-            let input = unsafe { (&mut *self.input.get()).take() }.ok_or(device_error(
-                context.get_device_id(),
-                "Select operation failed.",
-            ))?;
+            let input = self.input.get();
+            let input = unsafe { input.as_mut() };
+            let input = input
+                .unwrap()
+                .take()
+                .ok_or_else(|| device_error(context.get_device_id(), "Select operation failed."))?;
             let (left, right) = input.execute(context)?;
             // Update internal state.
             unsafe {
@@ -617,12 +613,14 @@ where
         Ok(())
     }
     unsafe fn left(&self) -> T1 {
-        let left = unsafe { (&mut *self.left.get()).take() }.unwrap();
-        left
+        let cell = self.left.get();
+        let cell = unsafe { cell.as_mut() };
+        cell.unwrap().take().unwrap()
     }
     unsafe fn right(&self) -> T2 {
-        let right = unsafe { (&mut *self.right.get()).take() }.unwrap();
-        right
+        let cell = self.right.get();
+        let cell = unsafe { cell.as_mut() };
+        cell.unwrap().take().unwrap()
     }
 }
 
@@ -649,8 +647,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -693,8 +690,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -811,8 +807,7 @@ impl<O: Send, DO: DeviceOperation<Output = O>, F: FnOnce(&ExecutionContext) -> D
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }
@@ -866,8 +861,7 @@ where
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }

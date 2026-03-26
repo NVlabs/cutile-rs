@@ -218,7 +218,7 @@ where
                 init_device_contexts_default()?;
                 ctx.devices
                     .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
+                    .ok_or_else(|| device_error(device_id, "Failed to initialize context"))?
             }
         };
         if !hashmap.contains_key(&device_id) {
@@ -226,7 +226,7 @@ where
         }
         let device_context = hashmap
             .get(&device_id)
-            .ok_or(device_error(device_id, "Failed to get context"))?;
+            .ok_or_else(|| device_error(device_id, "Failed to get context"))?;
         let r = f(device_context);
         ctx.devices.replace(Some(hashmap));
         Ok(r)
@@ -244,7 +244,7 @@ where
                 init_device_contexts_default()?;
                 ctx.devices
                     .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
+                    .ok_or_else(|| device_error(device_id, "Failed to initialize context"))?
             }
         };
         if !hashmap.contains_key(&device_id) {
@@ -252,7 +252,7 @@ where
         }
         let device_context = hashmap
             .get_mut(&device_id)
-            .ok_or(device_error(device_id, "Failed to get context"))?;
+            .ok_or_else(|| device_error(device_id, "Failed to get context"))?;
         let r = f(device_context);
         ctx.devices.replace(Some(hashmap));
         Ok(r)
@@ -272,7 +272,9 @@ where
 /// Useful when you need to schedule operations on a specific device outside the
 /// default `.await` / `.sync()` path.
 pub fn global_policy(device_id: usize) -> Result<Arc<GlobalSchedulingPolicy>, DeviceError> {
-    with_global_device_context(device_id, |device_context| device_context.policy.clone())
+    with_global_device_context(device_id, |device_context| {
+        Arc::clone(&device_context.policy)
+    })
 }
 
 pub unsafe fn with_deallocator_stream<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
@@ -357,7 +359,7 @@ pub fn insert_cuda_function(
 ) -> Result<(), DeviceError> {
     with_global_device_context_mut(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let res = device_context.functions.insert(key.clone(), value);
+        let res = device_context.functions.insert(key, value);
         device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
     })?
 }
@@ -383,11 +385,11 @@ pub fn get_cuda_function(
 ) -> Result<Arc<CudaFunction>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let entry = device_context
+        let (_module, function) = device_context
             .functions
             .get(&key)
-            .ok_or(device_error(device_id, "Failed to get cuda function."))?;
-        Ok(entry.1.clone())
+            .ok_or_else(|| device_error(device_id, "Failed to get cuda function."))?;
+        Ok(Arc::clone(function))
     })?
 }
 
@@ -398,7 +400,7 @@ pub fn insert_function_validator(
 ) -> Result<(), DeviceError> {
     with_global_device_context_mut(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let res = device_context.validators.insert(key.clone(), value);
+        let res = device_context.validators.insert(key, value);
         device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
     })?
 }
@@ -409,10 +411,10 @@ pub fn get_function_validator(
 ) -> Result<Arc<Validator>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let entry = device_context
+        let validator = device_context
             .validators
             .get(&key)
-            .ok_or(device_error(device_id, "Failed to get function validator."))?;
-        Ok(entry.clone())
+            .ok_or_else(|| device_error(device_id, "Failed to get function validator."))?;
+        Ok(Arc::clone(validator))
     })?
 }

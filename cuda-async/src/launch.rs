@@ -33,9 +33,9 @@ impl Drop for AsyncKernelLaunch {
         let _ = self
             .args
             .iter()
-            .map(|arg| {
+            .map(|&arg| {
                 // Reconstruct the boxes. Pointers will be dropped when they go out of scope.
-                unsafe { Box::from_raw(*arg) }
+                unsafe { Box::from_raw(arg as *mut usize) }
             })
             .collect::<Vec<_>>();
     }
@@ -76,9 +76,9 @@ impl AsyncKernelLaunch {
     /// # Safety
     /// The caller must ensure the kernel arguments and launch config are valid.
     unsafe fn launch(mut self, stream: &Arc<CudaStream>) -> Result<(), DeviceError> {
-        let cfg = self.cfg.ok_or(DeviceError::Launch(
-            "Await called before launching the kernel.".to_string(),
-        ))?;
+        let cfg = self.cfg.ok_or_else(|| {
+            DeviceError::Launch("Await called before launching the kernel.".to_string())
+        })?;
         launch_kernel(
             self.func.cu_function(),
             cfg.grid_dim,
@@ -136,8 +136,7 @@ impl IntoFuture for AsyncKernelLaunch {
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| policy.schedule(self)) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
     }
 }

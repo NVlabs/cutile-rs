@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// State machine for tracking the lifecycle of a device future.
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Default, Eq, PartialEq, Copy, Clone)]
 pub enum DeviceFutureState {
     // The future was created with an error and will resolve immediately on first poll.
     /// The future was created with an error and will resolve immediately.
     Failed,
     // The stream operation has not yet been scheduled. No callback has been added.
     /// The stream operation has not yet been scheduled.
+    #[default]
     Idle,
     // The stream operation has been scheduled and a callback has been added to the stream.
     // The callback should be added such that it immediately succeeds the scheduled operation.
@@ -33,7 +34,7 @@ pub enum DeviceFutureState {
 }
 
 /// Shared state between a CUDA stream callback and the async waker.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StreamCallbackState {
     pub(crate) waker: AtomicWaker,
     pub(crate) complete: AtomicBool,
@@ -42,10 +43,7 @@ pub struct StreamCallbackState {
 impl StreamCallbackState {
     /// Creates a new callback state with the completion flag unset.
     pub fn new() -> Self {
-        Self {
-            waker: AtomicWaker::new(),
-            complete: AtomicBool::new(false),
-        }
+        Self::default()
     }
     /// Marks the operation as complete and wakes the associated task.
     pub fn signal(&self) {
@@ -68,14 +66,7 @@ pub struct DeviceFuture<T: Send, DO: DeviceOperation<Output = T>> {
 impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
     /// Creates an idle device future with no operation or execution context set.
     pub fn new() -> Self {
-        Self {
-            execution_context: None,
-            device_operation: None,
-            state: DeviceFutureState::Idle,
-            callback_state: None,
-            result: None,
-            error: None,
-        }
+        Self::default()
     }
 
     /// Create a future that is pre-loaded with an error.
@@ -102,12 +93,11 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         &self,
         waker_state: Arc<StreamCallbackState>,
     ) -> Result<(), DeviceError> {
-        let ctx = self
-            .execution_context
-            .as_ref()
-            .ok_or(DeviceError::Internal(
+        let ctx = self.execution_context.as_ref().ok_or_else(|| {
+            DeviceError::Internal(
                 "Cannot execute future without setting stream on which to execute.".to_string(),
-            ))?;
+            )
+        })?;
         ctx.get_cuda_stream().launch_host_function(move || {
             waker_state.signal();
         })?;
@@ -115,21 +105,35 @@ impl<T: Send, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
     }
     /// Executes the stored device operation on the associated stream.
     fn execute(&mut self) -> Result<(), DeviceError> {
-        let ctx = self
-            .execution_context
-            .as_ref()
-            .ok_or(DeviceError::Internal(
+        let ctx = self.execution_context.as_ref().ok_or_else(|| {
+            DeviceError::Internal(
                 "Cannot execute future without setting stream on which to execute.".to_string(),
-            ))?;
+            )
+        })?;
         // TODO (hme): We may need to hold a reference to device_operation,
         //  to ensure kernel launch structs (and their args) are dropped
         //  when the future completes vs. when this function completes.
-        let operation = self.device_operation.take().ok_or(DeviceError::Internal(
-            "Unable to execute future: No operation has been set.".to_string(),
-        ))?;
+        let operation = self.device_operation.take().ok_or_else(|| {
+            DeviceError::Internal(
+                "Unable to execute future: No operation has been set.".to_string(),
+            )
+        })?;
         let out = unsafe { operation.execute(ctx) }?;
         self.result = Some(out);
         Ok(())
+    }
+}
+
+impl<T: Send, DO: DeviceOperation<Output = T>> Default for DeviceFuture<T, DO> {
+    fn default() -> Self {
+        Self {
+            device_operation: Default::default(),
+            execution_context: Default::default(),
+            result: Default::default(),
+            error: Default::default(),
+            state: Default::default(),
+            callback_state: Default::default(),
+        }
     }
 }
 
@@ -151,7 +155,11 @@ impl<T: Send, DO: DeviceOperation<Output = T>> Future for DeviceFuture<T, DO> {
         if self.callback_state.is_none() {
             self.callback_state = Some(Arc::new(StreamCallbackState::new()));
         }
-        let waker_state = self.callback_state.as_ref().cloned().expect("Impossible.");
+        let waker_state = self
+            .callback_state
+            .as_ref()
+            .map(Arc::clone)
+            .expect("Impossible.");
         match self.state {
             DeviceFutureState::Idle => {
                 // Initialize the waker.
@@ -162,7 +170,7 @@ impl<T: Send, DO: DeviceOperation<Output = T>> Future for DeviceFuture<T, DO> {
                     return Poll::Ready(Err(e));
                 }
                 // Add the callback. We only want to do this once.
-                if let Err(e) = unsafe { self.register_callback(waker_state.clone()) } {
+                if let Err(e) = unsafe { self.register_callback(Arc::clone(&waker_state)) } {
                     self.state = DeviceFutureState::Complete;
                     return Poll::Ready(Err(e));
                 }

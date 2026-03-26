@@ -76,6 +76,10 @@ impl<DType: Send + Sized> DeviceBox<[DType]> {
             _device_id: device_id,
         }
     }
+    /// Returns whether there is no element in the device slice.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
     /// Returns the number of elements in the device slice.
     pub fn len(&self) -> usize {
         self.len
