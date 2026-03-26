@@ -107,3 +107,17 @@ html_title = "cuTile Rust"
 
 # SEO
 html_baseurl = 'https://nvlabs.github.io/cutile-rs/'
+
+description = 'Write GPU kernels in safe, idiomatic Rust with tile-level abstractions.'
+
+html_meta = {
+    "description": description,
+    "author": author,
+    "og:title": project,
+    "og:description": description,
+    "og:type": "website",
+    "og:url": html_baseurl,
+    "og:site_name": project,
+}
+
+html_extra_path = ['robots.txt']
