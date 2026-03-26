@@ -1,15 +1,15 @@
 [advisories]
-# Deny any crate with a known security vulnerability.
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
+version = 2
+# paste is unmaintained but has no security issues; it's a transitive dep.
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
+version = 2
 # Allow common permissive licenses.
 allow = [
     "MIT",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
@@ -21,6 +21,17 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.8
+
+# cuda-bindings uses NVIDIA's proprietary license (LICENSE-NVIDIA).
+# mlir-sys does not declare a license field in its manifest.
+[[licenses.clarify]]
+name = "cuda-bindings"
+expression = "LicenseRef-NVIDIA"
+license-files = [{ path = "../LICENSE-NVIDIA", hash = 0x3863c5ac }]
+
+[[licenses.exceptions]]
+allow = ["LicenseRef-NVIDIA"]
+name = "cuda-bindings"
 
 [bans]
 multiple-versions = "warn"
