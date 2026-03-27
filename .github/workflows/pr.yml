@@ -66,7 +66,7 @@ jobs:
       - name: Clippy
         run: |
           source "${HOME}/.cargo/env"
-          cargo clippy
+          cargo clippy -- --deny clippy::all --allow clippy::missing-safety-doc
 
       - name: Test (compile only)
         run: |
