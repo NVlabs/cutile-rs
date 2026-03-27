@@ -277,13 +277,11 @@ fn get_ident_generic_args(
 ) -> Result<(Ident, AngleBracketedGenericArguments), Error> {
     match ty {
         Type::Path(type_path) => {
-            let result_type = type_path.clone();
-            let last_seg = result_type
+            let last_seg = type_path
                 .path
                 .segments
                 .last()
                 .ok_or_else(|| type_path.error("Expected at least one path segment"))?;
-            let last_seg = last_seg.clone();
             if last_seg.ident != vtd.name {
                 return last_seg
                     .ident
@@ -293,7 +291,7 @@ fn get_ident_generic_args(
                     ))
                     .into();
             }
-            match last_seg.arguments {
+            match &last_seg.arguments {
                 // The type takes a const generic array as a type param:
                 // f(..., shape: Shape<D>) -> ()
                 PathArguments::AngleBracketed(type_params) => {
@@ -422,25 +420,25 @@ fn get_concrete_op_or_method_ident_from_types(
             missing_types.push(expected_type_name);
             continue;
         };
-        let Some(vtd) = get_vtd(ty)? else {
-            return op_error(&format!(
+        let vtd = get_vtd(ty)?.ok_or_else(|| {
+            op_error(&format!(
                 concat!(
                     "Unable to infer type for argument {} for call to {}. Expected {}. ",
                     "Required by calls to variadic functions and methods."
                 ),
                 idx, op_or_method_ident, expected_type_name
             ))
-            .into();
-        };
+        })?;
+
         // Get the cga_instances from const_instances. These are ordered.
         // Match them in order to the const var structure of the VariadicOpData type.
-        let Some(cga_instances) = get_cga_type(ty, const_instances)? else {
-            return fn_error(&format!(
+        let cga_instances = get_cga_type(ty, const_instances)?.ok_or_else(|| {
+            fn_error(&format!(
                 "Unable to get cga instances for type: {}",
                 ty.to_token_stream()
             ))
-            .into();
-        };
+        })?;
+
         // This is a variadic type with cga instances.
         let type_name = vtd.name;
         if expected_type_name != type_name {
@@ -498,8 +496,8 @@ fn get_concrete_op_or_method_ident_from_types(
         .into();
     } else if const_length_values.len() < vod.const_length_vars.len() {
         // Try to get the last cga instance from the output type.
-        if output_type.is_none() {
-            return op_error(&format!(
+        let output_type = output_type.as_ref().ok_or_else(|| {
+            op_error(&format!(
                 concat!(
                     "Unable to infer call to {}. ",
                     "Try binding it to a statically typed variable.\n",
@@ -509,28 +507,21 @@ fn get_concrete_op_or_method_ident_from_types(
                 ),
                 op_or_method_ident, const_length_values, vod.const_length_vars
             ))
-            .into();
-        }
-        let output_type = output_type.clone().unwrap();
+        })?;
 
-        let maybe_vtd = get_vtd(&output_type)?;
-        if maybe_vtd.is_none() {
-            return op_error(&format!(
+        let vtd = get_vtd(output_type)?.ok_or_else(|| {
+            op_error(&format!(
                 "Unable to infer call to {}. Try binding it to a statically typed variable.",
                 op_or_method_ident
             ))
-            .into();
-        }
-        let vtd = maybe_vtd.unwrap();
-        let cga_instances = get_cga_type(&output_type, const_instances)?;
-        if cga_instances.is_none() {
-            return fn_error(&format!(
+        })?;
+
+        let cga_instances = get_cga_type(output_type, const_instances)?.ok_or_else(|| {
+            fn_error(&format!(
                 "Unable to get cga instances for output type: {}",
                 output_type.to_token_stream()
             ))
-            .into();
-        }
-        let cga_instances = cga_instances.unwrap();
+        })?;
 
         let (expected_type_name, vod_cga_var_names) = vod.output_map;
         if expected_type_name != vtd.name {
@@ -640,15 +631,20 @@ fn get_concrete_op_or_method_ident_from_types(
         ))
         .into();
     }
-    let mut length_vec = Vec::with_capacity(vod.const_length_vars.len());
-    for const_length_var in vod.const_length_vars {
-        let val = const_length_values.get(const_length_var).ok_or_else(|| {
-            op_error(&format!(
-                "Missing const_length_value for '{const_length_var}'"
-            ))
-        })?;
-        length_vec.push(*val);
-    }
+    let length_vec = vod
+        .const_length_vars
+        .iter()
+        .map(|const_length_var| {
+            const_length_values
+                .get(const_length_var)
+                .copied()
+                .ok_or_else(|| {
+                    op_error(&format!(
+                        "Missing const_length_value for '{const_length_var}'"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let ident = get_variadic_op_ident(op_or_method_ident, &length_vec);
     Ok((ident, rtype))
 }
@@ -771,16 +767,17 @@ impl ConstInstances {
     fn instantiate_var_cgas(&self, var_cgas: &[VarCGAParameter]) -> Result<Self, Error> {
         let mut result = self.clone();
         for cga in var_cgas {
-            if !result.inst_u32.contains_key(&cga.length_var) {
-                return Span::call_site()
-                    .error(&format!(
+            let n = result
+                .inst_u32
+                .get(&cga.length_var)
+                .copied()
+                .ok_or_else(|| {
+                    Span::call_site().error(&format!(
                         "instantiate_var_cgas: Missing inst_u32 entry for '{}'",
                         cga.length_var
                     ))
-                    .into();
-            }
-            let n = result.inst_u32.get(&cga.length_var).unwrap();
-            result.inst_array.insert(cga.name.clone(), cga.instance(*n));
+                })?;
+            result.inst_array.insert(cga.name.clone(), cga.instance(n));
             result.var_arrays.insert(cga.name.clone(), cga.clone());
         }
         Ok(result)
@@ -843,9 +840,10 @@ impl VariadicLengthIterator {
         if let Some(variadic_length_vars) = attribute_list.parse_string_arr("variadic_length_vars")
         {
             for var in variadic_length_vars {
-                let len = (attribute_list.parse_int(var.as_str()).ok_or_else(|| {
+                let len = attribute_list.parse_int(var.as_str()).ok_or_else(|| {
                     Span::call_site().error(&format!("Missing attribute value for '{var}'"))
-                })? + 1) as usize;
+                })? + 1;
+                let len = len as _;
                 i_max *= len;
                 if variadic_lengths.insert(var.clone(), len).is_some() {
                     return Span::call_site()
@@ -859,11 +857,12 @@ impl VariadicLengthIterator {
             let var = cga.length_var.clone();
             cga_length_vars.push(var.clone());
             // This is so we don't need to explicitly specify the variadic_length_vars attribute.
-            let len = (attribute_list.parse_int(var.as_str()).ok_or_else(|| {
+            let len = attribute_list.parse_int(var.as_str()).ok_or_else(|| {
                 Span::call_site().error(&format!("Missing attribute value for '{var}'"))
-            })? + 1) as usize;
-            if variadic_lengths.contains_key(&var) {
-                if *variadic_lengths.get(&var).unwrap() != len {
+            })? + 1;
+            let len = len as _;
+            if let Some(&variadic_length) = variadic_lengths.get(&var) {
+                if variadic_length != len {
                     return Span::call_site()
                         .error(&format!("Variadic length mismatch for '{var}'"))
                         .into();
@@ -987,16 +986,13 @@ pub fn variadic_struct(
     item: ItemStruct,
 ) -> Result<Vec<(ItemStruct, Option<ItemImpl>)>, Error> {
     // println!("item: {item:#?}");
-    let vtd = get_variadic_type_data(item.ident.to_string().as_str());
-    if vtd.is_none() {
-        return item
-            .ident
-            .error(&format!(
-                "Generating {} requires a corresponding entry in VARIADIC_TYPES",
-                item.ident
-            ))
-            .into();
-    }
+    let vtd = get_variadic_type_data(item.ident.to_string().as_str()).ok_or_else(|| {
+        item.ident.error(&format!(
+            "Generating {} requires a corresponding entry in VARIADIC_TYPES",
+            item.ident
+        ))
+    });
+
     let cgas = parse_var_cgas(&item.generics);
     let cga_iter = VariadicLengthIterator::new(attributes, &cgas)?;
 
@@ -1283,20 +1279,17 @@ fn rewrite_fn_sig(sig: &mut Signature, const_instances: &ConstInstances) -> Resu
 /// ```
 pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<ItemFn>, Error> {
     let op_name = item.sig.ident.to_string();
-    if get_variadic_op_data(&op_name).is_none() {
-        return item
-            .sig
-            .ident
-            .error(&format!(
-                concat!(
-                    "Variadic op data not found for {}. ",
-                    "VariadicOpData entry is required ",
-                    "for ops with cuda_tile::variadic_op annotation."
-                ),
-                op_name
-            ))
-            .into();
-    }
+    get_variadic_op_data(&op_name).ok_or_else(|| {
+        item.sig.ident.error(&format!(
+            concat!(
+                "Variadic op data not found for {}. ",
+                "VariadicOpData entry is required ",
+                "for ops with cuda_tile::variadic_op annotation."
+            ),
+            op_name
+        ))
+    })?;
+
     let cgas = parse_var_cgas(&item.sig.generics);
     // This ensures to not duplicate cgas with the same n.
     // let fn_types = get_sig_types(&item.sig, None);
@@ -1371,40 +1364,33 @@ fn expand_cga(
     path: &Path,
     instances: &ConstInstances,
 ) -> Result<AngleBracketedGenericArguments, Error> {
-    let _result_path = path.clone();
     let last_seg = path
         .segments
         .last()
         .ok_or_else(|| path.error("Expected at least one path segment in expand_cga"))?;
     let param_name = last_seg.ident.to_string();
     // Is it a variadic type or is it expecting a variadic type parameter?
-    if instances.inst_array.contains_key(&param_name) {
-        // The type is a const generic array, e.g. the D in f(..., shape: D) -> ()
-        let cga = instances.inst_array.get(&param_name).unwrap();
-        let mut generic_args_result: Vec<String> = vec![];
-        for j in 0..cga.length {
-            generic_args_result.push(format!("{}{}", cga.name, j));
-        }
-        let formatted = format!("<{}>", generic_args_result.join(","));
-        Ok(
-            syn::parse::<AngleBracketedGenericArguments>(formatted.parse().map_err(|_| {
-                path.error(&format!(
-                    "Failed to parse angle bracketed args '{formatted}'"
-                ))
-            })?)
-            .map_err(|e| {
-                path.error(&format!(
-                    "Failed to parse angle bracketed args '{formatted}': {e}"
-                ))
-            })?,
-        )
-    } else {
+    let cga = instances.inst_array.get(&param_name).ok_or_else(|| {
         path.error(&format!(
             "{} is not a const generic array.",
             path.to_token_stream()
         ))
-        .into()
-    }
+    })?;
+    // The type is a const generic array, e.g. the D in f(..., shape: D) -> ()
+    let generic_args_result = (0..cga.length)
+        .map(|i| format!("{}{}", cga.name, i))
+        .collect::<Vec<_>>();
+    let formatted = format!("<{}>", generic_args_result.join(","));
+    syn::parse(formatted.parse().map_err(|_| {
+        path.error(&format!(
+            "Failed to parse angle bracketed args '{formatted}'"
+        ))
+    })?)
+    .map_err(|e| {
+        path.error(&format!(
+            "Failed to parse angle bracketed args '{formatted}': {e}"
+        ))
+    })
 }
 
 /// Desugars variadic types in a path, replacing CGA syntax with concrete type names and args.
@@ -1652,16 +1638,16 @@ fn desugar_cga(
                                     Expr::Path(len_path) => {
                                         // This is something like Tensor<E, {[-1; N]}>
                                         let num_rep_var = len_path.to_token_stream().to_string();
-                                        if !instances.inst_u32.contains_key(&num_rep_var) {
-                                            return len_path
-                                                .error(&format!(
+                                        let num_repetitions = instances
+                                            .inst_u32
+                                            .get(&num_rep_var)
+                                            .copied()
+                                            .ok_or_else(|| {
+                                                len_path.error(&format!(
                                                     "Expected instance for generic argument {}",
                                                     num_rep_var
                                                 ))
-                                                .into();
-                                        }
-                                        let num_repetitions =
-                                            *instances.inst_u32.get(&num_rep_var).unwrap();
+                                            })?;
                                         for _ in 0..num_repetitions {
                                             generic_args_result.push(thing_to_repeat.clone());
                                         }
@@ -1714,7 +1700,7 @@ fn desugar_cga(
     let formatted = format!("<{}>", generic_args_result.join(","));
     Ok((
         expanded_param_ident,
-        syn::parse::<AngleBracketedGenericArguments>(formatted.parse().map_err(|_| {
+        syn::parse(formatted.parse().map_err(|_| {
             type_ident.error(&format!(
                 "Failed to parse angle bracketed args '{formatted}'"
             ))
@@ -1802,16 +1788,17 @@ fn get_cga_type(
                             Expr::Path(len_path) => {
                                 // This is something like Tensor<E, {[-1; N]}>
                                 let num_rep_var = len_path.to_token_stream().to_string();
-                                if !const_instances.inst_u32.contains_key(&num_rep_var) {
-                                    return len_path
-                                        .error(&format!(
+                                let num_repetitions = const_instances
+                                    .inst_u32
+                                    .get(&num_rep_var)
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        len_path.error(&format!(
                                             "Expected instance for generic argument {}",
                                             num_rep_var
                                         ))
-                                        .into();
-                                }
-                                let num_rep = const_instances.inst_u32.get(&num_rep_var).unwrap();
-                                n.push(*num_rep);
+                                    })?;
+                                n.push(num_repetitions);
                                 cgas.push(Some(generic_arg.to_token_stream().to_string()));
                             }
                             Expr::Lit(len_lit) => {
@@ -2032,15 +2019,12 @@ impl RewriteVariadicsPass {
         desugar_generics(&mut item.generics, const_instances)?;
         let mut variadic_trait_vtd = None;
         // Update generics in trait definition.
-        if let Some(trait_) = &mut item.trait_ {
-            let path_copy = trait_.1.clone();
-            let path = &mut trait_.1;
-            if path.segments.is_empty() {
-                return path
-                    .error("Expected at least one path segment in trait path")
-                    .into();
-            }
-            let last_seg = path.segments.last_mut().unwrap();
+        if let Some((_, path, _)) = &mut item.trait_ {
+            let span = path.span();
+            let last_seg = path
+                .segments
+                .last_mut()
+                .ok_or_else(|| span.error("Expected at least one path segment in trait path"))?;
             let ident_vtd = get_variadic_type_data(last_seg.ident.to_string().as_str());
             if let Some(vtd) = ident_vtd {
                 if const_instances.inst_u32.len() != 1 {
@@ -2048,7 +2032,7 @@ impl RewriteVariadicsPass {
                         .error("Only one CGA is permitted for variadic traits.")
                         .into();
                 }
-                *path = desugar_path(&path_copy, const_instances)?;
+                *path = desugar_path(path, const_instances)?;
                 variadic_trait_vtd = Some(vtd);
             } else if let PathArguments::AngleBracketed(path_args) = &mut last_seg.arguments {
                 desugar_generic_arguments(path_args, const_instances)?
@@ -2191,13 +2175,10 @@ impl RewriteVariadicsPass {
                     );
                 }
                 FnArg::Receiver(_fn_self) => {
-                    if self_ty.is_none() {
-                        return sig
-                            .ident
+                    let self_ty = self_ty.cloned().ok_or_else(|| {
+                        sig.ident
                             .error("bind_parameters for impls requires self_ty.")
-                            .into();
-                    }
-                    let self_ty = self_ty.unwrap().clone();
+                    })?;
                     variables.insert("self".to_string(), Binding { ty: Some(self_ty) });
                 }
             }
@@ -2282,10 +2263,8 @@ impl RewriteVariadicsPass {
                         }
                         _ => return local.error("Local pattern type not supported").into(),
                     }
-                    if binding_name.is_none() {
-                        return local.error("Unable to rewrite expr.").into();
-                    }
-                    let binding_name = binding_name.unwrap();
+                    let binding_name =
+                        binding_name.ok_or_else(|| local.error("Unable to rewrite expr."))?;
                     if let Some(init) = &mut local.init {
                         // Rewrite the expression but preserve explicit type annotations
                         let inferred_ty = self.rewrite_expr(
@@ -2307,18 +2286,19 @@ impl RewriteVariadicsPass {
                     );
                 }
                 Stmt::Item(item) => {
-                    let mut binding_name: Option<String> = None;
-                    let binding_ty: Option<Type> = match item {
+                    let (ty, name) = match item {
                         Item::Const(const_item) => {
-                            binding_name = Some(const_item.ident.to_string());
                             let return_type = Some(*const_item.ty.clone());
                             // This is like a let binding with limitations.
-                            self.rewrite_expr(
-                                &mut const_item.expr,
-                                const_instances,
-                                variables,
-                                return_type,
-                            )?
+                            (
+                                self.rewrite_expr(
+                                    &mut const_item.expr,
+                                    const_instances,
+                                    variables,
+                                    return_type,
+                                )?,
+                                const_item.ident.to_string(),
+                            )
                         }
                         _ => {
                             return item
@@ -2329,50 +2309,29 @@ impl RewriteVariadicsPass {
                                 .into()
                         }
                     };
-                    let Some(binding_name) = binding_name else {
-                        return item.error("Unable to rewrite expr.").into();
-                    };
-                    variables.insert(
-                        binding_name.clone(),
-                        Binding {
-                            ty: binding_ty.clone(),
-                        },
-                    );
+                    variables.insert(name, Binding { ty });
                 }
                 Stmt::Expr(expr, semicolon) => {
                     let ty =
                         self.rewrite_expr(expr, const_instances, variables, return_type.clone())?;
                     match expr {
                         Expr::Assign(assign_expr) => {
-                            let binding_name: String;
-                            let mut binding_ty: Option<Type> = None;
-                            match &mut *assign_expr.left {
+                            let binding_name = match assign_expr.left.as_ref() {
                                 Expr::Path(path_expr) => {
                                     if path_expr.path.segments.len() != 1 {
                                         return path_expr
                                             .error("Expected single-segment path in assignment")
                                             .into();
                                     }
-                                    binding_name = path_expr.path.segments[0].ident.to_string()
+                                    path_expr.path.segments[0].ident.to_string()
                                 }
                                 _ => return assign_expr.error("Expr::Assign not supported").into(),
-                            }
+                            };
                             // The computed binding type ty is expected to be None.
                             // Types are only needed in this pass to compute concrete variadic
                             // type and op names.
-                            binding_ty = match variables.get(&binding_name) {
-                                Some(old) => old.ty.clone(),
-                                None => {
-                                    // This is invalid, but let Rust generate a nice error.
-                                    None
-                                }
-                            };
-                            let _ = variables.insert(
-                                binding_name,
-                                Binding {
-                                    ty: binding_ty.clone(),
-                                },
-                            );
+                            let ty = variables.get(&binding_name).and_then(|old| old.ty.clone());
+                            variables.insert(binding_name, Binding { ty });
                         }
                         Expr::Return(_return_expr) => {
                             return_type = ty;
@@ -2408,8 +2367,7 @@ impl RewriteVariadicsPass {
                 // );
                 // We rewrite the entire expr to desugared array.
                 // Extract info we need before borrowing expr mutably.
-                let is_path = matches!(&*index_expr.expr, Expr::Path(_));
-                if !is_path {
+                let Expr::Path(path_expr) = index_expr.expr.as_ref() else {
                     return index_expr
                         .expr
                         .error(&format!(
@@ -2417,10 +2375,6 @@ impl RewriteVariadicsPass {
                             index_expr.expr.to_token_stream()
                         ))
                         .into();
-                }
-                let path_expr = match &*index_expr.expr {
-                    Expr::Path(p) => p.clone(),
-                    _ => unreachable!(),
                 };
                 let expr_str = path_expr.to_token_stream().to_string();
                 if let Some(cga) = const_instances.inst_array.get(&expr_str) {
@@ -2447,13 +2401,8 @@ impl RewriteVariadicsPass {
                     let return_type: Type = parse_quote! { i32 };
                     Ok(Some(return_type))
                 } else {
-                    let index_expr = match expr {
-                        Expr::Index(ie) => ie,
-                        _ => unreachable!(),
-                    };
-                    let index_expr_expr = &mut *index_expr.expr;
                     match self.rewrite_expr(
-                        index_expr_expr,
+                        index_expr.expr.as_mut(),
                         const_instances,
                         variables,
                         return_type,
@@ -2685,12 +2634,10 @@ impl RewriteVariadicsPass {
             Expr::Struct(struct_expr) => {
                 // TODO (hme): Similar code fragment in desugar_ty.
                 //  Can this be refactored into a rewrite for any PathSegment?
-                if struct_expr.path.segments.is_empty() {
-                    return struct_expr
-                        .error("Expected at least one path segment in struct expression")
-                        .into();
-                }
-                let last_seg = struct_expr.path.segments.last_mut().unwrap();
+                let span = struct_expr.span();
+                let last_seg = struct_expr.path.segments.last_mut().ok_or_else(|| {
+                    span.error("Expected at least one path segment in struct expression")
+                })?;
                 let name = last_seg.ident.to_string();
                 let vtd = get_variadic_type_data(name.as_str());
                 if let Some(_vtd) = vtd {
@@ -2882,11 +2829,9 @@ impl RewriteVariadicsPass {
         // Derive name of method call.
         let method_ident = &expr.method;
         let method_name = method_ident.to_string();
-        let self_ty =
-            match self.rewrite_expr(&mut expr.receiver, const_instances, variables, None)? {
-                Some(ty) => ty,
-                None => return expr.receiver.error("Unable to infer receiver type").into(),
-            };
+        let self_ty = self
+            .rewrite_expr(&mut expr.receiver, const_instances, variables, None)?
+            .ok_or_else(|| expr.receiver.error("Unable to infer receiver type"))?;
         // This may be a primitive which implements a supported variadic trait.
         let maybe_primitive_type = self_ty.to_token_stream().to_string();
         let variadic_meta = get_variadic_trait_impl_meta_data(&maybe_primitive_type, &method_name)?;
@@ -2950,12 +2895,10 @@ impl RewriteVariadicsPass {
                 // Actually perform function call rewrite.
                 let last_seg = match &mut *expr.func {
                     Expr::Path(path_expr) => {
-                        if path_expr.path.segments.is_empty() {
-                            return path_expr
-                                .error("Expected at least one path segment in function call")
-                                .into();
-                        }
-                        path_expr.path.segments.last_mut().unwrap()
+                        let span = path_expr.span();
+                        path_expr.path.segments.last_mut().ok_or_else(|| {
+                            span.error("Expected at least one path segment in function call")
+                        })?
                     }
                     _ => {
                         return expr
