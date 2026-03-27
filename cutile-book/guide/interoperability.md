@@ -159,6 +159,81 @@ This pattern gives you full access to the CUDA driver API while still participat
 
 ---
 
+## Coming from Triton: Warp Specialization in the Tile Model
+
+[Triton](https://triton-lang.org/) and cuTile Rust share a similar programming model — both let you write kernels in terms of tile-level operations rather than individual threads. If you are coming from Triton and rely on warp specialization (e.g., `tl.async_task` for producer/consumer patterns), this section explains what the cuTile Rust compiler handles automatically and where the models differ.
+
+### What the Tile Compiler Already Does
+
+Many patterns that require explicit warp specialization in Triton are handled implicitly by the cuTile Rust compiler:
+
+| Triton (manual) | cuTile Rust (automatic) |
+|-----------------|------------------------|
+| Assign producer warps to prefetch tiles from global → shared memory | Compiler generates shared memory staging for `load_tile` operations |
+| Assign consumer warps to compute on shared memory tiles | Compiler maps tile arithmetic to Tensor Cores and registers |
+| Software pipeline with `tl.async_task` to overlap loads and compute | `allow_tma = true` enables hardware-assisted pipelining via TMA on Hopper+ |
+| Manual `tl.dot` placement across warps | `mma()` maps directly to Tensor Core instructions; thread/warp assignment is compiler-managed |
+| Tune `num_warps` and `num_stages` for occupancy | `occupancy` and `num_cta_in_cga` optimization hints guide the compiler |
+
+In short: the standard producer/consumer pipelining pattern — where some warps prefetch the next tile while others compute on the current tile — is what the tile compiler's code generation already targets. You express the algorithm; the compiler decides how to schedule it across warps and pipeline stages.
+
+### Example: Pipelined GEMM
+
+In Triton, a warp-specialized GEMM might look like:
+
+```python
+# Triton: explicit producer/consumer warp specialization
+@triton.jit
+def gemm_kernel(...):
+    with tl.async_task([0]):          # Producer warp: prefetch A, B tiles
+        a = tl.load(A_ptr + offsets)
+        b = tl.load(B_ptr + offsets)
+    with tl.async_task([1, 2]):       # Consumer warps: compute
+        c += tl.dot(a, b)
+```
+
+The equivalent cuTile Rust kernel expresses the same algorithm without explicit warp roles:
+
+```rust
+#[cutile::entry(
+    optimization_hints = (
+        tensor_dim_factor = 16,
+        sm_120 = (allow_tma = true, occupancy = 2,),
+    )
+)]
+fn gemm<const S: [i32; 2]>(
+    c: &mut Tensor<f32, S>,
+    a: &Tensor<f32, { [-1, -1] }>,
+    b: &Tensor<f32, { [-1, -1] }>,
+) {
+    // The compiler stages these loads through shared memory
+    // and pipelines them with the compute below.
+    let tile_a = load_tile_like_2d(a, c);
+    let tile_b = load_tile_like_2d(b, c);
+    c.store(mma(tile_a, tile_b));
+}
+```
+
+The `allow_tma = true` hint enables Tensor Memory Accelerator-based bulk copies on Hopper+, which is the hardware mechanism underlying efficient producer/consumer pipelining. The compiler decides how to distribute work across warps and pipeline stages.
+
+### When You Still Need Custom Kernels
+
+The tile model covers the common case — pipelined dense tensor algebra — but some Triton patterns have no direct equivalent:
+
+- **Heterogeneous warp roles** beyond producer/consumer (e.g., three distinct task types within a block)
+- **Warp-level reductions** using `tl.reduce` with custom combiners that don't map to tile primitives
+- **Dynamic control flow per warp** where different warps take different code paths based on runtime conditions
+- **Cross-block communication** via atomic operations or cooperative groups
+
+For these, compile the kernel with Triton (or write it in CUDA C++) and integrate it via `AsyncKernelLaunch` as described in the sections above. Since Triton outputs PTX, you can load it directly:
+
+```rust
+let module = load_module_from_ptx(triton_generated_ptx, device_id)?;
+let function = Arc::new(module.load_function("gemm_kernel")?);
+```
+
+---
+
 ## Recommendations
 
 1. **Try tile programming first.** If your kernel can be expressed as tile operations, the compiler will handle thread management and memory staging. The resulting code is safer and often performs well.
