@@ -8,6 +8,9 @@
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
+pub use cutile_compiler::validator::{
+    PointerParamType, ScalarParamType, TensorParamType, ValidParamType, Validator,
+};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -34,36 +37,6 @@ pub trait FunctionKey: Hash {
         let hash_value: u64 = hasher.finish();
         format!("{:x}", hash_value)
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum ValidParamType {
-    Scalar(ScalarParamType),
-    Pointer(PointerParamType),
-    Tensor(TensorParamType),
-}
-
-#[derive(Debug, Clone)]
-pub struct ScalarParamType {
-    pub element_type: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PointerParamType {
-    pub mutable: bool,
-    pub element_type: String,
-}
-
-// TODO (hme): This is note entirely tile-agnostic with this param type.
-#[derive(Debug, Clone)]
-pub struct TensorParamType {
-    pub element_type: String,
-    pub shape: Vec<i32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Validator {
-    pub params: Vec<ValidParamType>,
 }
 
 type DeviceFunctions = HashMap<String, (Arc<CudaModule>, Arc<CudaFunction>)>;

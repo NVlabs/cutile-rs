@@ -5,6 +5,7 @@
 target
 
 **/*.bc
+**/*.mlir
 **/*.cubin
 **/core
 scratch

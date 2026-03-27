@@ -25,7 +25,7 @@ use crate::kernel_entry_generator::generate_entry_point;
 use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::*;
 use crate::types::*;
-use cuda_async::device_context::Validator;
+use crate::validator::Validator;
 use cuda_tile_rs::operation_parse;
 use melior::ir::attribute::StringAttribute;
 use melior::ir::operation::{OperationBuilder, OperationLike};
