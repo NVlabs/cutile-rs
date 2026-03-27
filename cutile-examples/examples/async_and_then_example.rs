@@ -7,7 +7,6 @@ use cuda_async::device_operation::{value, with_context, DeviceOperation};
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_core::LaunchConfig;
-use cutile;
 use cutile::candle_core;
 use cutile::tensor::{CopyToDevice, IntoPartition, Tensor, ToHostVec};
 use cutile::tile_kernel::compile_from_context;
@@ -128,16 +127,16 @@ async fn main() -> Result<(), DeviceError> {
     // Check output.
     let y_host = y.to_host_vec().await?;
     let arange = arange.flatten(0, 1).unwrap();
-    for i in 0..arange.dims()[0] {
+    for (i, &y_host) in y_host.iter().enumerate().take(arange.dims()[0]) {
         let x_i: f32 = arange.get(i).unwrap().to_scalar().unwrap();
         let y_i: f32 = arange.get(i).unwrap().to_scalar().unwrap();
         // We're applying the saxpy function 3 times.
         let mut answer = y_i;
-        answer = a * x_i + answer;
-        answer = a * x_i + answer;
-        answer = a * x_i + answer;
-        println!("{} * {} + {} = {}", a, x_i, y_i, y_host[i]);
-        assert_eq!(answer, y_host[i], "{} != {} ?", answer, y_host[i]);
+        answer += a * x_i;
+        answer += a * x_i;
+        answer += a * x_i;
+        println!("{} * {} + {} = {}", a, x_i, y_i, y_host);
+        assert_eq!(answer, y_host, "{} != {} ?", answer, y_host);
     }
     Ok(())
 }

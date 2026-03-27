@@ -88,14 +88,14 @@ fn ocean_gemm(c: &mut Criterion) {
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
 
-    let mut shapes = vec![];
-    for exponent in 0..6 {
-        // This is what the ocean benchmark uses.
-        let scale: usize = 2usize.pow(exponent);
-        let shape = (1024 * scale, 1024 * scale, 1024 * scale);
-        shapes.push(shape)
-    }
-    let hyper_params = vec![
+    // This is what the ocean benchmark uses.
+    let shapes = (0..6)
+        .map(|i| {
+            let n = 2usize.pow(10 + i);
+            (n, n, n)
+        })
+        .collect::<Vec<_>>();
+    let hyper_params = [
         ((128, 128, 64), 2),
         ((256, 256, 64), 2),
         ((256, 256, 64), 2),
@@ -103,11 +103,7 @@ fn ocean_gemm(c: &mut Criterion) {
         ((256, 256, 64), 2),
         ((256, 256, 64), 2),
     ];
-    let slice = 0..6;
-    for (shape, (tile, _group_size_m)) in zip(&shapes[slice.clone()], &hyper_params[slice.clone()])
-    {
-        let (m, n, k) = *shape;
-        let (bm, bn, bk) = *tile;
+    for (&(m, n, k), &((bm, bn, bk), _group_size_m)) in shapes.iter().zip(hyper_params.iter()) {
         let generics = vec![
             "f16".to_string(),
             bm.to_string(),
@@ -124,7 +120,7 @@ fn ocean_gemm(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("N", &label), &label, |b, _size_mb| {
             b.iter_custom(|iters| {
                 let mut z = api::zeros::<2, f16>([m, n])
-                    .partition([bm as i32, bn as i32])
+                    .partition([bm, bn])
                     .sync_on(&stream)
                     .expect("Failed.");
                 stream.synchronize().expect("Failed to synchronize.");
@@ -139,8 +135,7 @@ fn ocean_gemm(c: &mut Criterion) {
                     }
                 }
                 stream.synchronize().expect("Failed to synchronize.");
-                let res = start.elapsed();
-                res
+                start.elapsed()
             });
         });
     }

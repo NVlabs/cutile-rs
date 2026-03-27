@@ -100,10 +100,12 @@ async fn main() -> Result<(), Error> {
     ];
     let w0 = api::randn(0.0f32, 1.0, [dim, dim]); // impl DeviceOperation
     let w1 = api::randn(0.0f32, 1.0, [dim]); // impl DeviceOperation
-    let w = zip!(w0.arc(), w1.arc()).schedule(&devices[0])?.await?;
+    let w = zip!(w0.arc(), w1.arc())
+        .schedule(devices.first().unwrap())?
+        .await?;
     let mut joins = vec![];
-    for i in 1..num_devices {
-        let w_copy = tokio::spawn(zip!(copy(&w.0).arc(), copy(&w.1).arc()).schedule(&devices[i])?);
+    for device in devices.iter().skip(1) {
+        let w_copy = tokio::spawn(zip!(copy(&w.0).arc(), copy(&w.1).arc()).schedule(device)?);
         joins.push(w_copy);
     }
     let mut model_weights = vec![w];

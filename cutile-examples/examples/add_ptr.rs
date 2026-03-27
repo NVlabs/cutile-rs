@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile::api::{arange, ones, zeros};
 use cutile::tensor::{Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
@@ -17,8 +16,7 @@ mod my_module {
         let shape: Shape<{ [-1] }> = Shape::<{ [-1] }> { dims: &[len] };
         let strides: Array<{ [-1] }> = Array::<{ [-1] }> { dims: &[1i32] };
         let ptr_tile: PointerTile<*mut T, { [] }> = pointer_to_tile(ptr);
-        let tensor = make_tensor_view(ptr_tile, shape, strides, new_token_unordered());
-        tensor
+        make_tensor_view(ptr_tile, shape, strides, new_token_unordered())
     }
 
     #[cutile::entry()]

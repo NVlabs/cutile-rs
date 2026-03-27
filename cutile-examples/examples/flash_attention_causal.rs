@@ -6,7 +6,6 @@ extern crate core;
 
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::CudaContext;
-use cutile;
 use cutile::api::{randn_f32, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
@@ -141,6 +140,7 @@ mod my_module {
 
 use my_module::fmha;
 
+#[allow(clippy::too_many_arguments)]
 fn idx4(
     a: usize,
     b: usize,
@@ -154,6 +154,7 @@ fn idx4(
     (((a * hsz + b) * m + c) * dsz) + d
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fmha_ref_cpu(
     q: &[f32],
     k: &[f32],
