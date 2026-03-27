@@ -25,6 +25,17 @@ impl<T> DevicePointer<T> {
     pub fn cu_deviceptr(&self) -> CUdeviceptr {
         self.dptr
     }
+
+    /// Constructs a typed device pointer from a raw CUDA device pointer.
+    ///
+    /// # Safety
+    /// The caller must ensure `dptr` is valid for values of type `T`.
+    pub unsafe fn from_cu_deviceptr(dptr: CUdeviceptr) -> Self {
+        Self {
+            dtype: PhantomData,
+            dptr,
+        }
+    }
 }
 
 impl<T: Send + Sized> KernelArgument for DevicePointer<T> {
