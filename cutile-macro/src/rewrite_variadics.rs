@@ -87,7 +87,7 @@
 //! - Pattern matching and variable bindings
 
 use crate::{
-    error::{syn_err, Error},
+    error::{Error, SpannedError},
     types::{
         concrete_name, get_variadic_function_suffix, get_variadic_method_data,
         get_variadic_op_data, get_variadic_trait_type_data, get_variadic_type_data,
@@ -168,13 +168,13 @@ fn try_get_path_expr_ident_str(maybe_path_expr: &Expr) -> Result<Option<String>,
     match maybe_path_expr {
         Expr::Path(path_expr) => {
             if path_expr.path.segments.len() != 1 {
-                return Err(syn_err(
-                    path_expr.path.span(),
-                    &format!(
+                return path_expr
+                    .path
+                    .error(&format!(
                         "Expected single-segment path, got: {:?}",
                         path_expr.path.segments.to_token_stream().to_string()
-                    ),
-                ));
+                    ))
+                    .into();
             }
             let fn_name = path_expr.path.segments[0].ident.to_string();
             Ok(Some(fn_name))
@@ -207,7 +207,7 @@ fn get_vod_from_call(expr: &mut ExprCall) -> Result<Option<VariadicOpData>, Erro
                     .path
                     .segments
                     .last()
-                    .ok_or_else(|| syn_err(path_expr.span(), "Expected at least one path segment"))?
+                    .ok_or_else(|| path_expr.error("Expected at least one path segment"))?
                     .ident
                     .to_string();
                 Some(fn_name)
@@ -278,19 +278,20 @@ fn get_ident_generic_args(
     match ty {
         Type::Path(type_path) => {
             let result_type = type_path.clone();
-            let maybe_last_seg =
-                result_type.path.segments.last().ok_or_else(|| {
-                    syn_err(type_path.span(), "Expected at least one path segment")
-                })?;
-            let last_seg = maybe_last_seg.clone();
+            let last_seg = result_type
+                .path
+                .segments
+                .last()
+                .ok_or_else(|| type_path.error("Expected at least one path segment"))?;
+            let last_seg = last_seg.clone();
             if last_seg.ident != vtd.name {
-                return Err(syn_err(
-                    last_seg.ident.span(),
-                    &format!(
+                return last_seg
+                    .ident
+                    .error(&format!(
                         "get_ident_generic_args: Expected type '{}', got '{}'",
                         vtd.name, last_seg.ident
-                    ),
-                ));
+                    ))
+                    .into();
             }
             match last_seg.arguments {
                 // The type takes a const generic array as a type param:
@@ -299,11 +300,11 @@ fn get_ident_generic_args(
                     // This is a type of the form T<...>
                     Ok((last_seg.ident.clone(), type_params.clone()))
                 }
-                _ => Err(syn_err(type_path.span(), "Unexpected generic arguments")),
+                _ => type_path.error("Unexpected generic arguments").into(),
             }
         }
         Type::Reference(ref_type) => get_ident_generic_args(&ref_type.elem, vtd),
-        _ => Err(syn_err(ty.span(), "Unexpected type")),
+        _ => ty.error("Unexpected type").into(),
     }
 }
 
@@ -405,6 +406,15 @@ fn get_concrete_op_or_method_ident_from_types(
 
     let mut missing_idx = vec![];
     let mut missing_types = vec![];
+
+    let op_error = |msg: &_| op_or_method_ident.error(msg);
+    let fn_error = |msg: &str| {
+        op_error(&format!(
+            "get_concrete_op_ident_from_types({}, ...): {}",
+            op_or_method_ident, msg
+        ))
+    };
+
     for (idx, expected_type_name, vod_cga_var_names) in vod.input_map {
         // Go through the input map and attempt to map from VOD -
         let Some(ty) = &input_types[idx] else {
@@ -413,32 +423,40 @@ fn get_concrete_op_or_method_ident_from_types(
             continue;
         };
         let Some(vtd) = get_vtd(ty)? else {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("Unable to infer type for argument {idx} for call to {op_or_method_ident}. Expected {expected_type_name}. Required by calls to variadic functions and methods."),
-            ));
+            return op_error(&format!(
+                concat!(
+                    "Unable to infer type for argument {} for call to {}. Expected {}. ",
+                    "Required by calls to variadic functions and methods."
+                ),
+                idx, op_or_method_ident, expected_type_name
+            ))
+            .into();
         };
         // Get the cga_instances from const_instances. These are ordered.
         // Match them in order to the const var structure of the VariadicOpData type.
         let Some(cga_instances) = get_cga_type(ty, const_instances)? else {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unable to get cga instances for type: {}", ty.to_token_stream()),
-            ));
+            return fn_error(&format!(
+                "Unable to get cga instances for type: {}",
+                ty.to_token_stream()
+            ))
+            .into();
         };
         // This is a variadic type with cga instances.
         let type_name = vtd.name;
         if expected_type_name != type_name {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected positional argument type: {:#?}", (idx, ty.to_token_stream())),
-            ));
+            return fn_error(&format!(
+                "Unexpected positional argument type: {:#?}",
+                (idx, ty.to_token_stream())
+            ))
+            .into();
         }
         if vod_cga_var_names.len() != cga_instances.n.len() {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances for {type_name}, got {:?}.", vod_cga_var_names.len(), cga_instances.n),
-            ));
+            return fn_error(&format!(
+                "Expected {} cga instances for {type_name}, got {:?}.",
+                vod_cga_var_names.len(),
+                cga_instances.n
+            ))
+            .into();
         }
         for (cga_var_name, (&cga_var_length, cga_arg_string)) in vod_cga_var_names.iter().zip(
             cga_instances
@@ -446,20 +464,22 @@ fn get_concrete_op_or_method_ident_from_types(
                 .iter()
                 .zip(cga_instances.cga_arg_strings.iter()),
         ) {
-            let cga_var_length_var = vod.cga_map.get(cga_var_name).ok_or_else(|| {
-                syn_err(
-                    op_or_method_ident.span(),
-                    &format!("Missing cga_map entry for '{cga_var_name}'"),
-                )
-            })?;
+            let cga_var_length_var = vod
+                .cga_map
+                .get(cga_var_name)
+                .ok_or_else(|| op_error(&format!("Missing cga_map entry for '{cga_var_name}'")))?;
             vod_cga_name_to_context_cga_name.insert(cga_var_name, cga_arg_string.clone());
             if let Some(&current_var_length) = const_length_values.get(cga_var_length_var) {
                 // If we've already recorded this cga instance, make sure other instances are equivalent.
                 if current_var_length != cga_var_length {
-                    return Err(syn_err(
-                        op_or_method_ident.span(),
-                        &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): CGA instance var length mismatch. Expected {current_var_length} but got {cga_var_length} for cga {cga_var_name}."),
-                    ));
+                    return fn_error(&format!(
+                        concat!(
+                            "CGA instance var length mismatch. ",
+                            "Expected {} but got {} for cga {}."
+                        ),
+                        current_var_length, cga_var_length, cga_var_name
+                    ))
+                    .into();
                 }
             } else {
                 const_length_values.insert(cga_var_length_var, cga_var_length);
@@ -471,71 +491,73 @@ fn get_concrete_op_or_method_ident_from_types(
     // The keys of const_length_values are the length values in "VOD space," or the const_length_vars for the corresponding variadic op data entry.
 
     if const_length_values.len() > vod.const_length_vars.len() {
-        return Err(syn_err(
-            op_or_method_ident.span(),
-            &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected number of cga instances: {:#?} ", const_length_values),
-        ));
+        return fn_error(&format!(
+            "Unexpected number of cga instances: {:#?} ",
+            const_length_values
+        ))
+        .into();
     } else if const_length_values.len() < vod.const_length_vars.len() {
         // Try to get the last cga instance from the output type.
         if output_type.is_none() {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("Unable to infer call to {}. Try binding it to a statically typed variable. \nDebug info:\n const_length_values={:#?}, vod.const_length_vars={:#?}",
-                    op_or_method_ident,
-                    const_length_values,
-                    vod.const_length_vars),
-            ));
+            return op_error(&format!(
+                concat!(
+                    "Unable to infer call to {}. ",
+                    "Try binding it to a statically typed variable.\n",
+                    "Debug info:\n",
+                    "const_length_values={:#?}, ",
+                    "vod.const_length_vars={:#?}"
+                ),
+                op_or_method_ident, const_length_values, vod.const_length_vars
+            ))
+            .into();
         }
         let output_type = output_type.clone().unwrap();
 
         let maybe_vtd = get_vtd(&output_type)?;
         if maybe_vtd.is_none() {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!(
-                    "Unable to infer call to {}. Try binding it to a statically typed variable.",
-                    op_or_method_ident
-                ),
-            ));
+            return op_error(&format!(
+                "Unable to infer call to {}. Try binding it to a statically typed variable.",
+                op_or_method_ident
+            ))
+            .into();
         }
         let vtd = maybe_vtd.unwrap();
         let cga_instances = get_cga_type(&output_type, const_instances)?;
         if cga_instances.is_none() {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unable to get cga instances for output type: {}", output_type.to_token_stream()),
-            ));
+            return fn_error(&format!(
+                "Unable to get cga instances for output type: {}",
+                output_type.to_token_stream()
+            ))
+            .into();
         }
         let cga_instances = cga_instances.unwrap();
 
         let (expected_type_name, vod_cga_var_names) = vod.output_map;
         if expected_type_name != vtd.name {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Unexpected output type: {}", output_type.to_token_stream()),
-            ));
+            return fn_error(&format!(
+                "Unexpected output type: {}",
+                output_type.to_token_stream()
+            ))
+            .into();
         }
         if vod_cga_var_names.len() != cga_instances.n.len() {
-            return Err(syn_err(
-                op_or_method_ident.span(),
-                &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): Expected {} cga instances, got {}.", vod_cga_var_names.len(), cga_instances.n.len()),
-            ));
+            return fn_error(&format!(
+                "Expected {} cga instances, got {}.",
+                vod_cga_var_names.len(),
+                cga_instances.n.len()
+            ))
+            .into();
         }
         for (cga_var_name, &cga_var_length) in vod_cga_var_names.iter().zip(cga_instances.n.iter())
         {
-            let cga_var_length_var = vod.cga_map.get(cga_var_name).ok_or_else(|| {
-                syn_err(
-                    op_or_method_ident.span(),
-                    &format!("Missing cga_map entry for '{cga_var_name}'"),
-                )
-            })?;
+            let cga_var_length_var = vod
+                .cga_map
+                .get(cga_var_name)
+                .ok_or_else(|| op_error(&format!("Missing cga_map entry for '{cga_var_name}'")))?;
             if let Some(&current_var_length) = const_length_values.get(cga_var_length_var) {
                 // If we've already recorded this cga instance, make sure other instances are equivalent.
                 if current_var_length != cga_var_length {
-                    return Err(syn_err(
-                        op_or_method_ident.span(),
-                        &format!("get_concrete_op_ident_from_types({op_or_method_ident}, ...): CGA instance var length mismatch for output type."),
-                    ));
+                    return fn_error("CGA instance var length mismatch for output type.").into();
                 }
             } else {
                 const_length_values.insert(cga_var_length_var, cga_var_length);
@@ -544,10 +566,14 @@ fn get_concrete_op_or_method_ident_from_types(
     }
 
     if const_length_values.len() != vod.const_length_vars.len() {
-        return Err(syn_err(
-            op_or_method_ident.span(),
-            &format!("Unable to infer type for argument(s) {missing_idx:?} for call to {op_or_method_ident}. Expected {missing_types:?}. Required by calls to variadic functions and methods."),
-        ));
+        return op_error(&format!(
+            concat!(
+                "Unable to infer type for argument(s) {:?} for call to {}. ",
+                "Expected {:?}. Required by calls to variadic functions and methods."
+            ),
+            missing_idx, op_or_method_ident, missing_types
+        ))
+        .into();
     }
 
     // TODO (hme): Separate this whole thing into two functions: One for output inference, and one for desugaring.
@@ -556,18 +582,12 @@ fn get_concrete_op_or_method_ident_from_types(
     } else {
         let (return_type_name, return_type_generic_args) = vod.return_type;
         if return_type_generic_args.is_empty() {
-            let ty = syn::parse::<Type>(return_type_name.parse().map_err(|_| {
-                syn_err(
-                    op_or_method_ident.span(),
-                    &format!("Unable to parse {return_type_name}"),
-                )
-            })?)
-            .map_err(|e| {
-                syn_err(
-                    op_or_method_ident.span(),
-                    &format!("Unable to parse {return_type_name}: {e}"),
-                )
-            })?;
+            let ty = syn::parse::<Type>(
+                return_type_name
+                    .parse()
+                    .map_err(|_| op_error(&format!("Unable to parse {return_type_name}")))?,
+            )
+            .map_err(|e| op_error(&format!("Unable to parse {return_type_name}: {e}")))?;
             Some(ty)
         } else {
             let mut missing_cgas = vec![];
@@ -586,10 +606,15 @@ fn get_concrete_op_or_method_ident_from_types(
             if return_type_generic_arg_strings.len() != num_cgas {
                 // Return the given output_type if it is not none.
                 if output_type.is_none() {
-                    return Err(syn_err(
-                        op_or_method_ident.span(),
-                        &format!("Failed to infer return type generic args {:?} \nop={} \nvod_cga_name_to_context_cga_name={vod_cga_name_to_context_cga_name:#?}", missing_cgas, op_or_method_ident),
-                    ));
+                    return op_error(&format!(
+                        concat!(
+                            "Failed to infer return type generic args {:?}\n",
+                            "op={}\n",
+                            "vod_cga_name_to_context_cga_name={:#?}"
+                        ),
+                        missing_cgas, op_or_method_ident, vod_cga_name_to_context_cga_name
+                    ))
+                    .into();
                 }
                 output_type
             } else {
@@ -598,36 +623,29 @@ fn get_concrete_op_or_method_ident_from_types(
                     return_type_name,
                     return_type_generic_arg_strings.join(", ")
                 );
-                let ty = syn::parse::<Type>(return_type_str.parse().map_err(|_| {
-                    syn_err(
-                        op_or_method_ident.span(),
-                        &format!("Unable to parse {return_type_str}"),
-                    )
-                })?)
-                .map_err(|e| {
-                    syn_err(
-                        op_or_method_ident.span(),
-                        &format!("Unable to parse {return_type_str}: {e}"),
-                    )
-                })?;
+                let ty = syn::parse::<Type>(
+                    return_type_str
+                        .parse()
+                        .map_err(|_| op_error(&format!("Unable to parse {return_type_str}")))?,
+                )
+                .map_err(|e| op_error(&format!("Unable to parse {return_type_str}: {e}")))?;
                 Some(ty)
             }
         }
     };
 
     if vod.const_length_vars.len() != const_length_values.len() {
-        return Err(syn_err(
-            op_or_method_ident.span(),
-            &format!("Failed to infer op name from given parameters {op_or_method_ident}"),
-        ));
+        return op_error(&format!(
+            "Failed to infer op name from given parameters {op_or_method_ident}"
+        ))
+        .into();
     }
     let mut length_vec = Vec::with_capacity(vod.const_length_vars.len());
     for const_length_var in vod.const_length_vars {
         let val = const_length_values.get(const_length_var).ok_or_else(|| {
-            syn_err(
-                op_or_method_ident.span(),
-                &format!("Missing const_length_value for '{const_length_var}'"),
-            )
+            op_error(&format!(
+                "Missing const_length_value for '{const_length_var}'"
+            ))
         })?;
         length_vec.push(*val);
     }
@@ -709,24 +727,22 @@ impl ConstInstances {
         {
             let length_instance = *length_instance as u32;
             if length_var_name != &cga.length_var {
-                return Err(syn_err(
-                    Span::call_site(),
-                    &format!(
+                return Span::call_site()
+                    .error(&format!(
                         "CGA length var name mismatch: expected '{}', got '{}'",
                         cga.length_var, length_var_name
-                    ),
-                ));
+                    ))
+                    .into();
             }
             if let Some(existing_length) = inst_u32.insert(length_var_name.clone(), length_instance)
             {
                 if existing_length != length_instance {
-                    return Err(syn_err(
-                        Span::call_site(),
-                        &format!(
+                    return Span::call_site()
+                        .error(&format!(
                             "CGA length instance mismatch for '{}': expected {}, got {}",
                             length_var_name, existing_length, length_instance
-                        ),
-                    ));
+                        ))
+                        .into();
                 }
             }
             inst_array.insert(cga.name.clone(), cga.instance(length_instance));
@@ -756,13 +772,12 @@ impl ConstInstances {
         let mut result = self.clone();
         for cga in var_cgas {
             if !result.inst_u32.contains_key(&cga.length_var) {
-                return Err(syn_err(
-                    Span::call_site(),
-                    &format!(
+                return Span::call_site()
+                    .error(&format!(
                         "instantiate_var_cgas: Missing inst_u32 entry for '{}'",
                         cga.length_var
-                    ),
-                ));
+                    ))
+                    .into();
             }
             let n = result.inst_u32.get(&cga.length_var).unwrap();
             result.inst_array.insert(cga.name.clone(), cga.instance(*n));
@@ -780,13 +795,12 @@ impl ConstInstances {
             let n: u32 = n_list[i];
             let cga = &var_cgas[i];
             if result.inst_u32.contains_key(&cga.length_var) {
-                return Err(syn_err(
-                    Span::call_site(),
-                    &format!(
+                return Span::call_site()
+                    .error(&format!(
                         "instantiate_new_var_cgas: inst_u32 already contains entry for '{}'",
                         cga.length_var
-                    ),
-                ));
+                    ))
+                    .into();
             }
             result.inst_u32.insert(cga.length_var.clone(), n);
             result.inst_array.insert(cga.name.clone(), cga.instance(n));
@@ -830,17 +844,13 @@ impl VariadicLengthIterator {
         {
             for var in variadic_length_vars {
                 let len = (attribute_list.parse_int(var.as_str()).ok_or_else(|| {
-                    syn_err(
-                        Span::call_site(),
-                        &format!("Missing attribute value for '{var}'"),
-                    )
+                    Span::call_site().error(&format!("Missing attribute value for '{var}'"))
                 })? + 1) as usize;
                 i_max *= len;
                 if variadic_lengths.insert(var.clone(), len).is_some() {
-                    return Err(syn_err(
-                        Span::call_site(),
-                        &format!("Duplicate variadic_length_var '{var}'"),
-                    ));
+                    return Span::call_site()
+                        .error(&format!("Duplicate variadic_length_var '{var}'"))
+                        .into();
                 }
             }
         }
@@ -850,17 +860,13 @@ impl VariadicLengthIterator {
             cga_length_vars.push(var.clone());
             // This is so we don't need to explicitly specify the variadic_length_vars attribute.
             let len = (attribute_list.parse_int(var.as_str()).ok_or_else(|| {
-                syn_err(
-                    Span::call_site(),
-                    &format!("Missing attribute value for '{var}'"),
-                )
+                Span::call_site().error(&format!("Missing attribute value for '{var}'"))
             })? + 1) as usize;
             if variadic_lengths.contains_key(&var) {
                 if *variadic_lengths.get(&var).unwrap() != len {
-                    return Err(syn_err(
-                        Span::call_site(),
-                        &format!("Variadic length mismatch for '{var}'"),
-                    ));
+                    return Span::call_site()
+                        .error(&format!("Variadic length mismatch for '{var}'"))
+                        .into();
                 }
             } else {
                 i_max *= len;
@@ -983,13 +989,13 @@ pub fn variadic_struct(
     // println!("item: {item:#?}");
     let vtd = get_variadic_type_data(item.ident.to_string().as_str());
     if vtd.is_none() {
-        return Err(syn_err(
-            item.ident.span(),
-            &format!(
+        return item
+            .ident
+            .error(&format!(
                 "Generating {} requires a corresponding entry in VARIADIC_TYPES",
                 item.ident
-            ),
-        ));
+            ))
+            .into();
     }
     let cgas = parse_var_cgas(&item.generics);
     let cga_iter = VariadicLengthIterator::new(attributes, &cgas)?;
@@ -999,14 +1005,14 @@ pub fn variadic_struct(
     let vtd = vtd.unwrap();
     let num_cgas = vtd.num_cgas();
     if cgas.len() as u32 != num_cgas {
-        return Err(syn_err(
-            item.ident.span(),
-            &format!(
+        return item
+            .ident
+            .error(&format!(
                 "Expected {} const generic arrays, got {}",
                 num_cgas,
                 cgas.len()
-            ),
-        ));
+            ))
+            .into();
     }
     let mut result: Vec<(ItemStruct, Option<ItemImpl>)> = vec![];
     for var_cga_iter_item in cga_iter {
@@ -1092,16 +1098,15 @@ pub fn variadic_struct(
                     }}
                 "#
                 );
-                let parsed_impl =
-                    syn::parse::<ItemImpl>(constructor_impl.parse().map_err(|_| {
-                        syn_err(item.ident.span(), "Failed to parse constructor impl")
-                    })?)
-                    .map_err(|e| {
-                        syn_err(
-                            item.ident.span(),
-                            &format!("Failed to parse constructor impl: {e}"),
-                        )
-                    })?;
+                let parsed_impl = syn::parse::<ItemImpl>(
+                    constructor_impl
+                        .parse()
+                        .map_err(|_| item.ident.error("Failed to parse constructor impl"))?,
+                )
+                .map_err(|e| {
+                    item.ident
+                        .error(&format!("Failed to parse constructor impl: {e}"))
+                })?;
                 // println!("parsed_impl: {parsed_impl:#?}");
                 Some(parsed_impl)
             }
@@ -1279,10 +1284,18 @@ fn rewrite_fn_sig(sig: &mut Signature, const_instances: &ConstInstances) -> Resu
 pub fn variadic_op(attributes: &SingleMetaList, item: ItemFn) -> Result<Vec<ItemFn>, Error> {
     let op_name = item.sig.ident.to_string();
     if get_variadic_op_data(&op_name).is_none() {
-        return Err(syn_err(
-            item.sig.ident.span(),
-            &format!("Variadic op data not found for {op_name}. VariadicOpData entry is required for ops with cuda_tile::variadic_op annotation."),
-        ));
+        return item
+            .sig
+            .ident
+            .error(&format!(
+                concat!(
+                    "Variadic op data not found for {}. ",
+                    "VariadicOpData entry is required ",
+                    "for ops with cuda_tile::variadic_op annotation."
+                ),
+                op_name
+            ))
+            .into();
     }
     let cgas = parse_var_cgas(&item.sig.generics);
     // This ensures to not duplicate cgas with the same n.
@@ -1315,31 +1328,31 @@ fn desugar_generics(
                         .inst_array
                         .get(const_param_name.as_str())
                         .ok_or_else(|| {
-                            syn_err(
-                                const_param.ident.span(),
-                                &format!("Missing inst_array entry for '{const_param_name}'"),
-                            )
+                            const_param.ident.error(&format!(
+                                "Missing inst_array entry for '{const_param_name}'"
+                            ))
                         })?;
                     if cga.element_type != "i32" {
-                        return Err(syn_err(
-                            const_param.ident.span(),
-                            &format!("Expected element_type 'i32', got '{}'", cga.element_type),
-                        ));
+                        return const_param
+                            .ident
+                            .error(&format!(
+                                "Expected element_type 'i32', got '{}'",
+                                cga.element_type
+                            ))
+                            .into();
                     }
                     for i in 0..cga.length {
                         let const_str = format!("const {}{}: {}", cga.name, i, cga.element_type);
                         let generic_param =
                             syn::parse::<GenericParam>(const_str.parse().map_err(|_| {
-                                syn_err(
-                                    const_param.ident.span(),
-                                    &format!("Failed to parse generic param '{const_str}'"),
-                                )
+                                const_param
+                                    .ident
+                                    .error(&format!("Failed to parse generic param '{const_str}'"))
                             })?)
                             .map_err(|e| {
-                                syn_err(
-                                    const_param.ident.span(),
-                                    &format!("Failed to parse generic param '{const_str}': {e}"),
-                                )
+                                const_param.ident.error(&format!(
+                                    "Failed to parse generic param '{const_str}': {e}"
+                                ))
                             })?;
                         concrete_type_params.push(generic_param);
                     }
@@ -1359,12 +1372,10 @@ fn expand_cga(
     instances: &ConstInstances,
 ) -> Result<AngleBracketedGenericArguments, Error> {
     let _result_path = path.clone();
-    let last_seg = path.segments.last().ok_or_else(|| {
-        syn_err(
-            path.span(),
-            "Expected at least one path segment in expand_cga",
-        )
-    })?;
+    let last_seg = path
+        .segments
+        .last()
+        .ok_or_else(|| path.error("Expected at least one path segment in expand_cga"))?;
     let param_name = last_seg.ident.to_string();
     // Is it a variadic type or is it expecting a variadic type parameter?
     if instances.inst_array.contains_key(&param_name) {
@@ -1377,23 +1388,22 @@ fn expand_cga(
         let formatted = format!("<{}>", generic_args_result.join(","));
         Ok(
             syn::parse::<AngleBracketedGenericArguments>(formatted.parse().map_err(|_| {
-                syn_err(
-                    path.span(),
-                    &format!("Failed to parse angle bracketed args '{formatted}'"),
-                )
+                path.error(&format!(
+                    "Failed to parse angle bracketed args '{formatted}'"
+                ))
             })?)
             .map_err(|e| {
-                syn_err(
-                    path.span(),
-                    &format!("Failed to parse angle bracketed args '{formatted}': {e}"),
-                )
+                path.error(&format!(
+                    "Failed to parse angle bracketed args '{formatted}': {e}"
+                ))
             })?,
         )
     } else {
-        Err(syn_err(
-            path.span(),
-            &format!("{} is not a const generic array.", path.to_token_stream()),
+        path.error(&format!(
+            "{} is not a const generic array.",
+            path.to_token_stream()
         ))
+        .into()
     }
 }
 
@@ -1406,13 +1416,13 @@ fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> 
         if instances.inst_array.contains_key(&param_name) {
             // The type is a const generic array: f(..., shape: D) -> ()
             // The result produced by this case is not supported syntax.
-            return Err(syn_err(
-                seg.ident.span(),
-                &format!(
+            return seg
+                .ident
+                .error(&format!(
                     "Unexpected use of desugar_path for {}",
                     path.to_token_stream()
-                ),
-            ));
+                ))
+                .into();
             // let cga = instances.inst_array.get(&param_name).unwrap();
             // let mut generic_args_result: Vec<String> = vec![];
             // for j in 0..cga.length {
@@ -1441,14 +1451,16 @@ fn desugar_path(path: &Path, instances: &ConstInstances) -> Result<Path, Error> 
                     let variadic_type_data: Option<VariadicTypeData> =
                         get_variadic_type_data(seg.ident.to_string().as_str());
                     if variadic_type_data.is_some() {
-                        return Err(syn_err(
-                            seg.ident.span(),
-                            "Variadic type arguments are required to desugar variadic types.",
-                        ));
+                        return seg
+                            .ident
+                            .error(
+                                "Variadic type arguments are required to desugar variadic types.",
+                            )
+                            .into();
                     }
                     (seg.ident.clone(), PathArguments::None)
                 }
-                _ => return Err(syn_err(seg.ident.span(), "Unexpected Path arguments.")),
+                _ => return seg.ident.error("Unexpected Path arguments.").into(),
             };
             let result_seg = PathSegment {
                 ident: last_type_ident,
@@ -1473,10 +1485,12 @@ fn desugar_generic_arguments(
                 *arg = GenericArgument::Type(desugar_ty(ty, const_instances)?);
             }
             _ => {
-                return Err(syn_err(
-                    span,
-                    &format!("Unsupported generic argument {}", arg.to_token_stream()),
-                ))
+                return span
+                    .error(&format!(
+                        "Unsupported generic argument {}",
+                        arg.to_token_stream()
+                    ))
+                    .into()
             }
         }
     }
@@ -1491,10 +1505,7 @@ fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, Error> {
             // Special case: For Option<T>, recursively desugar T but don't try to
             // expand Option itself as a variadic type
             let last_segment = type_path.path.segments.last().ok_or_else(|| {
-                syn_err(
-                    type_path.span(),
-                    "Expected at least one path segment in desugar_ty",
-                )
+                type_path.error("Expected at least one path segment in desugar_ty")
             })?;
             if last_segment.ident == "Option" {
                 let mut result_type = type_path.clone();
@@ -1526,16 +1537,10 @@ fn desugar_ty(ty: &Type, instances: &ConstInstances) -> Result<Type, Error> {
             if instances.inst_u32.contains_key(&arr_len) {
                 let n = instances.inst_u32.get(&arr_len).unwrap();
                 result.len = syn::parse::<Expr>(format!("{}", n).parse().map_err(|_| {
-                    syn_err(
-                        type_array.span(),
-                        &format!("Failed to parse array length '{n}'"),
-                    )
+                    type_array.error(&format!("Failed to parse array length '{n}'"))
                 })?)
                 .map_err(|e| {
-                    syn_err(
-                        type_array.span(),
-                        &format!("Failed to parse array length '{n}': {e}"),
-                    )
+                    type_array.error(&format!("Failed to parse array length '{n}': {e}"))
                 })?;
             }
             result.into()
@@ -1579,9 +1584,7 @@ fn desugar_cga(
                             .path
                             .segments
                             .last()
-                            .ok_or_else(|| {
-                                syn_err(type_path.span(), "Expected at least one path segment")
-                            })?
+                            .ok_or_else(|| type_path.error("Expected at least one path segment"))?
                             .ident
                             .to_string();
                         if instances.inst_array.contains_key(&last_ident) {
@@ -1617,17 +1620,16 @@ fn desugar_cga(
                         // TODO (hme): Would be great to get rid of this syntax.
                         // This is something like Tensor<E, {[...]}>
                         if block_expr.block.stmts.len() != 1 {
-                            return Err(syn_err(
-                                block_expr.span(),
-                                &format!(
+                            return block_expr
+                                .error(&format!(
                                     "Expected exactly 1 statement in block expression, got {}",
                                     block_expr.block.stmts.len()
-                                ),
-                            ));
+                                ))
+                                .into();
                         }
                         let statement = &block_expr.block.stmts[0];
                         let Stmt::Expr(statement_expr, _) = statement else {
-                            return Err(syn_err(block_expr.span(), "Unexpected block expression."));
+                            return block_expr.error("Unexpected block expression.").into();
                         };
                         match statement_expr {
                             Expr::Array(array_expr) => {
@@ -1651,13 +1653,12 @@ fn desugar_cga(
                                         // This is something like Tensor<E, {[-1; N]}>
                                         let num_rep_var = len_path.to_token_stream().to_string();
                                         if !instances.inst_u32.contains_key(&num_rep_var) {
-                                            return Err(syn_err(
-                                                len_path.span(),
-                                                &format!(
+                                            return len_path
+                                                .error(&format!(
                                                     "Expected instance for generic argument {}",
                                                     num_rep_var
-                                                ),
-                                            ));
+                                                ))
+                                                .into();
                                         }
                                         let num_repetitions =
                                             *instances.inst_u32.get(&num_rep_var).unwrap();
@@ -1673,12 +1674,9 @@ fn desugar_cga(
                                             .to_string()
                                             .parse::<u32>()
                                             .map_err(|e| {
-                                                syn_err(
-                                                    len_lit.span(),
-                                                    &format!(
-                                                        "Failed to parse repeat length as u32: {e}"
-                                                    ),
-                                                )
+                                                len_lit.error(&format!(
+                                                    "Failed to parse repeat length as u32: {e}"
+                                                ))
                                             })?;
                                         for _ in 0..num_repetitions {
                                             generic_args_result.push(thing_to_repeat.clone());
@@ -1686,10 +1684,9 @@ fn desugar_cga(
                                         num_repetitions
                                     }
                                     _ => {
-                                        return Err(syn_err(
-                                            generic_args.span(),
-                                            "Unexpected repeat expression.",
-                                        ))
+                                        return generic_args
+                                            .error("Unexpected repeat expression.")
+                                            .into()
                                     }
                                 };
                                 expanded_param_name = match &variadic_type_data {
@@ -1697,12 +1694,7 @@ fn desugar_cga(
                                     None => type_ident.to_string(),
                                 };
                             }
-                            _ => {
-                                return Err(syn_err(
-                                    block_expr.span(),
-                                    "Unexpected block expression.",
-                                ))
-                            }
+                            _ => return block_expr.error("Unexpected block expression.").into(),
                         }
                     }
                     Expr::Lit(lit_expr) => {
@@ -1723,16 +1715,14 @@ fn desugar_cga(
     Ok((
         expanded_param_ident,
         syn::parse::<AngleBracketedGenericArguments>(formatted.parse().map_err(|_| {
-            syn_err(
-                type_ident.span(),
-                &format!("Failed to parse angle bracketed args '{formatted}'"),
-            )
+            type_ident.error(&format!(
+                "Failed to parse angle bracketed args '{formatted}'"
+            ))
         })?)
         .map_err(|e| {
-            syn_err(
-                type_ident.span(),
-                &format!("Failed to parse angle bracketed args '{formatted}': {e}"),
-            )
+            type_ident.error(&format!(
+                "Failed to parse angle bracketed args '{formatted}': {e}"
+            ))
         })?,
     ))
 }
@@ -1760,10 +1750,8 @@ fn get_cga_type(
                             .segments
                             .last()
                             .ok_or_else(|| {
-                                syn_err(
-                                    type_path.span(),
-                                    "Expected at least one path segment in get_cga_type",
-                                )
+                                type_path
+                                    .error("Expected at least one path segment in get_cga_type")
                             })?
                             .ident
                             .to_string();
@@ -1775,13 +1763,12 @@ fn get_cga_type(
                         }
                     }
                     Type::Reference(type_ref) => {
-                        return Err(syn_err(
-                            type_ref.span(),
-                            &format!(
+                        return type_ref
+                            .error(&format!(
                                 "get_cga_type: Type::Reference not supported: {}",
                                 type_ref.to_token_stream()
-                            ),
-                        ));
+                            ))
+                            .into();
                     }
                     _ => {}
                 }
@@ -1791,17 +1778,16 @@ fn get_cga_type(
                 // TODO (hme): Would be great to get rid of this syntax.
                 // This is something like Tensor<E, {[...]}>
                 if block_expr.block.stmts.len() != 1 {
-                    return Err(syn_err(
-                        block_expr.span(),
-                        &format!(
+                    return block_expr
+                        .error(&format!(
                             "Expected exactly 1 statement in block expression, got {}",
                             block_expr.block.stmts.len()
-                        ),
-                    ));
+                        ))
+                        .into();
                 }
                 let statement = &block_expr.block.stmts[0];
                 let Stmt::Expr(statement_expr, _) = statement else {
-                    return Err(syn_err(block_expr.span(), "Unexpected block expression."));
+                    return block_expr.error("Unexpected block expression.").into();
                 };
                 match statement_expr {
                     Expr::Array(array_expr) => {
@@ -1817,13 +1803,12 @@ fn get_cga_type(
                                 // This is something like Tensor<E, {[-1; N]}>
                                 let num_rep_var = len_path.to_token_stream().to_string();
                                 if !const_instances.inst_u32.contains_key(&num_rep_var) {
-                                    return Err(syn_err(
-                                        len_path.span(),
-                                        &format!(
+                                    return len_path
+                                        .error(&format!(
                                             "Expected instance for generic argument {}",
                                             num_rep_var
-                                        ),
-                                    ));
+                                        ))
+                                        .into();
                                 }
                                 let num_rep = const_instances.inst_u32.get(&num_rep_var).unwrap();
                                 n.push(*num_rep);
@@ -1836,18 +1821,17 @@ fn get_cga_type(
                                     .to_string()
                                     .parse::<u32>()
                                     .map_err(|e| {
-                                        syn_err(
-                                            len_lit.span(),
-                                            &format!("Failed to parse repeat length as u32: {e}"),
-                                        )
+                                        len_lit.error(&format!(
+                                            "Failed to parse repeat length as u32: {e}"
+                                        ))
                                     })?;
                                 n.push(num_repetitions);
                                 cgas.push(Some(generic_arg.to_token_stream().to_string()));
                             }
-                            _ => return Err(syn_err(ty.span(), "Unexpected repeat expression.")),
+                            _ => return ty.error("Unexpected repeat expression.").into(),
                         }
                     }
-                    _ => return Err(syn_err(block_expr.span(), "Unexpected block expression.")),
+                    _ => return block_expr.error("Unexpected block expression.").into(),
                 }
             }
             _ => {}
@@ -1855,14 +1839,13 @@ fn get_cga_type(
     }
 
     if n.len() != cgas.len() {
-        return Err(syn_err(
-            ty.span(),
-            &format!(
+        return ty
+            .error(&format!(
                 "get_cga_type: n.len() ({}) != cgas.len() ({})",
                 n.len(),
                 cgas.len()
-            ),
-        ));
+            ))
+            .into();
     }
     Ok(Some(ConstGenericArrayType {
         cga_arg_strings: cgas,
@@ -1978,10 +1961,10 @@ impl RewriteVariadicsPass {
             return Ok(item);
         }
         if const_instances.inst_u32.len() != 1 {
-            return Err(syn_err(
-                item.ident.span(),
-                "Only one CGA is permitted for variadic traits.",
-            ));
+            return item
+                .ident
+                .error("Only one CGA is permitted for variadic traits.")
+                .into();
         }
         let key = const_instances.inst_u32.keys().next().unwrap();
         let n = *const_instances.inst_u32.get(key).unwrap();
@@ -2004,13 +1987,13 @@ impl RewriteVariadicsPass {
                             // It's not okay to make this assumption here, but we don't actually know the type.
                             let self_type =
                                 syn::parse2::<syn::Type>("Self".parse().map_err(|_| {
-                                    syn_err(result.sig.ident.span(), "Failed to parse 'Self' type")
+                                    result.sig.ident.error("Failed to parse 'Self' type")
                                 })?)
                                 .map_err(|e| {
-                                    syn_err(
-                                        result.sig.ident.span(),
-                                        &format!("Failed to parse 'Self' type: {e}"),
-                                    )
+                                    result
+                                        .sig
+                                        .ident
+                                        .error(&format!("Failed to parse 'Self' type: {e}"))
                                 })?;
                             let (inputs, output) = get_sig_types(&result.sig, Some(&self_type));
                             let inputs = inputs.into_iter().map(Some).collect::<Vec<_>>();
@@ -2028,7 +2011,7 @@ impl RewriteVariadicsPass {
                     self.rewrite_sig(&mut result.sig, &const_instances)?;
                     impl_items.push(TraitItem::Fn(result));
                 }
-                _ => return Err(syn_err(concrete_item.span(), "Unsupported impl item")),
+                _ => return concrete_item.error("Unsupported impl item").into(),
             }
         }
         item.items = impl_items;
@@ -2050,19 +2033,17 @@ impl RewriteVariadicsPass {
             let path_copy = trait_.1.clone();
             let path = &mut trait_.1;
             if path.segments.is_empty() {
-                return Err(syn_err(
-                    path.span(),
-                    "Expected at least one path segment in trait path",
-                ));
+                return path
+                    .error("Expected at least one path segment in trait path")
+                    .into();
             }
             let last_seg = path.segments.last_mut().unwrap();
             let ident_vtd = get_variadic_type_data(last_seg.ident.to_string().as_str());
             if let Some(vtd) = ident_vtd {
                 if const_instances.inst_u32.len() != 1 {
-                    return Err(syn_err(
-                        path.span(),
-                        "Only one CGA is permitted for variadic traits.",
-                    ));
+                    return path
+                        .error("Only one CGA is permitted for variadic traits.")
+                        .into();
                 }
                 *path = desugar_path(&path_copy, const_instances)?;
                 variadic_trait_vtd = Some(vtd);
@@ -2086,7 +2067,14 @@ impl RewriteVariadicsPass {
                     match attributes {
                         Some(attributes) => {
                             if variadic_trait_vtd.is_some() {
-                                return Err(syn_err(fn_impl.sig.ident.span(), "variadic_impl_fn attributes are not supported for variadic traits."));
+                                return fn_impl
+                                    .sig
+                                    .ident
+                                    .error(concat!(
+                                        "variadic_impl_fn attributes ",
+                                        "are not supported for variadic traits."
+                                    ))
+                                    .into();
                             }
                             clear_attributes(
                                 HashSet::from(["cuda_tile :: variadic_impl_fn"]),
@@ -2116,7 +2104,7 @@ impl RewriteVariadicsPass {
                         }
                     }
                 }
-                _ => return Err(syn_err(concrete_item.span(), "Unsupported impl item.")),
+                _ => return concrete_item.error("Unsupported impl item.").into(),
             }
         }
         item.items = impl_items;
@@ -2184,10 +2172,7 @@ impl RewriteVariadicsPass {
                         match &*fn_param.pat {
                             Pat::Ident(ident) => ident.ident.to_string(),
                             _ => {
-                                return Err(syn_err(
-                                    fn_param.span(),
-                                    "Unexpected function param pattern.",
-                                ))
+                                return fn_param.error("Unexpected function param pattern.").into()
                             }
                         }
                     };
@@ -2201,10 +2186,10 @@ impl RewriteVariadicsPass {
                 }
                 FnArg::Receiver(_fn_self) => {
                     if self_ty.is_none() {
-                        return Err(syn_err(
-                            sig.ident.span(),
-                            "bind_parameters for impls requires self_ty.",
-                        ));
+                        return sig
+                            .ident
+                            .error("bind_parameters for impls requires self_ty.")
+                            .into();
                     }
                     let self_ty = self_ty.unwrap().clone();
                     variables.insert("self".to_string(), Binding { ty: Some(self_ty) });
@@ -2261,10 +2246,9 @@ impl RewriteVariadicsPass {
                                     continue;
                                 }
                                 _ => {
-                                    return Err(syn_err(
-                                        pat_type.span(),
-                                        "let binding LHS not implemented.",
-                                    ))
+                                    return pat_type
+                                        .error("let binding LHS not implemented.")
+                                        .into();
                                 }
                             }
                             binding_ty = Some(*pat_type.ty.clone());
@@ -2290,10 +2274,10 @@ impl RewriteVariadicsPass {
                             }
                             continue; // Skip normal single-variable logic
                         }
-                        _ => return Err(syn_err(local.span(), "Local pattern type not supported")),
+                        _ => return local.error("Local pattern type not supported").into(),
                     }
                     if binding_name.is_none() {
-                        return Err(syn_err(local.span(), "Unable to rewrite expr."));
+                        return local.error("Unable to rewrite expr.").into();
                     }
                     let binding_name = binding_name.unwrap();
                     if let Some(init) = &mut local.init {
@@ -2331,17 +2315,16 @@ impl RewriteVariadicsPass {
                             )?
                         }
                         _ => {
-                            return Err(syn_err(
-                                item.span(),
-                                &format!(
+                            return item
+                                .error(&format!(
                                     "{}\nOnly const local item definitions are supported.",
                                     item.to_token_stream()
-                                ),
-                            ))
+                                ))
+                                .into()
                         }
                     };
                     let Some(binding_name) = binding_name else {
-                        return Err(syn_err(item.span(), "Unable to rewrite expr."));
+                        return item.error("Unable to rewrite expr.").into();
                     };
                     variables.insert(
                         binding_name.clone(),
@@ -2360,19 +2343,13 @@ impl RewriteVariadicsPass {
                             match &mut *assign_expr.left {
                                 Expr::Path(path_expr) => {
                                     if path_expr.path.segments.len() != 1 {
-                                        return Err(syn_err(
-                                            path_expr.span(),
-                                            "Expected single-segment path in assignment",
-                                        ));
+                                        return path_expr
+                                            .error("Expected single-segment path in assignment")
+                                            .into();
                                     }
                                     binding_name = path_expr.path.segments[0].ident.to_string()
                                 }
-                                _ => {
-                                    return Err(syn_err(
-                                        assign_expr.span(),
-                                        "Expr::Assign not supported",
-                                    ))
-                                }
+                                _ => return assign_expr.error("Expr::Assign not supported").into(),
                             }
                             // The computed binding type ty is expected to be None.
                             // Types are only needed in this pass to compute concrete variadic
@@ -2425,17 +2402,15 @@ impl RewriteVariadicsPass {
                 // );
                 // We rewrite the entire expr to desugared array.
                 // Extract info we need before borrowing expr mutably.
-                let index_span = index_expr.span();
-                let inner_expr_span = index_expr.expr.span();
                 let is_path = matches!(&*index_expr.expr, Expr::Path(_));
                 if !is_path {
-                    return Err(syn_err(
-                        inner_expr_span,
-                        &format!(
+                    return index_expr
+                        .expr
+                        .error(&format!(
                             "Index expression not supported: {}",
                             index_expr.expr.to_token_stream()
-                        ),
-                    ));
+                        ))
+                        .into();
                 }
                 let path_expr = match &*index_expr.expr {
                     Expr::Path(p) => p.clone(),
@@ -2446,26 +2421,26 @@ impl RewriteVariadicsPass {
                     let expanded_cga = expand_cga(&path_expr.path, const_instances)?;
                     let index = parse_signed_literal_as_i32(&index_expr.index);
                     if !(0 <= index && (index as u32) < cga.length) {
-                        return Err(syn_err(
-                            index_span,
-                            &format!(
+                        return index_expr
+                            .error(&format!(
                                 "Index {index} out of bounds for CGA of length {}",
                                 cga.length
-                            ),
-                        ));
+                            ))
+                            .into();
                     }
                     if cga.element_type != "i32" {
-                        return Err(syn_err(
-                            index_span,
-                            &format!("Expected element_type 'i32', got '{}'", cga.element_type),
-                        ));
+                        return index_expr
+                            .error(&format!(
+                                "Expected element_type 'i32', got '{}'",
+                                cga.element_type
+                            ))
+                            .into();
                     }
                     let desugared_idx_expression = expanded_cga.args[index as usize].clone();
                     *expr = parse_quote!(#desugared_idx_expression);
                     let return_type: Type = parse_quote! { i32 };
                     Ok(Some(return_type))
                 } else {
-                    let expr_span = expr.span();
                     let index_expr = match expr {
                         Expr::Index(ie) => ie,
                         _ => unreachable!(),
@@ -2480,18 +2455,16 @@ impl RewriteVariadicsPass {
                         Some(Type::Array(ty)) => Ok(Some(*ty.elem.clone())),
                         Some(Type::Reference(ty)) => {
                             let Type::Slice(slice_ty) = *ty.elem.clone() else {
-                                return Err(syn_err(
-                                    expr_span,
-                                    "Index expression not supported (reference)",
-                                ));
+                                return expr
+                                    .error("Index expression not supported (reference)")
+                                    .into();
                             };
                             Ok(Some(*slice_ty.elem.clone()))
                         }
-                        None => Err(syn_err(
-                            expr_span,
-                            "Failed to compute type for index expression",
-                        )),
-                        Some(_other) => Err(syn_err(expr_span, "Index expression not supported")),
+                        None => expr
+                            .error("Failed to compute type for index expression")
+                            .into(),
+                        Some(_other) => expr.error("Index expression not supported").into(),
                     }
                 }
             }
@@ -2609,24 +2582,24 @@ impl RewriteVariadicsPass {
                     .path
                     .segments
                     .last_mut()
-                    .ok_or_else(|| syn_err(path_span, "Expected at least one path segment"))?;
+                    .ok_or_else(|| path_span.error("Expected at least one path segment"))?;
                 let name = last_seg.ident.to_string();
                 if let Some(n) = const_instances.inst_u32.get(name.as_str()) {
                     // This is a const generic primitive.
                     let new_expr = syn::parse::<Expr>(
                         format!("{n}")
                             .parse()
-                            .map_err(|_| syn_err(path_span, &format!("Failed to parse '{n}'")))?,
+                            .map_err(|_| path_span.error(&format!("Failed to parse '{n}'")))?,
                     )
-                    .map_err(|e| syn_err(path_span, &format!("Failed to parse '{n}': {e}")))?;
+                    .map_err(|e| path_span.error(&format!("Failed to parse '{n}': {e}")))?;
                     *expr = new_expr;
                     return Ok(Some(
                         syn::parse::<Type>(
                             "i32"
                                 .parse()
-                                .map_err(|_| syn_err(path_span, "Failed to parse 'i32'"))?,
+                                .map_err(|_| path_span.error("Failed to parse 'i32'"))?,
                         )
-                        .map_err(|e| syn_err(path_span, &format!("Failed to parse 'i32': {e}")))?,
+                        .map_err(|e| path_span.error(&format!("Failed to parse 'i32': {e}")))?,
                     ));
                 }
                 self.rewrite_path_expr_type(
@@ -2707,20 +2680,21 @@ impl RewriteVariadicsPass {
                 // TODO (hme): Similar code fragment in desugar_ty.
                 //  Can this be refactored into a rewrite for any PathSegment?
                 if struct_expr.path.segments.is_empty() {
-                    return Err(syn_err(
-                        struct_expr.span(),
-                        "Expected at least one path segment in struct expression",
-                    ));
+                    return struct_expr
+                        .error("Expected at least one path segment in struct expression")
+                        .into();
                 }
                 let last_seg = struct_expr.path.segments.last_mut().unwrap();
                 let name = last_seg.ident.to_string();
                 let vtd = get_variadic_type_data(name.as_str());
                 if let Some(_vtd) = vtd {
                     if return_type.is_none() {
-                        return Err(syn_err(
-                            struct_expr.span(),
-                            "Variadic structs require a static type annotation. Try assigning to a statically typed let binding.",
-                        ));
+                        return struct_expr
+                            .error(concat!(
+                                "Variadic structs require a static type annotation. ",
+                                "Try assigning to a statically typed let binding."
+                            ))
+                            .into();
                     }
                     let (last_type_ident, last_seg_args) = match &last_seg.arguments {
                         PathArguments::AngleBracketed(type_params) => {
@@ -2732,7 +2706,7 @@ impl RewriteVariadicsPass {
                             )
                         }
                         PathArguments::None => (last_seg.ident.clone(), PathArguments::None),
-                        _ => return Err(syn_err(struct_expr.span(), "Unexpected Path arguments.")),
+                        _ => return struct_expr.error("Unexpected Path arguments.").into(),
                     };
                     *last_seg = PathSegment {
                         ident: last_type_ident,
@@ -2745,7 +2719,7 @@ impl RewriteVariadicsPass {
                     match &mut field.member {
                         Member::Named(_named) => {}
                         Member::Unnamed(_idx) => {
-                            return Err(syn_err(struct_expr.span(), "Tuples not supported."))
+                            return struct_expr.error("Tuples not supported.").into()
                         }
                     }
                 }
@@ -2800,17 +2774,15 @@ impl RewriteVariadicsPass {
                                     if punct.as_char() == ',' {
                                         continue;
                                     } else {
-                                        return Err(syn_err(
-                                            mac_expr.span(),
-                                            &format!("Unexpected punctuation {punct:}"),
-                                        ));
+                                        return mac_expr
+                                            .error(&format!("Unexpected punctuation {punct:}"))
+                                            .into();
                                     }
                                 }
                                 _ => {
-                                    return Err(syn_err(
-                                        mac_expr.span(),
-                                        &format!("Unexpected token {:?}", token),
-                                    ))
+                                    return mac_expr
+                                        .error(&format!("Unexpected token {:?}", token))
+                                        .into()
                                 }
                             }
                         }
@@ -2823,18 +2795,18 @@ impl RewriteVariadicsPass {
                         let mac_span = mac_expr.span();
                         let shape_fmt = format!("{ty_str}::<{cga_str}>::const_new()");
                         let shape_expr = syn::parse2::<Expr>(shape_fmt.parse().map_err(|_| {
-                            syn_err(mac_span, &format!("Failed to parse '{shape_fmt}'"))
+                            mac_span.error(&format!("Failed to parse '{shape_fmt}'"))
                         })?)
                         .map_err(|e| {
-                            syn_err(mac_span, &format!("Failed to parse '{shape_fmt}': {e}"))
+                            mac_span.error(&format!("Failed to parse '{shape_fmt}': {e}"))
                         })?;
                         *expr = shape_expr;
                         let shape_str = format!("{ty_str}<{cga_str}>");
                         let shape_ty = syn::parse::<Type>(shape_str.parse().map_err(|_| {
-                            syn_err(mac_span, &format!("Failed to parse '{shape_str}'"))
+                            mac_span.error(&format!("Failed to parse '{shape_str}'"))
                         })?)
                         .map_err(|e| {
-                            syn_err(mac_span, &format!("Failed to parse '{shape_str}': {e}"))
+                            mac_span.error(&format!("Failed to parse '{shape_str}': {e}"))
                         })?;
                         // println!("Expr::Macro const_shape: {shape_expr}, {shape_ty:#?}");
                         self.rewrite_expr(&mut *expr, const_instances, variables, Some(shape_ty))
@@ -2857,7 +2829,7 @@ impl RewriteVariadicsPass {
                 // The compiler will handle parsing and compilation of closure bodies
                 Ok(return_type)
             }
-            _ => Err(syn_err(expr.span(), "Expression type not supported")),
+            _ => expr.error("Expression type not supported").into(),
         }
     }
 
@@ -2907,12 +2879,7 @@ impl RewriteVariadicsPass {
         let self_ty =
             match self.rewrite_expr(&mut expr.receiver, const_instances, variables, None)? {
                 Some(ty) => ty,
-                None => {
-                    return Err(syn_err(
-                        expr.receiver.span(),
-                        "Unable to infer receiver type",
-                    ))
-                }
+                None => return expr.receiver.error("Unable to infer receiver type").into(),
             };
         // This may be a primitive which implements a supported variadic trait.
         let maybe_primitive_type = self_ty.to_token_stream().to_string();
@@ -2978,18 +2945,17 @@ impl RewriteVariadicsPass {
                 let last_seg = match &mut *expr.func {
                     Expr::Path(path_expr) => {
                         if path_expr.path.segments.is_empty() {
-                            return Err(syn_err(
-                                path_expr.span(),
-                                "Expected at least one path segment in function call",
-                            ));
+                            return path_expr
+                                .error("Expected at least one path segment in function call")
+                                .into();
                         }
                         path_expr.path.segments.last_mut().unwrap()
                     }
                     _ => {
-                        return Err(syn_err(
-                            expr.func.span(),
-                            "Unexpected function call expression.",
-                        ))
+                        return expr
+                            .func
+                            .error("Unexpected function call expression.")
+                            .into()
                     }
                 };
                 let mut maybe_input_types = vec![];

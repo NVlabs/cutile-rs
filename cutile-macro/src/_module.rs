@@ -201,15 +201,14 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let mut module_item = parse_macro_input!(item as ItemMod);
     module_item.attrs = attrs.into();
 
-    match module_inner(
+    module_inner(
         &module_item,
         is_core,
         &tile_rust_crate_root,
         raw_item_source,
-    ) {
-        Ok(ts) => ts.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+    )
+    .unwrap_or_else(|Error::Syn(e)| e.to_compile_error())
+    .into()
 }
 
 /// Fallible inner implementation of the `module` macro.
@@ -221,7 +220,7 @@ fn module_inner(
 ) -> Result<TokenStream2, Error> {
     let mut ast_content: Vec<Item> = vec![];
     let Some(content) = &module_item.content else {
-        return module_item.err("Non-empty module expected.");
+        return module_item.error("Non-empty module expected.").into();
     };
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let name = &module_item.ident;
@@ -273,7 +272,12 @@ fn module_inner(
             }
             syn::Item::Trait(trait_item) => {
                 if !is_core {
-                    return trait_item.err("Unsupported item type in non-core module: trait definitions are only allowed in core modules.");
+                    return trait_item
+                        .error(concat!(
+                            "Unsupported item type in non-core module: ",
+                            "trait definitions are only allowed in core modules."
+                        ))
+                        .into();
                 }
                 ast_content.push(Item::Trait(trait_item.clone()));
                 let item_clone = trait_item.clone();
@@ -284,7 +288,12 @@ fn module_inner(
             }
             syn::Item::Impl(impl_item) => {
                 if !is_core {
-                    return impl_item.err("Unsupported item type in non-core module: impl blocks are only allowed in core modules.");
+                    return impl_item
+                        .error(concat!(
+                            "Unsupported item type in non-core module: ",
+                            "impl blocks are only allowed in core modules."
+                        ))
+                        .into();
                 }
                 ast_content.push(Item::Impl(impl_item.clone()));
                 let item_clone = impl_item.clone();
@@ -292,14 +301,19 @@ fn module_inner(
             }
             syn::Item::Macro(macro_item) => {
                 if !is_core {
-                    return macro_item.err("Unsupported item type in non-core module: macro invocations are only allowed in core modules.");
+                    return macro_item
+                        .error(concat!(
+                            "Unsupported item type in non-core module: ",
+                            "macro invocations are only allowed in core modules."
+                        ))
+                        .into();
                 }
                 ast_content.push(Item::Macro(macro_item.clone()));
                 let item_clone = macro_item.clone();
                 concrete_items.push(item_clone.to_token_stream());
             }
             other => {
-                return other.err("Unsupported item type in module.");
+                return other.error("Unsupported item type in module.").into();
             }
         }
     }
@@ -786,9 +800,14 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
     };
 
     let Some(_entry_attrs) = get_meta_list_by_last_segment("entry", &item.attrs) else {
-        return item.sig.ident.err(&format!(
-            "Unexpected entry point {function_name}: Missing entry annotation."
-        ));
+        return item
+            .sig
+            .ident
+            .error(&format!(
+                "Unexpected entry point {}: Missing entry annotation.",
+                function_name
+            ))
+            .into();
     };
 
     if let Ok(dir) = env::var("DUMP_KERNEL_LAUNCHER_DIR") {
