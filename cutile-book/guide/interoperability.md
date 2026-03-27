@@ -246,4 +246,4 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 
 ---
 
-Continue to [Performance Tuning](performance-tuning.md) for optimization techniques, or see the [Async Execution](async-execution.md) guide for more on `DeviceOperation` composition.
+Continue to [Debugging](debugging.md) for troubleshooting, or see [Performance Tuning](performance-tuning.md) for optimization techniques.

@@ -97,8 +97,8 @@ guide/execution-model
 guide/memory-hierarchy
 guide/operations
 guide/async-execution
-guide/interoperability
 guide/performance-tuning
+guide/interoperability
 guide/debugging
 ```
 

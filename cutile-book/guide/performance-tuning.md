@@ -389,4 +389,5 @@ fn fast_matmul<const S: [i32; 2]>(
 
 - See [Memory Hierarchy](memory-hierarchy.md) for detailed memory optimization
 - Learn about [Async Execution](async-execution.md) for overlapping operations
+- Read [Interoperability](interoperability.md) for integrating custom CUDA kernels when tile programming isn't enough
 - Check [Debugging](debugging.md) for troubleshooting performance issues
