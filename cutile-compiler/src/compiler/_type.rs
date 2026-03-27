@@ -108,16 +108,13 @@ impl<'c, 'a> TileRustType<'c> {
             .ok_or_else(|| {
                 JITError::generic_err(&format!(
                     "unable to determine element type for `{}`",
-                    self.rust_ty.to_token_stream().to_string()
+                    self.rust_ty.to_token_stream()
                 ))
             })?;
-        Ok(ElementTypePrefix::new(&cuda_elem_ty_str)?)
+        ElementTypePrefix::new(&cuda_elem_ty_str)
     }
     pub(crate) fn get_cuda_tile_type_str(&self) -> Option<String> {
-        match self.cuda_tile_ty {
-            Some(ty) => Some(ty.to_string()),
-            None => None,
-        }
+        self.cuda_tile_ty.map(|ty| ty.to_string())
     }
     pub(crate) fn new_primitive_type(
         context: &'c Context,
@@ -130,7 +127,7 @@ impl<'c, 'a> TileRustType<'c> {
         let rust_ty = type_instance.get_source_type().clone();
         let type_param_str = params
             .iter_mut()
-            .map(|tp| tp.instantiate(generic_vars, &primitives))
+            .map(|tp| tp.instantiate(generic_vars, primitives))
             .collect::<Result<Vec<_>, _>>()?
             .join(",");
         let type_str = format!("{}<{}>", cuda_tile_name, type_param_str);
@@ -139,7 +136,7 @@ impl<'c, 'a> TileRustType<'c> {
             None => {
                 return JITError::generic(&format!(
                     "failed to compile type `{}` (resolved to `{}`)",
-                    rust_ty.to_token_stream().to_string(),
+                    rust_ty.to_token_stream(),
                     type_str
                 ))
             }
@@ -162,12 +159,12 @@ impl<'c, 'a> TileRustType<'c> {
         type_instance: TypeInstance,
     ) -> Result<TileRustType<'c>, JITError> {
         let rust_ty = type_instance.get_source_type().clone();
-        let type_str = if params.len() == 0 {
-            format!("{}", cuda_tile_name)
+        let type_str = if params.is_empty() {
+            cuda_tile_name.to_string()
         } else {
             let type_param_str = params
                 .iter_mut()
-                .map(|tp| tp.instantiate(generic_args, &primitives))
+                .map(|tp| tp.instantiate(generic_args, primitives))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(",");
             format!("{}<{}>", cuda_tile_name, type_param_str)
@@ -178,7 +175,7 @@ impl<'c, 'a> TileRustType<'c> {
             None => {
                 return JITError::generic(&format!(
                     "failed to compile type `{}` (resolved to `{}`)",
-                    rust_ty.to_token_stream().to_string(),
+                    rust_ty.to_token_stream(),
                     type_str
                 ))
             }

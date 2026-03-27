@@ -31,7 +31,7 @@ use syn::{BinOp, Expr, ItemImpl, Lit, Pat, Stmt};
 
 /// Creates a unit (flag) MLIR named attribute.
 pub fn named_flag_attr<'c>(context: &'c Context, name: &str) -> (Identifier<'c>, Attribute<'c>) {
-    (Identifier::new(&context, name), Attribute::unit(&context))
+    (Identifier::new(context, name), Attribute::unit(context))
 }
 
 /// Creates a named MLIR array attribute from a slice.
@@ -40,7 +40,7 @@ pub fn named_array_attr<'c, T: Clone + Display + Debug>(
     name: &str,
     arr: &[T],
 ) -> (Identifier<'c>, Attribute<'c>) {
-    (Identifier::new(&context, name), array_attr(context, arr))
+    (Identifier::new(context, name), array_attr(context, arr))
 }
 
 /// Creates an MLIR array attribute from a slice.
@@ -69,8 +69,8 @@ pub fn named_str_attr<'c>(
     str: &str,
 ) -> (Identifier<'c>, Attribute<'c>) {
     (
-        Identifier::new(&context, name),
-        StringAttribute::new(&context, str).into(),
+        Identifier::new(context, name),
+        StringAttribute::new(context, str).into(),
     )
 }
 
@@ -81,7 +81,7 @@ pub fn named_type_attr<'c>(
     ty: Type<'c>,
 ) -> (Identifier<'c>, Attribute<'c>) {
     (
-        Identifier::new(&context, name),
+        Identifier::new(context, name),
         TypeAttribute::new(ty).into(),
     )
 }
@@ -92,12 +92,12 @@ pub fn parse_named_attr<'c>(
     name: &str,
     attr_str: &str,
 ) -> Result<(Identifier<'c>, Attribute<'c>), JITError> {
-    let Some(attr) = Attribute::parse(&context, attr_str) else {
+    let Some(attr) = Attribute::parse(context, attr_str) else {
         return SourceLocation::unknown().jit_error_result(&format!(
             "failed to parse attribute `{name}` with value `{attr_str}`"
         ));
     };
-    Ok((Identifier::new(&context, name), attr))
+    Ok((Identifier::new(context, name), attr))
 }
 
 /// Creates a named MLIR 64-bit integer attribute.
@@ -108,7 +108,7 @@ pub fn named_int_attr<'c>(
 ) -> (Identifier<'c>, Attribute<'c>) {
     let ty = IntegerType::new(context, 64).into();
     (
-        Identifier::new(&context, name),
+        Identifier::new(context, name),
         IntegerAttribute::new(ty, value).into(),
     )
 }
@@ -127,7 +127,7 @@ pub fn cmp_pred_attr<'c>(
 
 /// Parses a `!cuda_tile.tile<...>` MLIR type from a shape/element string.
 pub fn cuda_tile_tile_ty<'c>(context: &'c Context, str: &str) -> Type<'c> {
-    Type::parse(&context, format!("!cuda_tile.tile<{str}>").as_str()).unwrap()
+    Type::parse(context, format!("!cuda_tile.tile<{str}>").as_str()).unwrap()
 }
 
 /// Constructs a `!cuda_tile.tile` MLIR type from a [`TypeInstance`].
@@ -146,7 +146,7 @@ pub fn cuda_tile_tile_ty_from_type_instance<'c>(
                 ));
             }
             let mut mlir_variadic_arg =
-                MLIRVariadicArg::from_structured_type_instance(&structured_type, primitives);
+                MLIRVariadicArg::from_structured_type_instance(structured_type, primitives);
             if let Some(force_element_type) = force_element_type {
                 mlir_variadic_arg.primitive_type_str = Some(force_element_type.to_string());
             }
@@ -157,15 +157,14 @@ pub fn cuda_tile_tile_ty_from_type_instance<'c>(
             let generic_ty_str = element_type.generic_ty.to_token_stream().to_string();
             let mut ty_str = get_cuda_tile_element_type_from_rust_primitive_str(
                 &element_type.rust_element_instance_ty,
-                &primitives,
+                primitives,
             )
-            .expect(
-                format!(
+            .unwrap_or_else(|| {
+                panic!(
                     "failed to determine tile element type for `{}`",
                     generic_ty_str
                 )
-                .as_str(),
-            );
+            });
             if let Some(force_element_type) = force_element_type {
                 ty_str = force_element_type.to_string();
             }
@@ -173,10 +172,7 @@ pub fn cuda_tile_tile_ty_from_type_instance<'c>(
         }
         _ => SourceLocation::unknown().jit_error_result(&format!(
             "type `{}` cannot be used as a tile type",
-            type_instance
-                .get_source_type()
-                .to_token_stream()
-                .to_string()
+            type_instance.get_source_type().to_token_stream()
         )),
     }
 }
@@ -235,13 +231,13 @@ impl AtomicMode {
                 &format!("invalid atomic mode `{mode}`; valid modes are: and, or, xor, add, addf, max, min, umax, umin, xchg"),
             ),
         };
-        if elem_ty_prefix == ElementTypePrefix::Float {
-            if ![AtomicMode::XChg, AtomicMode::AddF].contains(&result) {
-                return SourceLocation::unknown().jit_error_result(&format!(
-                    "float types only support `xchg` and `addf` atomic modes, got `{:?}`",
-                    result
-                ));
-            }
+        if elem_ty_prefix == ElementTypePrefix::Float
+            && ![AtomicMode::XChg, AtomicMode::AddF].contains(&result)
+        {
+            return SourceLocation::unknown().jit_error_result(&format!(
+                "float types only support `xchg` and `addf` atomic modes, got `{:?}`",
+                result
+            ));
         }
         Ok(result)
     }
@@ -327,12 +323,12 @@ pub fn get_cmp_predicate_attr<'c>(
 ) -> Result<Option<(Identifier<'c>, Attribute<'c>)>, JITError> {
     // Assume ordered for all.
     match expr {
-        TileBinaryOp::Eq => Ok(Some(cmp_pred_attr(&context, "equal")?)),
-        TileBinaryOp::Ne => Ok(Some(cmp_pred_attr(&context, "not_equal")?)),
-        TileBinaryOp::Lt => Ok(Some(cmp_pred_attr(&context, "less_than")?)),
-        TileBinaryOp::Le => Ok(Some(cmp_pred_attr(&context, "less_than_or_equal")?)),
-        TileBinaryOp::Gt => Ok(Some(cmp_pred_attr(&context, "greater_than")?)),
-        TileBinaryOp::Ge => Ok(Some(cmp_pred_attr(&context, "greater_than_or_equal")?)),
+        TileBinaryOp::Eq => Ok(Some(cmp_pred_attr(context, "equal")?)),
+        TileBinaryOp::Ne => Ok(Some(cmp_pred_attr(context, "not_equal")?)),
+        TileBinaryOp::Lt => Ok(Some(cmp_pred_attr(context, "less_than")?)),
+        TileBinaryOp::Le => Ok(Some(cmp_pred_attr(context, "less_than_or_equal")?)),
+        TileBinaryOp::Gt => Ok(Some(cmp_pred_attr(context, "greater_than")?)),
+        TileBinaryOp::Ge => Ok(Some(cmp_pred_attr(context, "greater_than_or_equal")?)),
         _ => Ok(None),
     }
 }
@@ -363,7 +359,7 @@ pub fn update_token<'c>(
     let Some(var_arg_ident) = get_ident_from_expr(var_arg) else {
         return SourceLocation::unknown().jit_error_result(&format!(
             "expected a variable name, got `{}`",
-            var_arg.to_token_stream().to_string()
+            var_arg.to_token_stream()
         ));
     };
     let var_name = var_arg_ident.to_string();
@@ -395,7 +391,7 @@ pub fn get_token_from_expr<'c>(
     let Some(var_arg_ident) = get_ident_from_expr(var_arg) else {
         return SourceLocation::unknown().jit_error_result(&format!(
             "expected a variable name, got `{}`",
-            var_arg.to_token_stream().to_string()
+            var_arg.to_token_stream()
         ));
     };
     let var_name = var_arg_ident.to_string();
@@ -430,7 +426,7 @@ pub fn update_outer_block_type_meta<'c>(
     inner_block_vars: &mut CompilerContext<'c, 'c>,
     outer_block_vars: &mut CompilerContext<'c, 'c>,
     field_name: String,
-) -> () {
+) {
     // This does not work for function inlining.
     let mut var_map = HashMap::new();
     for var_name in outer_block_vars.var_keys() {
@@ -445,7 +441,7 @@ pub fn update_type_meta<'c>(
     outer_block_vars: &mut CompilerContext<'c, 'c>,
     outer2inner_vars: &HashMap<String, String>,
     _field_name: String,
-) -> () {
+) {
     let outer_keys_ = outer_block_vars.var_keys();
     let outer_keys = outer_keys_
         .iter()
@@ -488,36 +484,31 @@ pub fn update_type_meta<'c>(
 pub fn parse_list_of_expr(tokens: TokenStream) -> Result<Vec<Expr>, JITError> {
     let mut args: Vec<Expr> = vec![];
     let mut arg_expr: Vec<TokenTree> = vec![];
-    for (_i, token) in tokens.clone().into_iter().enumerate() {
+    for token in tokens {
         // println!("{i} = {}", token.to_string());
         match &token {
-            TokenTree::Literal(_lit) => {
-                arg_expr.push(token.clone());
-            }
-            TokenTree::Ident(_ident) => {
-                arg_expr.push(token.clone());
+            TokenTree::Literal(_) | TokenTree::Ident(_) => {
+                arg_expr.push(token);
             }
             TokenTree::Punct(punct) => {
                 if punct.as_char() == ',' {
-                    if arg_expr.len() > 0 {
+                    if !arg_expr.is_empty() {
                         let expr =
                             syn::parse2::<syn::Expr>(arg_expr.into_iter().collect()).unwrap();
                         args.push(expr);
                     }
                     arg_expr = vec![];
                 } else {
-                    arg_expr.push(token.clone());
+                    arg_expr.push(token);
                 }
             }
             _ => {
-                return SourceLocation::unknown().jit_error_result(&format!(
-                    "unexpected token `{}` in expression list",
-                    token.to_string()
-                ));
+                return SourceLocation::unknown()
+                    .jit_error_result(&format!("unexpected token `{}` in expression list", token));
             }
         }
     }
-    if arg_expr.len() > 0 {
+    if !arg_expr.is_empty() {
         let expr = syn::parse2::<syn::Expr>(arg_expr.into_iter().collect()).unwrap();
         args.push(expr);
     }
@@ -536,7 +527,7 @@ pub fn collect_mutated_variables_from_block(
     // We need to check that the variable is actually being captured, or whether it was locally defined.
     let mut local_vars: HashSet<String> = HashSet::new();
     let mut result: BTreeSet<String> = BTreeSet::new();
-    for (_i, statement) in block.stmts.iter().enumerate() {
+    for statement in &block.stmts {
         match statement {
             Stmt::Local(local) => {
                 let mut var_names: Vec<String> = vec![];
@@ -817,7 +808,7 @@ impl OptimizationHints {
                     if !opt_key.starts_with("sm_") {
                         return SourceLocation::unknown().jit_error_result(&format!(
                             "Unexpected optimization hint {}.",
-                            sm_key_val.to_token_stream().to_string()
+                            sm_key_val.to_token_stream()
                         ));
                     }
                     // This is an architecture specific hint.
@@ -882,11 +873,11 @@ impl OptimizationHints {
             if let Some(occupancy) = arch_hints.occupancy {
                 arch_hints_vec.push(format!("occupancy={occupancy}"));
             }
-            if arch_hints_vec.len() > 0 {
+            if !arch_hints_vec.is_empty() {
                 results.push(format!("{arch}={{ {} }}", arch_hints_vec.join(", ")));
             }
         }
-        if results.len() > 0 {
+        if !results.is_empty() {
             let opt_hint_str = format!("#cuda_tile.optimization_hints<{}>", results.join(", "));
             Ok(Some(parse_named_attr(
                 context,
@@ -929,11 +920,11 @@ impl OptimizationHints {
                     arch_hints_vec.push(format!("latency={latency}"));
                 }
             }
-            if arch_hints_vec.len() > 0 {
+            if !arch_hints_vec.is_empty() {
                 results.push(format!("{arch}={{ {} }}", arch_hints_vec.join(", ")));
             }
         }
-        if results.len() > 0 {
+        if !results.is_empty() {
             let opt_hint_str = format!("#cuda_tile.optimization_hints<{}>", results.join(", "));
             Ok(Some(parse_named_attr(
                 context,
@@ -947,6 +938,7 @@ impl OptimizationHints {
 }
 
 /// Builds a `cuda_tile.reduce` MLIR operation.
+#[allow(clippy::too_many_arguments)]
 pub fn reduce_op<'c>(
     context: &'c Context,
     location: Location<'c>,
@@ -959,9 +951,9 @@ pub fn reduce_op<'c>(
 ) -> Result<Operation<'c>, JITError> {
     Ok(OperationBuilder::new("cuda_tile.reduce", location)
         .add_attributes(&[
-            parse_named_attr(&context, "dim", format!("{dim}: i32").as_str())?,
+            parse_named_attr(context, "dim", format!("{dim}: i32").as_str())?,
             parse_named_attr(
-                &context,
+                context,
                 "identities",
                 format!("[{identity} : {element_type}]").as_str(),
             )?,
@@ -1238,7 +1230,7 @@ pub fn extract_string_literal<'c, 'a>(
         }
         _ => SourceLocation::unknown().jit_error_result(&format!(
             "`{param_name}` must be a string literal, got `{}`",
-            expr.to_token_stream().to_string()
+            expr.to_token_stream()
         )),
     }
 }

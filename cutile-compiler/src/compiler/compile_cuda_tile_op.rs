@@ -82,18 +82,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         };
 
-        let cuda_tile_op_params = op_attrs
-            .parse_string_arr("params")
-            .unwrap_or_else(|| vec![]);
+        let cuda_tile_op_params = op_attrs.parse_string_arr("params").unwrap_or_default();
         let cuda_tile_op_attribute_params = op_attrs
             .parse_string_arr("attribute_params")
-            .unwrap_or_else(|| vec![]);
-        let cuda_tile_op_hint_params = op_attrs
-            .parse_string_arr("hint_params")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_default();
+        let cuda_tile_op_hint_params = op_attrs.parse_string_arr("hint_params").unwrap_or_default();
         let cuda_tile_op_named_attributes = op_attrs
             .parse_string_arr("named_attributes")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_default();
         if call_expr.args.len() < cuda_tile_op_params.len() {
             return self.jit_error_result(
                 &call_expr.span(),
@@ -120,7 +116,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
 
         // General op compilation path.
-        Ok(self.compile_general_op(
+        self.compile_general_op(
             builder,
             call_expr,
             fn_item,
@@ -133,13 +129,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             generic_args,
             ctx,
             return_type,
-        )?)
+        )
     }
 
     /// Compile special-cased ops (load_ptr_tko, store_ptr_tko, atomic_rmw_tko,
     /// atomic_cas_tko, load_view_tko, store_view_tko, cuda_tile.reduce, cuda_tile.scan).
     /// Returns `Some(Some(...))` or `Some(None)` if a special case was handled,
     /// or `None` if the caller should fall through to general compilation.
+    #[allow(clippy::too_many_arguments)]
     fn try_compile_cuda_tile_special_op(
         &'c self,
         builder: &'c ir::Block<'c>,
@@ -377,20 +374,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
 
         // arg[6]: optimization_hints (Option<&str>)
-        let _optimization_hints = if let Some(hint_arg) =
-            crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
-        {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = hint_arg
-            {
-                Some(s.value())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let _optimization_hints =
+            match crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx) {
+                Some(Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                })) => Some(s.value()),
+                _ => None,
+            };
 
         let operand_segments = format!(
             "array<i32: 1, {}, {}, {}>",
@@ -433,29 +423,27 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!(
-                    "`load_ptr_tko` MLIR verification failed: {}",
-                    op_ref.to_string()
-                ),
+                &format!("`load_ptr_tko` MLIR verification failed: {}", op_ref),
             );
         }
 
-        let mut values = vec![];
-        values.push(TileRustValue::<'c, 'c>::new_structured_type(
-            op_ref.result(0).unwrap().into(),
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::<'c, 'c>::new_primitive(
-            op_ref.result(1).unwrap().into(),
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::<'c, 'c>::new_structured_type(
+                op_ref.result(0).unwrap().into(),
+                tile_elem_ty,
+                None,
+            ),
+            TileRustValue::<'c, 'c>::new_primitive(
+                op_ref.result(1).unwrap().into(),
+                token_elem_ty,
+                None,
+            ),
+        ];
 
-        return Ok(Some(TileRustValue::<'c, 'c>::new_compound(
+        Ok(Some(TileRustValue::<'c, 'c>::new_compound(
             values,
             return_type_outer,
-        )));
+        )))
     }
 
     fn compile_store_ptr_tko(
@@ -567,21 +555,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: optimization_hints
-        let _optimization_hints = if let Some(hint_arg) =
-            crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
-        {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = hint_arg
-            {
-                Some(s.value())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // arg[6]: optimization_hints (Option<&str>)
+        let _optimization_hints =
+            match crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx) {
+                Some(Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                })) => Some(s.value()),
+                _ => None,
+            };
 
         let operand_segments = format!("array<i32: 1, 1, {}, {}>", mask_count, token_count);
 
@@ -621,19 +602,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!(
-                    "`store_ptr_tko` MLIR verification failed: {}",
-                    op_ref.to_string()
-                ),
+                &format!("`store_ptr_tko` MLIR verification failed: {}", op_ref),
             );
         }
         let op_value: Value<'c, 'c> = op_ref.result(0).unwrap().into();
         let token_type = self
             .compile_type(&syn::parse_quote!(Token), generic_args, &HashMap::new())?
             .unwrap();
-        return Ok(Some(TileRustValue::<'c, 'c>::new_primitive(
+        Ok(Some(TileRustValue::<'c, 'c>::new_primitive(
             op_value, token_type, None,
-        )));
+        )))
     }
 
     fn compile_atomic_rmw_tko(
@@ -815,29 +793,27 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!(
-                    "`atomic_rmw_tko` MLIR verification failed: {}",
-                    op_ref.to_string()
-                ),
+                &format!("`atomic_rmw_tko` MLIR verification failed: {}", op_ref),
             );
         }
 
-        let mut values = vec![];
-        values.push(TileRustValue::<'c, 'c>::new_structured_type(
-            op_ref.result(0).unwrap().into(),
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::<'c, 'c>::new_primitive(
-            op_ref.result(1).unwrap().into(),
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::<'c, 'c>::new_structured_type(
+                op_ref.result(0).unwrap().into(),
+                tile_elem_ty,
+                None,
+            ),
+            TileRustValue::<'c, 'c>::new_primitive(
+                op_ref.result(1).unwrap().into(),
+                token_elem_ty,
+                None,
+            ),
+        ];
 
-        return Ok(Some(TileRustValue::<'c, 'c>::new_compound(
+        Ok(Some(TileRustValue::<'c, 'c>::new_compound(
             values,
             return_type_outer,
-        )));
+        )))
     }
 
     fn compile_atomic_cas_tko(
@@ -1017,31 +993,30 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!(
-                    "`atomic_cas_tko` MLIR verification failed: {}",
-                    op_ref.to_string()
-                ),
+                &format!("`atomic_cas_tko` MLIR verification failed: {}", op_ref),
             );
         }
 
-        let mut values = vec![];
-        values.push(TileRustValue::<'c, 'c>::new_structured_type(
-            op_ref.result(0).unwrap().into(),
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::<'c, 'c>::new_primitive(
-            op_ref.result(1).unwrap().into(),
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::<'c, 'c>::new_structured_type(
+                op_ref.result(0).unwrap().into(),
+                tile_elem_ty,
+                None,
+            ),
+            TileRustValue::<'c, 'c>::new_primitive(
+                op_ref.result(1).unwrap().into(),
+                token_elem_ty,
+                None,
+            ),
+        ];
 
-        return Ok(Some(TileRustValue::<'c, 'c>::new_compound(
+        Ok(Some(TileRustValue::<'c, 'c>::new_compound(
             values,
             return_type_outer,
-        )));
+        )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_load_view_tko(
         &'c self,
         builder: &'c ir::Block<'c>,
@@ -1106,7 +1081,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let index_values = index_value.values.as_ref().unwrap();
         let mut index_values_vec = Vec::new();
         for value in index_values.iter() {
-            let Some(v) = value.value.clone() else {
+            let Some(v) = value.value else {
                 return self.jit_error_result(
                     &call_expr.args[1].span(),
                     &format!("Unexpected nested array {index_arg_str}"),
@@ -1173,18 +1148,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!(
-                    "`load_view_tko` MLIR verification failed: {}",
-                    op_ref.to_string()
-                ),
+                &format!("`load_view_tko` MLIR verification failed: {}", op_ref),
             );
         }
         let op_value: Value<'c, 'c> = op_ref.result(0).unwrap().into();
-        return Ok(Some(TileRustValue::<'c, 'c>::new_structured_type(
+        Ok(Some(TileRustValue::<'c, 'c>::new_structured_type(
             op_value,
             return_type,
             None,
-        )));
+        )))
     }
 
     fn compile_store_view_tko(
@@ -1247,7 +1219,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let index_values = index_value.values.as_ref().unwrap();
         let mut index_values_vec = Vec::new();
         for value in index_values.iter() {
-            let Some(v) = value.value.clone() else {
+            let Some(v) = value.value else {
                 return self.jit_error_result(
                     &call_expr.args[2].span(),
                     &format!("Unexpected nested array {index_arg_str}"),
@@ -1293,9 +1265,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let op = op_builder
             .add_results(&[token_result_ty])
             .add_operands(&[tile_value])
-            .add_operands(&[cuda_tile_view_value.clone()])
+            .add_operands(&[cuda_tile_view_value.to_owned()])
             .add_operands(&index_values)
-            .add_operands(&[cuda_tile_token.clone()])
+            .add_operands(&[cuda_tile_token.to_owned()])
             .add_attributes(&opt_hints)
             .add_attributes(&[(
                 Identifier::new(&self.context, "memory_ordering_semantics"),
@@ -1315,10 +1287,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!(
-                    "`store_view_tko` MLIR verification failed: {}",
-                    op_ref.to_string()
-                ),
+                &format!("`store_view_tko` MLIR verification failed: {}", op_ref),
             );
         }
         let new_token: Value = op_ref.result(0).unwrap().into();
@@ -1332,7 +1301,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 &format!("Unexpected state: Expected {var_arg_ident} in ctx"),
             );
         };
-        return Ok(Some(result.clone()));
+        Ok(Some(result.clone()))
     }
 
     fn compile_reduce_op(
@@ -1494,15 +1463,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!("`reduce` MLIR verification failed: {}", op_ref.to_string()),
+                &format!("`reduce` MLIR verification failed: {}", op_ref),
             );
         }
         let op_value: Value<'c, 'c> = op_ref.result(0).unwrap().into();
-        return Ok(Some(TileRustValue::<'c, 'c>::new_structured_type(
+        Ok(Some(TileRustValue::<'c, 'c>::new_structured_type(
             op_value,
             return_type_inner,
             None,
-        )));
+        )))
     }
 
     fn compile_scan_op(
@@ -1671,19 +1640,20 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if !op_ref.verify() {
             return self.jit_error_result(
                 &call_expr.span(),
-                &format!("`scan` MLIR verification failed: {}", op_ref.to_string()),
+                &format!("`scan` MLIR verification failed: {}", op_ref),
             );
         }
         let op_value: Value<'c, 'c> = op_ref.result(0).unwrap().into();
-        return Ok(Some(TileRustValue::<'c, 'c>::new_structured_type(
+        Ok(Some(TileRustValue::<'c, 'c>::new_structured_type(
             op_value,
             return_type,
             None,
-        )));
+        )))
     }
 
     /// General-purpose op compilation for CUDA Tile dialect operations that follow
     /// the standard pattern (operands from params, attributes, results from return type).
+    #[allow(clippy::too_many_arguments)]
     fn compile_general_op(
         &'c self,
         builder: &'c ir::Block<'c>,
@@ -1710,17 +1680,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         };
 
         let return_type = if return_type.is_none() {
-            match rust_function_name.as_str() {
-                "constant" => {
-                    return self.jit_error_result(
-                        &call_expr.span(),
-                        &format!(
-                            "Return type required for {}",
-                            call_expr.to_token_stream().to_string()
-                        ),
-                    )
-                }
-                _ => {}
+            if rust_function_name == "constant" {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    &format!("Return type required for {}", call_expr.to_token_stream()),
+                );
             }
             self.derive_type(
                 builder,
@@ -1748,9 +1712,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let field_meta_expr_parts = field_meta_expr_str.split(".").collect::<Vec<&str>>();
                 let field_meta_expr_param = field_meta_expr_parts[0];
                 let mut succeeded = false;
-                for i in 0..param_names.len() {
-                    if param_names[i] == field_meta_expr_param {
-                        let call_expr_arg = &call_expr.args[i];
+                for (param_name, call_expr_arg) in param_names.iter().zip(call_expr.args.iter()) {
+                    if param_name == field_meta_expr_param {
                         let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
                         let final_expr_str =
                             field_meta_expr_str.replace(field_meta_expr_param, &call_expr_arg_str);
@@ -1783,40 +1746,36 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut operand_lengths = vec![];
         let mut op_builder = OperationBuilder::new(op_name, self.function_location());
         let mut compiled_args: Vec<TileRustValue<'c, 'c>> = Vec::new();
-        for i in 0..cuda_tile_op_params.len() {
-            let call_expr_arg = &call_expr.args[i];
+        for (op_param, call_expr_arg) in cuda_tile_op_params.iter().zip(call_expr.args.iter()) {
             let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
             let op_arg =
                 self.compile_expression(builder, call_expr_arg, generic_args, ctx, None)?;
             if op_arg.is_none() {
-                return self
-                    .jit_error_result(&call_expr.args[i].span(), "Failed to compile op arg");
+                return self.jit_error_result(&call_expr_arg.span(), "Failed to compile op arg");
             }
             let op_arg = op_arg.unwrap();
             compiled_args.push(op_arg.clone());
-            let op_param = &cuda_tile_op_params[i];
             let mut arg_values = vec![];
-            if op_arg.value.is_some() {
-                arg_values.push(op_arg.value.clone().unwrap());
-            } else if op_arg.fields.is_some() {
-                let fields = op_arg.fields.as_ref().unwrap();
+            if let Some(value) = op_arg.value {
+                arg_values.push(value);
+            } else if let Some(fields) = op_arg.fields {
                 let op_path = op_param.split(".").collect::<Vec<&str>>();
                 if op_path.len() <= 1 {
                     return self.jit_error_result(
-                        &call_expr.args[i].span(),
+                        &call_expr_arg.span(),
                         &format!("Field expression required for struct param {call_expr_arg_str}, got {op_param}"),
                     );
                 }
-                let field = *op_path.last().clone().unwrap();
+                let field = *op_path.last().unwrap();
                 match fields.get(field) {
                     Some(field_value) => {
-                        if field_value.value.is_some() {
-                            arg_values.push(field_value.value.clone().unwrap());
-                        } else if field_value.values.is_some() {
-                            for value in field_value.values.as_ref().unwrap().iter() {
-                                let Some(v) = value.value.clone() else {
+                        if let Some(value) = field_value.value {
+                            arg_values.push(value);
+                        } else if let Some(values) = &field_value.values {
+                            for value in values {
+                                let Some(v) = value.value else {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"),
                                     );
                                 };
@@ -1824,31 +1783,30 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             }
                         } else if field_value.fields.is_some() {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!(
                                     "Unexpected nested struct {op_param} for {call_expr_arg_str}"
                                 ),
                             );
                         } else {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!("Unexpected op param {op_param} for {call_expr_arg_str}"),
                             );
                         }
                     }
                     None => {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Failed to access field {op_param} for {call_expr_arg_str}"),
                         )
                     }
                 }
-            } else if op_arg.values.is_some() {
-                let values = op_arg.values.as_ref().unwrap();
-                for value in values.iter() {
-                    let Some(v) = value.value.clone() else {
+            } else if let Some(values) = op_arg.values {
+                for value in values {
+                    let Some(v) = value.value else {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"),
                         );
                     };
@@ -1856,7 +1814,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
             } else {
                 return self.jit_error_result(
-                    &call_expr.args[i].span(),
+                    &call_expr_arg.span(),
                     &format!("Unexpected op param {op_param} for {call_expr_arg_str}"),
                 );
             }
@@ -1871,7 +1829,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
             if attr_name.starts_with("signedness") && attr_value == "inferred_signedness" {
                 let elem_ty = compiled_args
-                    .get(0)
+                    .first()
                     .and_then(|arg| {
                         arg.ty
                             .get_instantiated_rust_element_type(&self.modules.primitives)
@@ -1904,7 +1862,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut cuda_tile_op_attr_params_iter = cuda_tile_op_attribute_params.iter();
         let mut maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
         let fn_params = get_sig_param_names(&fn_item.sig);
-        for i in 0..fn_params.len() {
+        for (fn_param, call_expr_arg) in fn_params.iter().zip(call_expr.args.iter()) {
             if maybe_next_attr_param.is_none() {
                 break;
             }
@@ -1919,17 +1877,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             let (attr_id, attr_ty): (&str, &str) = (op_attr[0], op_attr[1]);
             match attr_ty {
                 "array" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
-                    let call_expr_arg = &call_expr.args[i];
                     let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
                     let op_arg =
                         self.compile_expression(builder, call_expr_arg, generic_args, ctx, None)?;
                     if op_arg.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Failed to compile attribute arg for {call_expr_arg_str}"),
                         );
                     }
@@ -1940,7 +1897,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 let Some(cga) = get_cga_from_type(&op_arg.ty.rust_ty, generic_args)
                                 else {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         "Failed to build attribute",
                                     );
                                 };
@@ -1952,24 +1909,24 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             }
                             _ => {
                                 return self.jit_error_result(
-                                    &call_expr.args[i].span(),
+                                    &call_expr_arg.span(),
                                     "Attribute type not implemented.",
                                 )
                             }
                         },
                         _ => {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!("Unexpected call arg {call_expr_arg_str} for {next_attr}"),
                             )
                         }
                     }
                 }
                 "dense" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
-                    let (lit_value, _mlir_lit_ty) = match &call_expr.args[i] {
+                    let (lit_value, _mlir_lit_ty) = match &call_expr_arg {
                         Expr::Lit(lit_expr) => match &lit_expr.lit {
                             Lit::Bool(bool_lit) => (bool_lit.value.to_string(), "i1".to_string()),
                             Lit::Int(int_lit) => {
@@ -1980,7 +1937,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             }
                             _ => {
                                 return self.jit_error_result(
-                                    &call_expr.args[i].span(),
+                                    &call_expr_arg.span(),
                                     "Constant not supported",
                                 )
                             }
@@ -1988,7 +1945,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         Expr::Unary(unary_expr) => {
                             let UnOp::Neg(_) = unary_expr.op else {
                                 return self.jit_error_result(
-                                    &call_expr.args[i].span(),
+                                    &call_expr_arg.span(),
                                     "Only unary negation is supported for constant values",
                                 );
                             };
@@ -2003,14 +1960,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     ),
                                     _ => {
                                         return self.jit_error_result(
-                                            &call_expr.args[i].span(),
+                                            &call_expr_arg.span(),
                                             "Unsupported literal type for negation",
                                         )
                                     }
                                 },
                                 _ => {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         "Only literal negation is supported for constant values",
                                     )
                                 }
@@ -2035,7 +1992,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 "E" => (get_const_hex(ty.as_str(), "e")?, ty.clone()),
                                 _ => {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         "Constant not supported",
                                     )
                                 }
@@ -2043,7 +2000,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         }
                         _ => {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 "Unsupported expression for named attribute.",
                             )
                         }
@@ -2068,7 +2025,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     );
                     if attr.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!(
                                 "Attribute parse failed: dense<{lit_value}> : {cuda_tile_tile_ty}"
                             ),
@@ -2080,18 +2037,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     )]);
                 }
                 "rounding" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
-                    let rounding_mode_str = match &call_expr.args[i] {
+                    let rounding_mode_str = match &call_expr_arg {
                         Expr::Lit(ExprLit {
                             lit: Lit::Str(lit_str),
                             ..
                         }) => lit_str.value(),
                         _ => {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 "Rounding mode must be a string literal. Valid values: \
                              \"nearest_even\", \"positive_inf\", \"negative_inf\", \
                              \"nearest_int_to_zero\", \"approx\".",
@@ -2107,7 +2064,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     ];
                     if !VALID_MODES.contains(&rounding_mode_str.as_str()) {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!(
                                 "Invalid rounding mode: \"{}\". Valid values are: {}",
                                 rounding_mode_str,
@@ -2146,32 +2103,31 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     op_builder = op_builder.add_attributes(&[attr]);
                 }
                 "integer" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
-                    let call_expr_arg = &call_expr.args[i];
+                    let call_expr_arg = &call_expr_arg;
                     let op_arg =
                         self.compile_expression(builder, call_expr_arg, generic_args, ctx, None)?;
                     if op_arg.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Failed to compile integer attribute {attr_id}"),
                         );
                     }
                     let op_arg = op_arg.unwrap();
                     if op_arg.value.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Integer attribute {attr_id} must be a value"),
                         );
                     }
                     if let Some(bounds) = op_arg.bounds {
                         if bounds.is_exact() {
-                            let const_val = bounds.start as i64;
                             let int_attr = IntegerAttribute::new(
                                 ir::Type::parse(&self.context, "i64").unwrap(),
-                                const_val,
+                                bounds.start,
                             );
                             op_builder = op_builder.add_attributes(&[(
                                 Identifier::new(&self.context, attr_id),
@@ -2179,13 +2135,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             )]);
                         } else {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!("Integer attribute {attr_id} must be a constant value, got bounds: {bounds:?}"),
                             );
                         }
                     } else {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Integer attribute {attr_id} must be a constant value"),
                         );
                     }
@@ -2229,8 +2185,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             &call_expr.span(),
                             &format!(
                                 "op_ref={},\nret_ty={}",
-                                op_ref.to_string(),
-                                return_type.rust_ty.to_token_stream().to_string()
+                                op_ref,
+                                return_type.rust_ty.to_token_stream()
                             ),
                         );
                     }
@@ -2256,7 +2212,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let mut elem_types = vec![];
                         for elem in &tuple_type.elems {
                             let elem_ty =
-                                self.compile_type(&elem, generic_args, &HashMap::new())?;
+                                self.compile_type(elem, generic_args, &HashMap::new())?;
                             if elem_ty.is_none() {
                                 return self.jit_error_result(
                                     &call_expr.span(),
@@ -2280,7 +2236,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         if !op_ref.verify() {
                             return self.jit_error_result(
                                 &call_expr.span(),
-                                &format!("compound type operation MLIR verification failed: {}", op_ref.to_string()),
+                                &format!("compound type operation MLIR verification failed: {}", op_ref),
                             );
                         }
                         let mut values = vec![];
@@ -2334,21 +2290,21 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return_type,
                         )))
                     } else {
-                        return self.jit_error_result(
+                        self.jit_error_result(
                             &call_expr.span(),
                             &format!("operations that return multiple values must use a tuple return type, got `{}`",
-                                return_type.rust_ty.to_token_stream().to_string()),
-                        );
+                                return_type.rust_ty.to_token_stream()),
+                        )
                     }
                 }
                 Kind::Struct => {
-                    return self.jit_error_result(
+                    self.jit_error_result(
                         &call_expr.span(),
                         "this operation cannot return a struct; only scalar and structured (tile) types are supported as return types",
                     )
                 }
                 Kind::String => {
-                    return self.jit_error_result(
+                    self.jit_error_result(
                         &call_expr.span(),
                         "this operation cannot return a string; only scalar and structured (tile) types are supported as return types",
                     )
@@ -2360,7 +2316,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             if !op_ref.verify() {
                 return self.jit_error_result(
                     &call_expr.span(),
-                    &format!("operation MLIR verification failed: {}", op_ref.to_string()),
+                    &format!("operation MLIR verification failed: {}", op_ref),
                 );
             }
             Ok(None)
@@ -2394,7 +2350,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         }
                         _ => {
                             let Some(val) =
-                                self.compile_expression(builder, &expr, generic_vars, ctx, None)?
+                                self.compile_expression(builder, expr, generic_vars, ctx, None)?
                             else {
                                 return self.jit_error_result(
                                     &expr.span(),
@@ -2416,10 +2372,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 // We need to obtain the arg types for printing.
                 let re_repl = Regex::new(r"\{\}").unwrap();
                 for (i, element_ty) in element_type_instance.into_iter().enumerate() {
-                    let rust_element_type_instance = element_ty.expect(
-                        format!("failed to determine element type for print argument {}", i)
-                            .as_str(),
-                    );
+                    let rust_element_type_instance = element_ty.unwrap_or_else(|| {
+                        panic!("failed to determine element type for print argument {}", i)
+                    });
                     // Make sure there is still something to match.
                     if !re_repl.is_match(&str_literal) {
                         return self.jit_error_result(
@@ -2541,12 +2496,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 builder.append_operation(assert_op);
                 Ok(None)
             }
-            _ => {
-                return self.jit_error_result(
-                    &mac.path.span(),
-                    &format!("unrecognized macro `{}`", mac_ident),
-                )
-            }
+            _ => self.jit_error_result(
+                &mac.path.span(),
+                &format!("unrecognized macro `{}`", mac_ident),
+            ),
         }
     }
 }
