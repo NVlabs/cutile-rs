@@ -386,14 +386,16 @@ pub trait IntoPartitionArc {
 
 /// A multi-dimensional array stored in GPU memory.
 ///
-/// `Tensor` is the primary type for working with GPU data in cuTile Rust. It wraps a
-/// [`DeviceBox`] with shape and stride information, providing a typed, multi-dimensional
-/// view of GPU memory.
+/// `Tensor` is the primary type for working with GPU data in cuTile Rust. Each tensor
+/// carries typed view metadata (`shape`, `strides`, and dtype via `Tensor<T>`) over a
+/// shared device allocation, providing a typed, multi-dimensional view of GPU memory.
 ///
 /// ## Memory Management
 ///
-/// Tensors own their GPU memory through a `DeviceBox`. Memory is automatically freed
-/// when the tensor is dropped. For shared ownership, use `Arc<Tensor<T>>`.
+/// Tensor storage is reference-counted and backed by a byte-addressed [`DeviceBox`].
+/// Multiple tensor views can therefore share the same device allocation while exposing
+/// different metadata. The backing allocation is freed automatically when the last
+/// storage reference is dropped. For shared ownership of a tensor view, use `Arc<Tensor<T>>`.
 ///
 /// ## Examples
 ///
@@ -419,6 +421,19 @@ pub trait IntoPartitionArc {
 ///
 /// // Reshape (must preserve total size)
 /// let reshaped = y.reshape([32, 32]); // 1024 = 32 * 32
+/// ```
+///
+/// ### Creating zero-copy views
+///
+/// ```rust,ignore
+/// let x = Arc::new(api::arange::<f32>(8).await);
+///
+/// // Create a rank-2 view over the same device storage.
+/// let matrix = x.view([2, 4]);
+///
+/// // Reinterpret the same bytes as a different typed tensor view.
+/// let bytes = Arc::new(api::arange::<u8>(16).await);
+/// let words = bytes.reinterpret::<u32, 1>([4]);
 /// ```
 ///
 /// ### Transferring to host
