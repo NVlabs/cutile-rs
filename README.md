@@ -15,8 +15,11 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 
 ## Requirements
 
-- **NVIDIA GPU** with `sm_80` or >= `sm_100` compute capability. `sm_90` is not yet supported.
-- **CUDA** 13.2.
+- **NVIDIA GPU** with `sm_8x` or `sm_100+` compute capability.
+  - `sm_100+` is supported by CUDA 13.1+.
+  - `sm_8x` support was added in CUDA 13.2.
+  - `sm_90` is not yet supported; it is expected in CUDA 13.3 (release date TBD).
+- **CUDA** 13.2 recommended (`sm_8x` support and `sm_100+` performance improvements over 13.1).
 - **LLVM** 21 with MLIR.
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
