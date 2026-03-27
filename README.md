@@ -154,6 +154,29 @@ allowing for safe parallel mutable access.
 - Benchmarks: `cargo bench`
 - Everything: `./scripts/run_all.sh` (or pipe to a log file: `./scripts/run_all.sh 2>&1 | tee test_run.log`)
 
+# Via Nix
+
+We provide a Nix flake for easy setup and development. Flakes must be enabled in your Nix configuration, if not already, add to `~/.config/nix/nix.conf`:
+```
+experimental-features = nix-command flakes
+```
+
+Run a command directly:
+```bash
+nix develop -c cargo run -p cutile-examples --example add_basic
+```
+
+Or open an interactive shell:
+```bash
+nix develop
+# cutile-rs dev shell
+#  ✓ CUDA  /nix/store/...-cuda-toolkit-13.2
+#  ✓ LLVM  21.1.8
+#  ✓ Rust  1.90.0-nightly
+```
+
+The flake automatically locates host NVIDIA driver libraries on both NixOS and non-NixOS systems.
+
 # License
 The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
 All other crates are licensed under the Apache License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0
