@@ -98,6 +98,7 @@ guide/memory-hierarchy
 guide/operations
 guide/async-execution
 guide/performance-tuning
+guide/interoperability
 guide/debugging
 ```
 
