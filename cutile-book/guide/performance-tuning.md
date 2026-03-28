@@ -1,6 +1,6 @@
 # Performance Tuning
 
-This guide covers techniques for optimizing cuTile Rust kernel performance. For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Interoperability with Custom CUDA Kernels](interoperability.md).
+This guide covers techniques for optimizing cuTile Rust kernel performance. For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Interoperability](interoperability.md).
 
 ## The Performance Mindset
 

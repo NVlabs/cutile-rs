@@ -36,11 +36,23 @@ The key insight is that you don't need to leave the `DeviceOperation` execution 
 
 ### Step 1: Compile Your CUDA Kernel
 
-Compile your CUDA C++ kernel to a `.cubin` or `.ptx` file:
+Compile your CUDA C++ kernel to PTX (portable) or a `.cubin` (architecture-specific):
 
 ```bash
+# PTX — portable across GPU architectures, JIT-compiled at load time.
+nvcc -ptx -arch=compute_80 my_kernel.cu -o my_kernel.ptx
+
+# cubin — pre-compiled for a single architecture, no JIT overhead.
 nvcc -cubin -arch=sm_80 my_kernel.cu -o my_kernel.cubin
 ```
+
+> **Architecture portability:** A `.cubin` file only runs on the exact SM architecture it was compiled for. Code compiled with `-arch=sm_80` will not load on an `sm_100` GPU. PTX avoids this problem — the CUDA driver JIT-compiles it for the target GPU at load time, at the cost of a one-time compilation delay. Prefer PTX unless you need to eliminate JIT overhead. If you must ship `.cubin` files, compile for each target architecture:
+>
+> ```bash
+> nvcc -cubin -gencode arch=compute_80,code=sm_80 \
+>              -gencode arch=compute_100,code=sm_100 \
+>              my_kernel.cu -o my_kernel.cubin
+> ```
 
 ### Step 2: Load the Module and Function
 
@@ -68,24 +80,99 @@ let function = Arc::new(module.load_function("my_kernel_entry")?);
 `AsyncKernelLaunch` is a `DeviceOperation` that wraps the CUDA driver's kernel launch API:
 
 ```rust
-use cuda_async::launch::{AsyncKernelLaunch, KernelArgument};
+use cuda_async::launch::AsyncKernelLaunch;
 use cuda_core::LaunchConfig;
 
 let mut launcher = AsyncKernelLaunch::new(function.clone());
-launcher
-    .push_arg(Box::new(num_elements as u32))
-    .push_arg(Box::new(x.device_pointer()))
-    .push_arg(Box::new(y.device_pointer()))
-    .push_arg(Box::new(z.device_pointer()))
-    .set_launch_config(LaunchConfig {
-        grid_dim: (grid_size, 1, 1),
-        block_dim: (256, 1, 1),
-        shared_mem_bytes: 0,
-    });
+launcher.push_arg(num_elements as u32);
+// SAFETY: x, y, z are valid device allocations with at least num_elements
+// f32 elements. z is exclusively written; x and y are read-only.
+// All three remain allocated until this operation completes.
+unsafe {
+    launcher
+        .push_arg_raw(Box::new(x.device_pointer()))
+        .push_arg_raw(Box::new(y.device_pointer()))
+        .push_arg_raw(Box::new(z.device_pointer()));
+}
+launcher.set_launch_config(LaunchConfig {
+    grid_dim: (grid_size, 1, 1),
+    block_dim: (256, 1, 1),
+    shared_mem_bytes: 0,
+});
 
 // Execute as a DeviceOperation — integrates with the async model.
 launcher.await?;
 ```
+
+Scalar arguments (types implementing `DType`) can be pushed safely with `push_arg`. Device pointers must use `unsafe { push_arg_raw() }` — see [Safety: Device Pointer Arguments](#safety-device-pointer-arguments) below.
+
+### Safety: Device Pointer Arguments
+
+When you call `push_arg_raw` to pass a device pointer, you are telling the CUDA driver "here is an address the kernel should access." The Rust compiler has no visibility into GPU kernel code and cannot verify that:
+
+- The pointer refers to a valid device memory allocation on the correct GPU.
+- The allocation is large enough for the kernel's access pattern.
+- No other operation is concurrently reading or writing the same memory.
+
+By contrast, scalar arguments (like `num_elements as u32`) are copied into the kernel's parameter space during launch setup — the kernel reads the value, not an address. No device memory is dereferenced, so there is no validity or aliasing concern. Any type implementing `DType` can be pushed safely with `push_arg`.
+
+To prevent data races on device memory, use the `DeviceOperation` model's stream ordering guarantees: operations chained with `.and_then()` on the same stream execute in order and see each other's writes. If two operations access the same memory on different streams, explicit synchronization is required.
+
+> **Why generated cuTile Rust kernels don't require `unsafe`:** When you write a tile kernel with `#[cutile::entry]`, the generated launcher uses the `KernelArgument` and `ArcKernelArgument` implementations for `Tensor<T>` and `Partition<Tensor<T>>`. These implementations call `push_arg_raw` internally, but can do so safely because the framework controls both sides: device pointers come from framework-managed allocations (guaranteed valid), and the ownership model — `Partition` for exclusive access, `Arc<Tensor>` for shared reads — prevents aliasing at the type level. Custom kernels bypass this: you are pushing pointers that the framework didn't allocate and can't track, so the safety burden falls on you.
+
+You can apply the same pattern to your own custom kernels by wrapping the launch in a struct that implements `DeviceOperation`. The struct's typed fields enforce the correct argument signature, and the `unsafe` is confined to the `execute` implementation:
+
+```rust
+use cuda_async::device_operation::{DeviceOperation, ExecutionContext};
+use cuda_async::launch::AsyncKernelLaunch;
+use cuda_core::LaunchConfig;
+
+pub struct MyCustomKernel {
+    function: Arc<CudaFunction>,
+    n: u32,
+    x: Arc<Tensor<f32>>,
+    y: Partition<Tensor<f32>>,
+}
+
+impl DeviceOperation for MyCustomKernel {
+    type Output = (Arc<Tensor<f32>>, Partition<Tensor<f32>>);
+
+    unsafe fn execute(
+        self,
+        ctx: &ExecutionContext,
+    ) -> Result<Self::Output, DeviceError> {
+        let mut launcher = AsyncKernelLaunch::new(self.function.clone());
+        launcher.push_arg(self.n);
+        // SAFETY: x and y are framework-managed Tensor allocations.
+        // x is shared (Arc, read-only); y is exclusive (Partition, written).
+        unsafe {
+            launcher
+                .push_arg_raw(Box::new(self.x.cu_deviceptr()))
+                .push_arg_raw(Box::new(self.y.object.cu_deviceptr()));
+        }
+        launcher.set_launch_config(LaunchConfig {
+            grid_dim: self.y.grid()?,
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        });
+        launcher.execute(ctx)?;
+        Ok((self.x, self.y))
+    }
+}
+```
+
+Callers construct `MyCustomKernel` with typed arguments and launch it like any other `DeviceOperation` — no `unsafe` at the call site:
+
+```rust
+let result = MyCustomKernel {
+    function: function.clone(),
+    n: num_elements,
+    x: x.clone(),
+    y: y_part,
+}.await?;
+```
+
+This is the same pattern the `#[cutile::entry]` macro uses to generate safe launchers for tile kernels. The struct owns its arguments, the `DeviceOperation` trait provides stream ordering, and `unsafe` is scoped to the one place that marshals device pointers.
 
 ### Step 4: Compose with Tile Kernels
 
@@ -103,10 +190,15 @@ let y: Tensor<f32> = y.unpartition().await?;
 
 // Chain a custom CUDA kernel for the second stage.
 let mut launcher = AsyncKernelLaunch::new(custom_function.clone());
+// SAFETY: y is read-only; z is exclusively written. Both are valid
+// allocations that outlive this operation.
+unsafe {
+    launcher
+        .push_arg_raw(Box::new(y.device_pointer()))
+        .push_arg_raw(Box::new(z.device_pointer()));
+}
 launcher
-    .push_arg(Box::new(y.device_pointer()))
-    .push_arg(Box::new(z.device_pointer()))
-    .push_arg(Box::new(num_elements as u32))
+    .push_arg(num_elements as u32)
     .set_launch_config(cfg);
 
 // .and_then() ensures the custom kernel runs on the same stream,
@@ -171,7 +263,7 @@ Many patterns that require explicit warp specialization in Triton are handled im
 |-----------------|------------------------|
 | Assign producer warps to prefetch tiles from global → shared memory | Compiler generates shared memory staging for `load_tile` operations |
 | Assign consumer warps to compute on shared memory tiles | Compiler maps tile arithmetic to Tensor Cores and registers |
-| Software pipeline with `tl.async_task` to overlap loads and compute | `allow_tma = true` enables hardware-assisted pipelining via TMA on Hopper+ |
+| Software pipeline with `tl.async_task` to overlap loads and compute | `allow_tma = true` enables hardware-assisted pipelining via TMA on supported architectures (sm_100+) |
 | Manual `tl.dot` placement across warps | `mma()` maps directly to Tensor Core instructions; thread/warp assignment is compiler-managed |
 | Tune `num_warps` and `num_stages` for occupancy | `occupancy` and `num_cta_in_cga` optimization hints guide the compiler |
 
@@ -214,7 +306,7 @@ fn gemm<const S: [i32; 2]>(
 }
 ```
 
-The `allow_tma = true` hint enables Tensor Memory Accelerator-based bulk copies on Hopper+, which is the hardware mechanism underlying efficient producer/consumer pipelining. The compiler decides how to distribute work across warps and pipeline stages.
+The `allow_tma = true` hint enables Tensor Memory Accelerator-based bulk copies on architectures that support TMA, which is the hardware mechanism underlying efficient producer/consumer pipelining. The compiler decides how to distribute work across warps and pipeline stages.
 
 ### When You Still Need Custom Kernels
 
@@ -234,16 +326,36 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 
 ---
 
+## Error Handling
+
+Custom kernel integration can fail at several points. Here are the common errors and how to address them:
+
+**Module loading** — `load_module_from_file` and `load_module_from_ptx` return `DeviceError` if the file is missing, the binary is corrupt, or the architecture doesn't match the current GPU. A `.cubin` compiled for `sm_80` will fail to load on an `sm_100` device. PTX avoids this class of error entirely.
+
+**Missing launch configuration** — Calling `.await` or `.sync()` on an `AsyncKernelLaunch` without first calling `set_launch_config` produces a `DeviceError::Launch` with the message "Await called before launching the kernel."
+
+**Invalid launch parameters** — The CUDA driver rejects launches with grid or block dimensions of zero, block dimensions exceeding device limits (typically 1024 threads per block), or shared memory requests exceeding the device's per-block limit. These surface as `DeviceError::Launch` with context from the driver.
+
+**Argument mismatches** — If the number or types of pushed arguments don't match the kernel's signature, behavior is undefined. The CUDA driver does not validate argument layouts at launch time. Double-check that `push_arg` and `push_arg_raw` calls match the kernel's parameter list in order, count, and size.
+
+For debugging launch failures, see [Debugging](debugging.md). Setting the environment variable `CUDA_LAUNCH_BLOCKING=1` forces synchronous kernel execution, which makes error messages report the exact failing kernel rather than a later operation.
+
+---
+
 ## Recommendations
 
 1. **Try tile programming first.** If your kernel can be expressed as tile operations, the compiler will handle thread management and memory staging. The resulting code is safer and often performs well.
 
 2. **Use CUDA C++ for warp-specialized kernels.** When you need explicit warp-level control, write the kernel in CUDA C++ and integrate it via `AsyncKernelLaunch`.
 
-3. **Avoid unnecessary synchronization.** By implementing your custom kernel as a `DeviceOperation`, you can chain it with `.and_then()` alongside tile kernels. All operations on the same stream execute in order — there's no need to sync between stages.
+3. **Prefer PTX for portability.** PTX kernels are JIT-compiled for the target GPU at load time, avoiding architecture-specific `.cubin` builds. Use `.cubin` only when JIT overhead is unacceptable.
 
-4. **Keep data on the device.** Use `device_pointer()` to pass tensor data to custom kernels without copying back to the host. The data stays in GPU memory throughout the pipeline.
+4. **Keep `unsafe` scoped to device pointer arguments.** Push scalar arguments with `push_arg` and device pointers with `push_arg_raw` inside a focused `unsafe` block. Document the safety invariants — pointer validity, allocation size, and aliasing — in a `// SAFETY:` comment.
+
+5. **Avoid unnecessary synchronization.** By implementing your custom kernel as a `DeviceOperation`, you can chain it with `.and_then()` alongside tile kernels. All operations on the same stream execute in order — there's no need to sync between stages.
+
+6. **Keep data on the device.** Use `device_pointer()` to pass tensor data to custom kernels without copying back to the host. The data stays in GPU memory throughout the pipeline.
 
 ---
 
-Continue to [Debugging](debugging.md) for troubleshooting, or see [Performance Tuning](performance-tuning.md) for optimization techniques.
+Continue to [Debugging](debugging.md) for troubleshooting, or see [Performance Tuning](performance-tuning.md) for optimization techniques. This chapter builds on the `DeviceOperation` model introduced in [Async Execution](async-execution.md).
