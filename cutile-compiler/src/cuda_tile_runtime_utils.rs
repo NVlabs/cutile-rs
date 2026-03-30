@@ -68,7 +68,7 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
 
     let res = cuda_tile_write_bytecode(&module_op, bc_filename.as_str());
     assert!(res.is_ok());
-    let _ = Command::new("tileiras")
+    let output = Command::new("tileiras")
         .arg("--gpu-name")
         .arg(gpu_name)
         .arg("--opt-level")
@@ -77,7 +77,15 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
         .arg(&cubin_filename)
         .arg(&bc_filename)
         .output()
-        .expect(format!("Failed to compile bytecode {bc_filename}").as_str());
+        .expect(format!("Failed to launch tileiras for {bc_filename}").as_str());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        panic!(
+            "tileiras failed (exit {}) for gpu {gpu_name}:\nstderr: {stderr}\nstdout: {stdout}",
+            output.status
+        );
+    }
     cubin_filename
 }
 
