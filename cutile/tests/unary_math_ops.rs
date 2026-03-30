@@ -85,7 +85,6 @@ mod unary_math_ops_module {
         output.store(result);
     }
 
-    
     #[cutile::entry()]
     fn unary_math_ops_bf16_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
         // Verifies bf16 unary math operation lowering

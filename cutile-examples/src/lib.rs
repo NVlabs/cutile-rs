@@ -49,8 +49,7 @@ mod cuda_utils {
             .broadcast_matmul(&k_trans)
             .expect("Failed to execute q @ k^T."); // (m x d) @ (d x m)
 
-        let sm_scale_tensor =
-            candle_core::Tensor::full(sm_scale, qk.shape(), qk.device()).unwrap();
+        let sm_scale_tensor = candle_core::Tensor::full(sm_scale, qk.shape(), qk.device()).unwrap();
         let qk_scaled = qk.mul(&sm_scale_tensor).expect("Failed to scale qk.");
         let qk_softmax = softmax(&qk_scaled, 3).expect("Failed to softmax qk.");
 
