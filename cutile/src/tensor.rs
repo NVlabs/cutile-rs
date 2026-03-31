@@ -200,19 +200,17 @@
 //! - [`tile_async`](crate::tile_async) - Async execution infrastructure
 //! - [`core`](crate::core) - GPU kernel DSL types
 
-use crate::api::{
-    copy, copy_device_to_host_vec, copy_host_vec_to_device, copy_to_device, copy_to_host,
-};
+use crate::api::{copy, copy_device_to_host_vec, copy_host_vec_to_device};
 use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
-use candle_core::{DType, WithDType};
 use cuda_async::device_box::{DeviceBox, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOperation};
 use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::{malloc_async, CudaStream};
+use cuda_core::{DType, DTypeId};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -268,7 +266,7 @@ impl<T> Partition<T> {
     }
 }
 
-impl<T: WithDType> Partition<Tensor<T>> {
+impl<T: DType> Partition<Tensor<T>> {
     /// Returns the total size of the tensor in bytes.
     pub fn num_bytes(&self) -> usize {
         self.object.size() * size_of::<T>()
@@ -285,7 +283,7 @@ impl<T: WithDType> Partition<Tensor<T>> {
     }
 
     /// Returns the data type of the tensor elements.
-    pub fn dtype(&self) -> DType {
+    pub fn dtype(&self) -> DTypeId {
         T::DTYPE
     }
 
@@ -430,13 +428,13 @@ pub trait IntoPartitionArc {
 /// let cpu_vec: Vec<f32> = gpu_tensor.to_host_vec().await;
 /// ```
 #[derive(Debug)]
-pub struct Tensor<T: WithDType> {
+pub struct Tensor<T: DType> {
     pub device_box: DeviceBox<[T]>,
     pub shape: Vec<i32>,
     pub strides: Vec<i32>,
 }
 
-impl<T: WithDType> Tensor<T> {
+impl<T: DType> Tensor<T> {
     /// Allocates uninitialized GPU memory for a 1D tensor.
     ///
     /// This is a low-level function that allocates memory asynchronously but does not
@@ -474,7 +472,7 @@ impl<T: WithDType> Tensor<T> {
         })
     }
 
-    pub fn dtype(&self) -> DType {
+    pub fn dtype(&self) -> DTypeId {
         T::DTYPE
     }
 
@@ -598,26 +596,26 @@ pub trait ToHostVec<T: Send> {
     fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>>;
 }
 
-impl<T: WithDType> ToHostVec<T> for Tensor<T> {
+impl<T: DType> ToHostVec<T> for Tensor<T> {
     fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>> {
         let arc_self = Arc::new(self);
         copy_device_to_host_vec(&arc_self)
     }
 }
 
-impl<T: WithDType> ToHostVec<T> for Arc<Tensor<T>> {
+impl<T: DType> ToHostVec<T> for Arc<Tensor<T>> {
     fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>> {
         copy_device_to_host_vec(&self)
     }
 }
 
-impl<T: WithDType> ToHostVec<T> for &Arc<Tensor<T>> {
+impl<T: DType> ToHostVec<T> for &Arc<Tensor<T>> {
     fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>> {
         copy_device_to_host_vec(self)
     }
 }
 
-impl<T: WithDType + Debug> IntoPartitionArc for Tensor<T> {
+impl<T: DType> IntoPartitionArc for Tensor<T> {
     fn partition<const RANK: usize>(
         self: Arc<Tensor<T>>,
         partition_shape: [i32; RANK],
@@ -633,7 +631,7 @@ impl<T: WithDType + Debug> IntoPartitionArc for Tensor<T> {
     }
 }
 
-impl<T: WithDType> IntoPartition for Tensor<T> {
+impl<T: DType> IntoPartition for Tensor<T> {
     fn partition<const RANK: usize>(self, partition_shape: [i32; RANK]) -> Partition<Tensor<T>> {
         let partition_shape = partition_shape.to_vec();
         let partition_strides = self.strides.clone();
@@ -645,68 +643,12 @@ impl<T: WithDType> IntoPartition for Tensor<T> {
     }
 }
 
-/// Converts a Candle tensor (CPU) to a cuTile Rust tensor (GPU).
-///
-/// This trait provides a method to copy data from a CPU-based `candle_core::Tensor`
-/// to a GPU-based `Tensor<T>`.
-///
-/// ## Examples
-///
-/// ```rust,ignore
-/// use cutile::tensor::CopyToDevice;
-/// use std::sync::Arc;
-///
-/// let cpu_tensor = candle_core::Tensor::zeros((1024,), DType::F32, &Device::Cpu)?;
-/// let cpu_arc = Arc::new(cpu_tensor);
-/// let gpu_tensor: Arc<Tensor<f32>> = cpu_arc.copy_to_device().await;
-/// ```
-pub trait CopyToDevice {
-    /// Copies this CPU tensor to GPU memory.
-    fn copy_to_device<T: WithDType>(
-        self: &Arc<Self>,
-    ) -> impl DeviceOperation<Output = Arc<Tensor<T>>>;
-}
-
-pub trait CopyToHost {
-    fn copy_to_host(self) -> impl DeviceOperation<Output = candle_core::Tensor>;
-}
-
-impl CopyToDevice for candle_core::Tensor {
-    fn copy_to_device<T: WithDType>(
-        self: &Arc<Self>,
-    ) -> impl DeviceOperation<Output = Arc<Tensor<T>>> {
-        copy_to_device(self).arc()
-    }
-}
-
-pub trait CopyToDeviceTensor<T: WithDType> {
-    fn copy_to_device_tensor(self: &Arc<Self>) -> impl DeviceOperation<Output = Tensor<T>>;
-}
-
-impl<T: WithDType> CopyToDeviceTensor<T> for Vec<T> {
-    fn copy_to_device_tensor(self: &Arc<Self>) -> impl DeviceOperation<Output = Tensor<T>> {
-        copy_host_vec_to_device(self)
-    }
-}
-
-impl<T: WithDType> CopyToHost for &Arc<Tensor<T>> {
-    fn copy_to_host(self) -> impl DeviceOperation<Output = candle_core::Tensor> {
-        copy_to_host(self)
-    }
-}
-
-impl<T: WithDType> CopyToHost for Tensor<T> {
-    fn copy_to_host(self) -> impl DeviceOperation<Output = candle_core::Tensor> {
-        copy_to_host(&Arc::new(self))
-    }
-}
-
-pub trait Unpartition<T: WithDType> {
+pub trait Unpartition<T: DType> {
     /// Unwraps the partition to produce the underlying value.
     fn unpartition(self) -> impl DeviceOperation<Output = Tensor<T>>;
 }
 
-impl<T: WithDType, DI: DeviceOperation<Output = Partition<Tensor<T>>>> Unpartition<T> for DI {
+impl<T: DType, DI: DeviceOperation<Output = Partition<Tensor<T>>>> Unpartition<T> for DI {
     fn unpartition(self) -> impl DeviceOperation<Output = Tensor<T>> {
         UnwrapPartition { op: self }
     }
@@ -720,15 +662,14 @@ pub struct DeviceVec<T> {
     device_vec: Arc<Tensor<i64>>,
 }
 
-impl<T: WithDType> DeviceVec<Tensor<T>> {
+impl<T: DType> DeviceVec<Tensor<T>> {
     pub fn from(v: Vec<Tensor<T>>) -> DeviceVec<Tensor<T>> {
         let i64vec: Arc<Vec<i64>> = v
             .iter()
             .map(|x| x.cu_deviceptr() as i64)
             .collect::<Vec<_>>()
             .into();
-        let device_vec: Arc<Tensor<i64>> = i64vec
-            .copy_to_device_tensor()
+        let device_vec: Arc<Tensor<i64>> = copy_host_vec_to_device(&i64vec)
             .sync()
             .expect("Failed to execute device operation.")
             .reshape([v.len()])
@@ -748,13 +689,13 @@ impl<T: WithDType> DeviceVec<Tensor<T>> {
     }
 }
 
-impl<T: WithDType> From<Vec<Tensor<T>>> for DeviceVec<Tensor<T>> {
+impl<T: DType> From<Vec<Tensor<T>>> for DeviceVec<Tensor<T>> {
     fn from(v: Vec<Tensor<T>>) -> Self {
         DeviceVec::from(v)
     }
 }
 
-impl<T: WithDType> Index<usize> for DeviceVec<Tensor<T>> {
+impl<T: DType> Index<usize> for DeviceVec<Tensor<T>> {
     type Output = Arc<Tensor<T>>;
     fn index(&self, index: usize) -> &Self::Output {
         &self.host_vec[index]
@@ -765,7 +706,7 @@ pub struct DeviceVecIntoIter<Item> {
     items: DeviceVec<Item>,
 }
 
-impl<T: WithDType + Debug> Iterator for DeviceVecIntoIter<Tensor<T>> {
+impl<T: DType> Iterator for DeviceVecIntoIter<Tensor<T>> {
     type Item = Tensor<T>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.items.len() > 0 {
@@ -778,7 +719,7 @@ impl<T: WithDType + Debug> Iterator for DeviceVecIntoIter<Tensor<T>> {
     }
 }
 
-impl<T: WithDType + Debug> IntoIterator for DeviceVec<Tensor<T>> {
+impl<T: DType> IntoIterator for DeviceVec<Tensor<T>> {
     type Item = Tensor<T>;
     type IntoIter = DeviceVecIntoIter<Tensor<T>>;
     fn into_iter(self) -> Self::IntoIter {

@@ -4,14 +4,12 @@
  */
 use cuda_async::device_operation::*;
 use cutile;
-use cutile::api::{self, copy_to_host};
-use cutile::candle_core::WithDType;
+use cutile::api;
 use cutile::half::f16;
-use cutile::num_traits::identities::*;
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel};
+use cutile::DType;
 use my_module::gemm_op;
-use std::fmt::Debug;
 use std::sync::Arc;
 
 #[cutile::module]
@@ -46,7 +44,7 @@ mod my_module {
     }
 }
 
-fn gemm<T1: WithDType + Debug, T2: WithDType + Debug>(
+fn gemm<T1: DType, T2: DType>(
     x: Arc<Tensor<T2>>,
     y: Arc<Tensor<T2>>,
 ) -> impl DeviceOperation<Output = Tensor<T1>> {
@@ -71,19 +69,27 @@ fn gemm<T1: WithDType + Debug, T2: WithDType + Debug>(
     z.unpartition()
 }
 
+use cutile_examples::to_candle_tensor;
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), cuda_async::error::DeviceError> {
     type IN = f16;
     type OUT = f32;
     let (m, n, k) = (64, 64, 16);
-    let x = api::randn(IN::zero(), IN::one(), [m, k]).arc().await?; // impl DeviceOperation
-    let y = api::randn(IN::zero(), IN::one(), [k, n]).arc().await?; // impl DeviceOperation
+    let x = api::randn_f16(IN::zero(), IN::one(), [m, k], None)
+        .arc()
+        .await?;
+    let y = api::randn_f16(IN::zero(), IN::one(), [k, n], None)
+        .arc()
+        .await?;
     let z = gemm::<OUT, IN>(x.clone(), y.clone()).await?;
     let z_host: Vec<OUT> = z.to_host_vec().await?;
-    let x_host = copy_to_host(&x).await?;
-    let y_host = copy_to_host(&y).await?;
-    let answer_host: Vec<f16> = x_host
-        .matmul(&y_host)
+    let x_host: Vec<IN> = x.to_host_vec().await?;
+    let y_host: Vec<IN> = y.to_host_vec().await?;
+    let x_candle = to_candle_tensor(&x_host, &[m, k]);
+    let y_candle = to_candle_tensor(&y_host, &[k, n]);
+    let answer_host: Vec<f16> = x_candle
+        .matmul(&y_candle)
         .unwrap()
         .reshape(((),))
         .unwrap()

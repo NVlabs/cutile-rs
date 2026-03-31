@@ -6,12 +6,11 @@ use cuda_async::device_operation::*;
 use cuda_core::CudaContext;
 use cutile;
 use cutile::api;
-use cutile::candle_core::WithDType;
 use cutile::error::Error;
 use cutile::tensor::*;
 use cutile::tile_kernel::*;
+use cutile::DType;
 use my_module::gemm as gemm_kernel;
-use std::fmt::Debug;
 
 #[cutile::module]
 mod my_module {
@@ -37,7 +36,7 @@ mod my_module {
     }
 }
 
-fn gemm<T: WithDType + Debug>() -> Result<(), Error> {
+fn gemm<T: DType + std::fmt::Display>() -> Result<(), Error> {
     let ctx = CudaContext::new(0)?;
     let stream = ctx.new_stream()?;
     let scale = 2usize.pow(10); // On the order of megabytes.

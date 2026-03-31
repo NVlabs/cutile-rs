@@ -17,7 +17,6 @@ quote = { workspace = true }
 num-traits = { workspace = true }
 half = { workspace = true }
 anyhow = { workspace = true }
-candle-core = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 cutile-compiler = { workspace = true }

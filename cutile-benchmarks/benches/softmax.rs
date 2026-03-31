@@ -5,7 +5,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cuda_async::device_operation::DeviceOperation;
 use cuda_core::CudaContext;
-use cutile::api::{randn, zeros};
+use cutile::api::{randn_f16, zeros};
 use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
 use cutile::tile_kernel::TileKernel;
@@ -62,7 +62,7 @@ fn softmax(c: &mut Criterion) {
     for i in 0..6 {
         let (m, n, (bm, bn)) = params[i];
         let generics = vec![bm.to_string(), bn.to_string()];
-        let x: Arc<Tensor<f16>> = randn(f16::ZERO, f16::ONE, [m, n])
+        let x: Arc<Tensor<f16>> = randn_f16(f16::ZERO, f16::ONE, [m, n], None)
             .sync_on(&stream)
             .expect("Failed.")
             .into();

@@ -53,7 +53,7 @@ mod tensor_and_matrix_ops_module {
     #[cutile::entry()]
     fn mmai_kernel(output: &mut Tensor<i64, { [16, 16] }>) {
         // Test mmai operation - integer matrix multiply-accumulate
-        // NOTE: Using i64 tensor due to candle-core runtime limitation
+        // NOTE: Using i64 tensor because mma output is i32, extended to i64 for storage
 
         let lhs_shape: Shape<{ [16, 32] }> = Shape::<{ [16, 32] }> {
             dims: &[16i32, 32i32],
@@ -72,7 +72,7 @@ mod tensor_and_matrix_ops_module {
         // Perform integer matrix multiply-accumulate
         let result_i32: Tile<i32, { [16, 16] }> = mma(lhs, rhs, acc);
 
-        // Convert to i64 for storage (candle-core limitation workaround)
+        // Convert to i64 for storage
         let result_i64: Tile<i64, { [16, 16] }> = exti(result_i32);
 
         output.store(result_i64);

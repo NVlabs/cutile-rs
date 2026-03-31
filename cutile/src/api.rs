@@ -138,29 +138,28 @@
 use crate::kernels::conversion::convert_apply;
 use crate::kernels::creation::{arange_apply, full_apply};
 use crate::tensor::{IntoPartition, Tensor, Unpartition};
-use candle_core::{FloatDType, WithDType};
 use cuda_async::device_box::DeviceBox;
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
     value, DeviceOperation, ExecutionContext, Unzippable1, Unzippable2,
 };
-use cuda_async::error::{device_error, DeviceError};
+use cuda_async::error::DeviceError;
 use cuda_async::scheduling_policies::SchedulingPolicy;
 use cuda_core::curand::RNG;
+use cuda_core::DType;
 use cuda_core::{malloc_async, memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
 use half::f16;
 use std::alloc::{alloc, Layout};
 use std::cmp::min;
 use std::future::IntoFuture;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Device operation for copying a tensor within GPU memory.
 ///
 /// This internal type implements the async copy operation that allocates new
 /// GPU memory and copies tensor data device-to-device.
-pub struct CopyDeviceToDevice<T: WithDType + Send> {
+pub struct CopyDeviceToDevice<T: DType> {
     tensor: Arc<Tensor<T>>,
 }
 
@@ -168,7 +167,7 @@ pub struct CopyDeviceToDevice<T: WithDType + Send> {
 ///
 /// Allocates new GPU memory asynchronously and uses `memcpy_dtod_async` for
 /// efficient GPU-to-GPU data transfer.
-impl<T: WithDType + Send> DeviceOperation for CopyDeviceToDevice<T> {
+impl<T: DType> DeviceOperation for CopyDeviceToDevice<T> {
     type Output = Tensor<T>;
 
     unsafe fn execute(
@@ -193,7 +192,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToDevice<T> {
     }
 }
 
-impl<T: WithDType + Send> IntoFuture for CopyDeviceToDevice<T> {
+impl<T: DType> IntoFuture for CopyDeviceToDevice<T> {
     type Output = Result<Tensor<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Tensor<T>, CopyDeviceToDevice<T>>;
     fn into_future(self) -> Self::IntoFuture {
@@ -220,149 +219,8 @@ impl<T: WithDType + Send> IntoFuture for CopyDeviceToDevice<T> {
 /// let y = api::copy(&x).await;
 /// // y is now an independent copy of x
 /// ```
-pub fn copy<T: WithDType + Send>(
-    tensor: &Arc<Tensor<T>>,
-) -> impl DeviceOperation<Output = Tensor<T>> {
+pub fn copy<T: DType>(tensor: &Arc<Tensor<T>>) -> impl DeviceOperation<Output = Tensor<T>> {
     CopyDeviceToDevice {
-        tensor: tensor.clone(),
-    }
-}
-
-/// Device operation for copying a tensor from CPU to GPU.
-///
-/// This internal type implements the async copy operation that transfers
-/// data from a Candle CPU tensor to GPU memory.
-pub struct CopyHostToDevice<T: WithDType + Send> {
-    dtype: PhantomData<T>,
-    tensor: Arc<candle_core::Tensor>,
-}
-
-/// Implements the host-to-device copy operation.
-///
-/// Extracts data from the Candle tensor, allocates GPU memory, and uses
-/// `memcpy_htod_async` for efficient CPU-to-GPU data transfer.
-impl<T: WithDType + Send> DeviceOperation for CopyHostToDevice<T> {
-    type Output = Tensor<T>;
-
-    unsafe fn execute(
-        self,
-        ctx: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let tensor = self.tensor;
-        let params = candle_tensor_to_vec::<T>(&tensor);
-        let (vec, shape, strides) = params;
-        let element_size = std::mem::size_of::<T>();
-        let num_elements = vec.len();
-        let dptr = malloc_async(element_size * num_elements, ctx.get_cuda_stream());
-        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
-        let device_box = DeviceBox::<[T]>::from_raw_parts(dptr, num_elements, ctx.get_device_id());
-        Ok(Tensor {
-            device_box,
-            shape: shape.clone(),
-            strides: strides.clone(),
-        })
-    }
-}
-
-impl<T: WithDType + Send> IntoFuture for CopyHostToDevice<T> {
-    type Output = Result<Tensor<T>, DeviceError>;
-    type IntoFuture = DeviceFuture<Tensor<T>, CopyHostToDevice<T>>;
-    fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
-    }
-}
-
-/// Copies a CPU tensor (Candle) to GPU memory.
-///
-/// Transfers data from a `candle_core::Tensor` on the CPU to a GPU `Tensor<T>`.
-/// This is the primary way to move data from host to device.
-///
-/// ## Examples
-///
-/// ```rust,ignore
-/// use cutile::api;
-/// use std::sync::Arc;
-///
-/// let cpu_tensor = candle_core::Tensor::zeros((1024,), DType::F32, &Device::Cpu)?;
-/// let gpu_tensor: Tensor<f32> = api::copy_to_device(&Arc::new(cpu_tensor)).await;
-/// ```
-pub fn copy_to_device<T: WithDType + Send>(
-    tensor: &Arc<candle_core::Tensor>,
-) -> CopyHostToDevice<T> {
-    CopyHostToDevice {
-        tensor: tensor.clone(),
-        dtype: PhantomData,
-    }
-}
-
-/// Device operation for copying a tensor from GPU to CPU.
-///
-/// This internal type implements the async copy operation that transfers
-/// data from GPU memory to a Candle CPU tensor.
-pub struct CopyDeviceToHost<T: WithDType + Send> {
-    tensor: Arc<Tensor<T>>,
-}
-
-/// Implements the device-to-host copy operation.
-///
-/// Allocates CPU memory, uses `memcpy_dtoh_async` for GPU-to-CPU transfer,
-/// and wraps the result in a Candle tensor.
-impl<T: WithDType + Send> DeviceOperation for CopyDeviceToHost<T> {
-    type Output = candle_core::Tensor;
-
-    unsafe fn execute(
-        self,
-        context: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
-        let src = self.tensor.device_box.cu_deviceptr();
-        let num_elements = self.tensor.size();
-        let shape: Vec<usize> = self.tensor.shape.iter().map(|x| *x as usize).collect();
-        let layout = Layout::array::<T>(num_elements).expect("overflow cannot happen");
-        let dst = alloc(layout).cast::<T>();
-        memcpy_dtoh_async(dst, src, num_elements, context.get_cuda_stream());
-        let data = Vec::from_raw_parts(dst, num_elements, num_elements);
-        let shape = candle_core::Shape::from(shape);
-        match candle_core::Tensor::from_vec(data, shape, &candle_core::Device::Cpu) {
-            Ok(tensor) => Ok(tensor),
-            Err(err) => Err(device_error(
-                context.get_device_id(),
-                err.to_string().as_str(),
-            )),
-        }
-    }
-}
-
-impl<T: WithDType + Send> IntoFuture for CopyDeviceToHost<T> {
-    type Output = Result<candle_core::Tensor, DeviceError>;
-    type IntoFuture = DeviceFuture<candle_core::Tensor, CopyDeviceToHost<T>>;
-    fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
-    }
-}
-
-/// Copies a GPU tensor to CPU memory as a Candle tensor.
-///
-/// Transfers data from GPU to a CPU-based `candle_core::Tensor`. Useful when you need
-/// to interoperate with other libraries that use Candle tensors.
-///
-/// ## Examples
-///
-/// ```rust,ignore
-/// use cutile::api;
-///
-/// let gpu_tensor = Arc::new(api::arange::<f32>(100).await);
-/// let cpu_tensor: candle_core::Tensor = api::copy_to_host(&gpu_tensor).await;
-/// ```
-pub fn copy_to_host<T: WithDType>(tensor: &Arc<Tensor<T>>) -> CopyDeviceToHost<T> {
-    CopyDeviceToHost {
         tensor: tensor.clone(),
     }
 }
@@ -371,7 +229,7 @@ pub fn copy_to_host<T: WithDType>(tensor: &Arc<Tensor<T>>) -> CopyDeviceToHost<T
 ///
 /// This internal type implements the async copy operation that transfers
 /// data from GPU memory directly to a CPU `Vec<T>`.
-struct CopyDeviceToHostVec<T: WithDType + Send> {
+struct CopyDeviceToHostVec<T: DType> {
     tensor: Arc<Tensor<T>>,
 }
 
@@ -379,7 +237,7 @@ struct CopyDeviceToHostVec<T: WithDType + Send> {
 ///
 /// Allocates CPU memory and uses `memcpy_dtoh_async` to transfer data,
 /// returning the result as a `Vec<T>` for direct access.
-impl<T: WithDType + Send> DeviceOperation for CopyDeviceToHostVec<T> {
+impl<T: DType> DeviceOperation for CopyDeviceToHostVec<T> {
     type Output = Vec<T>;
 
     unsafe fn execute(
@@ -395,7 +253,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyDeviceToHostVec<T> {
     }
 }
 
-impl<T: WithDType + Send> IntoFuture for CopyDeviceToHostVec<T> {
+impl<T: DType> IntoFuture for CopyDeviceToHostVec<T> {
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, CopyDeviceToHostVec<T>>;
     fn into_future(self) -> Self::IntoFuture {
@@ -420,7 +278,7 @@ impl<T: WithDType + Send> IntoFuture for CopyDeviceToHostVec<T> {
 /// let gpu_tensor = Arc::new(api::arange::<f32>(100).await);
 /// let cpu_vec: Vec<f32> = api::copy_device_to_host_vec(&gpu_tensor).await;
 /// ```
-pub fn copy_device_to_host_vec<T: WithDType>(
+pub fn copy_device_to_host_vec<T: DType>(
     tensor: &Arc<Tensor<T>>,
 ) -> impl DeviceOperation<Output = Vec<T>> {
     CopyDeviceToHostVec {
@@ -428,11 +286,11 @@ pub fn copy_device_to_host_vec<T: WithDType>(
     }
 }
 
-struct CopyHostVecToDevice<T: WithDType + Send> {
+struct CopyHostVecToDevice<T: DType> {
     vec: Arc<Vec<T>>,
 }
 
-impl<T: WithDType + Send> DeviceOperation for CopyHostVecToDevice<T> {
+impl<T: DType> DeviceOperation for CopyHostVecToDevice<T> {
     type Output = Tensor<T>;
 
     unsafe fn execute(
@@ -455,7 +313,7 @@ impl<T: WithDType + Send> DeviceOperation for CopyHostVecToDevice<T> {
     }
 }
 
-impl<T: WithDType + Send> IntoFuture for CopyHostVecToDevice<T> {
+impl<T: DType> IntoFuture for CopyHostVecToDevice<T> {
     type Output = Result<Tensor<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Tensor<T>, CopyHostVecToDevice<T>>;
     fn into_future(self) -> Self::IntoFuture {
@@ -467,31 +325,10 @@ impl<T: WithDType + Send> IntoFuture for CopyHostVecToDevice<T> {
     }
 }
 
-pub fn copy_host_vec_to_device<T: WithDType>(
+pub fn copy_host_vec_to_device<T: DType>(
     vec: &Arc<Vec<T>>,
 ) -> impl DeviceOperation<Output = Tensor<T>> {
     CopyHostVecToDevice { vec: vec.clone() }
-}
-
-/// Internal helper to extract data from a Candle tensor.
-///
-/// Converts a Candle tensor to a flat vector along with its shape and stride information.
-/// This is used internally for host-to-device data transfers.
-///
-/// ## Returns
-///
-/// A tuple of:
-/// - `Vec<T>` - Flattened tensor data
-/// - `Vec<i32>` - Tensor shape dimensions
-/// - `Vec<i32>` - Tensor stride information
-pub(crate) fn candle_tensor_to_vec<T: WithDType>(
-    tensor: &Arc<candle_core::Tensor>,
-) -> (Vec<T>, Vec<i32>, Vec<i32>) {
-    let shape: Vec<i32> = tensor.shape().dims().iter().map(|x| *x as i32).collect();
-    let strides: Vec<i32> = tensor.stride().iter().map(|x| *x as i32).collect();
-    let size: usize = tensor.shape().dims().iter().product();
-    let vec = tensor.reshape((size,)).unwrap().to_vec1().unwrap();
-    (vec, shape, strides)
 }
 
 /// Creates a tensor filled with zeros.
@@ -513,7 +350,7 @@ pub(crate) fn candle_tensor_to_vec<T: WithDType>(
 /// // 3D tensor
 /// let volume = api::zeros::<i32>([64, 64, 64]).await;
 /// ```
-pub fn zeros<const RANK: usize, T: WithDType>(
+pub fn zeros<const RANK: usize, T: DType>(
     shape: [usize; RANK],
 ) -> impl DeviceOperation<Output = Tensor<T>> {
     full(T::zero(), shape)
@@ -532,7 +369,7 @@ pub fn zeros<const RANK: usize, T: WithDType>(
 /// let x = api::ones::<f32>([1024]).await;
 /// let matrix = api::ones::<f16>([256, 256]).await;
 /// ```
-pub fn ones<const RANK: usize, T: WithDType>(
+pub fn ones<const RANK: usize, T: DType>(
     shape: [usize; RANK],
 ) -> impl DeviceOperation<Output = Tensor<T>> {
     full(T::one(), shape)
@@ -552,7 +389,7 @@ pub fn ones<const RANK: usize, T: WithDType>(
 /// let x = api::full(3.14f32, [1024]).await;
 /// let matrix = api::full(-1, [128, 128]).await;
 /// ```
-pub fn full<const RANK: usize, T: WithDType>(
+pub fn full<const RANK: usize, T: DType>(
     val: T,
     shape: [usize; RANK],
 ) -> impl DeviceOperation<Output = Tensor<T>> {
@@ -566,7 +403,7 @@ pub fn full<const RANK: usize, T: WithDType>(
     })
 }
 
-pub fn fill<T: WithDType>(tensor: Tensor<T>, val: T) -> impl DeviceOperation<Output = Tensor<T>> {
+pub fn fill<T: DType>(tensor: Tensor<T>, val: T) -> impl DeviceOperation<Output = Tensor<T>> {
     value(tensor).and_then(move |t| {
         let len = t.shape.iter().product::<i32>() as usize;
         let partition_size = min(len, 128);
@@ -589,7 +426,7 @@ pub fn fill<T: WithDType>(tensor: Tensor<T>, val: T) -> impl DeviceOperation<Out
 /// let indices = api::arange::<i32>(100).await; // [0, 1, 2, ..., 99]
 /// let floats = api::arange::<f32>(1000).await;
 /// ```
-pub fn arange<T: WithDType>(len: usize) -> impl DeviceOperation<Output = Tensor<T>> {
+pub fn arange<T: DType>(len: usize) -> impl DeviceOperation<Output = Tensor<T>> {
     Tensor::<T>::uninitialized(len).and_then(move |t| {
         let partition_size = min(len, 128);
         let result = unsafe { t.assume_init() }.partition([partition_size as i32]);
@@ -610,7 +447,7 @@ pub fn arange<T: WithDType>(len: usize) -> impl DeviceOperation<Output = Tensor<
 /// let src_f32 = Arc::new(api::arange::<f32>(1024).await);
 /// let dst_f16: Tensor<f16> = convert(src_f32).await;
 /// ```
-pub fn convert<FromType: WithDType, ToType: WithDType>(
+pub fn convert<FromType: DType, ToType: DType>(
     src: Arc<Tensor<FromType>>,
 ) -> impl DeviceOperation<Output = Tensor<ToType>> {
     let len = src.shape.clone().iter().product::<i32>() as usize;
@@ -748,25 +585,13 @@ pub fn rand_f64<const RANK: usize>(
     })
 }
 
-pub fn randn<const RANK: usize, T: FloatDType>(
-    mean: T,
-    std: T,
-    shape: [usize; RANK],
-) -> impl DeviceOperation<Output = Tensor<T>> {
-    // TODO (hme): No random number generator for TileIR?
-    let t = candle_core::Tensor::randn(mean, std, &shape, &candle_core::Device::Cpu)
-        .expect("randn failed.");
-    copy_to_device(&Arc::new(t))
-}
-
 // Reshape operations
 
 /// Device operation that reshapes a tensor to a new static shape.
 ///
 /// This wraps another device operation and reshapes its tensor output.
 /// The reshape is performed after the input operation executes.
-pub struct Reshape<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>>
-{
+pub struct Reshape<const RANK: usize, T: DType, DI: DeviceOperation<Output = Tensor<T>>> {
     shape: [usize; RANK],
     input: DI,
 }
@@ -774,8 +599,8 @@ pub struct Reshape<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<O
 /// Implements reshape as a device operation.
 ///
 /// Executes the input operation and then reshapes the resulting tensor.
-impl<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>>
-    DeviceOperation for Reshape<RANK, T, DI>
+impl<const RANK: usize, T: DType, DI: DeviceOperation<Output = Tensor<T>>> DeviceOperation
+    for Reshape<RANK, T, DI>
 {
     type Output = Tensor<T>;
 
@@ -788,7 +613,7 @@ impl<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<Output = Tensor
     }
 }
 
-impl<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> IntoFuture
+impl<const RANK: usize, T: DType, DI: DeviceOperation<Output = Tensor<T>>> IntoFuture
     for Reshape<RANK, T, DI>
 {
     type Output = Result<Tensor<T>, DeviceError>;
@@ -822,7 +647,7 @@ impl<const RANK: usize, T: WithDType + Send, DI: DeviceOperation<Output = Tensor
 /// ```
 pub trait DeviceOperationReshape<T, DI>
 where
-    T: Send + WithDType,
+    T: DType,
     DI: DeviceOperation<Output = Tensor<T>>,
 {
     /// Reshapes the output tensor of this operation to the specified shape.
@@ -833,7 +658,7 @@ where
 
 impl<T, DI> DeviceOperationReshape<T, DI> for DI
 where
-    T: Send + WithDType,
+    T: DType,
     DI: DeviceOperation<Output = Tensor<T>>,
 {
     fn reshape<const RANK: usize>(self, shape: [usize; RANK]) -> Reshape<RANK, T, DI>
@@ -850,7 +675,7 @@ where
 ///
 /// Similar to [`Reshape`] but uses a runtime-determined shape (`Vec<usize>`)
 /// instead of a compile-time constant array.
-pub struct DynamicReshape<T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> {
+pub struct DynamicReshape<T: DType, DI: DeviceOperation<Output = Tensor<T>>> {
     shape: Vec<usize>,
     input: DI,
 }
@@ -859,9 +684,7 @@ pub struct DynamicReshape<T: WithDType + Send, DI: DeviceOperation<Output = Tens
 ///
 /// Executes the input operation and then reshapes the resulting tensor
 /// using the runtime-specified shape.
-impl<T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> DeviceOperation
-    for DynamicReshape<T, DI>
-{
+impl<T: DType, DI: DeviceOperation<Output = Tensor<T>>> DeviceOperation for DynamicReshape<T, DI> {
     type Output = Tensor<T>;
 
     unsafe fn execute(
@@ -873,9 +696,7 @@ impl<T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> DeviceOperati
     }
 }
 
-impl<T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> IntoFuture
-    for DynamicReshape<T, DI>
-{
+impl<T: DType, DI: DeviceOperation<Output = Tensor<T>>> IntoFuture for DynamicReshape<T, DI> {
     type Output = Result<Tensor<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Tensor<T>, DynamicReshape<T, DI>>;
     fn into_future(self) -> Self::IntoFuture {
@@ -904,7 +725,7 @@ impl<T: WithDType + Send, DI: DeviceOperation<Output = Tensor<T>>> IntoFuture
 /// ```
 pub trait DeviceOperationDynamicReshape<T, DI>
 where
-    T: Send + WithDType,
+    T: DType,
     DI: DeviceOperation<Output = Tensor<T>>,
 {
     /// Reshapes the output tensor using a runtime-specified shape.
@@ -915,7 +736,7 @@ where
 
 impl<T, DI> DeviceOperationDynamicReshape<T, DI> for DI
 where
-    T: Send + WithDType,
+    T: DType,
     DI: DeviceOperation<Output = Tensor<T>>,
 {
     fn reshape_dyn(self, shape: Vec<usize>) -> DynamicReshape<T, DI>

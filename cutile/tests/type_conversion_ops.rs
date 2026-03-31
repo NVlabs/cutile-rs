@@ -41,7 +41,7 @@ mod type_conversion_ops_module {
     #[cutile::entry()]
     fn exti_unsigned_kernel<const S: [i32; 1]>(output: &mut Tensor<i64, S>) {
         // Test integer extension with unsigned types (zero extension)
-        // Note: Using i64 tensor but operating on u32 tiles due to WithDType limitations
+        // Note: Using i64 tensor but operating on u32 tiles to test unsigned extension
         let x: Tile<i64, S> = load_tile_mut(output);
         // Truncate to u32, then extend back to i64 with unsigned (zero extension)
         let truncated: Tile<u32, S> = trunci(x);

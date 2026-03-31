@@ -6,7 +6,6 @@
 //! Owned and borrowed wrappers around CUDA device pointers.
 
 use crate::device_context::with_deallocator_stream;
-use crate::launch::{AsyncKernelLaunch, KernelArgument};
 use cuda_core::free_async;
 use cuda_core::sys::CUdeviceptr;
 use std::marker::PhantomData;
@@ -24,13 +23,6 @@ impl<T> DevicePointer<T> {
     /// Returns the raw CUDA device pointer.
     pub fn cu_deviceptr(&self) -> CUdeviceptr {
         self.dptr
-    }
-}
-
-impl<T: Send + Sized> KernelArgument for DevicePointer<T> {
-    /// Pushes this device pointer as a kernel launch argument.
-    fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
-        launcher.push_arg(Box::new(self.cu_deviceptr()));
     }
 }
 

@@ -9,7 +9,7 @@ use cuda_core::CudaContext;
 use cutile;
 use cutile::api::{randn_f32, zeros};
 use cutile::error::Error;
-use cutile::tensor::{CopyToHost, IntoPartition, Partition, Tensor};
+use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
 use std::sync::Arc;
 
@@ -140,7 +140,6 @@ mod my_module {
     }
 }
 
-use cutile::candle_core;
 use cutile_examples::fmha_ref_exec;
 use my_module::fmha as fmha_kernel;
 
@@ -195,16 +194,30 @@ fn fmha(
     .generics(generics)
     .sync_on(&stream)?;
 
-    let out_host: candle_core::Tensor = out.unpartition().copy_to_host().sync_on(&stream)?;
-    let answer_host = fmha_ref_exec(&q, &k, &v, qk_scale)
-        .reshape(((), m, d))
-        .expect("Failed to reshape.");
-    println!("out_host.shape() = {:?}", out_host.shape());
+    let out_vec: Vec<f32> = out.unpartition().to_host_vec().sync_on(&stream)?;
+    let q_host: Vec<f32> = q.to_host_vec().sync_on(&stream)?;
+    let k_host: Vec<f32> = k.to_host_vec().sync_on(&stream)?;
+    let v_host: Vec<f32> = v.to_host_vec().sync_on(&stream)?;
+    let answer_host = fmha_ref_exec(
+        &q_host,
+        &[b, h, m, d],
+        &k_host,
+        &[b, hkv, m, d],
+        &v_host,
+        &[b, hkv, m, d],
+        qk_scale,
+    )
+    .reshape(((), m, d))
+    .expect("Failed to reshape.");
+    let out_candle =
+        candle_core::Tensor::from_slice(&out_vec, &[b * h, m, d], &candle_core::Device::Cpu)
+            .unwrap();
+    println!("out shape = {:?}", out_candle.shape());
     for i in 0..(b * h) {
         let answer_mat = answer_host
             .get_on_dim(0, i)
             .expect("Failed to get {i} on dim 0.");
-        let out_mat = out_host
+        let out_mat = out_candle
             .get_on_dim(0, i)
             .expect("Failed to get {i} on dim 0.");
         let near_zero = (&answer_mat - &out_mat)
@@ -214,16 +227,16 @@ fn fmha(
             .reshape((m * d,))
             .unwrap();
         let vec = near_zero.to_vec1::<f32>().unwrap();
-        let check = vec.iter().all(|x| x.abs() <= 1e-4);
+        let check = vec.iter().all(|x: &f32| x.abs() <= 1e-4);
         // Looking at out_host[i, 0, :] (1d slice of last dim d, the predicted token at position 0).
         let sample_dim = 0;
         let sample_idx = 0;
-        let out_vec = out_mat
+        let out_sample = out_mat
             .get_on_dim(sample_dim, sample_idx)
             .unwrap()
             .to_vec1::<f32>()
             .unwrap();
-        let answer_vec = answer_mat
+        let answer_sample = answer_mat
             .get_on_dim(sample_dim, sample_idx)
             .unwrap()
             .to_vec1::<f32>()
@@ -232,7 +245,7 @@ fn fmha(
         assert!(
             check,
             "output check failed. \noutput={:?} \nanswer={:?}",
-            out_vec, answer_vec
+            out_sample, answer_sample
         );
     }
     Ok(())

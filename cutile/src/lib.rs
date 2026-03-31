@@ -176,10 +176,8 @@ pub mod utils;
 
 pub use cuda_async;
 pub use cuda_core;
+pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;
-// TODO (hme): Coordinate with Candle about our dependence on this.
-pub use candle_core;
-pub use candle_core::{FloatDType, WithDType};

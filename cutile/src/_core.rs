@@ -2860,8 +2860,7 @@ pub mod core {
     /// input element (for integer types).
     ///
     /// **Note:** Only `i64` is supported for signed integers in cutile, not `i32`.
-    /// This is because candle-core (used for tensor management) implements `WithDType`
-    /// for `i64` but not `i32`. TileIR itself supports both types.
+    /// TileIR itself supports both types.
     ///
     /// ## Examples
     ///
@@ -2895,8 +2894,7 @@ pub mod core {
     /// Computes element-wise negation of integer tiles.
     ///
     /// **Note:** Only `i64` is supported for signed integers in cutile, not `i32`.
-    /// This is because candle-core (used for tensor management) implements `WithDType`
-    /// for `i64` but not `i32`. TileIR itself supports both types.
+    /// TileIR itself supports both types.
     ///
     /// ## Examples
     ///

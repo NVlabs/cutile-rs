@@ -9,12 +9,11 @@ use cuda_core::CudaContext;
 use cutile;
 use cutile::api::{arange, zeros, DeviceOperationReshape};
 use cutile::error::Error;
-use cutile::tensor::{CopyToHost, IntoPartition, Partition, Tensor};
+use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
+use cutile_examples::{pretty_print_matrix, to_candle_tensor};
 use std::sync::Arc;
 
-use cutile::candle_core;
-use cutile::utils::pretty_print_matrix;
 use my_module::tensor_permute;
 
 #[cutile::module]
@@ -115,8 +114,10 @@ fn main() -> Result<(), Error> {
         .generics(generics.clone())
         .sync_on(&stream)?;
 
-    let out_host: candle_core::Tensor = dst.unpartition().copy_to_host().sync_on(&stream)?;
-    let answer_host = src.copy_to_host().sync_on(&stream)?;
+    let out_vec: Vec<f32> = dst.unpartition().to_host_vec().sync_on(&stream)?;
+    let src_vec: Vec<f32> = src.to_host_vec().sync_on(&stream)?;
+    let out_host = to_candle_tensor(&out_vec, &[b * h, d, m]);
+    let answer_host = to_candle_tensor(&src_vec, &[b, h, m, d]);
     let answer_host = answer_host
         .permute((
             dim_map[0] as usize,

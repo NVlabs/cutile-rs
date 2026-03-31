@@ -7,9 +7,11 @@
 
 mod api;
 mod cudarc_shim;
+mod dtype;
 mod error;
 
 pub use api::*;
 pub use cuda_bindings as sys;
 pub use cudarc_shim::*;
+pub use dtype::*;
 pub use error::*;

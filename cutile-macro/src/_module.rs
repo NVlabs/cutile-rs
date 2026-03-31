@@ -331,7 +331,7 @@ fn module_inner(
                 // so all dependencies should be imported relative to cutile.
                 use std::{iter::zip, future::{Future, IntoFuture}, collections::HashMap, sync::Arc};
                 use #tile_rust_crate_root::error::{*};
-                use #tile_rust_crate_root::WithDType;
+                use #tile_rust_crate_root::DType;
                 use #tile_rust_crate_root::{tensor};
                 use #tile_rust_crate_root::tile_kernel::{*};
                 use #tile_rust_crate_root::cuda_async::error::{*};

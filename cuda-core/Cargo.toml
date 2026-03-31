@@ -12,3 +12,4 @@ readme = "README.md"
 [dependencies]
 cuda-bindings = { workspace = true }
 anyhow = { workspace = true }
+half = { workspace = true }

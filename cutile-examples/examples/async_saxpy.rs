@@ -5,12 +5,13 @@
 use cuda_async::device_operation::{DeviceOperation, IntoDeviceOperation, Zippable};
 use cutile;
 use cutile::api::{arange, DeviceOperationReshape};
-use cutile::candle_core::WithDType;
 use cutile::error::Error;
 use cutile::tensor::ToHostVec;
 use cutile::tile_kernel::global_policy;
 use cutile::tile_kernel::IntoDeviceOperationPartition;
-use std::fmt::Debug;
+use cutile::DType;
+use std::fmt::Display;
+use std::ops::{Add, Mul};
 
 #[cutile::module]
 mod my_module {
@@ -32,8 +33,10 @@ mod my_module {
 
 use my_module::*;
 
-async fn execute<T: WithDType + Debug>(size: usize) -> Result<(), Error> {
-    let a = (T::one() + T::one()).device_operation();
+async fn execute<T: DType + Display + PartialEq + Mul<Output = T> + Add<Output = T>>(
+    size: usize,
+) -> Result<(), Error> {
+    let a = (<T as DType>::one() + <T as DType>::one()).device_operation();
     let x = arange(size).reshape([4, 8]);
     let y = arange(size).reshape([4, 8]);
     let saxpy_op = (a, x.arc(), y.partition([2, 4])).zip().apply(saxpy_apply);

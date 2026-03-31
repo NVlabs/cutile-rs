@@ -69,7 +69,7 @@ use my_kernels::*;
 fn load_data<const RANK: usize>(
     batch_size: [usize; RANK],
 ) -> impl DeviceOperation<Output = Tensor<f32>> {
-    api::randn(0.0, 1.0, batch_size)
+    api::randn_f32(0.0, 1.0, batch_size, None)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
@@ -98,8 +98,8 @@ async fn main() -> Result<(), Error> {
         block_dim.to_string(),
         dim.to_string(),
     ];
-    let w0 = api::randn(0.0f32, 1.0, [dim, dim]); // impl DeviceOperation
-    let w1 = api::randn(0.0f32, 1.0, [dim]); // impl DeviceOperation
+    let w0 = api::randn_f32(0.0f32, 1.0, [dim, dim], None); // impl DeviceOperation
+    let w1 = api::randn_f32(0.0f32, 1.0, [dim], None); // impl DeviceOperation
     let w = zip!(w0.arc(), w1.arc()).schedule(&devices[0])?.await?;
     let mut joins = vec![];
     for i in 1..num_devices {

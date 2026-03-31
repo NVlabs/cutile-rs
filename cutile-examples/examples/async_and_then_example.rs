@@ -8,8 +8,8 @@ use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_core::LaunchConfig;
 use cutile;
-use cutile::candle_core;
-use cutile::tensor::{CopyToDevice, IntoPartition, Tensor, ToHostVec};
+use cutile::api::{arange, DeviceOperationReshape};
+use cutile::tensor::{IntoPartition, ToHostVec};
 use cutile::tile_kernel::compile_from_context;
 use my_module::_module_asts;
 use std::sync::Arc;
@@ -31,8 +31,7 @@ mod my_module {
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), DeviceError> {
     let policy = global_policy(0)?;
-    let num_elements: f32 = 2usize.pow(5) as f32;
-    let shape = (4, 8);
+    let num_elements: usize = 2usize.pow(5);
     let strides = &[8, 1];
     let y_partition_shape = [2, 4];
     let y_partition_strides = strides;
@@ -63,15 +62,8 @@ async fn main() -> Result<(), DeviceError> {
 
     // Spawn allocation of tensor 1 and 2.
     let a: f32 = 2.0;
-    let arange = Arc::new(
-        candle_core::Tensor::arange(0f32, num_elements, &candle_core::Device::Cpu)
-            .unwrap()
-            .reshape(shape)
-            .unwrap(),
-    );
-    let x: Arc<Tensor<f32>> = arange.copy_to_device().await?;
-    let y: Arc<Tensor<f32>> = arange.copy_to_device().await?;
-    let y = Arc::try_unwrap(y).unwrap();
+    let x: Arc<_> = arange::<f32>(num_elements).reshape([4, 8]).await?.into();
+    let y = arange::<f32>(num_elements).reshape([4, 8]).await?;
 
     // We need the function to build the launcher, so we wait on compilation.
     let (function, _) = compilation_task
@@ -82,7 +74,7 @@ async fn main() -> Result<(), DeviceError> {
         let y_part = y.partition(y_partition_shape);
         let mut launcher = AsyncKernelLaunch::new(function.clone());
         launcher
-            .push_arg(Box::new(a))
+            .push_arg(a)
             .push_arg_arc(&x)
             .push_arg(&y_part)
             .set_launch_config(LaunchConfig {
@@ -94,7 +86,7 @@ async fn main() -> Result<(), DeviceError> {
             .and_then(|_| {
                 let mut launcher = AsyncKernelLaunch::new(function.clone());
                 launcher
-                    .push_arg(Box::new(a))
+                    .push_arg(a)
                     .push_arg_arc(&x)
                     .push_arg(&y_part)
                     .set_launch_config(LaunchConfig {
@@ -107,7 +99,7 @@ async fn main() -> Result<(), DeviceError> {
             .and_then(|_| {
                 let mut launcher = AsyncKernelLaunch::new(function.clone());
                 launcher
-                    .push_arg(Box::new(a))
+                    .push_arg(a)
                     .push_arg_arc(&x)
                     .push_arg(&y_part)
                     .set_launch_config(LaunchConfig {
@@ -127,10 +119,10 @@ async fn main() -> Result<(), DeviceError> {
 
     // Check output.
     let y_host = y.to_host_vec().await?;
-    let arange = arange.flatten(0, 1).unwrap();
-    for i in 0..arange.dims()[0] {
-        let x_i: f32 = arange.get(i).unwrap().to_scalar().unwrap();
-        let y_i: f32 = arange.get(i).unwrap().to_scalar().unwrap();
+    let input_host: Vec<f32> = arange(num_elements).await?.to_host_vec().await?;
+    for i in 0..num_elements {
+        let x_i = input_host[i];
+        let y_i = input_host[i];
         // We're applying the saxpy function 3 times.
         let mut answer = y_i;
         answer = a * x_i + answer;

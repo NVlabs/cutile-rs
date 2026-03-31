@@ -11,7 +11,8 @@ use crate::device_operation::{DeviceOperation, ExecutionContext};
 use crate::error::DeviceError;
 use crate::scheduling_policies::SchedulingPolicy;
 use anyhow::{Context, Result};
-use cuda_core::{launch_kernel, CudaFunction, CudaStream, LaunchConfig};
+use cuda_core::sys::CUdeviceptr;
+use cuda_core::{launch_kernel, CudaFunction, CudaStream, DType, LaunchConfig};
 use std::ffi::c_void;
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -65,6 +66,19 @@ impl AsyncKernelLaunch {
         self
     }
 
+    /// Pushes a device pointer as a kernel argument.
+    //TODO (hme): document safety
+    pub unsafe fn push_device_ptr(&mut self, ptr: CUdeviceptr) -> &mut Self {
+        self.push_arg_raw(Box::new(ptr))
+    }
+
+    /// Pushes a raw argument to the kernel parameter list.
+    unsafe fn push_arg_raw<T>(&mut self, arg: Box<T>) -> &mut Self {
+        let r = Box::into_raw(arg);
+        self.args.push(r as *mut _);
+        self
+    }
+
     /// Sets the grid/block dimensions and shared memory configuration for the launch.
     pub fn set_launch_config(&mut self, cfg: LaunchConfig) -> &mut Self {
         self.cfg = Some(cfg);
@@ -112,10 +126,15 @@ pub trait KernelArgument {
     fn push_arg(self, launcher: &mut AsyncKernelLaunch);
 }
 
-impl<T> KernelArgument for Box<T> {
+/// Safe implementation for scalar types. Values implementing `DType` are copied
+/// into the kernel's parameter space during launch — the kernel reads the value,
+/// not a device pointer, so no `unsafe` is required.
+impl<T: DType> KernelArgument for T {
     fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
-        let r = Box::into_raw(self);
-        launcher.args.push(r as *mut _);
+        // TODO (hme): document safety
+        unsafe {
+            launcher.push_arg_raw(Box::new(self));
+        }
     }
 }
 

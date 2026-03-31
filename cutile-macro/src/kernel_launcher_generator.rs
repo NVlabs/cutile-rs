@@ -36,21 +36,21 @@
 //! ) { }
 //!
 //! // Generates these launchers:
-//! pub fn my_kernel<T: Send + WithDType>(
+//! pub fn my_kernel<T: Send + DType>(
 //!     output: Partition<Tensor<T>>,
 //!     input: Arc<Tensor<T>>,
 //! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Wraps materialized values and delegates to my_kernel_op
 //! }
 //!
-//! pub fn my_kernel_op<T: Send + WithDType>(
+//! pub fn my_kernel_op<T: Send + DType>(
 //!     output: impl DeviceOperation<Output = Partition<Tensor<T>>>,
 //!     input: impl DeviceOperation<Output = Arc<Tensor<T>>>,
 //! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Launches from separate lazy arguments
 //! }
 //!
-//! pub fn my_kernel_apply<T: Send + WithDType>(
+//! pub fn my_kernel_apply<T: Send + DType>(
 //!     inputs: (Partition<Tensor<T>>, Arc<Tensor<T>>),
 //! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Launches from one grouped lazy argument tuple
@@ -118,7 +118,7 @@ pub(crate) struct RequiredGenerics {
     /// Names of generic parameters in order
     names: Vec<String>,
     /// Names of compile-time generic type parameters required by launcher functions.
-    /// This lets generated launcher functions support type param inference via impls of the WithDType trait.
+    /// This lets generated launcher functions support type param inference via impls of the DType trait.
     launcher_type_params: Vec<String>,
     /// Type annotations for const generic parameters (None for type params)
     types: Vec<Option<Type>>,
@@ -179,7 +179,7 @@ impl RequiredGenerics {
         for name in &self.names {
             let is_launcher_type_param = self.launcher_type_params.contains(name);
             if is_launcher_type_param && self.get_ty(name) == SupportedGenericType::TypeParam {
-                type_params.push(format!("{}: Send + WithDType", name.clone()));
+                type_params.push(format!("{}: Send + DType", name.clone()));
             }
         }
         syn::parse2::<Generics>(format!("<{}>", type_params.join(", ")).parse().unwrap()).unwrap()
@@ -472,7 +472,7 @@ pub fn to_tuple_string(args: &[String]) -> String {
 /// pub struct MyKernel<T> {
 ///     args: MyKernelArgs<T>,
 /// }
-/// impl<T: WithDType> DeviceOperation for MyKernel<T> {
+/// impl<T: DType> DeviceOperation for MyKernel<T> {
 ///     type Output = ();
 ///     unsafe fn execute(mut self, ctx: &ExecutionContext) -> Self::Output {
 ///         // Kernel launch logic here
@@ -529,15 +529,13 @@ pub fn generate_kernel_launcher(
                     required_generics
                         .launcher_type_params
                         .push(type_name.clone());
-                    // T is WithDType, so we can use T::DTYPE.as_str();
+                    // T is DType, so we can use T::DTYPE.as_str();
                     required_generics.expressions.insert(
                         type_name.clone(),
                         Some(format!("vec![{type_name}::DTYPE.as_str().to_string()]")),
                     );
                 }
-                builder_statements.push(parse_stmt(format!(
-                    "kernel_launch.push_arg(Box::new({var_name}));"
-                )));
+                builder_statements.push(parse_stmt(format!("kernel_launch.push_arg({var_name});")));
             }
             Type::Ptr(ptr_type) => {
                 // Let's require this to be unsafe, even though all unsafe operations on pointers
@@ -561,13 +559,15 @@ pub fn generate_kernel_launcher(
                     required_generics
                         .launcher_type_params
                         .push(type_name.clone());
-                    // T is WithDType, so we can use T::DTYPE.as_str();
+                    // T is DType, so we can use T::DTYPE.as_str();
                     required_generics.expressions.insert(
                         type_name.clone(),
                         Some(format!("vec![{type_name}::DTYPE.as_str().to_string()]")),
                     );
                 }
-                builder_statements.push(parse_stmt(format!("kernel_launch.push_arg({var_name});")));
+                builder_statements.push(parse_stmt(format!(
+                    "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
+                )));
             }
             _ => {
                 return ty.err("Unable to generate launcher: unsupported parameter type.");

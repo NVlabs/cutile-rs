@@ -5,14 +5,39 @@
 
 //! Shared utilities and reference implementations for cutile examples.
 
+use candle_core::WithDType;
 use candle_nn::ops::softmax;
-use std::sync::Arc;
+use cuda_core::DType;
 
-use cuda_async::device_operation::*;
 use cuda_core::{get_device_clock_rate, CudaContext};
-use cutile::candle_core;
-use cutile::candle_core::WithDType;
-use cutile::tensor::{CopyToHost, Tensor};
+
+/// Convert a host slice to a candle CPU tensor.
+pub fn to_candle_tensor<T: DType + WithDType>(data: &[T], shape: &[usize]) -> candle_core::Tensor {
+    candle_core::Tensor::from_slice(data, shape, &candle_core::Device::Cpu).unwrap()
+}
+
+/// Prints a 2D candle tensor in a formatted table for debugging.
+pub fn pretty_print_matrix<T: WithDType>(mat: &candle_core::Tensor) {
+    let iter_dim = 0;
+    let range = 0..mat.shape().dims()[iter_dim];
+    println!(
+        " {}",
+        range
+            .into_iter()
+            .map(|x| format!("{:^9}", x))
+            .collect::<Vec<String>>()
+            .join("")
+    );
+    for j in 0..mat.shape().dims()[iter_dim] {
+        let out_vec = mat.get_on_dim(iter_dim, j).unwrap().to_vec1::<T>().unwrap();
+        let out_vec = out_vec
+            .iter()
+            .map(|x| format!("{:^8.1}|", x))
+            .collect::<Vec<String>>()
+            .join("");
+        println!("|{}", out_vec);
+    }
+}
 
 /// Formats a byte count into a human-readable size string (e.g. "1.5kb", "2.3mb").
 pub fn size_label(size_bytes: usize) -> String {
@@ -32,16 +57,23 @@ pub fn size_label(size_bytes: usize) -> String {
 }
 
 /// Computes a reference FMHA result on the host: `softmax(scale(Q @ K^T)) @ V`.
+///
+/// Takes host-side data as slices and shapes, constructs candle tensors internally.
 pub fn fmha_ref_exec<T: WithDType>(
-    q: &Arc<Tensor<T>>,
-    k: &Arc<Tensor<T>>,
-    v: &Arc<Tensor<T>>,
+    q_data: &[T],
+    q_shape: &[usize],
+    k_data: &[T],
+    k_shape: &[usize],
+    v_data: &[T],
+    v_shape: &[usize],
     sm_scale: T,
 ) -> candle_core::Tensor {
-    // softmax( scale( q @ k^T ) ) @ v
-    let q_host: candle_core::Tensor = q.copy_to_host().sync().unwrap(); // b, h, m, d
-    let k_host: candle_core::Tensor = k.copy_to_host().sync().unwrap(); // b, hkv, m, d
-    let v_host: candle_core::Tensor = v.copy_to_host().sync().unwrap(); // b, hkv, m, d
+    let q_host =
+        candle_core::Tensor::from_slice(q_data, q_shape, &candle_core::Device::Cpu).unwrap();
+    let k_host =
+        candle_core::Tensor::from_slice(k_data, k_shape, &candle_core::Device::Cpu).unwrap();
+    let v_host =
+        candle_core::Tensor::from_slice(v_data, v_shape, &candle_core::Device::Cpu).unwrap();
     let k_trans = k_host.transpose(2, 3).expect("Failed to transpose k.");
     let qk = q_host
         .broadcast_matmul(&k_trans)

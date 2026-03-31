@@ -6,8 +6,8 @@
 //! Tile kernel compilation, caching, launching, and partitioning for CUDA device operations.
 
 use anyhow::{Context, Result};
-use candle_core::WithDType;
 use cuda_async::error::DeviceError;
+use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, CudaFunction};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
@@ -484,7 +484,7 @@ where
     // fn validate(validator: &Validator) -> Result<(), Error> {
 
     // }
-    // fn validate_arc<T: WithDType>(
+    // fn validate_arc<T: DType>(
     //     &self,
     //     func_name: String,
     //     var_name: String,
@@ -528,14 +528,17 @@ where
 ///
 /// Pushes the device pointer, shape, and stride information to the kernel launcher
 /// in the order expected by compiled tile functions.
-impl<T: WithDType> ArcKernelArgument for Tensor<T> {
+impl<T: DType> ArcKernelArgument for Tensor<T> {
     fn push_arg_arc(self: &Arc<Self>, launcher: &mut AsyncKernelLaunch) {
-        launcher.push_arg(Box::new(self.cu_deviceptr()));
+        // TODO (hme): document safety
+        unsafe {
+            launcher.push_device_ptr(self.cu_deviceptr());
+        }
         for dim in self.shape.iter() {
-            launcher.push_arg(Box::new(*dim));
+            launcher.push_arg(*dim);
         }
         for stride in self.strides.iter() {
-            launcher.push_arg(Box::new(*stride));
+            launcher.push_arg(*stride);
         }
     }
 }
@@ -545,20 +548,23 @@ impl<T: WithDType> ArcKernelArgument for Tensor<T> {
 /// Pushes the device pointer, tensor shape and strides, followed by partition shape
 /// and strides. This allows kernels to access both the full tensor and the partition
 /// information for block-level indexing.
-impl<T: WithDType> KernelArgument for &Partition<Tensor<T>> {
+impl<T: DType> KernelArgument for &Partition<Tensor<T>> {
     fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
-        launcher.push_arg(Box::new(self.object.cu_deviceptr()));
+        // TODO (hme): document safety
+        unsafe {
+            launcher.push_device_ptr(self.object.cu_deviceptr());
+        }
         for dim in self.object.shape.iter() {
-            launcher.push_arg(Box::new(*dim));
+            launcher.push_arg(*dim);
         }
         for stride in self.object.strides.iter() {
-            launcher.push_arg(Box::new(*stride));
+            launcher.push_arg(*stride);
         }
         for dim in self.partition_shape.iter() {
-            launcher.push_arg(Box::new(*dim));
+            launcher.push_arg(*dim);
         }
         for stride in self.partition_strides.iter() {
-            launcher.push_arg(Box::new(*stride));
+            launcher.push_arg(*stride);
         }
     }
 }
@@ -778,19 +784,19 @@ where
 // ToHostVec
 
 /// A device operation that copies a tensor from device memory to a host `Vec<T>`.
-pub struct TensorToHostVec<T: WithDType, DI>
+pub struct TensorToHostVec<T: DType, DI>
 where
     DI: DeviceOperation<Output = Tensor<T>>,
 {
     pub(crate) op: DI,
 }
 
-unsafe impl<T: WithDType, DI> Send for TensorToHostVec<T, DI> where
+unsafe impl<T: DType, DI> Send for TensorToHostVec<T, DI> where
     DI: DeviceOperation<Output = Tensor<T>>
 {
 }
 
-impl<T: WithDType, DI> DeviceOperation for TensorToHostVec<T, DI>
+impl<T: DType, DI> DeviceOperation for TensorToHostVec<T, DI>
 where
     DI: DeviceOperation<Output = Tensor<T>>,
 {
@@ -810,7 +816,7 @@ where
     }
 }
 
-impl<T: WithDType, DI> IntoFuture for TensorToHostVec<T, DI>
+impl<T: DType, DI> IntoFuture for TensorToHostVec<T, DI>
 where
     DI: DeviceOperation<Output = Tensor<T>>,
 {
@@ -826,7 +832,7 @@ where
 }
 
 /// Extension trait for converting a tensor device operation into a host `Vec<T>` operation.
-pub trait TensorDeviceOpToHostVec<T: WithDType> {
+pub trait TensorDeviceOpToHostVec<T: DType> {
     /// Wraps this operation to copy the resulting tensor to a host `Vec<T>`.
     fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>>
     where
@@ -836,7 +842,4 @@ pub trait TensorDeviceOpToHostVec<T: WithDType> {
     }
 }
 
-impl<T: WithDType, DI> TensorDeviceOpToHostVec<T> for DI where
-    DI: DeviceOperation<Output = Tensor<T>>
-{
-}
+impl<T: DType, DI> TensorDeviceOpToHostVec<T> for DI where DI: DeviceOperation<Output = Tensor<T>> {}

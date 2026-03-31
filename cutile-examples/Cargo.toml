@@ -16,4 +16,5 @@ cutile = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 tokio = { workspace = true }
+candle-core = { workspace = true }
 candle-nn = { workspace = true }

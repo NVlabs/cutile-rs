@@ -58,7 +58,7 @@ pub mod my_kernels {
 fn load_data<const RANK: usize>(
     batch_size: [usize; RANK],
 ) -> impl DeviceOperation<Output = Tensor<f32>> {
-    api::randn(0.0, 1.0, batch_size)
+    api::randn_f32(0.0, 1.0, batch_size, None)
 }
 
 use my_kernels::_module_asts;
@@ -69,8 +69,8 @@ async fn main() -> Result<(), Error> {
     let (m, n, k) = (16, 16, 16);
     let (bm, bn, bk) = (4, 4, 4);
     let data = load_data([m, n]).arc().await?;
-    let w0 = api::randn(0.0f32, 1.0, [n, k]).arc().await?; // impl DeviceOperation
-    let w1 = api::randn(0.0f32, 1.0, [k]).arc().await?; // impl DeviceOperation
+    let w0 = api::randn_f32(0.0f32, 1.0, [n, k], None).arc().await?; // impl DeviceOperation
+    let w1 = api::randn_f32(0.0f32, 1.0, [k], None).arc().await?; // impl DeviceOperation
     let out = api::zeros::<1, f32>([m]).partition([bm]).await?;
 
     // Compilation
