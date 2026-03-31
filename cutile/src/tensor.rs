@@ -208,14 +208,17 @@ use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
 use candle_core::{DType, WithDType};
 use cuda_async::device_box::{DeviceBox, DevicePointer};
+use cuda_async::device_context::{device_alloc_async, with_default_device_policy};
+use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation;
-use cuda_async::device_operation::{value, DeviceOperation};
+use cuda_async::device_operation::{value, DeviceOperation, ExecutionContext};
 use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
-use cuda_core::{malloc_async, CudaStream};
-use std::fmt::Debug;
+use cuda_core::CudaStream;
 use std::marker::PhantomData;
+use std::future::IntoFuture;
 use std::mem::MaybeUninit;
+use std::fmt::Debug;
 use std::ops::Index;
 use std::sync::Arc;
 
@@ -384,6 +387,43 @@ pub trait IntoPartitionArc {
         Self: Sized;
 }
 
+/// Device operation for allocating uninitialized tensor memory.
+struct AllocUninitializedTensor<T: WithDType + Send> {
+    len: usize,
+    _marker: PhantomData<T>,
+}
+
+unsafe impl<T: WithDType + Send> Send for AllocUninitializedTensor<T> {}
+
+impl<T: WithDType + Send> DeviceOperation for AllocUninitializedTensor<T> {
+    type Output = MaybeUninit<Tensor<T>>;
+
+    unsafe fn execute(
+        self,
+        ctx: &ExecutionContext,
+    ) -> Result<MaybeUninit<Tensor<T>>, DeviceError> {
+        let num_bytes = self.len * size_of::<T>();
+        let dptr = device_alloc_async(num_bytes, ctx.get_cuda_stream(), ctx.get_device_id())?;
+        Ok(MaybeUninit::new(Tensor {
+            device_box: DeviceBox::from_raw_parts(dptr, self.len, ctx.get_device_id()),
+            shape: vec![self.len as i32],
+            strides: vec![1],
+        }))
+    }
+}
+
+impl<T: WithDType + Send> IntoFuture for AllocUninitializedTensor<T> {
+    type Output = Result<MaybeUninit<Tensor<T>>, DeviceError>;
+    type IntoFuture = DeviceFuture<MaybeUninit<Tensor<T>>, AllocUninitializedTensor<T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| policy.schedule(self)) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
 /// A multi-dimensional array stored in GPU memory.
 ///
 /// `Tensor` is the primary type for working with GPU data in cuTile Rust. It wraps a
@@ -439,39 +479,20 @@ pub struct Tensor<T: WithDType> {
 impl<T: WithDType> Tensor<T> {
     /// Allocates uninitialized GPU memory for a 1D tensor.
     ///
-    /// This is a low-level function that allocates memory asynchronously but does not
-    /// initialize it. The returned value must be initialized before use with `assume_init()`.
-    ///
     /// ## Safety
     ///
-    /// The returned tensor is wrapped in `MaybeUninit`. It must be initialized by a kernel
-    /// or other operation before calling `assume_init()` on it.
+    /// The returned `DeviceOperation` yields a `MaybeUninit<Tensor<T>>` that must
+    /// be initialized by a kernel before calling `assume_init()`.
     ///
-    /// ## Examples
+    /// # Errors
     ///
-    /// ```rust,ignore
-    /// use cutile::tensor::Tensor;
-    ///
-    /// let uninit = Tensor::<f32>::uninitialized(1024).await;
-    /// // Must initialize before use
-    /// let tensor = unsafe { uninit.assume_init() };
-    /// ```
+    /// Returns `DeviceError` if memory allocation fails (e.g., OOM).
     pub fn uninitialized(len: usize) -> impl DeviceOperation<Output = MaybeUninit<Self>> {
         assert!(len > 0, "Non-zero length required.");
-        device_operation::with_context(move |ctx| {
-            let num_bytes = len * size_of::<T>();
-            value(MaybeUninit::new(unsafe {
-                Self {
-                    device_box: DeviceBox::from_raw_parts(
-                        malloc_async(num_bytes, ctx.get_cuda_stream()),
-                        len,
-                        ctx.get_device_id(),
-                    ),
-                    shape: vec![len as i32],
-                    strides: vec![1],
-                }
-            }))
-        })
+        AllocUninitializedTensor::<T> {
+            len,
+            _marker: PhantomData,
+        }
     }
 
     pub fn dtype(&self) -> DType {
