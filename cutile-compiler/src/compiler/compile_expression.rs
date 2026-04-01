@@ -55,12 +55,37 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "this loop pattern is not supported; use a simple variable name or `_`",
                         ),
                     };
-                    let Expr::Range(range_expr) = &*for_expr.expr else {
-                        return self.jit_error_result(
-                            &for_expr.expr.span(),
-                            "only range expressions (e.g. `0..n`) are supported in for loops",
-                        );
-                    };
+                    // Extract range and optional step from the for-loop expression.
+                    // Supports: `0..n` (step=1) and `(0..n).step_by(k)`.
+                    let (range_expr, maybe_step_expr): (&syn::ExprRange, Option<&Expr>) =
+                        match &*for_expr.expr {
+                            Expr::Range(range) => (range, None),
+                            Expr::MethodCall(mc) if mc.method == "step_by" => {
+                                let receiver = match &*mc.receiver {
+                                    Expr::Paren(p) => &*p.expr,
+                                    other => other,
+                                };
+                                let Expr::Range(range) = receiver else {
+                                    return self.jit_error_result(
+                                        &mc.receiver.span(),
+                                        "expected a range expression as the receiver of step_by (e.g. `(0..n).step_by(k)`)",
+                                    );
+                                };
+                                if mc.args.len() != 1 {
+                                    return self.jit_error_result(
+                                        &mc.args.span(),
+                                        "step_by expects exactly one argument",
+                                    );
+                                }
+                                (range, Some(&mc.args[0]))
+                            }
+                            _ => {
+                                return self.jit_error_result(
+                                    &for_expr.expr.span(),
+                                    "only range expressions (e.g. `0..n` or `(0..n).step_by(k)`) are supported in for loops",
+                                );
+                            }
+                        };
                     // TODO (hme): Add meaningful errors and do more than just unwrap.
                     let Some(start_expr) = &range_expr.start else {
                         return self.jit_error_result(
@@ -104,7 +129,24 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let iterand_upper_const = end_val.bounds.clone();
                     let lower_bound = start_val.value.unwrap();
                     let upper_bound = end_val.value.unwrap();
-                    let step_value = self.compile_constant(builder, generic_vars, 1)?;
+                    let step_value = if let Some(step_expr) = maybe_step_expr {
+                        let Some(val) = self.compile_expression(
+                            builder,
+                            step_expr,
+                            generic_vars,
+                            ctx,
+                            Some(start_val.ty.clone()),
+                        )?
+                        else {
+                            return self.jit_error_result(
+                                &step_expr.span(),
+                                "failed to compile step_by expression",
+                            );
+                        };
+                        val
+                    } else {
+                        self.compile_constant(builder, generic_vars, 1)?
+                    };
                     let step: Value = step_value.value.ok_or_else(|| {
                         self.jit_error(
                             &for_expr.span(),
