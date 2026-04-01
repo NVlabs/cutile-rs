@@ -1,4 +1,4 @@
-# Interoperability with Custom CUDA Kernels
+# Interoperability
 
 The tile model handles dense tensor algebra well — GEMM, element-wise operations, reductions, convolutions — but some algorithms depend on **warp-level primitives** (`__shfl_sync`, `__ballot_sync`, `__reduce_sync`) for things like custom scan/prefix-sum, cooperative groups, or irregular data access patterns. For these, write the kernel in CUDA C++ and integrate it using the approach below.
 
@@ -16,13 +16,7 @@ nvcc -ptx -arch=compute_80 my_kernel.cu -o my_kernel.ptx
 nvcc -cubin -arch=sm_80 my_kernel.cu -o my_kernel.cubin
 ```
 
-> **Architecture portability:** A `.cubin` file only runs on the exact SM architecture it was compiled for. Code compiled with `-arch=sm_80` will not load on an `sm_100` GPU. PTX avoids this problem — the CUDA driver JIT-compiles it for the target GPU at load time, at the cost of a one-time compilation delay. Prefer PTX unless you need to eliminate JIT overhead. If you must ship `.cubin` files, compile for each target architecture:
->
-> ```bash
-> nvcc -cubin -gencode arch=compute_80,code=sm_80 \
->              -gencode arch=compute_100,code=sm_100 \
->              my_kernel.cu -o my_kernel.cubin
-> ```
+> **Architecture portability:** A `.cubin` file only runs on the exact SM architecture it was compiled for. Code compiled with `-arch=sm_80` will not load on an `sm_100` GPU. PTX avoids this problem — the CUDA driver JIT-compiles it for the target GPU at load time, at the cost of a one-time compilation delay. Prefer PTX unless you need to eliminate JIT overhead. If you must ship `.cubin` files, compile for each target architecture.
 
 ## Step 2: Load the Module and Function
 
