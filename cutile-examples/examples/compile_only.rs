@@ -13,7 +13,7 @@ use std::env;
 use std::slice;
 
 // Same syntax as full CUDA version - features control behavior
-#[cutile::module(mlir_only = true)]
+#[cutile::module(compile_only = true)]
 mod my_kernels {
     use cutile::core::*;
 
