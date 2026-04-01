@@ -14,6 +14,24 @@ Thank you for your interest in contributing to cuTile Rust! Based on the type of
    - For all other crates, please ensure that your commits are signed [following GitHub’s instruction](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification).
      - Before marking your PR as ready for review, please make sure all tests pass and all examples are running via `bash scripts/run_all.sh`.
 
+# Branch and PR Naming
+
+Use a prefix that describes the type of change.
+
+| Type | Use for |
+|---|---|
+| `feat` | New features |
+| `fix` | Bug fixes |
+| `doc` | Documentation changes |
+| `refactor` | Code refactoring (no behavior change) |
+| `test` | Test additions or changes |
+| `ci` | CI/CD changes |
+| `chore` | Maintenance tasks |
+
+**Branches** use `/` as a separator: `feat/warp-interop`, `fix/kernel-launch-sync`, `doc/contributing-guide`
+
+**PR titles** use `:` as a separator, lowercase: `feat: add warp interop support`, `fix: resolve kernel launch sync race`, `doc: update contributing guide`
+
 # Signing Your Work
 
 * We require that all contributors "sign-off" on their commits. This certifies that the contribution is your original work, or you have rights to submit it under the same license, or a compatible license.
