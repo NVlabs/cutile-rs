@@ -231,7 +231,7 @@ fn module_inner(
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let name = &module_item.ident;
     let mut module_ast_calls: Vec<String> = vec![];
-    let mut entry_functions: Vec<TokenStream2> = vec![];
+    let mut kernel_launchers: Vec<TokenStream2> = vec![];
 
     for item in &content.1 {
         match item {
@@ -266,7 +266,7 @@ fn module_inner(
                     &function_item.attrs,
                 );
                 if entry_attrs.is_some() {
-                    entry_functions.push(kernel_launcher(name, function_item)?);
+                    kernel_launchers.push(kernel_launcher(name, function_item)?);
                 };
                 ast_content.push(Item::Fn(function_item.clone()));
                 concrete_items.push(function(function_item.clone(), tile_rust_crate_root)?);
@@ -316,7 +316,7 @@ fn module_inner(
         tile_rust_crate_root,
         raw_item_source,
     );
-    let res = if skip_launcher || entry_functions.is_empty() {
+    let res = if skip_launcher || kernel_launchers.is_empty() {
         quote! {
             pub mod #name {
                 #![allow(nonstandard_style)]
@@ -350,7 +350,7 @@ fn module_inner(
                 #ast_module_tokens
                 #(#concrete_items)*
                 // Entry point code.
-                #(#entry_functions)*
+                #(#kernel_launchers)*
             }
         }
     };
