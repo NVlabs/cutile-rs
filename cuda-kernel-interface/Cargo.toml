@@ -1,0 +1,12 @@
+[package]
+name = "cuda-kernel-interface"
+description = "Shared kernel interface metadata for CUDA compilers and runtimes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]

@@ -11,6 +11,9 @@ members = [
     # Async CUDA API. Uses cuda-core.
     "cuda-async",
 
+    # Shared kernel interface metadata used by compilers and runtimes.
+    "cuda-kernel-interface",
+
     # CUDA Tile MLIR dialect.
     "cuda-tile-rs",
 
@@ -65,6 +68,7 @@ convert_case = "0.8"
 cuda-bindings = { path = "cuda-bindings", version = "0.0.1-alpha" }
 cuda-core = { path = "cuda-core", version = "0.0.1-alpha" }
 cuda-async = { path = "cuda-async", version = "0.0.1-alpha" }
+cuda-kernel-interface = { path = "cuda-kernel-interface", version = "0.0.1-alpha" }
 cuda-tile-rs = { path = "cuda-tile-rs", version = "0.0.1-alpha" }
 cutile-compiler = { path = "cutile-compiler", version = "0.0.1-alpha" }
 cutile-macro = { path = "cutile-macro", version = "0.0.1-alpha" }

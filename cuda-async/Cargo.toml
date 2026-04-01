@@ -11,7 +11,7 @@ description = "Safe Async CUDA support via Async Rust."
 
 [dependencies]
 cuda-core = { workspace = true }
-cutile-compiler = { workspace = true }
+cuda-kernel-interface = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

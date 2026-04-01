@@ -26,5 +26,6 @@ half = { workspace = true }
 mlir-sys = { workspace = true }
 anyhow = { workspace = true }
 stacker = { workspace = true }
+cuda-kernel-interface = { workspace = true }
 cuda-tile-rs = { workspace = true }
 cuda-core = { workspace = true, optional = true }

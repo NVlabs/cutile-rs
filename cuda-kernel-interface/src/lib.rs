@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Shared kernel interface metadata used at the compiler/runtime boundary.
+
 #[derive(Debug, Clone)]
 pub enum ValidParamType {
     Scalar(ScalarParamType),

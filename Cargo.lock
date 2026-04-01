@@ -445,6 +445,7 @@ version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "cuda-core",
+ "cuda-kernel-interface",
  "futures",
  "thiserror 1.0.69",
 ]
@@ -466,6 +467,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuda-kernel-interface"
+version = "0.0.1-alpha"
+
+[[package]]
 name = "cuda-tile-rs"
 version = "0.0.1-alpha"
 dependencies = [
@@ -481,6 +486,7 @@ name = "cutile"
 version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
+ "candle-core",
  "cuda-async",
  "cuda-core",
  "cutile-compiler",
@@ -510,8 +516,8 @@ name = "cutile-compiler"
 version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
- "cuda-async",
  "cuda-core",
+ "cuda-kernel-interface",
  "cuda-tile-rs",
  "half",
  "melior",
@@ -529,7 +535,6 @@ dependencies = [
 name = "cutile-examples"
 version = "0.0.1-alpha"
 dependencies = [
- "candle-core",
  "candle-nn",
  "cuda-async",
  "cuda-core",

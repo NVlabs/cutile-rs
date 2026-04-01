@@ -28,7 +28,6 @@ pub mod kernel_naming;
 pub mod syn_utils;
 pub mod train_map;
 pub mod types;
-pub mod validator;
 
 pub mod compiler;
 pub use compiler::utils;
