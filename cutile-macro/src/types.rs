@@ -450,7 +450,9 @@ pub fn get_variadic_method_data(
     let method2op = match vtd.name {
         "Array" => HashMap::from([]),
         "Shape" => HashMap::from([]),
-        "PointerTile" => HashMap::from([]),
+        "PointerTile" => {
+            HashMap::from([("broadcast", "broadcast_ptr"), ("reshape", "reshape_ptr")])
+        }
         "Tensor" => HashMap::from([
             ("partition", "make_partition_view"),
             ("partition_permuted", "make_partition_view_permuted"),
@@ -643,6 +645,20 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
             input_map: vec![(0, "Tile", &["S"]), (1, "Shape", &["R"])],
             output_map: ("Tile", &["R"]),
             return_type: ("Tile", &["_", "R"]),
+        }),
+        "broadcast_ptr" => Some(VariadicOpData {
+            const_length_vars: &["N"],
+            cga_map: HashMap::from([("S", "N"), ("R", "N")]),
+            input_map: vec![(0, "PointerTile", &["S"]), (1, "Shape", &["R"])],
+            output_map: ("PointerTile", &["R"]),
+            return_type: ("PointerTile", &["_", "R"]),
+        }),
+        "reshape_ptr" => Some(VariadicOpData {
+            const_length_vars: &["N", "M"],
+            cga_map: HashMap::from([("S", "N"), ("R", "M")]),
+            input_map: vec![(0, "PointerTile", &["S"]), (1, "Shape", &["R"])],
+            output_map: ("PointerTile", &["R"]),
+            return_type: ("PointerTile", &["_", "R"]),
         }),
         "broadcast" => Some(VariadicOpData {
             const_length_vars: &["N"],

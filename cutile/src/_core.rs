@@ -639,6 +639,21 @@ pub mod core {
         pub fn offset(self, offset: i32) -> PointerTile<P, D> {
             addptr(self, offset)
         }
+
+        /// Broadcasts this pointer tile to a new shape.
+        ///
+        /// Dimensions of size 1 in the source can be broadcast to any size in the result.
+        pub fn broadcast<const R: [i32; N]>(self, shape: Shape<R>) -> PointerTile<P, R> {
+            broadcast_ptr(self, shape)
+        }
+
+        /// Reshapes this pointer tile to a new shape without moving data.
+        ///
+        /// The total number of elements must remain the same.
+        #[cuda_tile::variadic_impl_fn(M = 6)]
+        pub fn reshape<const R: [i32; M]>(self, shape: Shape<R>) -> PointerTile<P, R> {
+            reshape_ptr(self, shape)
+        }
     }
 
     /// Adds a scalar offset to all pointers in a pointer tile.
@@ -663,6 +678,30 @@ pub mod core {
         ptr: PointerTile<P, D>,
         offset: Tile<I, D>,
     ) -> PointerTile<P, D> {
+        unreachable!()
+    }
+
+    /// Broadcasts a pointer tile to a new shape.
+    ///
+    /// Dimensions of size 1 in the source can be broadcast to any size in the result.
+    #[cuda_tile::op(name="cuda_tile.broadcast", params=["source"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn broadcast_ptr<P: Pointer, const S: [i32; N], const R: [i32; N]>(
+        source: PointerTile<P, S>,
+        shape: Shape<R>,
+    ) -> PointerTile<P, R> {
+        unreachable!()
+    }
+
+    /// Reshapes a pointer tile to a new shape without moving data.
+    ///
+    /// The total number of elements must remain the same.
+    #[cuda_tile::op(name="cuda_tile.reshape", params=["source"])]
+    #[cuda_tile::variadic_op(N = 6, M = 6)]
+    pub fn reshape_ptr<P: Pointer, const S: [i32; N], const R: [i32; M]>(
+        source: PointerTile<P, S>,
+        shape: Shape<R>,
+    ) -> PointerTile<P, R> {
         unreachable!()
     }
 

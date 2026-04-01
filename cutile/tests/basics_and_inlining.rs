@@ -213,6 +213,13 @@ mod basics_and_inlining_module {
     }
 
     #[cutile::entry()]
+    unsafe fn ptr_tile_reshape_kernel(ptr: *mut f32) {
+        let ptr_tile: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
+        let reshaped: PointerTile<*mut f32, { [1] }> = ptr_tile.reshape(const_shape![1]);
+        let _broadcast: PointerTile<*mut f32, { [128] }> = reshaped.broadcast(const_shape![128]);
+    }
+
+    #[cutile::entry()]
     fn negative_constant_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let shape = output.shape();
         let _neg_float: Tile<f32, S> = constant(-1.0, shape);
@@ -303,5 +310,38 @@ fn compile_negative_constant() -> () {
             .to_string();
         assert!(module_op_str.contains("-1.0"));
         println!("{module_op_str}");
+    });
+}
+
+#[test]
+fn compile_ptr_tile_reshape() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "ptr_tile_reshape_kernel",
+            &[],
+            &[],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("{module_op_str}");
+        assert!(
+            module_op_str.contains("reshape") && module_op_str.contains("tile<ptr<f32>>"),
+            "Expected reshape operation on pointer tile type"
+        );
+        assert!(
+            module_op_str.contains("broadcast"),
+            "Expected broadcast operation on pointer tile type"
+        );
     });
 }
