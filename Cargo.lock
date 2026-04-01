@@ -539,7 +539,6 @@ dependencies = [
  "cuda-async",
  "cuda-core",
  "cutile",
- "cutile-compiler",
  "tokio",
 ]
 

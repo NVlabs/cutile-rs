@@ -16,7 +16,6 @@ cuda = ["cutile/cuda", "dep:cuda-core", "dep:cuda-async", "dep:tokio", "dep:cand
 
 [dependencies]
 cutile = { workspace = true }
-cutile-compiler = { workspace = true }
 cuda-core = { workspace = true, optional = true }
 cuda-async = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
