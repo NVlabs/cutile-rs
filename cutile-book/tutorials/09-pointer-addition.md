@@ -133,3 +133,9 @@ Modify the kernel to scale the output by a constant factor passed as an addition
 ### Exercise 3: Safe Wrapper
 
 Write a safe Rust wrapper function around the unsafe kernel that validates the pointer lengths at the host level before launching.
+
+---
+
+## See Also
+
+For a structured approach to integrating pre-compiled CUDA C++ kernels — using `AsyncKernelLaunch` instead of raw pointers — see the [Interoperability](../guide/interoperability.md) guide.

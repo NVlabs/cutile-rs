@@ -173,6 +173,8 @@ This pattern is key to performance: global memory is slow compared to on-chip re
 - You need maximum portability across GPU *vendors*
 - Your team is deeply invested in the CUDA C++ ecosystem
 
+> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, cuTile Rust provides an [Interoperability](interoperability.md) that lets you integrate pre-compiled kernels into the same async execution model.
+
 ---
 
 ## Next Steps

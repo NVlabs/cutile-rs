@@ -95,6 +95,15 @@ mod control_flow_ops_module {
     }
 
     #[cutile::entry()]
+    fn step_by_test_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let mut sum: Tile<f32, S> = load_tile_mut(output);
+        for _i in (0i32..100i32).step_by(10) {
+            sum = sum + sum;
+        }
+        output.store(sum);
+    }
+
+    #[cutile::entry()]
     fn assume_test_kernel<const S: [i32; 1]>(output: &mut Tensor<i64, S>) {
         // Test assume operation - provides optimization hints to compiler
         // Note: Using i64 tensor because bounded predicate only works with integers
@@ -326,6 +335,40 @@ fn compile_loop_test() -> () {
         assert!(has_break, "Expected break operation for loop exit");
 
         println!("\n✓ loop expression compiled to cuda_tile.loop with break!");
+    });
+}
+
+#[test]
+fn compile_step_by_test() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "control_flow_ops_module",
+            "step_by_test_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== STEP_BY TEST MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains(" for "),
+            "Expected for loop in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("step %cst_10_i32"),
+            "Expected step_by(10) to compile to step %cst_10_i32"
+        );
     });
 }
 

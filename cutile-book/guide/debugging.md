@@ -381,5 +381,6 @@ The JIT kernel cache is in-memory per process. Restart the process to force reco
 ## Next Steps
 
 - See [Performance Tuning](performance-tuning.md) for optimization techniques
+- See [Interoperability](interoperability.md) for integrating custom CUDA kernels
 - Review [Syntax Reference](../appendix/syntax-reference.md) for the complete API
 - Try the [Tutorials](../tutorials/01-hello-world.md) for working examples

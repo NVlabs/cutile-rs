@@ -3,8 +3,36 @@ cuTile Rust (`cutile-rs`) is a research project for writing tile-based GPU kerne
 The workspace combines:
 
 - a safe user-facing DSL for authoring kernels
-- a safe host-side API astyn executed kernel functions
+- a safe host-side API for asynchronously executing kernel functions
 - an MLIR-based compiler pipeline backed by the CUDA Tile compiler
+
+## Workspace Crates
+
+```
+cutile                 User-facing crate for authoring and executing tile kernels
+├── cutile-macro
+├── cutile-compiler
+├── cuda-async
+└── cuda-core
+
+cutile-macro           cuTile Rust proc-macro
+└── cutile-compiler
+
+cutile-compiler        Compiles cuTile Rust kernels to executables
+├── cuda-tile-rs
+├── cuda-async
+└── cuda-core
+
+cuda-async             Async CUDA execution via async Rust
+└── cuda-core
+
+cuda-core              Idiomatic safe CUDA API
+└── cuda-bindings
+
+cuda-tile-rs           CUDA Tile MLIR dialect builder API
+
+cuda-bindings          NVIDIA CUDA bindings
+```
 
 # Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
@@ -15,7 +43,7 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributi
 
 ## Requirements
 
-- **NVIDIA GPU** with `sm_8x` or `sm_100+` compute capability.
+- **NVIDIA GPU** with compute capability `sm_80` or higher (minimum supported architecture: `sm_80`).
   - `sm_100+` is supported by CUDA 13.1+.
   - `sm_8x` support was added in CUDA 13.2.
   - `sm_90` is not yet supported; it is expected in CUDA 13.3 (release date TBD).
@@ -176,6 +204,10 @@ nix develop
 ```
 
 The flake automatically locates host NVIDIA driver libraries on both NixOS and non-NixOS systems.
+
+# Built with cuTile Rust
+
+- [Grout](https://github.com/huggingface/grout) — Qwen 3 inference engine in Rust by Hugging Face
 
 # License
 The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).

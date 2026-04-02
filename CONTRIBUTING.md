@@ -3,7 +3,7 @@
 Thank you for your interest in contributing to cuTile Rust! Based on the type of contribution, it will fall into two categories:
 
 1. You want to report a bug, feature request, or documentation issue:
-   - File an [issue](https://github.com/NVIDIA/cutile-rs/issues/new/choose) describing what you encountered or what you want to see changed.
+   - File an [issue](https://github.com/NVlabs/cutile-rs/issues/new/choose) describing what you encountered or what you want to see changed.
    - For bug reports, please include the following information:
      - Your OS (e.g., Ubuntu 22.04)
      - Your GPU and GPU architecture (e.g., NVIDIA A100, sm_80)
@@ -13,6 +13,24 @@ Thank you for your interest in contributing to cuTile Rust! Based on the type of
    - At this time we do not accept code contributions to the `cuda-bindings` crate.
    - For all other crates, please ensure that your commits are signed [following GitHub’s instruction](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification).
      - Before marking your PR as ready for review, please make sure all tests pass and all examples are running via `bash scripts/run_all.sh`.
+
+# Branch and PR Naming
+
+Use a prefix that describes the type of change.
+
+| Type | Use for |
+|---|---|
+| `feat` | New features |
+| `fix` | Bug fixes |
+| `doc` | Documentation changes |
+| `refactor` | Code refactoring (no behavior change) |
+| `test` | Test additions or changes |
+| `ci` | CI/CD changes |
+| `chore` | Maintenance tasks |
+
+**Branches** use `/` as a separator: `feat/warp-interop`, `fix/kernel-launch-sync`, `doc/contributing-guide`
+
+**PR titles** use `:` as a separator, lowercase: `feat: add warp interop support`, `fix: resolve kernel launch sync race`, `doc: update contributing guide`
 
 # Signing Your Work
 

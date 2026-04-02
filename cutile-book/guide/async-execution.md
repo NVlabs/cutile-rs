@@ -492,4 +492,4 @@ launcher.grid((num_tiles as u32, 1, 1)).sync_on(&stream);
 
 ---
 
-Continue to [Performance Tuning](performance-tuning.md) for optimization techniques, or [Debugging](debugging.md) for troubleshooting.
+Continue to [Performance Tuning](performance-tuning.md) for optimization techniques, [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOperation` model, or [Debugging](debugging.md) for troubleshooting.

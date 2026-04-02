@@ -184,3 +184,4 @@ Both use the same underlying compilation pipeline and generate equivalent GPU co
 - Learn about the [Data Model](data-model.md) for details on types and shapes
 - Explore [Memory Hierarchy](memory-hierarchy.md) for performance optimization
 - See [Async Execution](async-execution.md) for concurrent CPU/GPU work
+- See [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOperation` model
