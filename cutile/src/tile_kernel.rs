@@ -807,7 +807,7 @@ where
         context: &ExecutionContext,
     ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
         let tensor = self.op.execute(context)?;
-        let cu_deviceptr = tensor.device_box.cu_deviceptr();
+        let cu_deviceptr = tensor.cu_deviceptr();
         let size = tensor.size();
         let layout = Layout::array::<T>(size).expect("overflow cannot happen");
         let async_ptr = unsafe { alloc(layout).cast::<T>() };

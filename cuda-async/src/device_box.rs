@@ -24,55 +24,69 @@ impl<T> DevicePointer<T> {
     pub fn cu_deviceptr(&self) -> CUdeviceptr {
         self.dptr
     }
+
+    /// Constructs a typed device pointer from a raw CUDA device pointer.
+    ///
+    /// # Safety
+    /// The caller must ensure `dptr` is valid for values of type `T`.
+    pub unsafe fn from_cu_deviceptr(dptr: CUdeviceptr) -> Self {
+        Self {
+            dtype: PhantomData,
+            dptr,
+        }
+    }
 }
 
-/// An owning handle to a CUDA device memory allocation, freed asynchronously on drop.
+/// An owning, type-erased handle to a CUDA device memory allocation, freed asynchronously on drop.
+///
+/// `DeviceBox` manages a raw byte buffer on the GPU. It stores only the device pointer,
+/// byte length, and device id — all type information lives in higher-level wrappers
+/// such as `Tensor<T>`.
 #[derive(Debug)]
-pub struct DeviceBox<T: Send + ?Sized> {
-    _device_id: usize,
-    dtype: PhantomData<T>,
+pub struct DeviceBox {
+    device_id: usize,
     cudptr: CUdeviceptr,
     len: usize,
 }
 
-unsafe impl<T: Send + ?Sized> Send for DeviceBox<T> {}
-unsafe impl<T: Send + ?Sized> Sync for DeviceBox<T> {}
+unsafe impl Send for DeviceBox {}
+unsafe impl Sync for DeviceBox {}
 
-impl<T: Send + ?Sized> Drop for DeviceBox<T> {
+impl Drop for DeviceBox {
     fn drop(&mut self) {
         unsafe {
             // Safety: The CUDA driver is guaranteed to complete any queued async operations.
-            with_deallocator_stream(self._device_id, |stream| {
+            with_deallocator_stream(self.device_id, |stream| {
                 free_async(self.cudptr, stream);
             })
             .unwrap_or_else(|_| {
                 panic!(
                     "Failed to free device pointer on device_id={}",
-                    self._device_id
+                    self.device_id
                 )
             })
         }
     }
 }
 
-impl<DType: Send + Sized> DeviceBox<[DType]> {
-    /// Constructs a `DeviceBox<[DType]>` from a raw device pointer, length, and device id.
+impl DeviceBox {
+    /// Constructs a `DeviceBox` from a raw device pointer, byte length, and device id.
     ///
     /// # Safety
-    /// The caller must ensure `dptr` points to a valid device allocation of at least `len` elements.
-    pub unsafe fn from_raw_parts(dptr: CUdeviceptr, len: usize, device_id: usize) -> Self {
+    /// The caller must ensure `dptr` points to a valid device allocation of at least
+    /// `len_bytes` bytes.
+    pub unsafe fn from_raw_parts(dptr: CUdeviceptr, len_bytes: usize, device_id: usize) -> Self {
         Self {
-            dtype: PhantomData,
             cudptr: dptr,
-            len,
-            _device_id: device_id,
+            len: len_bytes,
+            device_id,
         }
     }
-    /// Returns whether there is no element in the device slice.
+    /// Returns whether the allocation is empty (zero bytes).
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
-    /// Returns the number of elements in the device slice.
+    /// Returns the byte length of the allocation.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -82,13 +96,6 @@ impl<DType: Send + Sized> DeviceBox<[DType]> {
     }
     /// Returns the device id this allocation belongs to.
     pub fn device_id(&self) -> usize {
-        self._device_id
-    }
-    /// Returns a non-owning `DevicePointer` to the underlying allocation.
-    pub fn device_pointer(&self) -> DevicePointer<DType> {
-        DevicePointer::<DType> {
-            dtype: PhantomData,
-            dptr: self.cudptr,
-        }
+        self.device_id
     }
 }
