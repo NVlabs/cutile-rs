@@ -39,12 +39,6 @@ We are excited to release this research project as a demonstration of how GPU pr
 
 Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
 
-# Built with cuTile Rust
-
-| Project | Description |
-|---------|-------------|
-| [Grout](https://github.com/huggingface/grout) | Qwen 3 inference engine in Rust by Hugging Face |
-
 # Setup
 
 ## Requirements
@@ -210,6 +204,12 @@ nix develop
 ```
 
 The flake automatically locates host NVIDIA driver libraries on both NixOS and non-NixOS systems.
+
+# Built with cuTile Rust
+
+| Project | Description |
+|---------|-------------|
+| [Grout](https://github.com/huggingface/grout) | Qwen 3 inference engine in Rust by Hugging Face |
 
 # License
 The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
