@@ -490,10 +490,10 @@ impl<T: DType> Tensor<T> {
             "Tensor shape/stride rank mismatch."
         );
 
-        let logical_num_bytes = checked_num_bytes_i32::<T>(shape)
+        let num_bytes = checked_num_bytes_i32::<T>(shape)
             .expect("Tensor shape contains invalid dimensions or overflows.");
         assert_eq!(
-            logical_num_bytes, storage_num_bytes,
+            num_bytes, storage_num_bytes,
             "Tensor logical byte size must match storage byte size."
         );
     }
@@ -505,7 +505,7 @@ impl<T: DType> Tensor<T> {
         shape: Vec<i32>,
         strides: Vec<i32>,
     ) -> Self {
-        Self::assert_valid_metadata(&shape, &strides, device_box.len());
+        Self::assert_valid_metadata(&shape, &strides, device_box.len_bytes());
         Self {
             storage: Arc::new(device_box),
             shape,
@@ -533,17 +533,17 @@ impl<T: DType> Tensor<T> {
 
     // Returns the physical byte length of the shared backing allocation.
     fn storage_num_bytes(&self) -> usize {
-        self.storage.len()
+        self.storage.len_bytes()
     }
 
     // Returns the logical element count described by the tensor's shape metadata.
-    fn logical_num_elements(&self) -> usize {
+    fn num_elements(&self) -> usize {
         checked_num_elements_i32(&self.shape)
             .expect("Tensor shape contains invalid dimensions or overflows.")
     }
 
-    // Returns the logical byte size implied by shape metadata and dtype T.
-    fn logical_num_bytes(&self) -> usize {
+    // Returns the byte size implied by shape metadata and dtype T.
+    fn typed_num_bytes(&self) -> usize {
         checked_num_bytes_i32::<T>(&self.shape)
             .expect("Tensor shape contains invalid dimensions or overflows.")
     }
@@ -555,7 +555,7 @@ impl<T: DType> Tensor<T> {
             return tensor_error_result("Zero-copy tensor views require contiguous storage.");
         }
         let target_num_bytes = checked_num_bytes::<T>(shape)?;
-        if target_num_bytes != self.logical_num_bytes() {
+        if target_num_bytes != self.typed_num_bytes() {
             return tensor_error_result("View shape must preserve tensor size.");
         }
         Ok(())
@@ -568,7 +568,7 @@ impl<T: DType> Tensor<T> {
             return tensor_error_result("Zero-copy reinterpret requires contiguous storage.");
         }
         let target_num_bytes = checked_num_bytes::<U>(shape)?;
-        if target_num_bytes != self.logical_num_bytes() {
+        if target_num_bytes != self.typed_num_bytes() {
             return tensor_error_result("Reinterpret shape must preserve total byte size.");
         }
         let alignment = align_of::<U>() as u64;
@@ -638,8 +638,8 @@ impl<T: DType> Tensor<T> {
 
     /// Returns the total number of elements in the tensor.
     pub fn size(&self) -> usize {
-        debug_assert_eq!(self.logical_num_bytes(), self.storage_num_bytes());
-        self.logical_num_elements()
+        debug_assert_eq!(self.typed_num_bytes(), self.storage_num_bytes());
+        self.num_elements()
     }
 
     /// Creates a copy of this tensor on the GPU.
@@ -657,9 +657,9 @@ impl<T: DType> Tensor<T> {
 
     /// Returns the total size of the tensor in bytes.
     pub fn num_bytes(self: &Arc<Self>) -> usize {
-        let logical_num_bytes = self.logical_num_bytes();
-        debug_assert_eq!(logical_num_bytes, self.storage_num_bytes());
-        logical_num_bytes
+        let n = self.typed_num_bytes();
+        debug_assert_eq!(n, self.storage_num_bytes());
+        n
     }
 
     /// Returns the size of the tensor in megabytes (base 10).

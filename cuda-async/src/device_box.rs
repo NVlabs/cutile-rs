@@ -84,10 +84,10 @@ impl DeviceBox {
     }
     /// Returns whether the allocation is empty (zero bytes).
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len_bytes() == 0
     }
     /// Returns the byte length of the allocation.
-    pub fn len(&self) -> usize {
+    pub fn len_bytes(&self) -> usize {
         self.len
     }
     /// Returns the raw CUDA device pointer.
