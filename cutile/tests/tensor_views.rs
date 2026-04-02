@@ -94,7 +94,7 @@ fn arc_views_work_with_different_rank_kernels() {
 
         let output_1d = api::zeros::<1, f32>([4]).sync().expect("Failed.");
         let (result_1d, _input_1d) =
-            tensor_views_module::passthrough_1d_sync(output_1d.partition([4]), input_1d)
+            tensor_views_module::passthrough_1d(output_1d.partition([4]), input_1d)
                 .sync()
                 .expect("Failed.");
         let host_1d: Vec<f32> = result_1d
@@ -105,7 +105,7 @@ fn arc_views_work_with_different_rank_kernels() {
 
         let output_2d = api::zeros::<2, f32>([2, 2]).sync().expect("Failed.");
         let (result_2d, _input_2d) =
-            tensor_views_module::passthrough_2d_sync(output_2d.partition([2, 2]), input_2d)
+            tensor_views_module::passthrough_2d(output_2d.partition([2, 2]), input_2d)
                 .sync()
                 .expect("Failed.");
         let host_2d: Vec<f32> = result_2d

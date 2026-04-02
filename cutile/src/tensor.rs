@@ -567,7 +567,7 @@ impl<T: DType> Tensor<T> {
 
     // Validates zero-copy reinterpret by checking total byte size and target-type
     // alignment on top of the same contiguous-layout requirement as views.
-    fn validate_reinterpret_shape<U: WithDType>(&self, shape: &[usize]) -> Result<(), Error> {
+    fn validate_reinterpret_shape<U: DType>(&self, shape: &[usize]) -> Result<(), Error> {
         if !self.is_contiguous() {
             return tensor_error_result("Zero-copy reinterpret requires contiguous storage.");
         }
@@ -804,7 +804,7 @@ impl<T: DType> Tensor<T> {
     }
 
     /// Creates a zero-copy reinterpret view with a new static shape.
-    pub fn try_reinterpret<U: WithDType, const RANK: usize>(
+    pub fn try_reinterpret<U: DType, const RANK: usize>(
         self: &Arc<Self>,
         shape: [usize; RANK],
     ) -> Result<Arc<Tensor<U>>, Error> {
@@ -812,7 +812,7 @@ impl<T: DType> Tensor<T> {
     }
 
     /// Creates a zero-copy reinterpret view with a new runtime shape.
-    pub fn try_reinterpret_dyn<U: WithDType>(
+    pub fn try_reinterpret_dyn<U: DType>(
         self: &Arc<Self>,
         shape: &[usize],
     ) -> Result<Arc<Tensor<U>>, Error> {
@@ -845,7 +845,7 @@ impl<T: DType> Tensor<T> {
     ///
     /// Panics if the tensor is not contiguous, if the target shape does not preserve
     /// total byte size, or if pointer alignment is incompatible with the target type.
-    pub fn reinterpret<U: WithDType, const RANK: usize>(
+    pub fn reinterpret<U: DType, const RANK: usize>(
         self: &Arc<Self>,
         shape: [usize; RANK],
     ) -> Arc<Tensor<U>> {
@@ -854,7 +854,7 @@ impl<T: DType> Tensor<T> {
     }
 
     /// Creates a zero-copy reinterpret view with a new runtime shape.
-    pub fn reinterpret_dyn<U: WithDType>(self: &Arc<Self>, shape: &[usize]) -> Arc<Tensor<U>> {
+    pub fn reinterpret_dyn<U: DType>(self: &Arc<Self>, shape: &[usize]) -> Arc<Tensor<U>> {
         self.try_reinterpret_dyn(shape)
             .expect("Failed to reinterpret tensor storage.")
     }

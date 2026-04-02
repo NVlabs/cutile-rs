@@ -138,7 +138,6 @@
 use crate::kernels::conversion::convert_apply;
 use crate::kernels::creation::{arange_apply, full_apply};
 use crate::tensor::{IntoPartition, Tensor, Unpartition};
-use candle_core::{FloatDType, WithDType};
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
