@@ -23,7 +23,7 @@ use crate::error::*;
 use crate::tensor::{IntoPartition, IntoPartitionArc, Partition, Tensor};
 
 pub use cuda_async::{
-    device_box::*, device_context::*, device_future::*, device_operation::*, launch::*,
+    device_buffer::*, device_context::*, device_future::*, device_operation::*, launch::*,
     scheduling_policies::*,
 };
 

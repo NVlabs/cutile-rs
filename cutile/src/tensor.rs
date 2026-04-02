@@ -21,7 +21,7 @@
 //!
 //! A [`Tensor<T>`] represents a multi-dimensional array stored in GPU memory. Key features:
 //!
-//! - **Automatic memory management**: Uses RAII via [`DeviceBox`]
+//! - **Automatic memory management**: Uses RAII via [`DeviceBuffer`]
 //! - **Shape tracking**: Maintains shape and stride information
 //! - **Zero-copy operations**: Reshape and view operations don't copy data
 //! - **Safe concurrency**: `Send + Sync` for safe sharing across async tasks
@@ -204,7 +204,7 @@ use crate::api::{copy, copy_device_to_host_vec, copy_host_vec_to_device};
 use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
-use cuda_async::device_box::{DeviceBox, DevicePointer};
+use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOperation};
 use cuda_async::error::DeviceError;
@@ -385,12 +385,12 @@ pub trait IntoPartitionArc {
 /// A multi-dimensional array stored in GPU memory.
 ///
 /// `Tensor` is the primary type for working with GPU data in cuTile Rust. It wraps a
-/// [`DeviceBox`] with shape and stride information, providing a typed, multi-dimensional
+/// [`DeviceBuffer`] with shape and stride information, providing a typed, multi-dimensional
 /// view of GPU memory.
 ///
 /// ## Memory Management
 ///
-/// Tensors share GPU memory ownership through `Arc<DeviceBox>`. Memory is automatically
+/// Tensors share GPU memory ownership through `Arc<DeviceBuffer>`. Memory is automatically
 /// freed when the last reference is dropped. For shared tensor ownership, use
 /// `Arc<Tensor<T>>`, which enables zero-copy views over the same storage.
 ///
@@ -430,7 +430,7 @@ pub trait IntoPartitionArc {
 /// ```
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
-    pub(crate) storage: Arc<DeviceBox>,
+    pub(crate) storage: Arc<DeviceBuffer>,
     pub shape: Vec<i32>,
     pub strides: Vec<i32>,
     _dtype: PhantomData<T>,
@@ -500,14 +500,14 @@ impl<T: DType> Tensor<T> {
 
     /// Wraps an owned byte allocation as a tensor after validating that the supplied
     /// shape/stride metadata is consistent with the allocation size.
-    pub(crate) fn from_device_box(
-        device_box: DeviceBox,
+    pub(crate) fn from_device_buffer(
+        device_buffer: DeviceBuffer,
         shape: Vec<i32>,
         strides: Vec<i32>,
     ) -> Self {
-        Self::assert_valid_metadata(&shape, &strides, device_box.len_bytes());
+        Self::assert_valid_metadata(&shape, &strides, device_buffer.len_bytes());
         Self {
-            storage: Arc::new(device_box),
+            storage: Arc::new(device_buffer),
             shape,
             strides,
             _dtype: PhantomData,
@@ -524,8 +524,8 @@ impl<T: DType> Tensor<T> {
         strides: Vec<i32>,
     ) -> Self {
         Self::assert_valid_metadata(&shape, &strides, len_bytes);
-        Self::from_device_box(
-            DeviceBox::from_raw_parts(dptr, len_bytes, device_id),
+        Self::from_device_buffer(
+            DeviceBuffer::from_raw_parts(dptr, len_bytes, device_id),
             shape,
             strides,
         )
