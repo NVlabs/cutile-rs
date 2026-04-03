@@ -39,12 +39,6 @@ fn from_raw_parts_rejects_shape_storage_mismatch() {
     // Four bytes of storage cannot describe a Tensor<u32> with shape [2], which would
     // logically require eight bytes.
     let _ = unsafe {
-        Tensor::<u32>::from_raw_parts(
-            base.cu_deviceptr(),
-            4,
-            base.device_id(),
-            vec![2],
-            vec![1],
-        )
+        Tensor::<u32>::from_raw_parts(base.cu_deviceptr(), 4, base.device_id(), vec![2], vec![1])
     };
 }
