@@ -516,7 +516,7 @@ impl<T: DType> Tensor<T> {
 
     /// Rebuilds a tensor from raw device allocation parts and validates the metadata
     /// against the provided byte length before taking ownership of the pointer.
-    pub(crate) unsafe fn from_raw_parts(
+    pub unsafe fn from_raw_parts(
         dptr: CUdeviceptr,
         len_bytes: usize,
         device_id: usize,
@@ -629,6 +629,10 @@ impl<T: DType> Tensor<T> {
 
     pub fn cu_deviceptr(&self) -> CUdeviceptr {
         self.storage.cu_deviceptr()
+    }
+
+    pub fn device_id(&self) -> usize {
+        self.storage.device_id()
     }
 
     /// Returns a typed device pointer.
@@ -1005,56 +1009,5 @@ impl<T: DType> IntoIterator for DeviceVec<Tensor<T>> {
     type IntoIter = DeviceVecIntoIter<Tensor<T>>;
     fn into_iter(self) -> Self::IntoIter {
         DeviceVecIntoIter { items: self }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Tensor;
-    use crate::api;
-    use cuda_async::device_operation::DeviceOperation;
-    use std::mem::forget;
-    use std::sync::Arc;
-
-    #[test]
-    fn reinterpret_rejects_misaligned_storage() {
-        let base = Arc::new(api::zeros::<1, u8>([8]).sync().expect("Failed."));
-        // Test: reinterpret must reject storage whose base pointer is not aligned
-        // for the target dtype, even when the byte count itself would otherwise fit.
-        // Shift the pointer by one byte so the storage is no longer aligned for u32.
-        let misaligned = Arc::new(unsafe {
-            Tensor::<u8>::from_raw_parts(
-                base.cu_deviceptr() + 1,
-                4,
-                base.storage.device_id(),
-                vec![4],
-                vec![1],
-            )
-        });
-
-        assert!(misaligned.try_reinterpret::<u32, 1>([1]).is_err());
-
-        // The misaligned tensor is a borrowed view onto `base`'s allocation and must not free it.
-        forget(misaligned);
-    }
-
-    #[test]
-    #[should_panic(expected = "Tensor logical byte size must match storage byte size.")]
-    fn from_raw_parts_rejects_shape_storage_mismatch() {
-        let base = Arc::new(api::zeros::<1, u8>([4]).sync().expect("Failed."));
-
-        // Test: raw tensor construction must preserve the invariant that logical
-        // tensor bytes derived from shape/dtype exactly match the backing storage size.
-        // Four bytes of storage cannot describe a Tensor<u32> with shape [2], which would
-        // logically require eight bytes.
-        let _ = unsafe {
-            Tensor::<u32>::from_raw_parts(
-                base.cu_deviceptr(),
-                4,
-                base.storage.device_id(),
-                vec![2],
-                vec![1],
-            )
-        };
     }
 }
