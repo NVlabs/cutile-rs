@@ -10,3 +10,6 @@ mod common;
 
 #[path = "gpu/error_quality.rs"]
 mod error_quality;
+
+#[path = "gpu/tensor.rs"]
+mod tensor;
