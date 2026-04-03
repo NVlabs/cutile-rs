@@ -1375,6 +1375,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     match (src_elem_ty.as_str(), dst_elem_ty.as_str()) {
                         ("i32", "u32") => {}
                         ("i64", "u64") => {}
+                        ("i32", "usize") => {}
+                        ("usize", "i32") => {}
                         _ => {
                             return self.jit_error_result(
                                 &cast_expr.span(),

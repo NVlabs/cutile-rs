@@ -256,6 +256,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     args.push(type_param.clone());
                     continue;
                 }
+                // Required-but-deferred params: if not yet resolved, the type
+                // cannot be fully compiled at this point.
+                match optional_type_param.as_str() {
+                    "tensor_view" | "strides" => return Ok(None),
+                    _ => {}
+                }
             }
             let type_instance = type_instance.expect("Failed to instantiate type.");
             return Ok(Some(TileRustType::new_structured_type(
@@ -384,11 +390,19 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
                 let mut call_arg_rust_tys = vec![];
                 let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
+                let mut arg_string_values: HashMap<String, String> = HashMap::new();
                 for (i, param_name) in get_sig_param_names(&impl_method.sig).iter().enumerate() {
                     if i < call_arg_values.len() {
                         let call_arg_val = &call_arg_values[i];
                         let call_arg_ty = call_arg_val.ty.clone();
                         call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
+                        if let Some(ref string_lit_expr) = call_arg_val.string_literal {
+                            if let Expr::Lit(lit_expr) = string_lit_expr {
+                                if let syn::Lit::Str(s) = &lit_expr.lit {
+                                    arg_string_values.insert(param_name.to_string(), s.value());
+                                }
+                            }
+                        }
                         arg_types.insert(param_name.to_string(), call_arg_ty);
                     }
                 }
@@ -436,15 +450,17 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 Some(arg_type) => {
                                     let cuda_tile_type_str = arg_type.get_cuda_tile_type_str();
                                     let type_instance = Some(arg_type.type_instance.clone());
-                                    type_params.insert(
-                                        type_param_name.to_string(),
-                                        TypeParam::derive_param_from_type(
-                                            type_param_name,
-                                            arg_type.rust_ty.clone(),
-                                            cuda_tile_type_str,
-                                            type_instance,
-                                        ),
+                                    let mut type_param = TypeParam::derive_param_from_type(
+                                        type_param_name.clone(),
+                                        arg_type.rust_ty.clone(),
+                                        cuda_tile_type_str,
+                                        type_instance,
                                     );
+                                    if let TypeParam::Padding(ref mut padding) = type_param {
+                                        padding.padding_value =
+                                            arg_string_values.get(&type_param_name).cloned();
+                                    }
+                                    type_params.insert(type_param_name.to_string(), type_param);
                                 }
                                 None => {
                                     return self.jit_error_result(
@@ -504,12 +520,21 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
                         let mut call_arg_rust_tys = vec![];
                         let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
+                        let mut arg_string_values: HashMap<String, String> = HashMap::new();
                         for (i, param_name) in get_sig_param_names(&fn_item.sig).iter().enumerate()
                         {
                             if i < call_arg_values.len() {
                                 let call_arg_val = &call_arg_values[i];
                                 let call_arg_ty = call_arg_val.ty.clone();
                                 call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
+                                if let Some(ref string_lit_expr) = call_arg_val.string_literal {
+                                    if let Expr::Lit(lit_expr) = string_lit_expr {
+                                        if let syn::Lit::Str(s) = &lit_expr.lit {
+                                            arg_string_values
+                                                .insert(param_name.to_string(), s.value());
+                                        }
+                                    }
+                                }
                                 arg_types.insert(param_name.to_string(), call_arg_ty);
                             }
                         }
@@ -559,15 +584,20 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         Some(arg_type) => {
                                             let cuda_tile_type_str =
                                                 arg_type.get_cuda_tile_type_str();
-                                            type_params.insert(
-                                                type_param_name.to_string(),
-                                                TypeParam::derive_param_from_type(
-                                                    type_param_name,
-                                                    arg_type.rust_ty.clone(),
-                                                    cuda_tile_type_str,
-                                                    Some(arg_type.type_instance.clone()),
-                                                ),
+                                            let mut type_param = TypeParam::derive_param_from_type(
+                                                type_param_name.clone(),
+                                                arg_type.rust_ty.clone(),
+                                                cuda_tile_type_str,
+                                                Some(arg_type.type_instance.clone()),
                                             );
+                                            if let TypeParam::Padding(ref mut padding) = type_param
+                                            {
+                                                padding.padding_value = arg_string_values
+                                                    .get(&type_param_name)
+                                                    .cloned();
+                                            }
+                                            type_params
+                                                .insert(type_param_name.to_string(), type_param);
                                         }
                                         None => {
                                             return self.jit_error_result(
