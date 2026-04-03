@@ -374,6 +374,16 @@ mod memory_and_atomic_ops_module {
 
         output.store(old_values);
     }
+
+    #[cutile::entry()]
+    fn padded_partition_view_kernel<const S: [i32; 1]>(input: &Tensor<f32, S>) {
+        let token: Token = new_token_unordered();
+        let shape = input.shape();
+        let partition: Partition<f32, S> =
+            make_partition_view_padded(input, shape, "neg_inf", token);
+        let idx: [i32; 1] = [0i32];
+        let _tile: Tile<f32, S> = load_from_view(&partition, idx);
+    }
 }
 
 use memory_and_atomic_ops_module::_module_asts;
@@ -1123,5 +1133,41 @@ fn compile_atomic_xchg() -> () {
         );
 
         println!("\n✓ atomic_xchg_tko verified");
+    });
+}
+
+#[test]
+fn compile_padded_partition_view() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "memory_and_atomic_ops_module",
+            "padded_partition_view_kernel",
+            &[128.to_string()],
+            &[("input", &[1])],
+            None,
+            gpu_name,
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== PADDED_PARTITION_VIEW MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("make_partition_view"),
+            "Expected make_partition_view operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("padding_value = neg_inf"),
+            "Expected padding_value = neg_inf in partition_view type"
+        );
+
+        println!("\n✓ make_partition_view_padded with neg_inf padding verified");
     });
 }

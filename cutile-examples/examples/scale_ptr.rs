@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Demonstrates PointerTile reshape/broadcast and for-loop step_by.
+//! Demonstrates PointerTile reshape/broadcast and for-loop step_by with grid stride.
 //!
 //! This example implements a pointer-based vector scale kernel that:
 //! 1. Constructs pointer tiles using the reshape + broadcast pattern
 //!    (matching the cuTile-python/nv-triton pointer scatter/gather idiom).
-//! 2. Iterates over the input in fixed-size chunks using step_by.
+//! 2. Uses a persistent-kernel style grid-stride loop via step_by(grid.0 as usize).
 //!
 //! The reshape/broadcast pattern avoids the ptr-to-int/int-to-ptr workaround
 //! that was previously required for PointerTile shape manipulation.
@@ -26,6 +26,9 @@ mod my_module {
 
     #[cutile::entry()]
     unsafe fn scale_ptr(out_ptr: *mut f32, in_ptr: *mut f32, scale: f32, len: i32) {
+        let grid = get_num_tile_blocks();
+        let pid = get_tile_block_id();
+
         // Build pointer tiles using reshape + broadcast.
         // This is the standard cuTile-python/nv-triton pattern:
         //   base_ptr -> reshape [1] -> broadcast [TILE_SIZE]
@@ -40,8 +43,10 @@ mod my_module {
         let scale_tile: Tile<f32, { [128] }> = broadcast_scalar(scale, const_shape![128]);
         let len_tile: Tile<i32, { [128] }> = broadcast_scalar(len, const_shape![128]);
 
-        // Process the array in chunks of 128 using step_by.
-        for offset in (0i32..len).step_by(128) {
+        // Grid-stride loop: each block starts at pid.0 * 128 and steps by grid.0 * 128.
+        let start: i32 = pid.0 * 128i32;
+        let step: i32 = grid.0 * 128i32;
+        for offset in (start..len).step_by(step as usize) {
             let offsets: Tile<i32, { [128] }> =
                 iota(const_shape![128]) + broadcast_scalar(offset, const_shape![128]);
             let mask: Tile<bool, { [128] }> = lt_tile(offsets, len_tile);
@@ -72,8 +77,9 @@ async fn main() -> Result<(), cutile::error::Error> {
     let out_ptr = output.device_pointer();
     let in_ptr = input.device_pointer();
 
-    // Single tile block processes all elements via the step_by loop.
-    let op = unsafe { scale_ptr(out_ptr, in_ptr, scale, len as i32) }.grid((1, 1, 1));
+    // Multiple blocks process elements via the grid-stride loop.
+    let num_blocks = 4u32;
+    let op = unsafe { scale_ptr(out_ptr, in_ptr, scale, len as i32) }.grid((num_blocks, 1, 1));
     tokio::spawn(op.into_future())
         .await
         .expect("Failed to execute tokio task.")?;

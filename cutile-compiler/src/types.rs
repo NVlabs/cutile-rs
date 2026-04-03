@@ -39,6 +39,8 @@ pub enum TypeParam {
     // TODO (hme): Can we rename this to Type?
     /// Nested tensor view type parameter.
     TensorView(TypeParamTensorView),
+    /// Padding value parameter (e.g. `padding_value = neg_inf`).
+    Padding(TypeParamPadding),
 }
 
 impl TypeParam {
@@ -51,6 +53,7 @@ impl TypeParam {
             TypeParam::Tile(tp) => tp.name.clone(),
             TypeParam::TensorView(tp) => tp.name.clone(),
             TypeParam::DimMap(tp) => tp.name.clone(),
+            TypeParam::Padding(tp) => tp.name.clone(),
         }
     }
     /// Resolves this type parameter to a concrete MLIR type string.
@@ -66,6 +69,7 @@ impl TypeParam {
             TypeParam::Tile(tp) => tp.instantiate(generic_args, primitives),
             TypeParam::TensorView(tp) => tp.instantiate(generic_args, primitives),
             TypeParam::DimMap(tp) => tp.instantiate(generic_args, primitives),
+            TypeParam::Padding(tp) => tp.instantiate(),
         }
     }
     /// Constructs the appropriate `TypeParam` variant from a parameter name and Rust type.
@@ -120,6 +124,10 @@ impl TypeParam {
                 rust_ty,
                 cuda_tile_ty,
                 type_instance,
+            }),
+            "padding" | "padding_value" => TypeParam::Padding(TypeParamPadding {
+                name: Some(name),
+                padding_value: None,
             }),
             _ => panic!("Unexpected TypeParam name {name}"), // Internal error: unknown TypeParam variant
         }
@@ -333,6 +341,26 @@ impl TypeParamTensorView {
             "Cannot instantiate TypeParamTensorView from type {:?}",
             self.rust_ty.to_token_stream().to_string()
         ))
+    }
+}
+
+/// A padding value parameter for partition views (e.g. `padding_value = neg_inf`).
+#[derive(Debug, Clone)]
+pub struct TypeParamPadding {
+    pub name: Option<String>,
+    /// The padding value string (e.g. "neg_inf", "zero"). Set after creation
+    /// from the string literal argument.
+    pub padding_value: Option<String>,
+}
+
+impl TypeParamPadding {
+    fn instantiate(&self) -> Result<String, JITError> {
+        match &self.padding_value {
+            Some(val) => Ok(format!("padding_value = {val}")),
+            None => SourceLocation::unknown().jit_error_result(
+                "Padding TypeParam has no value set; the string literal was not resolved",
+            ),
+        }
     }
 }
 
