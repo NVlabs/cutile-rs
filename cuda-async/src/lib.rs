@@ -6,7 +6,7 @@
 //! Async runtime for CUDA device operations, providing futures-based kernel launching
 //! and device memory management.
 
-pub mod device_box;
+pub mod device_buffer;
 pub mod device_context;
 pub mod device_future;
 pub mod device_operation;

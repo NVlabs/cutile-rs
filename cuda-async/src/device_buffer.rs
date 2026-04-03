@@ -39,20 +39,20 @@ impl<T> DevicePointer<T> {
 
 /// An owning, type-erased handle to a CUDA device memory allocation, freed asynchronously on drop.
 ///
-/// `DeviceBox` manages a raw byte buffer on the GPU. It stores only the device pointer,
+/// `DeviceBuffer` manages a raw byte buffer on the GPU. It stores only the device pointer,
 /// byte length, and device id — all type information lives in higher-level wrappers
 /// such as `Tensor<T>`.
 #[derive(Debug)]
-pub struct DeviceBox {
+pub struct DeviceBuffer {
     device_id: usize,
     cudptr: CUdeviceptr,
     len: usize,
 }
 
-unsafe impl Send for DeviceBox {}
-unsafe impl Sync for DeviceBox {}
+unsafe impl Send for DeviceBuffer {}
+unsafe impl Sync for DeviceBuffer {}
 
-impl Drop for DeviceBox {
+impl Drop for DeviceBuffer {
     fn drop(&mut self) {
         unsafe {
             // Safety: The CUDA driver is guaranteed to complete any queued async operations.
@@ -69,8 +69,8 @@ impl Drop for DeviceBox {
     }
 }
 
-impl DeviceBox {
-    /// Constructs a `DeviceBox` from a raw device pointer, byte length, and device id.
+impl DeviceBuffer {
+    /// Constructs a `DeviceBuffer` from a raw device pointer, byte length, and device id.
     ///
     /// # Safety
     /// The caller must ensure `dptr` points to a valid device allocation of at least
@@ -84,10 +84,10 @@ impl DeviceBox {
     }
     /// Returns whether the allocation is empty (zero bytes).
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len_bytes() == 0
     }
     /// Returns the byte length of the allocation.
-    pub fn len(&self) -> usize {
+    pub fn len_bytes(&self) -> usize {
         self.len
     }
     /// Returns the raw CUDA device pointer.

@@ -11,19 +11,19 @@ print_header "Running CPU tests"
 
 run_step \
     "cuda-tile-rs tests" \
-    cargo test -p cuda-tile-rs --quiet
+    cargo test -p cuda-tile-rs
 
 run_step \
     "cutile-compiler CPU unit tests" \
-    cargo test -p cutile-compiler --lib --quiet
+    cargo test -p cutile-compiler --lib
 
 run_step \
     "cutile-compiler doc tests" \
-    cargo test -p cutile-compiler --doc --quiet
+    cargo test -p cutile-compiler --doc
 
 run_step \
     "cutile library tests" \
-    cargo test -p cutile --lib --quiet
+    cargo test -p cutile --lib
 
 print_summary_and_exit \
     "All CPU tests passed!" \

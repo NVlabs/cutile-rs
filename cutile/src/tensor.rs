@@ -21,7 +21,7 @@
 //!
 //! A [`Tensor<T>`] represents a multi-dimensional array stored in GPU memory. Key features:
 //!
-//! - **Automatic memory management**: Uses RAII via [`DeviceBox`]
+//! - **Automatic memory management**: Uses RAII via [`DeviceBuffer`]
 //! - **Shape tracking**: Maintains shape and stride information
 //! - **Zero-copy operations**: Reshape and view operations don't copy data
 //! - **Safe concurrency**: `Send + Sync` for safe sharing across async tasks
@@ -204,7 +204,7 @@ use crate::api::{copy, copy_device_to_host_vec, copy_host_vec_to_device};
 use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
-use cuda_async::device_box::{DeviceBox, DevicePointer};
+use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOperation};
 use cuda_async::error::DeviceError;
@@ -385,12 +385,12 @@ pub trait IntoPartitionArc {
 /// A multi-dimensional array stored in GPU memory.
 ///
 /// `Tensor` is the primary type for working with GPU data in cuTile Rust. It wraps a
-/// [`DeviceBox`] with shape and stride information, providing a typed, multi-dimensional
+/// [`DeviceBuffer`] with shape and stride information, providing a typed, multi-dimensional
 /// view of GPU memory.
 ///
 /// ## Memory Management
 ///
-/// Tensors share GPU memory ownership through `Arc<DeviceBox>`. Memory is automatically
+/// Tensors share GPU memory ownership through `Arc<DeviceBuffer>`. Memory is automatically
 /// freed when the last reference is dropped. For shared tensor ownership, use
 /// `Arc<Tensor<T>>`, which enables zero-copy views over the same storage.
 ///
@@ -430,7 +430,7 @@ pub trait IntoPartitionArc {
 /// ```
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
-    pub(crate) storage: Arc<DeviceBox>,
+    pub(crate) storage: Arc<DeviceBuffer>,
     pub shape: Vec<i32>,
     pub strides: Vec<i32>,
     _dtype: PhantomData<T>,
@@ -490,24 +490,24 @@ impl<T: DType> Tensor<T> {
             "Tensor shape/stride rank mismatch."
         );
 
-        let logical_num_bytes = checked_num_bytes_i32::<T>(shape)
+        let num_bytes = checked_num_bytes_i32::<T>(shape)
             .expect("Tensor shape contains invalid dimensions or overflows.");
         assert_eq!(
-            logical_num_bytes, storage_num_bytes,
+            num_bytes, storage_num_bytes,
             "Tensor logical byte size must match storage byte size."
         );
     }
 
     /// Wraps an owned byte allocation as a tensor after validating that the supplied
     /// shape/stride metadata is consistent with the allocation size.
-    pub(crate) fn from_device_box(
-        device_box: DeviceBox,
+    pub(crate) fn from_device_buffer(
+        device_buffer: DeviceBuffer,
         shape: Vec<i32>,
         strides: Vec<i32>,
     ) -> Self {
-        Self::assert_valid_metadata(&shape, &strides, device_box.len());
+        Self::assert_valid_metadata(&shape, &strides, device_buffer.len_bytes());
         Self {
-            storage: Arc::new(device_box),
+            storage: Arc::new(device_buffer),
             shape,
             strides,
             _dtype: PhantomData,
@@ -516,7 +516,7 @@ impl<T: DType> Tensor<T> {
 
     /// Rebuilds a tensor from raw device allocation parts and validates the metadata
     /// against the provided byte length before taking ownership of the pointer.
-    pub(crate) unsafe fn from_raw_parts(
+    pub unsafe fn from_raw_parts(
         dptr: CUdeviceptr,
         len_bytes: usize,
         device_id: usize,
@@ -524,8 +524,8 @@ impl<T: DType> Tensor<T> {
         strides: Vec<i32>,
     ) -> Self {
         Self::assert_valid_metadata(&shape, &strides, len_bytes);
-        Self::from_device_box(
-            DeviceBox::from_raw_parts(dptr, len_bytes, device_id),
+        Self::from_device_buffer(
+            DeviceBuffer::from_raw_parts(dptr, len_bytes, device_id),
             shape,
             strides,
         )
@@ -533,17 +533,17 @@ impl<T: DType> Tensor<T> {
 
     // Returns the physical byte length of the shared backing allocation.
     fn storage_num_bytes(&self) -> usize {
-        self.storage.len()
+        self.storage.len_bytes()
     }
 
     // Returns the logical element count described by the tensor's shape metadata.
-    fn logical_num_elements(&self) -> usize {
+    fn num_elements(&self) -> usize {
         checked_num_elements_i32(&self.shape)
             .expect("Tensor shape contains invalid dimensions or overflows.")
     }
 
-    // Returns the logical byte size implied by shape metadata and dtype T.
-    fn logical_num_bytes(&self) -> usize {
+    // Returns the byte size implied by shape metadata and dtype T.
+    fn typed_num_bytes(&self) -> usize {
         checked_num_bytes_i32::<T>(&self.shape)
             .expect("Tensor shape contains invalid dimensions or overflows.")
     }
@@ -555,7 +555,7 @@ impl<T: DType> Tensor<T> {
             return tensor_error_result("Zero-copy tensor views require contiguous storage.");
         }
         let target_num_bytes = checked_num_bytes::<T>(shape)?;
-        if target_num_bytes != self.logical_num_bytes() {
+        if target_num_bytes != self.typed_num_bytes() {
             return tensor_error_result("View shape must preserve tensor size.");
         }
         Ok(())
@@ -568,7 +568,7 @@ impl<T: DType> Tensor<T> {
             return tensor_error_result("Zero-copy reinterpret requires contiguous storage.");
         }
         let target_num_bytes = checked_num_bytes::<U>(shape)?;
-        if target_num_bytes != self.logical_num_bytes() {
+        if target_num_bytes != self.typed_num_bytes() {
             return tensor_error_result("Reinterpret shape must preserve total byte size.");
         }
         let alignment = align_of::<U>() as u64;
@@ -631,6 +631,10 @@ impl<T: DType> Tensor<T> {
         self.storage.cu_deviceptr()
     }
 
+    pub fn device_id(&self) -> usize {
+        self.storage.device_id()
+    }
+
     /// Returns a typed device pointer.
     pub fn device_pointer(&self) -> DevicePointer<T> {
         unsafe { DevicePointer::from_cu_deviceptr(self.cu_deviceptr()) }
@@ -638,8 +642,8 @@ impl<T: DType> Tensor<T> {
 
     /// Returns the total number of elements in the tensor.
     pub fn size(&self) -> usize {
-        debug_assert_eq!(self.logical_num_bytes(), self.storage_num_bytes());
-        self.logical_num_elements()
+        debug_assert_eq!(self.typed_num_bytes(), self.storage_num_bytes());
+        self.num_elements()
     }
 
     /// Creates a copy of this tensor on the GPU.
@@ -657,9 +661,9 @@ impl<T: DType> Tensor<T> {
 
     /// Returns the total size of the tensor in bytes.
     pub fn num_bytes(self: &Arc<Self>) -> usize {
-        let logical_num_bytes = self.logical_num_bytes();
-        debug_assert_eq!(logical_num_bytes, self.storage_num_bytes());
-        logical_num_bytes
+        let n = self.typed_num_bytes();
+        debug_assert_eq!(n, self.storage_num_bytes());
+        n
     }
 
     /// Returns the size of the tensor in megabytes (base 10).
@@ -1005,56 +1009,5 @@ impl<T: DType> IntoIterator for DeviceVec<Tensor<T>> {
     type IntoIter = DeviceVecIntoIter<Tensor<T>>;
     fn into_iter(self) -> Self::IntoIter {
         DeviceVecIntoIter { items: self }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Tensor;
-    use crate::api;
-    use cuda_async::device_operation::DeviceOperation;
-    use std::mem::forget;
-    use std::sync::Arc;
-
-    #[test]
-    fn reinterpret_rejects_misaligned_storage() {
-        let base = Arc::new(api::zeros::<1, u8>([8]).sync().expect("Failed."));
-        // Test: reinterpret must reject storage whose base pointer is not aligned
-        // for the target dtype, even when the byte count itself would otherwise fit.
-        // Shift the pointer by one byte so the storage is no longer aligned for u32.
-        let misaligned = Arc::new(unsafe {
-            Tensor::<u8>::from_raw_parts(
-                base.cu_deviceptr() + 1,
-                4,
-                base.storage.device_id(),
-                vec![4],
-                vec![1],
-            )
-        });
-
-        assert!(misaligned.try_reinterpret::<u32, 1>([1]).is_err());
-
-        // The misaligned tensor is a borrowed view onto `base`'s allocation and must not free it.
-        forget(misaligned);
-    }
-
-    #[test]
-    #[should_panic(expected = "Tensor logical byte size must match storage byte size.")]
-    fn from_raw_parts_rejects_shape_storage_mismatch() {
-        let base = Arc::new(api::zeros::<1, u8>([4]).sync().expect("Failed."));
-
-        // Test: raw tensor construction must preserve the invariant that logical
-        // tensor bytes derived from shape/dtype exactly match the backing storage size.
-        // Four bytes of storage cannot describe a Tensor<u32> with shape [2], which would
-        // logically require eight bytes.
-        let _ = unsafe {
-            Tensor::<u32>::from_raw_parts(
-                base.cu_deviceptr(),
-                4,
-                base.storage.device_id(),
-                vec![2],
-                vec![1],
-            )
-        };
     }
 }
