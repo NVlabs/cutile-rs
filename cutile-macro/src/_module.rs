@@ -57,6 +57,7 @@ use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::{env, fs};
@@ -244,6 +245,8 @@ fn process_items(
 ) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
+    // Collect entry point metadata for __entries() generation.
+    let mut entry_metas: Vec<(String, String)> = vec![]; // (function_name, function_entry)
 
     for item in items {
         match item {
@@ -257,6 +260,10 @@ fn process_items(
                 );
                 if entry_attrs.is_some() {
                     entry_functions.push(kernel_launcher(parent_name, function_item)?);
+                    let fn_name = function_item.sig.ident.to_string();
+                    let kernel_naming = KernelNaming::new(&fn_name);
+                    let fn_entry = kernel_naming.entry_name();
+                    entry_metas.push((fn_name, fn_entry));
                 };
                 concrete_items.push(function(function_item.clone(), tile_rust_crate_root)?);
             }
@@ -331,8 +338,63 @@ fn module_inner(
     let ast_module_tokens = emit_module_ast_self_and_registry_entry(
         ast_module_item,
         tile_rust_crate_root,
-        raw_item_source,
+        raw_item_source.clone(),
     );
+
+    // Compute SHA-256 source hash at macro expansion time.
+    let source_hash = format!("{:x}", Sha256::digest(raw_item_source.as_bytes()));
+    let module_name_str = name.to_string();
+
+    // Generate __entries() and __SOURCE_HASH for warmup support.
+    let entry_meta_items: Vec<TokenStream2> = entry_metas
+        .iter()
+        .map(|(fn_name, fn_entry)| {
+            quote! {
+                #tile_rust_crate_root::tile_kernel::EntryMeta {
+                    module_name: #module_name_str,
+                    function_name: #fn_name,
+                    function_entry: #fn_entry,
+                }
+            }
+        })
+        .collect();
+    let warmup_metadata = quote! {
+        /// SHA-256 hash of the module source, computed at compile time.
+        /// Changes whenever any kernel source in this module changes.
+        pub const __SOURCE_HASH: &str = #source_hash;
+
+        /// Returns metadata for all entry points in this module.
+        pub fn __entries() -> Vec<#tile_rust_crate_root::tile_kernel::EntryMeta> {
+            vec![#(#entry_meta_items),*]
+        }
+
+        /// Pre-compile kernel specializations for this module.
+        ///
+        /// This is a convenience wrapper around [`compile_warmup`] that automatically
+        /// supplies the module ASTs, entry metadata, module name, and source hash.
+        /// Callers only need to provide the [`WarmupSpec`]s describing which
+        /// generics/strides to pre-compile.
+        ///
+        /// # Example
+        ///
+        /// ```rust,ignore
+        /// my_module::__compile_warmup(&[
+        ///     WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()]),
+        /// ])?;
+        /// ```
+        pub fn __compile_warmup(
+            specs: &[#tile_rust_crate_root::tile_kernel::WarmupSpec],
+        ) -> Result<(), #tile_rust_crate_root::error::Error> {
+            #tile_rust_crate_root::tile_kernel::compile_warmup(
+                || _module_asts(),
+                &__entries(),
+                #module_name_str,
+                __SOURCE_HASH,
+                specs,
+            )
+        }
+    };
+
     let res = if entry_functions.is_empty() {
         quote! {
             pub mod #name {
@@ -343,6 +405,8 @@ fn module_inner(
                 use #ast_path;
                 #ast_module_tokens
                 #(#concrete_items)*
+                // Warmup metadata.
+                #warmup_metadata
             }
         }
     } else {
@@ -369,6 +433,8 @@ fn module_inner(
                 #(#concrete_items)*
                 // Entry point code.
                 #(#entry_functions)*
+                // Warmup metadata.
+                #warmup_metadata
             }
         }
     };
