@@ -445,7 +445,6 @@ version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "cuda-core",
- "cuda-kernel-interface",
  "futures",
  "thiserror 1.0.69",
 ]
@@ -465,10 +464,6 @@ dependencies = [
  "cuda-bindings",
  "half",
 ]
-
-[[package]]
-name = "cuda-kernel-interface"
-version = "0.0.1-alpha"
 
 [[package]]
 name = "cuda-tile-rs"
@@ -517,7 +512,6 @@ version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "cuda-core",
- "cuda-kernel-interface",
  "cuda-tile-rs",
  "half",
  "melior",

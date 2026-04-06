@@ -8,7 +8,7 @@
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
-pub use cuda_kernel_interface::{
+pub use cuda_core::{
     PointerParamType, ScalarParamType, TensorParamType, ValidParamType, Validator,
 };
 use std::cell::Cell;
