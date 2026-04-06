@@ -21,3 +21,5 @@ cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 cutile-compiler = { workspace = true }
 cutile-macro = { workspace = true }
+sha2 = { workspace = true }
+once_cell = { workspace = true }

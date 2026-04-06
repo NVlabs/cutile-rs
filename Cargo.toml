@@ -60,6 +60,9 @@ criterion = { version = "0.7", features = ["html_reports", "async_tokio", "csv_o
 trybuild = { version = "1.0.49", features = ["diff"] }
 phf = { version = "0.11", features = ["macros"] }
 convert_case = "0.8"
+dashmap = "6"
+sha2 = "0.10"
+once_cell = "1.19"  
 
 # ── Intra-workspace ──────────────────────────────────────────────────────────
 cuda-bindings = { path = "cuda-bindings", version = "0.0.1" }

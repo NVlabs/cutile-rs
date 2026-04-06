@@ -12,13 +12,32 @@ use cuda_core::{memcpy_dtoh_async, CudaFunction};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile::ModuleOperation;
-use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
 use cutile_compiler::specialization::SpecializationBits;
+use cutile_compiler::cuda_tile_runtime_utils::{
+    compile_module, get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+};
+use once_cell::sync::OnceCell;
+use sha2::{Digest, Sha256};
 use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+// JIT diagnostic logging (set CUTILE_JIT_LOG=1 to enable) 
+
+fn jit_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CUTILE_JIT_LOG").is_ok_and(|v| v == "1"))
+}
+
+macro_rules! jit_log {
+    ($($arg:tt)*) => {
+        if jit_log_enabled() {
+            eprintln!("[cutile::jit] {}", format!($($arg)*));
+        }
+    };
+}
 
 use crate::error::*;
 use crate::tensor::{IntoPartition, IntoPartitionArc, Partition, Tensor};
@@ -35,7 +54,8 @@ pub use cutile_compiler::compiler::utils::CompileOptions;
 /// Two kernel invocations that share the same `TileFunctionKey` can reuse the same compiled
 /// CUDA module and function, avoiding recompilation. The key captures everything that can
 /// change the generated GPU code: module name, function name, generic type/const parameters,
-/// tensor stride layouts, (optionally) the launch grid, and compile options.
+/// tensor stride layouts, (optionally) the launch grid, compile options, source hash, 
+/// GPU architecture, compiler version, and CUDA toolkit version.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TileFunctionKey {
     module_name: String,
@@ -45,6 +65,10 @@ pub struct TileFunctionKey {
     pub spec_args: Vec<(String, SpecializationBits)>,
     pub grid: Option<(u32, u32, u32)>,
     pub compile_options: CompileOptions,
+    source_hash: String,
+    gpu_name: String,
+    compiler_version: String,
+    cuda_toolkit_version: String,
 }
 
 impl TileFunctionKey {
@@ -56,6 +80,10 @@ impl TileFunctionKey {
         spec_args: Vec<(String, SpecializationBits)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
+        source_hash: String,
+        gpu_name: String,
+        compiler_version: String,
+        cuda_toolkit_version: String,
     ) -> Self {
         Self {
             module_name,
@@ -65,11 +93,36 @@ impl TileFunctionKey {
             spec_args,
             grid,
             compile_options,
+            source_hash,
+            gpu_name,
+            compiler_version,
+            cuda_toolkit_version,
         }
     }
 }
 
-impl FunctionKey for TileFunctionKey {}
+impl FunctionKey for TileFunctionKey {
+    fn get_disk_hash_string(&self) -> String {
+        let canonical = format!(
+            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}",
+            self.module_name,
+            self.function_name,
+            self.function_generics.join(","),
+            self.stride_args
+                .iter()
+                .map(|(k, v)| format!("{}={:?}", k, v))
+                .collect::<Vec<_>>()
+                .join(";"),
+            self.grid,
+            self.source_hash,
+            self.gpu_name,
+            self.compiler_version,
+            self.cuda_toolkit_version,
+        );
+        let hash = Sha256::digest(canonical.as_bytes());
+        format!("{:x}", hash)
+    }
+}
 
 /// Reads IR (MLIR or PTX) from a file.
 ///
@@ -121,12 +174,25 @@ fn write_ir(
     println!("IR written to {path:?}");
 }
 
+/// Attempt to load a cubin from the global JitStore.
+fn try_load_from_jit_store(disk_key: &str) -> Option<Vec<u8>> {
+    let store = cuda_async::jit_store::get_jit_store()?;
+    store.get(disk_key).ok().flatten()
+}
+
+// ── Single-flight compilation dedup is handled by once_cell::sync::OnceLock ──
+
 /// Compiles a tile function to CUDA and caches it for reuse.
 ///
 /// Handles the complete compilation pipeline from Rust/MLIR to CUDA:
-/// 1. Checks the thread-local cache for a previously compiled function
-/// 2. If not cached, compiles the module AST to MLIR, then to PTX/CUBIN
-/// 3. Loads the compiled function and caches it for future use
+/// 1. Checks the global kernel cache (process-wide, cross-thread)
+/// 2. Checks the disk cache (JitStore) for a previously persisted cubin
+/// 3. If not cached, compiles the module AST to MLIR, then to PTX/CUBIN
+/// 4. Stores the result in the global cache and optionally persists to disk
+///
+/// **Compilation dedup**: When multiple threads need the same kernel, `OnceLock::get_or_try_init`
+/// ensures only one thread performs compilation while others block. Once initialization completes,
+/// all threads see the same cached result.
 ///
 /// The caching key is based on the module name, function name, type generics, stride arguments,
 /// and compile-time grid dimensions, ensuring correct reuse across different specializations.
@@ -170,9 +236,14 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     spec_args: Vec<(String, SpecializationBits)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
+    source_hash: &str,
 ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
+    cuda_async::jit_store::ensure_default_jit_store();
+
     let device_id: usize = ctx.get_device_id();
-    // Compilation constructs a lookup key.
+    let gpu_name = get_gpu_name(device_id);
+    let compiler_version = get_compiler_version();
+    let cuda_toolkit_version = get_cuda_toolkit_version();
     let key = TileFunctionKey::new(
         module_name.to_string(),
         function_name.to_string(),
@@ -181,16 +252,63 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         spec_args,
         const_grid,
         compile_options,
+        source_hash.to_string(),
+        gpu_name.clone(),
+        compiler_version,
+        cuda_toolkit_version,
     );
+    let key_str = key.get_hash_string();
+    let disk_key = key.get_disk_hash_string();
     let cache_hash_str = key.get_hash_string();
-    if contains_cuda_function(device_id, &key) {
-        // A hit to the thread local kernel cache returns the compiled function.
-        let func = get_cuda_function(device_id, &key)?;
-        let validator = get_function_validator(device_id, &key)?;
-        Ok((func, validator))
-    } else {
-        let gpu_name = get_gpu_name(device_id);
-        // A miss compiles, caches, and returns the compiled function.
+
+    let cache = get_kernel_cache();
+    let slot = {
+        let entry = cache
+            .entry(key_str.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()));
+        Arc::clone(entry.value())
+    }; // entry dropped here — releases DashMap shard lock.
+
+    // Use OnceCell::get_or_try_init for single-flight compilation dedup.
+    // Only one thread executes the closure; others block and see the result.
+    let compiled = slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
+        // Try disk cache first.
+        if let Some(cubin_bytes) = try_load_from_jit_store(&disk_key) {
+            jit_log!(
+                "{module_name}::{function_name} → disk cache hit ({} bytes)",
+                cubin_bytes.len()
+            );
+            let modules = CUDATileModules::new(module_asts())?;
+            let compiler = CUDATileFunctionCompiler::new(
+                &modules,
+                module_name,
+                function_name,
+                &key.function_generics,
+                &key.stride_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), x.1.as_slice()))
+                    .collect::<Vec<_>>(),
+                const_grid,
+                gpu_name.clone(),
+                &key.compile_options,
+            )?;
+            let validator = Arc::new(compiler.get_validator());
+            let module = load_module_from_bytes(&cubin_bytes, device_id)?;
+            let function = Arc::new(module.load_function(function_entry).map_err(|e| {
+                Error::KernelLaunch(KernelLaunchError(format!(
+                    "failed to load '{function_entry}' from cached cubin: {e}"
+                )))
+            })?);
+            return Ok(CompiledKernel {
+                module,
+                function,
+                validator,
+            });
+        }
+
+        // Full JIT compilation.
+        jit_log!("{module_name}::{function_name} → JIT compiling...");
+        let t0 = std::time::Instant::now();
         let modules = CUDATileModules::new(module_asts())?;
         let debug_mlir_path = modules.get_entry_arg_string_by_function_name(
             module_name,
@@ -235,8 +353,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
             gpu_name.clone(),
             &key.compile_options,
         )?;
-        let validator: Validator = compiler.get_validator();
-        let validator = Arc::new(validator);
+        let validator = Arc::new(compiler.get_validator());
         let module_op: ModuleOperation = compiler.compile()?;
         let mlir = module_op.as_operation().to_string();
         if modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")? {
@@ -280,16 +397,295 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         //     println!("{ptx}");
         //     println!();
         // }
+        let jit_elapsed = t0.elapsed();
+        // Persist to disk cache if a JitStore is configured.
+        if let Some(store) = cuda_async::jit_store::get_jit_store() {
+            if let Ok(cubin_bytes) = std::fs::read(&cubin_filename) {
+                if store.put(&disk_key, &cubin_bytes).is_ok() {
+                    jit_log!(
+                        "{module_name}::{function_name} → saved to disk cache ({} bytes)",
+                        cubin_bytes.len()
+                    );
+                }
+            }
+        }
         let module = load_module_from_file(&cubin_filename, device_id)?;
-        let function = Arc::new(
-            module
-                .load_function(function_entry)
-                .expect("Failed to compile function."),
+        let function = Arc::new(module.load_function(function_entry).map_err(|e| {
+            Error::KernelLaunch(KernelLaunchError(format!(
+                "failed to load '{function_entry}' from compiled cubin: {e}"
+            )))
+        })?);
+        jit_log!(
+            "{module_name}::{function_name} → JIT compiled in {:.1?}",
+            jit_elapsed
         );
-        insert_cuda_function(device_id, &key, (module, function.clone()))?;
-        insert_function_validator(device_id, &key, validator.clone())?;
-        Ok((function, validator))
+        Ok(CompiledKernel {
+            module,
+            function,
+            validator,
+        })
+    })?;
+
+    Ok((
+        Arc::clone(&compiled.function),
+        Arc::clone(&compiled.validator),
+    ))
+}
+
+// ── Warmup types and functions ───────────────────────────────────────────────
+
+/// Metadata for a single kernel entry point, generated by the `#[cutile::module]` macro.
+#[derive(Debug, Clone)]
+pub struct EntryMeta {
+    pub module_name: &'static str,
+    pub function_name: &'static str,
+    pub function_entry: &'static str,
+}
+
+/// User-provided specialization for warmup compilation.
+///
+/// Each `WarmupSpec` describes one kernel specialization to pre-compile.
+#[derive(Debug, Clone)]
+pub struct WarmupSpec {
+    pub function_name: String,
+    pub function_generics: Vec<String>,
+    pub stride_args: Vec<(String, Vec<i32>)>,
+    pub const_grid: Option<(u32, u32, u32)>,
+}
+
+impl WarmupSpec {
+    /// Create a warmup spec with just generics (no strides, no const grid).
+    pub fn new(function_name: &str, generics: Vec<String>) -> Self {
+        Self {
+            function_name: function_name.to_string(),
+            function_generics: generics,
+            stride_args: vec![],
+            const_grid: None,
+        }
     }
+
+    /// Set stride arguments for this spec.
+    pub fn with_strides(mut self, stride_args: Vec<(String, Vec<i32>)>) -> Self {
+        self.stride_args = stride_args;
+        self
+    }
+
+    /// Set a const grid for this spec.
+    pub fn with_const_grid(mut self, grid: (u32, u32, u32)) -> Self {
+        self.const_grid = Some(grid);
+        self
+    }
+}
+
+/// Pre-compile a set of kernel specializations without launching.
+///
+/// Builds the module ASTs once, then compiles each requested specialization.
+/// Results are placed in the global kernel cache and optionally persisted
+/// to the JitStore.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// compile_warmup(
+///     || linalg::_module_asts(),
+///     &linalg::__entries(),
+///     "linalg",
+///     linalg::__SOURCE_HASH,
+///     &[
+///         WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()]),
+///         WarmupSpec::new("vector_add", vec!["f16".into(), "256".into()]),
+///         WarmupSpec::new("relu",       vec!["f32".into(), "128".into()]),
+///     ],
+/// )?;
+/// ```
+pub fn compile_warmup<F: Fn() -> Vec<Module>>(
+    module_asts: F,
+    entries: &[EntryMeta],
+    module_name: &str,
+    source_hash: &str,
+    specs: &[WarmupSpec],
+) -> Result<(), Error> {
+    cuda_async::jit_store::ensure_default_jit_store();
+
+    let device_id = get_default_device();
+    let gpu_name = get_gpu_name(device_id);
+    let compiler_version = get_compiler_version();
+    let cuda_toolkit_version = get_cuda_toolkit_version();
+
+    // Build module ASTs once, shared across all specs in this warmup call.
+    let modules = CUDATileModules::new(module_asts())?;
+
+    for spec in specs {
+        // Find matching entry metadata.
+        let entry = entries
+            .iter()
+            .find(|e| e.function_name == spec.function_name)
+            .ok_or_else(|| {
+                Error::KernelLaunch(KernelLaunchError(format!(
+                    "compile_warmup: unknown function '{}' in module '{}'",
+                    spec.function_name, module_name
+                )))
+            })?;
+
+        let key = TileFunctionKey::new(
+            module_name.to_string(),
+            spec.function_name.clone(),
+            spec.function_generics.clone(),
+            spec.stride_args.clone(),
+            spec.const_grid,
+            CompileOptions::default(),
+            source_hash.to_string(),
+            gpu_name.clone(),
+            compiler_version.clone(),
+            cuda_toolkit_version.clone(),
+        );
+
+        let key_str = key.get_hash_string();
+        let disk_key = key.get_disk_hash_string();
+        let cache = get_kernel_cache();
+        let slot = {
+            let entry = cache
+                .entry(key_str.clone())
+                .or_insert_with(|| Arc::new(OnceCell::new()));
+            Arc::clone(entry.value())
+        }; // entry dropped — releases DashMap shard lock.
+
+        // Use OnceCell::get_or_try_init for single-flight compilation dedup.
+        // Only one thread executes the closure; others block and see the result.
+        let _ = slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
+            jit_log!(
+                "warmup: {module_name}::{} <{}> → compiling...",
+                spec.function_name,
+                spec.function_generics.join(", ")
+            );
+
+            // Try disk cache first.
+            if let Some(cubin_bytes) = try_load_from_jit_store(&disk_key) {
+                jit_log!(
+                    "warmup: {module_name}::{} → disk cache hit ({} bytes)",
+                    spec.function_name,
+                    cubin_bytes.len()
+                );
+                let compiler = CUDATileFunctionCompiler::new(
+                    &modules,
+                    module_name,
+                    &spec.function_name,
+                    &spec.function_generics,
+                    &spec
+                        .stride_args
+                        .iter()
+                        .map(|x| (x.0.as_str(), x.1.as_slice()))
+                        .collect::<Vec<_>>(),
+                    spec.const_grid,
+                    gpu_name.clone(),
+                    &key.compile_options,
+                )?;
+                let validator = Arc::new(compiler.get_validator());
+                let module = load_module_from_bytes(&cubin_bytes, device_id)?;
+                let function =
+                    Arc::new(module.load_function(entry.function_entry).map_err(|e| {
+                        Error::KernelLaunch(KernelLaunchError(format!(
+                            "failed to load '{}' from cached cubin: {e}",
+                            entry.function_entry
+                        )))
+                    })?);
+                return Ok(CompiledKernel {
+                    module,
+                    function,
+                    validator,
+                });
+            }
+
+            // Full JIT compilation.
+            let t0 = std::time::Instant::now();
+            let compiler = CUDATileFunctionCompiler::new(
+                &modules,
+                module_name,
+                &spec.function_name,
+                &spec.function_generics,
+                &spec
+                    .stride_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), x.1.as_slice()))
+                    .collect::<Vec<_>>(),
+                spec.const_grid,
+                gpu_name.clone(),
+                &key.compile_options,
+            )?;
+            let validator = Arc::new(compiler.get_validator());
+            let module_op = compiler.compile()?;
+            let cubin_filename = compile_module(&module_op, &gpu_name);
+            let jit_elapsed = t0.elapsed();
+
+            // Persist to disk cache.
+            if let Some(store) = cuda_async::jit_store::get_jit_store() {
+                if let Ok(cubin_bytes) = std::fs::read(&cubin_filename) {
+                    if store.put(&disk_key, &cubin_bytes).is_ok() {
+                        jit_log!(
+                            "warmup: {module_name}::{} → saved to disk cache ({} bytes)",
+                            spec.function_name,
+                            cubin_bytes.len()
+                        );
+                    }
+                }
+            }
+
+            let module = load_module_from_file(&cubin_filename, device_id)?;
+            let function =
+                Arc::new(module.load_function(entry.function_entry).map_err(|e| {
+                    Error::KernelLaunch(KernelLaunchError(format!(
+                        "failed to load '{}' from compiled cubin: {e}",
+                        entry.function_entry
+                    )))
+                })?);
+            jit_log!(
+                "warmup: {module_name}::{} → JIT compiled in {:.1?}",
+                spec.function_name,
+                jit_elapsed
+            );
+            Ok(CompiledKernel {
+                module,
+                function,
+                validator,
+            })
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Execute a warmup routine with realistic kernel launches.
+///
+/// The provided closure should launch kernels with production-representative
+/// shapes and data. This warms up both the JIT compilation cache and the
+/// CUDA runtime (driver initialization, shared memory allocation, occupancy
+/// calculation, etc.).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// execute_warmup(|| {
+///     let x = api::zeros::<f32>([4096, 4096]).sync()?;
+///     let y = api::zeros::<f32>([4096, 4096]).sync()?;
+///     let z = api::zeros::<f32>([4096, 4096]).sync()?;
+///     linalg::matmul(z, x, y)
+///         .generics(vec!["f32".into(), "128".into()])
+///         .grid((32, 32, 1))
+///         .sync()?;
+///     Ok(())
+/// })?;
+/// ```
+pub fn execute_warmup<F>(f: F) -> Result<(), Error>
+where
+    F: FnOnce() -> Result<(), Error>,
+{
+    // Ensure device context is initialized.
+    let device_id = get_default_device();
+    let _ = with_global_device_context(device_id, |_| {})?;
+
+    // Run user-provided warmup routine.
+    // Kernels inside will auto-JIT via existing compile_from_context path.
+    f()
 }
 
 /// Validates that all partition grids match the expected launch grid.
@@ -426,6 +822,7 @@ where
         spec_args: Vec<(String, SpecializationBits)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
+        source_hash: &str,
     ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
         compile_from_context(
             ctx,
@@ -438,6 +835,7 @@ where
             spec_args,
             grid,
             compile_options,
+            source_hash,
         )
     }
     /// Sets the type and const generic arguments for this kernel.
