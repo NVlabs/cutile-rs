@@ -12,6 +12,7 @@ pub mod device_context;
 pub mod device_future;
 pub mod device_operation;
 pub mod error;
+pub mod jit_store;
 pub mod launch;
 pub mod prelude;
 pub mod scheduling_policies;

@@ -13,3 +13,9 @@ mod error_quality;
 
 #[path = "gpu/tensor.rs"]
 mod tensor;
+
+#[path = "gpu/warmup.rs"]
+mod warmup;
+
+#[path = "gpu/warmup_bench.rs"]
+mod warmup_bench;

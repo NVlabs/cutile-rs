@@ -11,6 +11,39 @@ use std::env;
 use std::process::Command;
 use uuid::Uuid;
 
+/// Returns the cutile compiler version (from the workspace Cargo.toml).
+pub fn get_compiler_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Returns the CUDA toolkit version by parsing `nvcc --version` output.
+///
+/// Falls back to `"unknown"` if `nvcc` is not available.
+pub fn get_cuda_toolkit_version() -> String {
+    Command::new("nvcc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Parse lines like "Cuda compilation tools, release 12.4, V12.4.131"
+            for line in stdout.lines() {
+                if let Some(pos) = line.find("release ") {
+                    let rest = &line[pos + "release ".len()..];
+                    if let Some(comma) = rest.find(',') {
+                        return Some(rest[..comma].to_string());
+                    }
+                    return Some(rest.trim().to_string());
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 pub fn get_gpu_name(device_id: usize) -> String {
     unsafe { init(0) }.expect("failed to initialize CUDA driver");
