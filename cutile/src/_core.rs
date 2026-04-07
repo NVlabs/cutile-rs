@@ -1582,8 +1582,8 @@ pub mod core {
     /// }
     /// ```
     #[cuda_tile::ty(name="!cuda_tile.partition_view",
-                    type_params=["tile", "tensor_view"],
-                    type_params_optional=["dim_map", "padding_value"],
+                    type_params=["tile"],
+                    type_params_optional=["padding_value", "tensor_view", "dim_map"],
                     type_meta=["token", "tensor_view.shape()"])]
     #[cuda_tile::variadic_struct(N = 6)]
     pub struct Partition<'a, E: ElementType, const D: [i32; N]> {
@@ -1663,10 +1663,9 @@ pub mod core {
         unreachable!()
     }
 
-    // TODO (hme): Add support for padding to make_partition_view (significant refactor)
     #[cuda_tile::op(name="cuda_tile.make_partition_view",
                     params=["tensor_view"],
-                    output_type_params=["tensor_view", "padding"],
+                    output_type_params=["tensor_view", "padding_value"],
                     output_type_meta=["token", "tensor_view.shape()"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn make_partition_view_padded<
@@ -1677,7 +1676,7 @@ pub mod core {
     >(
         tensor_view: &Tensor<E, TENSOR_SHAPE>,
         tile: Shape<TILE_SHAPE>,
-        padding: &str,
+        padding_value: &str,
         token: Token,
     ) -> Partition<'a, E, TILE_SHAPE> {
         unreachable!()
