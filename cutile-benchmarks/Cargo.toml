@@ -34,6 +34,10 @@ harness = false
 name = "rmsnorm"
 harness = false
 
+[[bench]]
+name = "launch_overhead"
+harness = false
+
 [dependencies]
 tokio = { workspace = true }
 cutile-compiler = { workspace = true }
