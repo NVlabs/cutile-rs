@@ -12,8 +12,8 @@ use cutile::cutile_compiler::cuda_tile_write_bytecode_to_buffer;
 use std::env;
 use std::slice;
 
-// Same syntax as full CUDA version - features control behavior
-#[cutile::module(compile_only = true)]
+// Build with --no-default-features to compile kernels without a GPU.
+#[cutile::module]
 mod my_kernels {
     use cutile::core::*;
 
