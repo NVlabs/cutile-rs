@@ -9,6 +9,7 @@
 extern crate core;
 
 pub use cuda_tile_rs::cuda_tile;
+pub use cuda_tile_rs::cuda_tile_write_bytecode_to_buffer;
 use cuda_tile_rs::register_cuda_tile_dialects;
 use melior::{
     dialect::DialectRegistry,
@@ -18,6 +19,7 @@ use melior::{
 
 pub mod ast;
 mod bounds;
+#[cfg(feature = "cuda")]
 pub mod cuda_tile_runtime_utils;
 pub mod error;
 pub mod generics;

@@ -63,11 +63,11 @@ convert_case = "0.8"
 
 # ── Intra-workspace ──────────────────────────────────────────────────────────
 cuda-bindings = { path = "cuda-bindings", version = "0.0.1" }
-cuda-core = { path = "cuda-core", version = "0.0.1" }
+cuda-core = { path = "cuda-core", version = "0.0.1", default-features = false }
 cuda-async = { path = "cuda-async", version = "0.0.1" }
 cuda-tile-rs = { path = "cuda-tile-rs", version = "0.0.1" }
 cutile-compiler = { path = "cutile-compiler", version = "0.0.1" }
 cutile-macro = { path = "cutile-macro", version = "0.0.1" }
-cutile = { path = "cutile", version = "0.0.1" }
+cutile = { path = "cutile", version = "0.0.1", default-features = false }
 cutile-examples = { path = "cutile-examples", version = "0.0.1" }
 cutile-benchmarks = { path = "cutile-benchmarks", version = "0.0.1" }

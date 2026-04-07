@@ -182,6 +182,7 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = parse_macro_input!(attributes as SingleMetaList);
     let is_core = attrs.parse_bool("core").unwrap_or(false);
     let is_tile_rust_crate = attrs.parse_bool("tile_rust_crate").unwrap_or(false);
+
     let tile_rust_crate_root = Ident::new(
         if is_tile_rust_crate {
             "crate"
@@ -225,7 +226,7 @@ fn module_inner(
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let name = &module_item.ident;
     let mut module_ast_calls: Vec<String> = vec![];
-    let mut entry_functions: Vec<TokenStream2> = vec![];
+    let mut kernel_launchers: Vec<TokenStream2> = vec![];
 
     for item in &content.1 {
         match item {
@@ -260,7 +261,7 @@ fn module_inner(
                     &function_item.attrs,
                 );
                 if entry_attrs.is_some() {
-                    entry_functions.push(kernel_launcher(name, function_item)?);
+                    kernel_launchers.push(kernel_launcher(name, function_item)?);
                 };
                 ast_content.push(Item::Fn(function_item.clone()));
                 concrete_items.push(function(function_item.clone(), tile_rust_crate_root)?);
@@ -310,12 +311,9 @@ fn module_inner(
         tile_rust_crate_root,
         raw_item_source,
     );
-    let res = if entry_functions.is_empty() {
+    let res = if kernel_launchers.is_empty() {
         quote! {
             pub mod #name {
-                #![allow(nonstandard_style)]
-                #![allow(dead_code)]
-                #![allow(unused_variables)]
                 // Module asts and generated type data.
                 use #ast_path;
                 #ast_module_tokens
@@ -323,28 +321,32 @@ fn module_inner(
             }
         }
     } else {
+        // Launcher code is gated behind the user's cuda feature.
+        // Users must define: [features] cuda = ["cutile/cuda"]
         quote! {
             pub mod #name {
-                #![allow(dead_code)]
-                // Entry point dependencies.
-                // Use of this macro requires cutile,
-                // so all dependencies should be imported relative to cutile.
-                use std::{iter::zip, future::{Future, IntoFuture}, collections::HashMap, sync::Arc};
-                use #tile_rust_crate_root::error::{*};
-                use #tile_rust_crate_root::DType;
-                use #tile_rust_crate_root::{tensor};
-                use #tile_rust_crate_root::tile_kernel::{*};
-                use #tile_rust_crate_root::cuda_async::error::{*};
-                use #tile_rust_crate_root::cuda_async::scheduling_policies::SchedulingPolicy;
-                use #tile_rust_crate_root::cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream, DriverError, LaunchConfig};
-                // use #tile_rust_crate_root::cutile_compiler::cuda_tile::ModuleOperation;
-                // use #tile_rust_crate_root::cutile_compiler::compiler::{CUDATileModules, CUDATileFunctionCompiler};
                 // Module asts and generated type data.
                 use #ast_path;
                 #ast_module_tokens
                 #(#concrete_items)*
-                // Entry point code.
-                #(#entry_functions)*
+
+                #[cfg(feature = "cuda")]
+                mod __cuda_launchers {
+                    use super::*;
+                    use std::{iter::zip, future::{Future, IntoFuture}, collections::HashMap, sync::Arc};
+                    use #tile_rust_crate_root::error::{*};
+                    use #tile_rust_crate_root::DType;
+                    use #tile_rust_crate_root::{tensor};
+                    use #tile_rust_crate_root::tile_kernel::{*};
+                    use #tile_rust_crate_root::cuda_async::error::{*};
+                    use #tile_rust_crate_root::cuda_async::scheduling_policies::SchedulingPolicy;
+                    use #tile_rust_crate_root::cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream, DriverError, LaunchConfig};
+
+                    #(#kernel_launchers)*
+                }
+
+                #[cfg(feature = "cuda")]
+                pub use __cuda_launchers::*;
             }
         }
     };

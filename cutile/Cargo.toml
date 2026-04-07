@@ -10,6 +10,10 @@ repository.workspace = true
 readme = "../README.md"
 keywords = ["mlir", "cutile", "cuda", "gpu", "async"]
 
+[features]
+default = ["cuda"]
+cuda = ["dep:cuda-core", "dep:cuda-async", "cutile-compiler/cuda"]
+
 [dependencies]
 syn = { workspace = true }
 proc-macro2 = { workspace = true }
@@ -17,7 +21,9 @@ quote = { workspace = true }
 num-traits = { workspace = true }
 half = { workspace = true }
 anyhow = { workspace = true }
-cuda-core = { workspace = true }
-cuda-async = { workspace = true }
 cutile-compiler = { workspace = true }
 cutile-macro = { workspace = true }
+
+# CUDA runtime dependencies; optional so cutile compiles on non-CUDA platforms.
+cuda-core = { workspace = true, optional = true }
+cuda-async = { workspace = true, optional = true }

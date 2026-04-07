@@ -9,7 +9,11 @@ authors.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[features]
+default = ["cuda"]
+cuda = ["dep:cuda-bindings"]
+
 [dependencies]
-cuda-bindings = { workspace = true }
+cuda-bindings = { workspace = true, optional = true }
 anyhow = { workspace = true }
 half = { workspace = true }

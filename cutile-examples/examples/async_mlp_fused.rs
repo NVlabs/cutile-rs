@@ -8,12 +8,12 @@ use cuda_async::device_operation::*;
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_async::scheduling_policies::WithDeviceId;
 use cuda_core::LaunchConfig;
+use cutile::cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
+use cutile::cutile_compiler::cuda_tile::ModuleOperation;
+use cutile::cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
 use cutile::tensor::{Tensor, ToHostVec};
 use cutile::tile_kernel::IntoDeviceOperationPartition;
 use cutile::{api, error::Error};
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile::ModuleOperation;
-use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
 use std::sync::Arc;
 
 #[cutile::module]

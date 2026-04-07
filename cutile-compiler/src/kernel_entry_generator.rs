@@ -13,9 +13,7 @@ use crate::generics::{GenericVars, TypeInstance};
 use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::{get_fn_arg_var_name, get_ident_from_path_expr, get_ident_generic_args};
 use crate::types::{get_primitives_attrs, get_type_mutability};
-use cuda_async::device_context::{
-    PointerParamType, ScalarParamType, TensorParamType, ValidParamType, Validator,
-};
+use cuda_core::{PointerParamType, ScalarParamType, TensorParamType, ValidParamType, Validator};
 use proc_macro2::Ident;
 use proc_macro2::Span;
 use quote::ToTokens;

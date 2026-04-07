@@ -10,7 +10,7 @@ readme = "README.md"
 description = "Safe Async CUDA support via Async Rust."
 
 [dependencies]
-cuda-core = { workspace = true }
+cuda-core = { workspace = true, features = ["cuda"] }
 futures = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

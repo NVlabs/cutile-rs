@@ -510,7 +510,6 @@ name = "cutile-compiler"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "cuda-async",
  "cuda-core",
  "cuda-tile-rs",
  "half",
@@ -534,7 +533,6 @@ dependencies = [
  "cuda-async",
  "cuda-core",
  "cutile",
- "cutile-compiler",
  "tokio",
 ]
 
