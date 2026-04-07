@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1-alpha"
+version = "0.0.1"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -62,12 +62,12 @@ phf = { version = "0.11", features = ["macros"] }
 convert_case = "0.8"
 
 # ── Intra-workspace ──────────────────────────────────────────────────────────
-cuda-bindings = { path = "cuda-bindings", version = "0.0.1-alpha" }
-cuda-core = { path = "cuda-core", version = "0.0.1-alpha", default-features = false }
-cuda-async = { path = "cuda-async", version = "0.0.1-alpha" }
-cuda-tile-rs = { path = "cuda-tile-rs", version = "0.0.1-alpha" }
-cutile-compiler = { path = "cutile-compiler", version = "0.0.1-alpha" }
-cutile-macro = { path = "cutile-macro", version = "0.0.1-alpha" }
-cutile = { path = "cutile", version = "0.0.1-alpha", default-features = false }
-cutile-examples = { path = "cutile-examples", version = "0.0.1-alpha" }
-cutile-benchmarks = { path = "cutile-benchmarks", version = "0.0.1-alpha" }
+cuda-bindings = { path = "cuda-bindings", version = "0.0.1" }
+cuda-core = { path = "cuda-core", version = "0.0.1", default-features = false }
+cuda-async = { path = "cuda-async", version = "0.0.1" }
+cuda-tile-rs = { path = "cuda-tile-rs", version = "0.0.1" }
+cutile-compiler = { path = "cutile-compiler", version = "0.0.1" }
+cutile-macro = { path = "cutile-macro", version = "0.0.1" }
+cutile = { path = "cutile", version = "0.0.1", default-features = false }
+cutile-examples = { path = "cutile-examples", version = "0.0.1" }
+cutile-benchmarks = { path = "cutile-benchmarks", version = "0.0.1" }

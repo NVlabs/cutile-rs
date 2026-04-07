@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-async"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "cuda-core",
@@ -451,14 +451,14 @@ dependencies = [
 
 [[package]]
 name = "cuda-bindings"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "bindgen 0.69.5",
 ]
 
 [[package]]
 name = "cuda-core"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-tile-rs"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "cutile"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-benchmarks"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "cuda-async",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-compiler"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "cuda-core",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-examples"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-macro"
-version = "0.0.1-alpha"
+version = "0.0.1"
 dependencies = [
  "convert_case 0.8.0",
  "cutile-compiler",
