@@ -191,8 +191,3 @@ pub use cutile_compiler;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;
-// TODO (hme): Coordinate with Candle about our dependence on this.
-#[cfg(feature = "cuda")]
-pub use candle_core;
-#[cfg(feature = "cuda")]
-pub use candle_core::{FloatDType, WithDType};

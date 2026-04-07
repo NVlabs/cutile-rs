@@ -3,13 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use candle_core::WithDType;
 use candle_nn::ops::softmax;
 use std::sync::Arc;
 
 use cuda_async::device_operation::*;
 use cuda_core::{get_device_clock_rate, CudaContext};
-use cutile::candle_core;
-use cutile::candle_core::WithDType;
 use cutile::tensor::{CopyToHost, Tensor};
 use cutile::DType;
 

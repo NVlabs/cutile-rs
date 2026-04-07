@@ -12,7 +12,7 @@ keywords = ["mlir", "cutile", "cuda", "gpu", "async"]
 
 [features]
 default = ["cuda"]
-cuda = ["dep:cuda-core", "dep:cuda-async", "dep:candle-core", "cutile-compiler/cuda"]
+cuda = ["dep:cuda-core", "dep:cuda-async", "cutile-compiler/cuda"]
 
 [dependencies]
 syn = { workspace = true }
@@ -24,7 +24,6 @@ anyhow = { workspace = true }
 cutile-compiler = { workspace = true }
 cutile-macro = { workspace = true }
 
-# CUDA dependencies - optional, requires Linux with CUDA
-candle-core = { workspace = true, optional = true }
+# CUDA runtime dependencies; optional so cutile compiles on non-CUDA platforms.
 cuda-core = { workspace = true, optional = true }
 cuda-async = { workspace = true, optional = true }

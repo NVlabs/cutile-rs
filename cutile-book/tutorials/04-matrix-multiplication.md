@@ -57,7 +57,7 @@ use cuda_core::CudaContext;
 use std::sync::Arc;
 use cutile;
 use cutile::api;
-use cutile::candle_core::WithDType;
+use candle_core::WithDType;
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::TileKernel;

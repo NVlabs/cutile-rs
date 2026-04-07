@@ -481,7 +481,6 @@ name = "cutile"
 version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
- "candle-core",
  "cuda-async",
  "cuda-core",
  "cutile-compiler",
@@ -529,6 +528,7 @@ dependencies = [
 name = "cutile-examples"
 version = "0.0.1-alpha"
 dependencies = [
+ "candle-core",
  "candle-nn",
  "cuda-async",
  "cuda-core",
