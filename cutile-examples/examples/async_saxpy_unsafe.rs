@@ -15,8 +15,8 @@ use cutile;
 use cutile::api::{arange, DeviceOperationReshape};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, ToHostVec};
-use cutile::tile_kernel::compile_from_context;
 use cutile::tile_kernel::global_policy;
+use cutile::tile_kernel::{compile_from_context, CompileOptions};
 use my_module::_module_asts;
 
 #[cutile::module]
@@ -58,6 +58,7 @@ async fn main() -> Result<(), Error> {
                 function_generics,
                 stride_args,
                 None,
+                CompileOptions::default(),
             );
             value(func)
         })

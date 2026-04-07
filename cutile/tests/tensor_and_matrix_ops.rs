@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
@@ -95,6 +96,7 @@ fn compile_cat() -> () {
             &[("output", &[8])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -131,6 +133,7 @@ fn compile_extract() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -163,6 +166,7 @@ fn compile_mmai() -> () {
             &[("output", &[16, 16])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler

@@ -689,8 +689,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 )
                             })?;
                         if old_element_type_str == new_element_type_str {
-                            // Nothing to do.
-                            return Ok(Some(arg));
+                            // Identity conversion (e.g. f32→f32 when E=f32).
+                            // Update the type to match the declared return type so
+                            // subsequent ops see the resolved type (Tile<f32> not Tile<E>).
+                            let mut result = arg;
+                            result.ty = new_type_compiled;
+                            return Ok(Some(result));
                         }
                         // These aren't required for all ops.
                         let op_builder = match (old_element_type_str.as_str(), new_element_type_str.as_str()) {

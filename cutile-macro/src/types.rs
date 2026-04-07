@@ -594,7 +594,7 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
             output_map: ("Token", &[]),
             return_type: ("Token", &[]),
         }),
-        "load_from_view" | "load_from_view_latency" => Some(VariadicOpData {
+        "load_from_view" => Some(VariadicOpData {
             const_length_vars: &["N"],
             cga_map: HashMap::from([("D", "N")]),
             input_map: vec![(0, "Partition", ["D"].as_slice())],

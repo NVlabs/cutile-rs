@@ -19,7 +19,7 @@ mod kernels {
     #[cutile::entry(print_ir=false, unchecked_accesses=true,
         optimization_hints = (
             tensor_dim_factor = 8,
-            sm_120 = (allow_tma = false, latency = 1, occupancy = 1),
+            sm_120 = (occupancy = 1,),
     ))]
     unsafe fn softmax<const BM: i32, const BN: i32>(
         x: &Tensor<f16, { [-1, -1] }>,

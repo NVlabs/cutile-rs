@@ -1005,7 +1005,7 @@ pub mod core {
     ///   - `"tl_blk"`: Tile block scope (same CTA)
     ///   - `"device"`: GPU device scope (all CTAs on same GPU)
     ///   - `"sys"`: System scope (all devices including CPU)
-    /// - `optimization_hints`: Optional optimization hints string (currently parsed but not used)
+    /// - `latency`: Optional latency hint for the compiler
     ///
     /// **Note:** When `memory_ordering` is `"weak"`, `memory_scope` is not included as an attribute
     /// (per TileIR spec).
@@ -1065,7 +1065,7 @@ pub mod core {
         mask: Option<Tile<bool, S>>,
         padding_value: Option<E>,
         token: Option<Token>,
-        optimization_hints: Option<&str>,
+        latency: Option<i32>,
     ) -> (Tile<E, S>, Token) {
         unreachable!()
     }
@@ -1092,7 +1092,7 @@ pub mod core {
     ///   - `"tl_blk"`: Tile block scope (same CTA)
     ///   - `"device"`: GPU device scope (all CTAs on same GPU)
     ///   - `"sys"`: System scope (all devices including CPU)
-    /// - `optimization_hints`: Optional optimization hints string (currently parsed but not used)
+    /// - `latency`: Optional latency hint for the compiler
     ///
     /// **Note:** When `memory_ordering` is `"weak"`, `memory_scope` is not included as an attribute
     /// (per TileIR spec).
@@ -1141,7 +1141,7 @@ pub mod core {
         memory_scope: &str,
         mask: Option<Tile<bool, S>>,
         token: Option<Token>,
-        optimization_hints: Option<&str>,
+        latency: Option<i32>,
     ) -> Token {
         unreachable!()
     }
@@ -1606,7 +1606,7 @@ pub mod core {
         /// ```
         pub fn load(&self, index: [i32; N]) -> Tile<E, D> {
             check_partition_access(self, index);
-            let result: Tile<E, D> = load_from_view(self, index);
+            let result: Tile<E, D> = load_from_view(self, index, None, false);
             result
         }
     }
@@ -1683,21 +1683,13 @@ pub mod core {
     }
 
     // TODO (hme): Mark loads from shared refs as unsafe and add suffix _unchecked.
-    #[cuda_tile::op(name="load_view_tko", params=["view", "index"])]
+    #[cuda_tile::op(name="load_view_tko", params=["view", "index"], hint_params=["latency"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn load_from_view<E: ElementType, const D: [i32; N]>(
         view: &Partition<E, D>,
         index: [i32; N],
-    ) -> Tile<E, D> {
-        unreachable!()
-    }
-
-    #[cuda_tile::op(name="load_view_tko", params=["view", "index"], hint_params=["latency"])]
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn load_from_view_latency<E: ElementType, const D: [i32; N]>(
-        view: &Partition<E, D>,
-        index: [i32; N],
-        latency: i32,
+        latency: Option<i32>,
+        disallow_tma: bool,
     ) -> Tile<E, D> {
         unreachable!()
     }
@@ -1756,7 +1748,7 @@ pub mod core {
         ///
         /// This is unsafe because it uses unordered memory operations.
         pub unsafe fn store(&mut self, tile: Tile<E, D>, index: [i32; N]) -> Token {
-            let token: Token = unsafe { store_to_view_mut(self, tile, index) };
+            let token: Token = unsafe { store_to_view_mut(self, tile, index, None, false) };
             token
         }
     }
@@ -1821,12 +1813,14 @@ pub mod core {
     ///
     /// This is unsafe because it doesn't use ordered memory operations.
     // This is unsafe because it doesn't make use of ordered memory operations.
-    #[cuda_tile::op(name="store_view_tko", params=["view", "tile", "index"])]
+    #[cuda_tile::op(name="store_view_tko", params=["view", "tile", "index"], hint_params=["latency"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn store_to_view_mut<E: ElementType, const D: [i32; N]>(
         view: &mut PartitionMut<E, D>,
         tile: Tile<E, D>,
         index: [i32; N],
+        latency: Option<i32>,
+        disallow_tma: bool,
     ) -> Token {
         unreachable!()
     }
@@ -3627,7 +3621,7 @@ pub mod core {
     ) -> Tile<E, R> {
         let tensor_token: Token = get_tensor_token(x);
         let x_partition: Partition<E, R> = make_partition_view(x, tile_shape, tensor_token);
-        let tile_x: Tile<E, R> = load_from_view(&x_partition, idx);
+        let tile_x: Tile<E, R> = load_from_view(&x_partition, idx, None, false);
         tile_x
     }
 
@@ -3671,7 +3665,7 @@ pub mod core {
         let tensor_token: Token = get_tensor_token(y);
         let mut y_partition: PartitionMut<E, S> =
             unsafe { make_partition_view_mut(y, tile_shape, tensor_token) };
-        unsafe { store_to_view_mut(&mut y_partition, result, [0i32; N]) };
+        unsafe { store_to_view_mut(&mut y_partition, result, [0i32; N], None, false) };
         let new_token: Token = get_partition_token_mut(&y_partition);
         set_tensor_token(y, new_token);
     }
@@ -3703,7 +3697,7 @@ pub mod core {
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(x);
         let x_partition: Partition<E, S> = make_partition_view(x, tile_shape, tensor_token);
-        let tile_x: Tile<E, S> = load_from_view(&x_partition, [pid.0, pid.1]);
+        let tile_x: Tile<E, S> = load_from_view(&x_partition, [pid.0, pid.1], None, false);
         tile_x
     }
 
@@ -3746,7 +3740,7 @@ pub mod core {
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(x);
         let x_partition: Partition<E1, S> = make_partition_view(x, tile_shape, tensor_token);
-        let tile_x: Tile<E1, S> = load_from_view(&x_partition, [pid.0]);
+        let tile_x: Tile<E1, S> = load_from_view(&x_partition, [pid.0], None, false);
         tile_x
     }
 

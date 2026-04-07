@@ -27,12 +27,14 @@ pub use cuda_async::{
     scheduling_policies::*,
 };
 
+pub use cutile_compiler::compiler::utils::CompileOptions;
+
 /// Cache key for a compiled tile kernel.
 ///
 /// Two kernel invocations that share the same `TileFunctionKey` can reuse the same compiled
 /// CUDA module and function, avoiding recompilation. The key captures everything that can
 /// change the generated GPU code: module name, function name, generic type/const parameters,
-/// tensor stride layouts, and (optionally) the launch grid.
+/// tensor stride layouts, (optionally) the launch grid, and compile options.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TileFunctionKey {
     module_name: String,
@@ -40,6 +42,7 @@ pub struct TileFunctionKey {
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
     pub grid: Option<(u32, u32, u32)>,
+    pub compile_options: CompileOptions,
 }
 
 impl TileFunctionKey {
@@ -49,6 +52,7 @@ impl TileFunctionKey {
         function_generics: Vec<String>,
         stride_args: Vec<(String, Vec<i32>)>,
         grid: Option<(u32, u32, u32)>,
+        compile_options: CompileOptions,
     ) -> Self {
         Self {
             module_name,
@@ -56,6 +60,7 @@ impl TileFunctionKey {
             function_generics,
             stride_args,
             grid,
+            compile_options,
         }
     }
 }
@@ -159,6 +164,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     function_generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
     const_grid: Option<(u32, u32, u32)>,
+    compile_options: CompileOptions,
 ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
     let device_id: usize = ctx.get_device_id();
     // Compilation constructs a lookup key.
@@ -168,6 +174,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         function_generics,
         stride_args,
         const_grid,
+        compile_options,
     );
     let cache_hash_str = key.get_hash_string();
     if contains_cuda_function(device_id, &key) {
@@ -223,6 +230,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
             args.3,
             args.4,
             args.5.clone(),
+            &key.compile_options,
         )?;
         let validator: Validator = compiler.get_validator();
         let validator = Arc::new(validator);
@@ -445,6 +453,7 @@ where
         function_generics: Vec<String>,
         stride_args: Vec<(String, Vec<i32>)>,
         grid: Option<(u32, u32, u32)>,
+        compile_options: CompileOptions,
     ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
         compile_from_context(
             ctx,
@@ -455,6 +464,7 @@ where
             function_generics,
             stride_args,
             grid,
+            compile_options,
         )
     }
     /// Sets the type and const generic arguments for this kernel.
@@ -463,6 +473,8 @@ where
     fn const_grid(self, grid: (u32, u32, u32)) -> Self;
     /// Sets the runtime launch grid dimensions.
     fn grid(self, grid: (u32, u32, u32)) -> Self;
+    /// Sets the runtime compile options (occupancy, num_cta_in_cga).
+    fn compile_options(self, options: CompileOptions) -> Self;
     /// Infers the launch grid from partitioned tensor inputs, or uses the explicit grid.
     fn infer_launch_grid(
         &self,

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
@@ -108,6 +109,7 @@ fn compile_scan_sum_test() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -153,6 +155,7 @@ fn compile_reduce_closure_test() -> () {
             &[("input", &[1]), ("result", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -201,6 +204,7 @@ fn compile_reduce_product_closure_test() -> () {
             &[("input", &[1]), ("result", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -249,6 +253,7 @@ fn compile_reduce_max_closure_test() -> () {
             &[("input", &[1]), ("result", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -297,6 +302,7 @@ fn compile_scan_closure_test() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler

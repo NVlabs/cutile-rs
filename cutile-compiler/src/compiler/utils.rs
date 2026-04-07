@@ -663,6 +663,33 @@ pub unsafe fn verify_statements_raw(cuda_tile_module: MlirOperation) -> Result<(
     Ok(())
 }
 
+/// Runtime compile options for kernel JIT compilation.
+///
+/// These options control kernel-level compilation hints that can vary between
+/// launches. Different values trigger separate JIT compilations (they are part
+/// of the cache key).
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Default)]
+pub struct CompileOptions {
+    pub occupancy: Option<i32>,
+    pub num_cta_in_cga: Option<i32>,
+}
+
+impl CompileOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn occupancy(mut self, occupancy: i32) -> Self {
+        self.occupancy = Some(occupancy);
+        self
+    }
+
+    pub fn num_cta_in_cga(mut self, num_cta_in_cga: i32) -> Self {
+        self.num_cta_in_cga = Some(num_cta_in_cga);
+        self
+    }
+}
+
 fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
     let Expr::Lit(lit) = expr else {
         return SourceLocation::unknown()
@@ -680,9 +707,7 @@ fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
 /// Per-architecture (SM) optimization hints for kernel compilation.
 pub struct SMHints {
     pub gpu_name: String,
-    pub allow_tma: Option<bool>,
     pub num_cta_in_cga: Option<i32>,
-    pub latency: Option<i32>,
     pub occupancy: Option<i32>,
     pub set_tensor_dim_factor: Option<i32>,
 }
@@ -693,29 +718,9 @@ impl SMHints {
         Self {
             gpu_name,
             num_cta_in_cga: None,
-            allow_tma: None,
-            latency: None,
             occupancy: None,
             set_tensor_dim_factor: None,
         }
-    }
-
-    /// Sets the TMA (Tensor Memory Access) permission hint.
-    pub fn set_allow_tma(&mut self, hint: &Expr) -> Result<(), JITError> {
-        if self.allow_tma.is_some() {
-            return SourceLocation::unknown()
-                .jit_error_result("allow_tma hint has already been set");
-        }
-        let Expr::Lit(lit) = hint else {
-            return SourceLocation::unknown()
-                .jit_error_result("expected a literal value for allow_tma hint");
-        };
-        let Lit::Bool(bool_expr) = &lit.lit else {
-            return SourceLocation::unknown()
-                .jit_error_result("expected a boolean literal for allow_tma hint");
-        };
-        self.allow_tma = Some(bool_expr.value);
-        Ok(())
     }
 
     /// Sets the number of CTAs in a CGA (Cooperative Grid Array) hint.
@@ -735,15 +740,6 @@ impl SMHints {
                 .jit_error_result("occupancy hint has already been set");
         }
         self.occupancy = Some(get_int_hint(hint)?);
-        Ok(())
-    }
-
-    /// Sets the target latency hint.
-    pub fn set_latency(&mut self, hint: &Expr) -> Result<(), JITError> {
-        if self.latency.is_some() {
-            return SourceLocation::unknown().jit_error_result("latency hint has already been set");
-        }
-        self.latency = Some(get_int_hint(hint)?);
         Ok(())
     }
 }
@@ -835,11 +831,11 @@ impl OptimizationHints {
                             "occupancy" => {
                                 sm_hints_result.set_occupancy(&hints)?;
                             }
-                            "allow_tma" => {
-                                sm_hints_result.set_allow_tma(&hints)?;
-                            }
-                            "latency" => {
-                                sm_hints_result.set_latency(&hints)?;
+                            "allow_tma" | "latency" => {
+                                return SourceLocation::unknown().jit_error_result(&format!(
+                                    "'{key}' is a per-op hint and cannot be set at the entry level. \
+                                     Use it as a parameter on individual load/store operations instead."
+                                ));
                             }
                             _ => {
                                 return SourceLocation::unknown().jit_error_result(&format!(
@@ -866,6 +862,27 @@ impl OptimizationHints {
     /// Returns the SM-specific hints for the given architecture key.
     pub fn get_sm_hints(&self, key: &str) -> Option<&SMHints> {
         self.tile_as_hints.get(key)
+    }
+
+    /// Applies runtime compile options, overriding entry-level hints.
+    pub fn apply_compile_options(&mut self, options: &CompileOptions) {
+        if options.occupancy.is_none() && options.num_cta_in_cga.is_none() {
+            return;
+        }
+        let target_arch = self
+            .target_gpu_name
+            .clone()
+            .unwrap_or_else(|| "sm_100".to_string());
+        let sm_hints = self
+            .tile_as_hints
+            .entry(target_arch.clone())
+            .or_insert_with(|| SMHints::new(target_arch));
+        if let Some(occupancy) = options.occupancy {
+            sm_hints.occupancy = Some(occupancy);
+        }
+        if let Some(num_cta_in_cga) = options.num_cta_in_cga {
+            sm_hints.num_cta_in_cga = Some(num_cta_in_cga);
+        }
     }
 
     /// Builds the MLIR `optimization_hints` attribute for the entry function.
@@ -904,45 +921,33 @@ impl OptimizationHints {
         context: &'c Context,
         hint_params: HashMap<String, i32>,
     ) -> Result<Option<(Identifier<'c>, Attribute<'c>)>, JITError> {
-        let mut results = vec![];
-        if !hint_params.is_empty() {
-            let target_arch = self
-                .target_gpu_name
-                .clone()
-                .expect("Target gpu not yet specified. Did you compile?");
-            let mut arch_hints_vec = vec![];
-            for (key, val) in hint_params.iter() {
+        if hint_params.is_empty() {
+            return Ok(None);
+        }
+        let target_arch = self
+            .target_gpu_name
+            .clone()
+            .expect("Target gpu not yet specified. Did you compile?");
+        let mut arch_hints_vec = vec![];
+        for (key, val) in hint_params.iter() {
+            if key == "allow_tma" {
+                arch_hints_vec.push(format!(
+                    "{key}={}",
+                    if *val != 0 { "true" } else { "false" }
+                ));
+            } else {
                 arch_hints_vec.push(format!("{key}={val}"));
             }
-            results.push(format!("{target_arch}={{ {} }}", arch_hints_vec.join(", ")));
         }
-        for (arch, arch_hints) in self.tile_as_hints.iter() {
-            let mut arch_hints_vec = vec![];
-            if let Some(allow_tma) = arch_hints.allow_tma {
-                if !hint_params.contains_key("allow_tma") {
-                    // If hint params were provided, ignore corresponding optimization hints.
-                    arch_hints_vec.push(format!("allow_tma={allow_tma}"));
-                }
-            }
-            if let Some(latency) = arch_hints.latency {
-                if !hint_params.contains_key("latency") {
-                    arch_hints_vec.push(format!("latency={latency}"));
-                }
-            }
-            if arch_hints_vec.len() > 0 {
-                results.push(format!("{arch}={{ {} }}", arch_hints_vec.join(", ")));
-            }
-        }
-        if results.len() > 0 {
-            let opt_hint_str = format!("#cuda_tile.optimization_hints<{}>", results.join(", "));
-            Ok(Some(parse_named_attr(
-                context,
-                "optimization_hints",
-                &opt_hint_str,
-            )?))
-        } else {
-            Ok(None)
-        }
+        let opt_hint_str = format!(
+            "#cuda_tile.optimization_hints<{target_arch}={{ {} }}>",
+            arch_hints_vec.join(", ")
+        );
+        Ok(Some(parse_named_attr(
+            context,
+            "optimization_hints",
+            &opt_hint_str,
+        )?))
     }
 }
 

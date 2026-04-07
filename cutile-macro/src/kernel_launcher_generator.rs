@@ -631,10 +631,12 @@ pub fn generate_kernel_launcher(
 
     let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
+        let compile_options = std::mem::take(&mut self._compile_options);
         let (function, validator) = self.compile(
             ctx, _module_asts,
             module_name, function_name, function_entry,
-            function_generics, stride_args, const_grid
+            function_generics, stride_args, const_grid,
+            compile_options
         )?;
         // Do validation here.
     }})

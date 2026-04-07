@@ -654,7 +654,7 @@ unsafe {
     
     let idx: [i32; 2] = [0i32, 0i32];
     let tile = load_from_view_mut(&partition, idx);
-    store_to_view_mut(&mut partition, tile, idx);
+    store_to_view_mut(&mut partition, tile, idx, None, false);
 }
 ```
 
@@ -672,6 +672,10 @@ let (values, token): (Tile<f32, S>, Token) =
 // Store with memory ordering
 let token: Token =
     store_ptr_tko(ptrs, values, "relaxed", "device", None, None, None);
+
+// Per-op latency hint
+let (values, token): (Tile<f32, S>, Token) =
+    load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Some(4));
 ```
 
 Memory orderings: `"relaxed"`, `"weak"`, `"acquire"`, `"release"`, `"acq_rel"`

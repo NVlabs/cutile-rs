@@ -376,21 +376,30 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: optimization_hints (Option<&str>)
-        let _optimization_hints = if let Some(hint_arg) =
+        // arg[6]: latency (Option<i32>)
+        let mut hint_params: HashMap<String, i32> = HashMap::new();
+        if let Some(latency_arg) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
         {
             if let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = hint_arg
+                lit: Lit::Int(int_lit),
+                ..
+            }) = latency_arg
             {
-                Some(s.value())
-            } else {
-                None
+                hint_params.insert(
+                    "latency".to_string(),
+                    int_lit.base10_parse::<i32>().unwrap(),
+                );
             }
-        } else {
-            None
-        };
+        }
+
+        let mut opt_hints = vec![];
+        if let Some(load_store_hints_attr) = self
+            .optimization_hints
+            .get_load_store_hints(&self.context, hint_params)?
+        {
+            opt_hints.push(load_store_hints_attr);
+        }
 
         let operand_segments = format!(
             "array<i32: 1, {}, {}, {}>",
@@ -401,6 +410,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             OperationBuilder::new("cuda_tile.load_ptr_tko", Location::unknown(&self.context))
                 .add_results(&[tile_result_ty, token_result_ty])
                 .add_operands(&operands)
+                .add_attributes(&opt_hints)
                 .add_attributes(&[(
                     Identifier::new(&self.context, "memory_ordering_semantics"),
                     IntegerAttribute::new(
@@ -567,21 +577,30 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: optimization_hints
-        let _optimization_hints = if let Some(hint_arg) =
+        // arg[6]: latency (Option<i32>)
+        let mut hint_params: HashMap<String, i32> = HashMap::new();
+        if let Some(latency_arg) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
         {
             if let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = hint_arg
+                lit: Lit::Int(int_lit),
+                ..
+            }) = latency_arg
             {
-                Some(s.value())
-            } else {
-                None
+                hint_params.insert(
+                    "latency".to_string(),
+                    int_lit.base10_parse::<i32>().unwrap(),
+                );
             }
-        } else {
-            None
-        };
+        }
+
+        let mut opt_hints = vec![];
+        if let Some(load_store_hints_attr) = self
+            .optimization_hints
+            .get_load_store_hints(&self.context, hint_params)?
+        {
+            opt_hints.push(load_store_hints_attr);
+        }
 
         let operand_segments = format!("array<i32: 1, 1, {}, {}>", mask_count, token_count);
 
@@ -589,6 +608,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             OperationBuilder::new("cuda_tile.store_ptr_tko", Location::unknown(&self.context))
                 .add_results(&[token_result_ty])
                 .add_operands(&operands)
+                .add_attributes(&opt_hints)
                 .add_attributes(&[(
                     Identifier::new(&self.context, "memory_ordering_semantics"),
                     IntegerAttribute::new(
@@ -1126,20 +1146,35 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     &format!("Failed to compile hint param {hint_param}"),
                 );
             };
-            let Expr::Lit(lit_expr) = &call_expr.args[i] else {
-                return self.jit_error_result(
-                    &call_expr.args[i].span(),
-                    &format!("Failed to compile hint param {hint_param}, expected literal."),
+            // Handle Option<i32> hint params (e.g. latency: Option<i32>).
+            if let Some(inner) = crate::compiler::utils::resolve_option_arg(&call_expr.args[i], ctx)
+            {
+                let Expr::Lit(lit_expr) = &inner else {
+                    return self.jit_error_result(
+                        &call_expr.args[i].span(),
+                        &format!("Failed to compile hint param {hint_param}, expected literal."),
+                    );
+                };
+                let Lit::Int(int_lit) = &lit_expr.lit else {
+                    return self
+                        .jit_error_result(&lit_expr.span(), "Non-integer literals not supported");
+                };
+                hint_params.insert(
+                    hint_param.to_string(),
+                    int_lit.base10_parse::<i32>().unwrap(),
                 );
-            };
-            let Lit::Int(int_lit) = &lit_expr.lit else {
-                return self
-                    .jit_error_result(&lit_expr.span(), "Non-integer literals not supported");
-            };
-            hint_params.insert(
-                hint_param.to_string(),
-                int_lit.base10_parse::<i32>().unwrap(),
-            );
+            }
+        }
+        // Handle disallow_tma: bool parameter.
+        if let Some(i) = fn_params.iter().position(|s| s == "disallow_tma") {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Bool(b), ..
+            }) = &call_expr.args[i]
+            {
+                if b.value {
+                    hint_params.insert("allow_tma".to_string(), 0);
+                }
+            }
         }
         if let Some(load_store_hints_attr) = self
             .optimization_hints
@@ -1267,22 +1302,37 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     &format!("Failed to compile hint param {hint_param}"),
                 );
             };
-            let Expr::Lit(lit_expr) = &call_expr.args[i] else {
-                return self.jit_error_result(
-                    &call_expr.args[i].span(),
-                    &format!("Failed to compile hint param {hint_param}, expected literal."),
+            // Handle Option<i32> hint params (e.g. latency: Option<i32>).
+            if let Some(inner) = crate::compiler::utils::resolve_option_arg(&call_expr.args[i], ctx)
+            {
+                let Expr::Lit(lit_expr) = &inner else {
+                    return self.jit_error_result(
+                        &call_expr.args[i].span(),
+                        &format!("Failed to compile hint param {hint_param}, expected literal."),
+                    );
+                };
+                let Lit::Int(int_lit) = &lit_expr.lit else {
+                    return self.jit_error_result(
+                        &lit_expr.span(),
+                        "Non-integer hint param literals not supported",
+                    );
+                };
+                hint_params.insert(
+                    hint_param.to_string(),
+                    int_lit.base10_parse::<i32>().unwrap(),
                 );
-            };
-            let Lit::Int(int_lit) = &lit_expr.lit else {
-                return self.jit_error_result(
-                    &lit_expr.span(),
-                    "Non-integer hint param literals not supported",
-                );
-            };
-            hint_params.insert(
-                hint_param.to_string(),
-                int_lit.base10_parse::<i32>().unwrap(),
-            );
+            }
+        }
+        // Handle disallow_tma: bool parameter.
+        if let Some(i) = fn_params.iter().position(|s| s == "disallow_tma") {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Bool(b), ..
+            }) = &call_expr.args[i]
+            {
+                if b.value {
+                    hint_params.insert("allow_tma".to_string(), 0);
+                }
+            }
         }
         if let Some(load_store_hints_attr) = self
             .optimization_hints

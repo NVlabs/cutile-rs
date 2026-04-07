@@ -11,6 +11,7 @@ use cuda_core::LaunchConfig;
 use cutile::tensor::{Tensor, ToHostVec};
 use cutile::tile_kernel::IntoDeviceOperationPartition;
 use cutile::{api, error::Error};
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile::ModuleOperation;
 use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
@@ -103,6 +104,7 @@ async fn main() -> Result<(), Error> {
             .collect::<Vec<_>>(),
         None,
         get_gpu_name(0),
+        &CompileOptions::default(),
     )?;
     let module_op: ModuleOperation = compiler.compile()?;
     println!("{}", module_op.as_operation().to_string());

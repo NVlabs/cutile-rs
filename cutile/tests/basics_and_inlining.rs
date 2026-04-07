@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
@@ -95,8 +96,9 @@ mod basics_and_inlining_module {
                 make_partition_view_mut(&y, shape, token);
             let idx: [i32; 2] = [0i32, 0i32];
             let some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
-            store_to_view_mut(&mut partition, some_tile, idx);
-            let _store_token_2: Token = store_to_view_mut(&mut partition, some_tile, idx);
+            store_to_view_mut(&mut partition, some_tile, idx, None, false);
+            let _store_token_2: Token =
+                store_to_view_mut(&mut partition, some_tile, idx, None, false);
         }
 
         let shape: Shape<{ [1, 1] }> = Shape::<{ [1, 1] }> {
@@ -182,16 +184,16 @@ mod basics_and_inlining_module {
                 make_partition_view_mut(&y, shape, token);
             let idx: [i32; 2] = [0i32, 0i32];
             let mut some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
-            store_to_view_mut(&mut partition, some_tile, idx);
-            store_to_view_mut(&mut partition, some_tile, idx);
+            store_to_view_mut(&mut partition, some_tile, idx, None, false);
+            store_to_view_mut(&mut partition, some_tile, idx, None, false);
             for _i in 0i32..10i32 {
                 let some_tile_2: Tile<f32, { [128, 256] }> = constant(2.0, shape);
                 some_tile = some_tile + some_tile_2;
-                store_to_view_mut(&mut partition, some_tile, idx);
+                store_to_view_mut(&mut partition, some_tile, idx, None, false);
                 continue;
             }
             let some_3: Tile<f32, { [128, 256] }> = some_tile + some_tile;
-            store_to_view_mut(&mut partition, some_3, idx);
+            store_to_view_mut(&mut partition, some_3, idx, None, false);
         }
 
         let _basic_string = "a string.";
@@ -251,6 +253,7 @@ fn compile_inlining() -> () {
             &[("y", &[1024, 1, 1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -276,6 +279,7 @@ fn compile_basics() -> () {
             &[("y", &[1024, 1]), ("w", &[1, 2, 3])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -301,6 +305,7 @@ fn compile_negative_constant() -> () {
             &[("output", &[1024])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -327,6 +332,7 @@ fn compile_ptr_tile_reshape() -> () {
             &[],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler

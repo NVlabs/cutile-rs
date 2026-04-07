@@ -691,7 +691,8 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             _const_grid: bool,
             _grid: (u32, u32, u32),
             input: Option<DI>,
-            function_generics: Option<Vec<String>>
+            function_generics: Option<Vec<String>>,
+            _compile_options: CompileOptions,
         }
 
         impl #tile_kernel_impl_type_params #launcher_ident #struct_args {
@@ -700,7 +701,8 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
                     _const_grid: false,
                     _grid: (0, 0, 0),
                     input: Some(input),
-                    function_generics: None
+                    function_generics: None,
+                    _compile_options: CompileOptions::default(),
                 }
             }
         }
@@ -722,6 +724,10 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             }
             fn generics(mut self, generics: Vec<String>) -> Self {
                 self.function_generics = Some(generics);
+                self
+            }
+            fn compile_options(mut self, options: CompileOptions) -> Self {
+                self._compile_options = options;
                 self
             }
         }

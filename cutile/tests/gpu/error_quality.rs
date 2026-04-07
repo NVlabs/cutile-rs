@@ -7,6 +7,7 @@
 
 use cutile;
 use cutile_compiler::ast::Module;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use cutile_compiler::error::JITError;
@@ -90,6 +91,7 @@ fn compile_and_get_error(
         &[("output", &[1])],
         None,
         gpu_name,
+        &CompileOptions::default(),
     )
     .expect("Compiler construction should succeed");
 

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
@@ -66,6 +67,7 @@ fn compile_minmax() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -105,6 +107,7 @@ fn compile_select() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -137,6 +140,7 @@ fn compile_bf16_binary_arith() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler

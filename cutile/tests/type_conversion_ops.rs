@@ -4,6 +4,7 @@
  */
 use cutile;
 use cutile::{api::*, tensor::*, tile_kernel::*};
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use half::bf16;
@@ -100,6 +101,7 @@ fn compile_conversion_ops() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -140,6 +142,7 @@ fn compile_ptr_conversion() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -180,6 +183,7 @@ fn compile_exti_unsigned() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -216,6 +220,7 @@ fn compile_bf16_conversion() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler

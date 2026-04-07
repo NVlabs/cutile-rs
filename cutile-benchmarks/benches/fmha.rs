@@ -130,7 +130,7 @@ mod kernels {
             // let v_tile: Tile<f16, {[1, 1, BN, D]}> = v_part.load([batch_idx, kv_head_idx, j, 0i32]);
             // TODO (hme): Separate this into safe/unsafe unchecked versions.
             let v_tile: Tile<f16, { [1, 1, BN, D] }> =
-                load_from_view_latency(&v_part, [batch_idx, kv_head_idx, j, 0i32], 4);
+                load_from_view(&v_part, [batch_idx, kv_head_idx, j, 0i32], Some(4), false);
             let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
             acc = mma(p, v_tile, acc);
             m_i = m_ij;

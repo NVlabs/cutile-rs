@@ -13,7 +13,8 @@ use crate::compiler::_module::CUDATileModules;
 pub use crate::compiler::_type::*;
 pub use crate::compiler::_value::*;
 use crate::compiler::utils::{
-    named_flag_attr, named_str_attr, named_type_attr, parse_named_attr, OptimizationHints,
+    named_flag_attr, named_str_attr, named_type_attr, parse_named_attr, CompileOptions,
+    OptimizationHints,
 };
 use crate::context_all;
 use crate::cuda_tile;
@@ -94,6 +95,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         stride_args: &[(&str, &[i32])],
         const_grid: Option<(u32, u32, u32)>,
         gpu_name: String,
+        compile_options: &CompileOptions,
     ) -> Result<Self, JITError> {
         if !modules.modules.contains_key(module_name) {
             return Err(JITError::Generic(format!(
@@ -125,10 +127,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 );
         }
 
-        let optimization_hints = match entry_attrs.get_entry_arg_expr("optimization_hints") {
+        let mut optimization_hints = match entry_attrs.get_entry_arg_expr("optimization_hints") {
             Some(hints_expr) => OptimizationHints::parse(hints_expr, gpu_name.clone())?,
-            None => OptimizationHints::empty(),
+            None => {
+                let mut hints = OptimizationHints::empty();
+                hints.target_gpu_name = Some(gpu_name.clone());
+                hints
+            }
         };
+        // Runtime compile options override entry-level hints.
+        optimization_hints.apply_compile_options(compile_options);
 
         let stride_args: HashMap<String, Vec<i32>> = stride_args
             .into_iter()

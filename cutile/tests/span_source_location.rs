@@ -33,6 +33,7 @@
 //!    preserves comments in the captured text.
 
 use cutile;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use cutile_compiler::error::JITError;
@@ -73,6 +74,7 @@ fn untyped_literal_error_has_correct_source_location() {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Compiler construction should succeed");
 
@@ -212,6 +214,7 @@ fn comments_do_not_break_span_tracking() {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Compiler construction should succeed");
 

@@ -10,7 +10,7 @@ use cuda_core::LaunchConfig;
 use cutile;
 use cutile::api::{arange, DeviceOperationReshape};
 use cutile::tensor::{IntoPartition, ToHostVec};
-use cutile::tile_kernel::compile_from_context;
+use cutile::tile_kernel::{compile_from_context, CompileOptions};
 use my_module::_module_asts;
 use std::sync::Arc;
 
@@ -53,6 +53,7 @@ async fn main() -> Result<(), DeviceError> {
                 function_generics,
                 stride_args,
                 None,
+                CompileOptions::default(),
             );
             value(func)
         })

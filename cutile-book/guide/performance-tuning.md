@@ -19,7 +19,11 @@ GPU performance optimization focuses on three key areas:
 
 ### Optimization Hints
 
-cuTile Rust provides `optimization_hints` for fine-tuning kernel performance:
+cuTile Rust provides `optimization_hints` at two levels: **entry-level** (kernel-wide) and **per-op** (on individual load/store operations).
+
+#### Entry-Level Hints
+
+Set `occupancy` and `num_cta_in_cga` in the entry annotation. These can also be overridden at runtime via `CompileOptions`:
 
 ```rust
 #[cutile::entry(
@@ -28,7 +32,6 @@ cuTile Rust provides `optimization_hints` for fine-tuning kernel performance:
         sm_120 = (                         // Hopper-specific hints
             num_cta_in_cga = 2,           // CTAs per Cooperative Group
             occupancy = 2,                 // Target occupancy
-            allow_tma = true,              // Use Tensor Memory Accelerator
         ),
         sm_90 = (                          // Ampere-specific hints
             num_cta_in_cga = 1,
@@ -38,15 +41,50 @@ cuTile Rust provides `optimization_hints` for fine-tuning kernel performance:
 fn optimized_kernel<const S: [i32; 2]>(...) { ... }
 ```
 
+To override entry-level hints at runtime (e.g. for autotuning):
+
+```rust
+use cutile::tile_kernel::CompileOptions;
+
+let result = my_kernel(input)
+    .compile_options(CompileOptions::default().occupancy(4).num_cta_in_cga(2))
+    .grid(grid)
+    .await;
+```
+
+Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
+
+#### Per-Op Hints
+
+`latency` and `disallow_tma` are set directly on individual load/store operations:
+
+```rust
+// Per-op latency hint on a view load
+let tile: Tile<f32, S> = load_from_view(&partition, idx, Some(4), false);
+
+// Disable TMA on a specific store
+unsafe { store_to_view_mut(&mut partition, tile, idx, None, true); }
+
+// Per-op latency on a pointer load
+let (values, token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Some(4));
+```
+
 ### Hint Reference
+
+#### Entry-Level Hints
 
 | Hint | Description | Default |
 |------|-------------|---------|
 | `tensor_dim_factor` | Memory alignment factor | Auto |
 | `num_cta_in_cga` | CTAs in Cooperative Group Array | 1 |
 | `occupancy` | Target occupancy level | Auto |
-| `allow_tma` | Enable Tensor Memory Accelerator (Hopper+) | Auto |
-| `latency` | Latency optimization hint | Auto |
+
+#### Per-Op Hints (on load/store operations)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `latency` | Latency optimization hint (`Option<i32>`) | `None` (compiler decides) |
+| `disallow_tma` | Disable Tensor Memory Accelerator for this op (`bool`) | `false` (TMA allowed) |
 
 ### Tile Size Selection
 

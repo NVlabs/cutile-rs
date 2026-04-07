@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
@@ -382,7 +383,7 @@ mod memory_and_atomic_ops_module {
         let partition: Partition<f32, S> =
             make_partition_view_padded(input, shape, "neg_inf", token);
         let idx: [i32; 1] = [0i32];
-        let _tile: Tile<f32, S> = load_from_view(&partition, idx);
+        let _tile: Tile<f32, S> = load_from_view(&partition, idx, None, false);
     }
 }
 
@@ -402,6 +403,7 @@ fn compile_join_tokens() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -449,6 +451,7 @@ fn compile_ptr_load_store() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -519,6 +522,7 @@ fn compile_load_ptr_weak() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -555,6 +559,7 @@ fn compile_load_ptr_acquire() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -591,6 +596,7 @@ fn compile_load_ptr_with_token() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -632,6 +638,7 @@ fn compile_load_ptr_with_mask() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -673,6 +680,7 @@ fn compile_store_ptr_release() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -709,6 +717,7 @@ fn compile_store_ptr_with_mask() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -749,6 +758,7 @@ fn compile_atomic_rmw() -> () {
             &[("output", &[1]), ("counters", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -797,6 +807,7 @@ fn compile_atomic_cas() -> () {
             &[("output", &[1]), ("expected", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -846,6 +857,7 @@ fn compile_atomic_cas_with_mask() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -887,6 +899,7 @@ fn compile_atomic_cas_acq_rel_sys() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -928,6 +941,7 @@ fn compile_atomic_and() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -965,6 +979,7 @@ fn compile_atomic_add() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -1002,6 +1017,7 @@ fn compile_atomic_max() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -1039,6 +1055,7 @@ fn compile_atomic_rmw_with_mask() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -1076,6 +1093,7 @@ fn compile_atomic_rmw_with_token() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -1113,6 +1131,7 @@ fn compile_atomic_xchg() -> () {
             &[("output", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
@@ -1150,6 +1169,7 @@ fn compile_padded_partition_view() -> () {
             &[("input", &[1])],
             None,
             gpu_name,
+            &CompileOptions::default(),
         )
         .expect("Failed.");
         let module_op_str = compiler
