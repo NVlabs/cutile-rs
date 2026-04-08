@@ -44,9 +44,9 @@ async fn main() -> Result<(), cutile::error::Error> {
     let tile_size = 4usize;
 
     // Initialize tensors.
-    let z = zeros::<1, f32>([len]).await?;
+    let z = zeros::<f32>(&[len]).await?;
     let x: Tensor<f32> = arange(len).await?;
-    let y: Tensor<f32> = ones([len]).await?;
+    let y: Tensor<f32> = ones(&[len]).await?;
 
     // Extract device pointers.
     let z_ptr = z.device_pointer();

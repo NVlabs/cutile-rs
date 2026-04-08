@@ -290,7 +290,7 @@ fn execute_bf16_to_f32_conversion() -> () {
             .sync()
             .expect("Failed.");
         let input = Arc::new(input);
-        let output: Tensor<f32> = zeros([input_host.len()]).sync().expect("Failed.");
+        let output: Tensor<f32> = zeros(&[input_host.len()]).sync().expect("Failed.");
 
         let (result, _) = bf16_to_f32_conversion_kernel(output.partition([4]), input)
             .sync()
@@ -315,7 +315,7 @@ fn execute_f32_to_bf16_conversion() -> () {
             .sync()
             .expect("Failed.");
         let input = Arc::new(input);
-        let output: Tensor<bf16> = zeros([input_host.len()]).sync().expect("Failed.");
+        let output: Tensor<bf16> = zeros(&[input_host.len()]).sync().expect("Failed.");
 
         let (result, _) = f32_to_bf16_conversion_kernel(output.partition([4]), input)
             .sync()

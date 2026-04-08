@@ -5,10 +5,11 @@
 
 use cuda_async::device_context::global_policy;
 use cuda_async::device_operation::*;
-use cutile::api::copy;
+use cutile::api::dup;
 use cutile::tensor::{Partition, Tensor, ToHostVec, Unpartition};
-use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel};
+use cutile::tile_kernel::{PartitionOp, TileKernel};
 use cutile::{api, error::Error};
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 #[cutile::module]
@@ -63,13 +64,9 @@ pub mod my_kernels {
     }
 }
 
-use my_kernels::*;
-
 // Simulate loading input data.
-fn load_data<const RANK: usize>(
-    batch_size: [usize; RANK],
-) -> impl DeviceOperation<Output = Tensor<f32>> {
-    api::randn_f32(0.0, 1.0, batch_size, None)
+fn load_data<const RANK: usize>(batch_size: [usize; RANK]) -> impl DeviceOp<Output = Tensor<f32>> {
+    api::randn(0.0, 1.0, batch_size, None)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
@@ -98,12 +95,16 @@ async fn main() -> Result<(), Error> {
         block_dim.to_string(),
         dim.to_string(),
     ];
-    let w0 = api::randn_f32(0.0f32, 1.0, [dim, dim], None); // impl DeviceOperation
-    let w1 = api::randn_f32(0.0f32, 1.0, [dim], None); // impl DeviceOperation
-    let w = zip!(w0.arc(), w1.arc()).schedule(&devices[0])?.await?;
+    let w0 = api::randn(0.0f32, 1.0, [dim, dim], None); // impl DeviceOp
+    let w1 = api::randn(0.0f32, 1.0, [dim], None); // impl DeviceOp
+    let w: (Arc<Tensor<f32>>, Arc<Tensor<f32>>) = zip!(w0.map(Into::into), w1.map(Into::into))
+        .schedule(&devices[0])?
+        .await?;
     let mut joins = vec![];
     for i in 1..num_devices {
-        let w_copy = tokio::spawn(zip!(copy(&w.0).arc(), copy(&w.1).arc()).schedule(&devices[i])?);
+        let w_copy = tokio::spawn(
+            zip!(dup(&w.0).map(Into::into), dup(&w.1).map(Into::into)).schedule(&devices[i])?,
+        );
         joins.push(w_copy);
     }
     let mut model_weights = vec![w];
@@ -118,18 +119,18 @@ async fn main() -> Result<(), Error> {
     for i in 0..num_devices {
         let w = &model_weights[i];
         let (w0, w1) = (w.0.clone(), w.1.clone());
-        let data = load_data([dim, dim]).arc();
-        let out0 = api::zeros::<2, f32>([dim, dim]).partition([block_dim, block_dim]);
+        let data = load_data([dim, dim]);
+        let out0 = api::zeros::<f32>(&[dim, dim]).partition([block_dim, block_dim]);
         let fully_connected_layer = fully_connected_layer.to_vec();
-        let (out0, _, _) = gemm_op(out0, data, value(w0))
+        let (out0, _, _) = my_kernels::gemm(out0, data, w0)
             .generics(fully_connected_layer)
             .unzip();
-        let out1 = api::zeros::<1, f32>([dim]).partition([block_dim]);
+        let out1 = api::zeros::<f32>(&[dim]).partition([block_dim]);
         let output_layer = output_layer.to_vec();
-        let (out1, _, _) = matvec_op(out1, out0.unpartition().arc(), value(w1))
+        let (out1, _, _) = my_kernels::matvec(out1, out0.unpartition(), w1)
             .generics(output_layer)
             .unzip();
-        let (out1,) = relu_op(out1).unzip();
+        let (out1,) = my_kernels::relu(out1).unzip();
         futures.push(tokio::spawn(out1.schedule(&devices[i])?));
     }
 

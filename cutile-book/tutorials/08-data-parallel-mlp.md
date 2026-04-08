@@ -70,18 +70,18 @@ mod data_parallel_module {
     }
 }
 
-use data_parallel_module::{gemm_apply, relu_apply, matvec_apply};
+use data_parallel_module::{gemm, relu, matvec};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), DeviceError> {
 
     use cuda_async::device_operation::*;
-    use data_parallel_module::{gemm_apply, relu_apply, matvec_apply};
+    use data_parallel_module::{gemm, relu, matvec};
     use cutile::api;
     use cutile::tensor::{Unpartition, Partition, Tensor, ToHostVec};
-    use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel};
+    use cutile::tile_kernel::{PartitionOp, TileKernel};
     use cuda_async::device_context::global_policy;
-    use cutile::api::copy;
+    use cutile::api::dup;
     use tokio::task::JoinHandle;
 
     // Get device scheduling policies.
@@ -109,12 +109,12 @@ async fn main() {
         block_dim.to_string(),
         dim.to_string(),
     ];
-    let w0 = api::randn(0.0f32, 1.0, [dim, dim]); // impl DeviceOperation
-    let w1 = api::randn(0.0f32, 1.0, [dim]); // impl DeviceOperation
-    let w = zip!(w0.arc(), w1.arc()).schedule(&devices[0])?.await?;
+    let w0 = api::randn(0.0f32, 1.0, [dim, dim]); // impl DeviceOp
+    let w1 = api::randn(0.0f32, 1.0, [dim]); // impl DeviceOp
+    let w = zip!(w0.map(Into::into), w1.map(Into::into)).schedule(&devices[0])?.await?;
     let mut joins = vec![];
     for i in 1..num_devices {
-        let w_copy = tokio::spawn(zip!(copy(&w.0).arc(), copy(&w.1).arc()).schedule(&devices[i])?);
+        let w_copy = tokio::spawn(zip!(dup(&w.0).map(Into::into), dup(&w.1).map(Into::into)).schedule(&devices[i])?);
         joins.push(w_copy);
     }
     let mut model_weights = vec![w];
@@ -127,16 +127,19 @@ async fn main() {
     for i in 0..num_devices {
         let w = &model_weights[i];
         let (w0, w1) = (w.0.clone(), w.1.clone());
-        let data = api::randn(0.0, 1.0, [dim, dim]).arc();
-        let out0 = api::zeros::<2, f32>([dim, dim]).partition([block_dim, block_dim]);
-        let (out0, _, _) = zip!(out0, data, value(w0))
-            .apply(|args| gemm_apply(args).generics(fully_connected_layer.to_vec()))
-            .unzip();
-        let out1 = api::zeros::<1, f32>([dim]).partition([block_dim]);
-        let (out1, _, _) = zip!(out1, out0.unpartition().arc(), value(w1))
-            .apply(|args| matvec_apply(args).generics(output_layer.to_vec()))
-            .unzip();
-        let (out1,) = out1.and_then(|out1| value((out1,))).apply(relu_apply).unzip();
+        let data = api::randn(0.0, 1.0, [dim, dim]).map(Into::into);
+        // Unified launcher: pass output partition and inputs directly.
+        let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
+        let out0 = gemm(out0, data, w0)
+            .generics(fully_connected_layer.to_vec())
+            .first()
+            .unpartition();
+        let out1 = api::zeros(&[dim]).partition([block_dim]);
+        let out1 = matvec(out1, out0.map(Into::into), w1)
+            .generics(output_layer.to_vec())
+            .first()
+            .unpartition();
+        let (out1,) = relu(out1.partition([block_dim])).unzip();
         futures.push(tokio::spawn(out1.schedule(&devices[i])?));
     }
 
@@ -150,6 +153,7 @@ async fn main() {
         println!("{:?}", output.to_host_vec().await?);
     }
 
+    Ok(())
 }
 ```
 
@@ -167,22 +171,21 @@ for i in 0..num_devices {
     let (w0, w1) = (w.0.clone(), w.1.clone());
     // Sample random data. Although the sampling procedure is a simulation,
     // this can be replaced with a procedure that actually samples a batch of data.
-    let data = api::randn(0.0, 1.0, [dim, dim]).arc();
-    // Construct the intermediate output buffer and partition, since we'll be writing to it.
-    let out0 = api::zeros::<2, f32>([dim, dim]).partition([block_dim, block_dim]);
-    // Execute GEMM.
-    let (out0, _, _) = zip!(out0, data, value(w0))
-        .apply(|args| gemm_apply(args).generics(fully_connected_layer.to_vec()))
-        .unzip();
-    // Construct the final output buffer and partition.
-    let out1 = api::zeros::<1, f32>([dim]).partition([block_dim]);
-    // Execute MatVec.
-    let (out1, _, _) = zip!(out1, out0.unpartition().arc(), value(w1))
-        .apply(|args| matvec_apply(args).generics(output_layer.to_vec()))
-        .unzip();
-    // Apply ReLU and unzip. We need to unzip here since arguments to kernels
-    // are always packed into a tuple.
-    let (out1,) = out1.and_then(|out1| value((out1,))).apply(relu_apply).unzip();
+    let data = api::randn(0.0, 1.0, [dim, dim]).map(Into::into);
+    // Unified launcher: pass output partition and inputs directly.
+    let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
+    let out0 = gemm(out0, data, w0)
+        .generics(fully_connected_layer.to_vec())
+        .first()
+        .unpartition();
+    // Final output: matvec + relu.
+    let out1 = api::zeros(&[dim]).partition([block_dim]);
+    let out1 = matvec(out1, out0.map(Into::into), w1)
+        .generics(output_layer.to_vec())
+        .first()
+        .unpartition();
+    // Apply ReLU. Partition for tile-level dispatch, then unzip the result.
+    let (out1,) = relu(out1.partition([block_dim])).unzip();
     // out1 now contains the work we would like to schedule on device i.
     // By invoking schedule on device i, we generate a device future which is
     // ready to execute on device i. By spawning a task for the device future,

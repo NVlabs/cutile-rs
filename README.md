@@ -124,13 +124,11 @@ If everything works, you should see: `Hello, I am tile <0, 0, 0> in a kernel wit
 # Quick Start
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
-use cutile::{self, api, tile_kernel::IntoDeviceOperationPartition};
-use my_module::add_op;
+use cutile::prelude::*;
+use my_module::add;
 
 #[cutile::module]
 mod my_module {
-
     use cutile::core::*;
 
     #[cutile::entry()]
@@ -145,33 +143,21 @@ mod my_module {
     }
 }
 
-fn main() -> Result<(), cutile::tile_kernel::DeviceError> {
-    let x = api::ones([32, 32]).arc();
-    let y = api::ones([32, 32]).arc();
-    let z = api::zeros([32, 32]).partition([4, 4]);
-    let (_z, _x, _y) = add_op(z, x, y).sync()?;
+fn main() -> Result<(), cuda_async::error::DeviceError> {
+    let x = api::ones::<f32>(&[32, 32]).sync()?;
+    let y = api::ones::<f32>(&[32, 32]).sync()?;
+    let mut z = api::zeros::<f32>(&[32, 32]).sync()?;
+
+    add((&mut z).partition([4, 4]), &x, &y).sync()?;
     Ok(())
 }
 ```
 
-The above example defines a _device-side_ module named `my_module`, which contains the _tile kernel_ `add`. 
-The `add` kernel is marked as an _entry point_, allowing it to be executed from the _host-side_ (e.g. the `main` function).
-Our kernel is defined such that `x` and `y` are input tensors, and `z` is an output tensor.
+The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. On the host side, `add(...)` constructs a lazy kernel launcher that accepts borrowed tensors: `(&mut z).partition([4, 4])` borrows the output and partitions it into 4×4 sub-tensors, while `&x` and `&y` borrow the inputs.
 
-On the host-side, we allocate our device-side tensors `x`, `y` and `z`.
-The kernel indicates that `z` must be mutable. Since the same tile kernel executes in parallel by many tile threads, we will need a way to provide each tile thread exclusive access to `z`. It is enough to wrap `x` and `y` in an Arc (see [cuda-async](cuda-async) for details), however, the tensor `z` is partitioned into a grid of `4x4` sub-tensors. In cuTile Rust,
-any `&mut Tensor<...>` requires the host to pass a `Partition<Tensor<T>>` as the argument. Any `&Tensor<...>` requires the
-host to pass an `Arc<Tensor<...>>` as an argument.
+`.sync()` JIT-compiles the kernel (cached after first use) and executes it. The launch grid `(8, 8, 1)` is inferred from the partition: 32÷4 = 8 tiles per dimension.
 
-The expression `add_op(z, x, y)` constructs a representation of a _kernel launcher_: A structure which encodes how the GPU applies the kernel to the given arguments. By default, because we have partitioned `z` into a grid of `4x4` subtensors, the kernel launcher will pick a _launch grid_ of `(8, 8, 1)`. Each `(x, y, z)` coordinate in the launch grid corresponds to a _tile thread_.
-
-The `sync` method picks the default device on the system and synchronously JIT-compiles the kernel to the default device's architecture and immediately executes the kernel with the provided arguments.
-Before executing the user-defined kernel on the device-side, each tile thread is initialized by selecting 
-a distinct sub-tensor from the partitioning of `z` as the `&mut Tensor<...>` kernel parameter.
-Each tile thread has exclusive access to a distinct sub-tensor within the partition of `z`,
-allowing for safe parallel mutable access.
-
-- Run the above example via `cargo run -p cutile-examples --example add_basic`.
+- Run the above example via `cargo run -p cutile-examples --example add_refs`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
 # Tests

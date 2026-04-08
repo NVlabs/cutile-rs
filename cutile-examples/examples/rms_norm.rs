@@ -2,10 +2,10 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile;
-use cutile::api::{randn_f32, zeros};
+use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
@@ -72,9 +72,9 @@ fn main() -> Result<(), Error> {
     let block_size = 2;
     let generics = vec![n.to_string(), block_size.to_string()];
     let eps: f32 = 1e-8; // A sufficiently small number.
-    let x: Arc<Tensor<f32>> = randn_f32(0.0, 1.0, [m, n], None).sync_on(&stream)?.into();
-    let w: Arc<Tensor<f32>> = randn_f32(0.0, 1.0, [n], None).sync_on(&stream)?.into();
-    let out: Partition<Tensor<f32>> = zeros([m, n]).sync_on(&stream)?.partition([1, n as i32]);
+    let x: Arc<Tensor<f32>> = randn(0.0, 1.0, [m, n], None).sync_on(&stream)?.into();
+    let w: Arc<Tensor<f32>> = randn(0.0, 1.0, [n], None).sync_on(&stream)?.into();
+    let out: Partition<Tensor<f32>> = zeros(&[m, n]).sync_on(&stream)?.partition([1, n]);
     let (_x, _w, out, _eps) = rms_norm(x, w, out, eps)
         .generics(generics)
         .sync_on(&stream)?;

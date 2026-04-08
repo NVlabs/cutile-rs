@@ -2,13 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::DeviceOperation;
-use cuda_core::CudaContext;
-use cutile;
-use cutile::api::arange;
-use cutile::error::Error;
-use cutile::tensor::{IntoPartition, Tensor, ToHostVec};
-use std::sync::Arc;
+use cutile::prelude::*;
 
 #[cutile::module]
 mod my_module {
@@ -16,8 +10,8 @@ mod my_module {
 
     #[cutile::entry()]
     fn softmax<const BM: i32, const BN: i32>(
-        x: &Tensor<f32, { [-1, -1] }>,
         y: &mut Tensor<f32, { [BM, BN] }>,
+        x: &Tensor<f32, { [-1, -1] }>,
     ) {
         let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
@@ -39,15 +33,25 @@ fn main() -> Result<(), Error> {
     // Create a new stream on which we run CUDA operations.
     let stream = ctx.new_stream()?;
     let (m, n) = (4, 8);
-    let (bm, bn) = (2, n as i32);
-    let input: Arc<Tensor<f32>> = arange(m * n).sync_on(&stream)?.into();
-    let x = input.copy_sync(&stream)?.reshape([m, n]).into();
+    let (bm, bn) = (2, n);
+    let input: Arc<Tensor<f32>> = api::arange(m * n).sync_on(&stream)?.into();
+    let x: Arc<Tensor<f32>> = input
+        .dup()
+        .sync_on(&stream)?
+        .reshape(&[m, n])
+        .unwrap()
+        .into();
     let y = input
-        .copy_sync(&stream)?
-        .reshape([m, n])
+        .dup()
+        .sync_on(&stream)?
+        .reshape(&[m, n])
+        .unwrap()
         .partition([bm, bn]);
-    let (_x, y) = softmax(x, y).sync_on(&stream)?;
-    let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;
+    let y_host: Vec<f32> = softmax(y, x)
+        .first()
+        .unpartition()
+        .to_host_vec()
+        .sync_on(&stream)?;
     for i in (0..y_host.len()).step_by(8) {
         let x = y_host[i..i + 8].to_vec();
         let sum: f32 = x.iter().sum();

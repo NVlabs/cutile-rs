@@ -10,9 +10,7 @@ cuTile Rust kernels are GPU programs that execute concurrently across a logical 
 The `#[cutile::entry()]` attribute marks a Rust function as an *entry point*: a function you can call from your Rust program that executes on the GPU.
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
-use cuda_async::error::DeviceError;
-use cutile::{self, api, tile_kernel::IntoDeviceOperationPartition};
+use cutile::prelude::*;
 use my_module::add;
 
 #[cutile::module]
@@ -31,16 +29,20 @@ mod my_module {
     }
 }
 
-fn main() -> Result<(), DeviceError> {
-    let z = api::zeros([32, 32]).partition([4, 4]).sync()?;
-    let x = api::ones([32, 32]).arc().sync()?;
-    let y = api::ones([32, 32]).arc().sync()?;
-    let (_z, _x, _y) = add(z, x, y).sync()?;
+fn main() -> Result<(), cuda_async::error::DeviceError> {
+    let ctx = cuda_core::CudaContext::new(0)?;
+    let stream = ctx.new_stream()?;
+
+    let x = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
+    let y = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
+    let mut z = api::zeros::<f32>(&[32, 32]).sync_on(&stream)?;
+
+    let _ = add((&mut z).partition([4, 4]), &x, &y).sync_on(&stream)?;
     Ok(())
 }
 ```
 
-Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launches work. The `add` function is device Rust code because it is marked with `#[cutile::entry()]`; when `main` first calls `add(z, x, y)`, cuTile Rust JIT-compiles that function into optimized GPU code. The `#[cutile::module]` macro makes `my_module` expose the generated host-side APIs for launching `add`.
+Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launches work. The `add` function is device Rust code because it is marked with `#[cutile::entry()]`; when `main` first calls `add(...)`, cuTile Rust JIT-compiles that function into optimized GPU code. The `#[cutile::module]` macro makes `my_module` expose the generated host-side APIs for launching `add`.
 
 ---
 
@@ -52,59 +54,51 @@ Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launc
 
 ## How Kernel Arguments Map
 
-On the host side, immutable tensor arguments are typically passed as `Arc<Tensor<_>>`, which the generated kernel API maps to `&Tensor<...>` in device Rust code. Mutable tensor arguments are typically passed as `Partition<Tensor<_>>`, which the generated kernel API maps to `&mut Tensor<...>` for one tile-shaped region of the output.
+On the host side, the generated launcher accepts several forms for each kernel parameter:
+
+| Kernel param | Host input | What the kernel sees |
+|---|---|---|
+| `&Tensor<T, S>` | `&Tensor<T>`, `Arc<Tensor<T>>`, or `Tensor<T>` | `&Tensor<T, S>` (read-only) |
+| `&mut Tensor<T, S>` | `Partition<&mut Tensor<T>>` or `Partition<Tensor<T>>` | `&mut Tensor<T, S>` (one tile-shaped region) |
+| Scalar (`f32`, etc.) | Same scalar | Same scalar |
 
 Partitioning splits a tensor into disjoint regions with a fixed tile shape, such as `partition([4, 4])` for a 2D tensor. Each tile block receives one partition element, which is how cuTile Rust gives the kernel mutable access to one region at a time while keeping writes non-overlapping.
+
+The borrow-based form (`&Tensor`, `Partition<&mut Tensor>`) lets you pass tensors without moving them. The kernel writes through the borrow — no `unpartition()` or return capture needed.
 
 ---
 
 ## Launching Kernels
 
-Use `add(...)` when your arguments are already resolved:
+The simplest pattern borrows everything:
 
 ```rust
-let z = api::zeros([32, 32]).partition([4, 4]).sync()?;
-let x = api::ones([32, 32]).arc().sync()?;
-let y = api::ones([32, 32]).arc().sync()?;
+let x = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
+let y = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
+let mut z = api::zeros::<f32>(&[32, 32]).sync_on(&stream)?;
 
-let (_z, _x, _y) = add(z, x, y)
-    .sync()
-    .expect("Failed to launch add kernel.");
+// Borrow-based: z is written in place.
+let _ = add((&mut z).partition([4, 4]), &x, &y).sync_on(&stream)?;
 ```
 
-Use `add_op(...)` when each argument is still its own `DeviceOperation`:
+The launcher also accepts lazy `DeviceOp` arguments — everything stays lazy until `.sync()` or `.await`:
 
 ```rust
-use my_module::add_op;
+let z = api::zeros(&[32, 32]).partition([4, 4]);
+let x = api::ones::<f32>(&[32, 32]);
+let y = api::ones::<f32>(&[32, 32]);
 
-let z = api::zeros([32, 32]).partition([4, 4]);
-let x = api::ones([32, 32]).arc();
-let y = api::ones([32, 32]).arc();
-
-let (_z, _x, _y) = add_op(z, x, y)
-    .sync()
-    .expect("Failed to launch add kernel.");
+let (_z, _x, _y) = add(z, x, y).sync()?;
 ```
 
-If your arguments are already grouped into one `DeviceOperation`, use `.apply(...)` to launch `add(...)` inside that device operation context:
+For chaining, use `.then()` to compose operations on the same stream:
 
 ```rust
-use cuda_async::device_operation::*;
-
-let z = api::zeros([32, 32]).partition([4, 4]);
-let x = api::ones([32, 32]).arc();
-let y = api::ones([32, 32]).arc();
-
-let args = zip!(z, x, y);
-let (_z, _x, _y) = args
-    .apply(|(z, x, y)| add(z, x, y))
-    .sync()
-    .expect("Failed to launch add kernel.");
+let result = allocate()
+    .then(|buf| fill_kernel(buf))
+    .then(|buf| process_kernel(buf))
+    .sync()?;
 ```
-
-Conceptually, `apply` builds a new `DeviceOperation` from the output of `args`. The closure does not execute immediately on the host. Instead, it describes how to construct the next deferred operation once `args` produces `(z, x, y)`, and the whole composed operation runs only when you call `.sync()` or `.await`.
-
-These are the main generated kernel-launch APIs you should work with.
 
 ---
 

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile::api::{randn_f16, zeros};
 use cutile::core::f16;
@@ -158,7 +158,7 @@ fn ocean_fmha(c: &mut Criterion) {
         let m = (1024 * scale,);
         context_lengths.push(m)
     }
-    const TILE_SHAPE: (i32, i32) = (128, 64);
+    const TILE_SHAPE: (usize, usize) = (128, 64);
     let hyper_params = vec![
         [TILE_SHAPE].as_slice(),
         [TILE_SHAPE].as_slice(),
@@ -210,11 +210,11 @@ fn ocean_fmha(c: &mut Criterion) {
             .expect("Failed.")
             .into();
 
-        let qk_scale = f16::from_f32(1.0 / f32::sqrt(q.shape[3] as f32));
+        let qk_scale = f16::from_f32(1.0 / f32::sqrt(q.shape()[3] as f32));
 
         // This is always 1.
-        let num_heads = q.shape[1];
-        let kv_num_heads = k.shape[1];
+        let num_heads = q.shape()[1];
+        let kv_num_heads = k.shape()[1];
         assert_eq!(num_heads % kv_num_heads, 0);
         let query_group_size = num_heads / kv_num_heads;
         let generics = vec![bm.to_string(), bn.to_string(), d.to_string()];
@@ -228,13 +228,13 @@ fn ocean_fmha(c: &mut Criterion) {
             |bencher, _size_mb| {
                 bencher.iter_custom(|iters| {
                     // launch grid = (b*h, m/bm, 1)
-                    let mut out: Partition<Tensor<f16>> = zeros([b * h, m, d])
+                    let mut out: Partition<Tensor<f16>> = zeros(&[b * h, m, d])
                         .sync_on(&stream)
                         .expect("Failed.")
-                        .partition([bbh, bm, d as i32]);
+                        .partition([bbh, bm, d]);
                     assert_eq!(
                         out.grid().expect("Invalid grid."),
-                        ((b * h) as u32, (m / bm as usize) as u32, 1)
+                        ((b * h) as u32, (m / bm) as u32, 1)
                     );
                     stream.synchronize().expect("Failed to synchronize.");
                     let start = Instant::now();

@@ -31,16 +31,16 @@ Key properties of streams:
 
 ---
 
-## DeviceOperations: Lazy Computation Graphs
+## DeviceOps: Lazy Computation Graphs
 
-The core abstraction is `DeviceOperation` — a lazy operation that describes GPU work without executing it.
+The core abstraction is `DeviceOp` — a lazy operation that describes GPU work without executing it.
 
-### What's a DeviceOperation?
+### What's a DeviceOp?
 
 Think of it as a recipe that hasn't been cooked yet:
 
 ```rust
-let z = api::zeros([64, 64]);  // DeviceOperation<Output=Tensor<f32>>
+let z = api::zeros(&[64, 64]);  // DeviceOp<Output=Tensor<f32>>
 // Nothing happened yet! Just built a description of what to do.
 
 let result = z.await;  // NOW it executes: allocates GPU memory, fills with zeros
@@ -49,19 +49,19 @@ let result = z.await;  // NOW it executes: allocates GPU memory, fills with zero
 ### The Key Trait
 
 ```rust
-pub trait DeviceOperation: Send + Sized + IntoFuture
+pub trait DeviceOp: Send + Sized + IntoFuture
 where Self::Output: Send {
     // ...
 }
 ```
 
-Every `DeviceOperation` implements `IntoFuture`, which means every operation is awaitable.
+Every `DeviceOp` implements `IntoFuture`, which means every operation is awaitable.
 
 ---
 
 ## The Execution Flow
 
-When you `.await` a DeviceOperation, here's what happens:
+When you `.await` a DeviceOp, here's what happens:
 
 ```{raw} html
 <style>
@@ -141,91 +141,223 @@ When you `.await` a DeviceOperation, here's what happens:
 Consider the following snippet:
 
 ```rust
-let x = api::randn(0.0f32, 1.0f32, [m, k]).arc().await;
+let x: Tensor<f32> = api::randn(0.0f32, 1.0f32, &[m, k]).await?;
 ```
 
 This is what each method does:
 
 | Step | Code | GPU Work? |
 |------|------|-----------|
-| 1 | `api::randn(...)` | ❌ Allocates CPU memory, creates DeviceOperation |
-| 2 | `.arc()` | ❌ Wraps in Arc, still lazy |
-| 3 | `.await` | ❌ Creates DeviceFuture |
-| 4 | First poll | ✅ **NOW** executes the GPU copy |
-| 5 | Completion | Returns tensor |
+| 1 | `api::randn(...)` | ❌ Creates lazy DeviceOp |
+| 2 | `.await` | ❌ Creates DeviceFuture |
+| 3 | First poll | ✅ **NOW** allocates GPU memory, generates random values |
+| 4 | Completion | Returns tensor |
 
 GPU work happens during the **first poll**, not when you call `.await`!
 
 ---
 
-## Synchronous vs Asynchronous Execution
+## Starting with `.sync()`
 
-### Synchronous Pattern
-
-```rust
-let launcher = kernel(args...);
-let result = launcher
-    .grid((x, y, z))
-    .sync_on(&stream);  // Launch AND wait
-```
-
-The `sync_on` method:
-1. Launches the kernel
-2. **Blocks** until completion
-3. Returns the result
-
-Use this for:
-- Simple scripts
-- When you need results immediately
-- Debugging
-
-### Asynchronous Pattern
+The simplest way to run a kernel is `.sync()`:
 
 ```rust
-let op = kernel_op(args...);
-let fut = op.into_future();
-let result = fut.await;  // Non-blocking in async context
+let x = api::ones::<f32>(&[1024]).sync()?;
+let y = api::ones::<f32>(&[1024]).sync()?;
+let mut z = api::zeros::<f32>(&[1024]).sync()?;
+
+add((&mut z).partition([128]), &x, &y).sync()?;
 ```
 
-Or, if the inputs are already grouped into one `DeviceOperation`:
+This is the right choice for scripts, debugging, and learning. Each `.sync()` call launches work on the GPU and blocks the CPU until it finishes.
+
+### Why sync-per-op is expensive
+
+In a multi-layer model, calling `.sync()` after every kernel creates a gap where *both* the CPU and GPU are idle — the CPU is waiting for the GPU, and the GPU has nothing queued:
+
+```text
+CPU:  [launch] [wait......] [launch] [wait......] [launch] [wait......]
+GPU:           [kernel████]          [kernel████]          [kernel████]
+                          ↑                      ↑
+                     idle gap                idle gap
+```
+
+For inference, this overhead dominates — kernels are fast (microseconds), but sync round-trips are not. A 22-layer transformer with 6 kernels per layer means 132 sync gaps per token.
+
+### The fix: compose first, sync once
+
+Build the entire operation graph lazily, then execute in one shot:
 
 ```rust
-let args = zip!(z_op, x_op, y_op);
-let (z, x, y) = args.apply(kernel_apply).await;
+// No GPU work yet — just building the graph.
+let result = rms_norm(out1, hidden.clone(), weight.clone(), eps)
+    .first()
+    .unpartition()
+    .shared();
+
+let q = matvec(out2, result.clone(), wq.clone())
+    .first()
+    .unpartition()
+    .shared();
+
+// NOW execute everything on one stream, no gaps.
+let output = q.sync_on(&stream)?;
 ```
 
-Use this for:
-- Production code
-- Overlapping computation and I/O
-- Building complex pipelines
+```text
+CPU:  [build graph...] [launch all]  [wait]
+GPU:                    [norm████][mv████][add████]
+                         no gaps — work is pipelined
+```
+
+The rest of this guide explains the tools for building these graphs:
+`.then()`, `zip!`, `.shared()`, `.await`, and stream scheduling.
+
+### Synchronous: `.sync()` / `.sync_on()`
+
+```rust
+kernel(args...).sync()?;          // default device, default stream policy
+kernel(args...).sync_on(&stream)?; // explicit stream
+```
+
+### Asynchronous: `.await`
+
+```rust
+let result = kernel(args...).await?;  // non-blocking in async context
+```
+
+Or compose lazily and await the final result:
+
+```rust
+let result = step1(args)
+    .then(|out| step2(out))
+    .then(|out| step3(out))
+    .await?;
+```
 
 ---
 
 ## Building Computation Graphs
 
-DeviceOperations compose into computation graphs:
+DeviceOps compose into computation graphs:
 
 ```rust
-// Build lazy computation graph
-let x = api::randn(0.0, 1.0, [m, k]);
-let y = api::randn(0.0, 1.0, [k, n]);
-let z = api::zeros([m, n]).partition([bm, bn]);
+// Build lazy computation graph — no GPU work yet
+let z = api::zeros(&[m, n]).partition([bm, bn]);
+let x = api::randn(0.0, 1.0, &[m, k]);
+let y = api::randn(0.0, 1.0, &[k, n]);
 
-// Chain kernel invocations
-let result = matmul_op(z, x.arc(), y.arc())
-    .and_then(|(z, _x, _y)| activation_op(z))
-    .and_then(|(z,)| normalize_op(z));
+// Chain kernel invocations — output-first convention, direct calls
+let result = matmul(z, x, y)
+    .then(|(z, _x, _y)| activation(z))
+    .then(|(z,)| normalize(z));
 
-// Execute entire graph
-let output = result.await;
+// Execute entire graph in one shot
+let output = result.await?;
 ```
 
-![Lazy computation graph showing how DeviceOperations compose](../_static/images/computation-graph.svg)
+![Lazy computation graph showing how DeviceOps compose](../_static/images/computation-graph.svg)
 
 **Benefits:**
 - Operations can be fused
 - Memory can be reused
 - Scheduling can be optimized
+
+---
+
+## Splitting and Sharing Operations
+
+`zip!` combines multiple `DeviceOp`s into one. But what about the reverse — taking a single operation's output and feeding it into multiple downstream branches? That's what `unzip` and `.shared()` are for.
+
+### unzip: Fan-Out from a Tuple
+
+`unzip` takes an operation that produces a tuple and splits it into independent operations, one per element:
+
+```rust
+// A kernel returns (output, weight, bias) as a 3-tuple.
+let (output, weight, bias) = kernel(args).unzip();
+
+// Each is now an independent DeviceOp.
+let result = output.unpartition().await?;
+let w = weight.await?;
+```
+
+`unzip` is the inverse of `zip!`:
+
+```text
+  zip! (fan-in)                     unzip (fan-out)
+
+    op_a ─┐                           ┌── branch_a
+           ├─ zip! ─── (a, b)    (a, b) ── unzip ──┤
+    op_b ─┘                           └── branch_b
+```
+
+### The Execute-Once Guarantee
+
+When you `unzip`, the ancestor operation that produces the tuple is **executed at most once**, regardless of how many branches consume it. Internally, `unzip` uses a shared gate (`Select`) that runs the ancestor on the first branch to execute and caches the results for the remaining branches:
+
+```text
+                                      ┌── SelectLeft ── .sync()  ─── runs ancestor,
+  ancestor_op ────── Select (shared) ─┤                               caches both results
+                                      └── SelectRight ── .sync() ─── finds cached result,
+                                                                      no re-execution
+```
+
+This means fan-out patterns like "compute once, use in two places" are safe and efficient:
+
+```rust
+let (z, x, y) = zip!(z_op, x_op, y_op)
+    .then(my_kernel)
+    .unzip();
+
+// The kernel runs once. z, x, and y each take their portion of the result.
+let output = z.unpartition().to_host_vec().sync()?;
+```
+
+### .shared(): Cloneable, Execute-Once Operations
+
+`.shared()` converts any `DeviceOp` into a `SharedDeviceOp<T>` that implements `Clone`. The underlying operation executes at most once — every clone gets `Arc::clone()` of the cached result. This follows the `FutureExt::shared()` convention from the `futures` crate.
+
+```rust
+// Create a shared operation — cloneable, execute-once.
+let x = api::ones(&[32, 32]).shared();
+
+// Pass to multiple consumers without consuming the original.
+let a = kernel_a(x.clone()).sync()?;  // x executes here (once)
+let b = kernel_b(x.clone()).sync()?;  // Uses the cached Arc — no re-execution
+let c = kernel_c(x).sync()?;          // Also uses the cached result
+```
+
+Unlike `unzip` (which splits a fixed tuple), `.shared()` supports unlimited consumers. The result is always `Arc<T>`, so shared reads are cheap.
+
+For pre-computed values (e.g., weight tensors already in `Arc`), use the `shared()` constructor:
+
+```rust
+let w: SharedDeviceOp<Tensor<f32>> = cuda_async::device_operation::shared(weight_arc);
+```
+
+### Common Patterns
+
+```text
+Diamond (fan-out then fan-in):
+
+  op_a ─┐              ┌─ transform_a ─┐
+         ├── zip! ── unzip              ├── zip! ── result
+  op_b ─┘              └─ transform_b ─┘
+
+Broadcast (.shared() into parallel kernels):
+
+                     ┌── kernel_a ── result_a
+  x.shared() ──────┤
+                     ├── kernel_b ── result_b
+                     └── kernel_c ── result_c
+```
+
+### Limitations
+
+The execute-once mechanism relies on **sequential execution** — the normal mode for `cuda-async`, where operations are `.sync()`'d or `.await`'d one at a time from a single thread. Under this model, the shared gate is guaranteed to see only one caller at a time.
+
+If two branches of an `unzip` were somehow executed **concurrently on different OS threads** (e.g., via `tokio::spawn` on a multi-threaded runtime), the gate is not safe — it uses a non-atomic check-then-act pattern internally. In practice, this is not triggerable because device contexts are thread-local, so scheduling an operation from a thread that hasn't initialized its device context will fail before reaching the gate. However, avoid designs that would poll both sides of an `unzip` from different threads.
 
 ---
 
@@ -240,25 +372,56 @@ You need synchronization when:
 
 ```rust
 // Bad: No sync before reading
-let z = kernel_op(x, y).sync_on(&stream);
+let z = kernel(x, y).sync_on(&stream);
 let data = z.to_host_vec();  // ❌ May read incomplete data!
 
 // Good: Sync before reading
-let z = kernel_op(x, y).sync_on(&stream);
+let z = kernel(x, y).sync_on(&stream);
 let data = z.to_host_vec().sync_on(&stream);  // ✅ Waits for completion
 ```
 
-### Arc for Shared Data
+### Passing Tensors to Kernels
 
-Use `Arc` to share tensors across operations:
+Kernel `&Tensor` params accept three input forms, and `&mut Tensor` params
+accept two partition forms. You get back the same type you put in.
+
+**Inputs (`&Tensor`):**
 
 ```rust
-let x: Arc<Tensor<f32>> = ones([32, 32]).sync_on(&stream).into();
+// Owned — single use, no Arc overhead.
+let x: Tensor<f32> = ones(&[32, 32]).sync_on(&stream)?;
+let (_, x) = kernel(out, x).sync_on(&stream)?;  // x is Tensor<f32>
 
-// x can be used multiple times
-let z1 = kernel1(x.clone()).sync_on(&stream);
-let z2 = kernel2(x.clone()).sync_on(&stream);
+// Shared — use the same tensor in multiple kernels.
+let x: Arc<Tensor<f32>> = ones(&[32, 32]).sync_on(&stream)?.into();
+let z1 = kernel1(out1, x.clone()).sync_on(&stream)?;
+let z2 = kernel2(out2, x.clone()).sync_on(&stream)?;
+
+// Borrowed — no allocation, borrow checker enforces lifetime.
+let x: Tensor<f32> = ones(&[32, 32]).sync_on(&stream)?;
+let _ = kernel(out, &x).sync_on(&stream)?;  // x still available
 ```
+
+**Outputs (`&mut Tensor`):**
+
+```rust
+// Owned partition — must unpartition() to get the tensor back.
+let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
+let (z, ..) = kernel(z, &x).sync_on(&stream)?;
+let tensor = z.unpartition();
+
+// Borrowed partition — writes in place, no unpartition() needed.
+let mut z = zeros(&[32, 32]).sync_on(&stream)?;
+let _ = kernel((&mut z).partition([4, 4]), &x).sync_on(&stream)?;
+// z already has the result.
+```
+
+Borrowed inputs (`&Tensor<T>`) and borrowed partitions (`Partition<&mut Tensor<T>>`)
+are not `'static`, so `tokio::spawn` rejects them at compile time — use `Arc`
+and owned partitions for spawned tasks.
+
+See the [DeviceOp API Reference](deviceop-reference.md#ownership-model)
+for the full ownership model.
 
 ---
 
@@ -309,14 +472,14 @@ Stream 2:       ████████ (op_c)
 Stream 3:          ████████ (op_d)
 ```
 
-**2. Chained with `.and_then()`**
+**2. Chained with `.then()`**
 
-Operations composed with `.and_then()` share a single stream, so the second operation always sees the first one's output:
+Operations composed with `.then()` share a single stream, so the second operation always sees the first one's output:
 
 ```rust
 let result = allocate_tensor()
-    .and_then(|tensor| fill_with_ones(tensor))  // same stream → ordered
-    .and_then(|tensor| run_kernel(tensor))       // same stream → ordered
+    .then(|tensor| fill_with_ones(tensor))  // same stream → ordered
+    .then(|tensor| run_kernel(tensor))       // same stream → ordered
     .await;
 ```
 
@@ -346,20 +509,19 @@ let b = op_b.await;  // op_b submitted after op_a is confirmed done
 
 Overlap requires two things: (1) operations land on different streams, and (2) they are submitted to the GPU before waiting for each other.
 
-**Building a lazy graph with `zip!` + `apply`:**
+**Building a lazy graph — direct kernel call:**
 
 ```rust
-// These three allocations form a single DeviceOperation graph.
-// When awaited, the policy submits them to the GPU in quick succession.
-let args = zip!(
-    zeros([1024, 1024]).partition([64, 64]),
-    x.device_operation(),
-    y.device_operation(),
-);
-let (z, _x, _y) = args.apply(kernel_apply).unzip();
-
-// All three inputs were submitted together — they can overlap.
-let result = z.unpartition().await;
+// The unified launcher accepts both DeviceOps and plain values.
+// No need for zip! or value() wrapping.
+let result = my_kernel(
+    zeros(&[1024, 1024]).partition([64, 64]),
+    x,
+    y,
+)
+.first()
+.unpartition()
+.await?;
 ```
 
 **Using `tokio::join!` for independent work:**
@@ -380,9 +542,9 @@ The round-robin policy does **not** track data dependencies. If operation B read
 **Safe patterns for dependent operations:**
 
 ```rust
-// Pattern 1: Chain with .and_then() — same stream, automatic ordering
+// Pattern 1: Chain with .then() — same stream, automatic ordering
 let result = create_tensor()
-    .and_then(|t| process(t))
+    .then(|t| process(t))
     .await;
 
 // Pattern 2: Await sequentially — host ensures ordering
@@ -409,11 +571,11 @@ let (a, b) = tokio::join!(future_a, future_b);
 
 | Method               | Stream assignment           | Ordering guarantee          | Best for                           |
 |----------------------|-----------------------------|-----------------------------|------------------------------------|
-| `.and_then()`        | Shares parent's stream      | **Strict** — same stream    | Dependent operations               |
+| `.then()`        | Shares parent's stream      | **Strict** — same stream    | Dependent operations               |
 | `.sync_on(&stream)`  | Your explicit stream        | **Strict** — if same stream | Debugging, deterministic pipelines |
 | `.sync()`            | Policy picks (round-robin)  | **None** between calls      | Quick scripts                      |
 | `.await`             | Policy picks (round-robin)  | **None** between awaits     | Async code (see note below)        |
-| `zip!` + `.apply()`  | Single stream for the graph | **Strict** within the graph | Kernel launch patterns             |
+| `zip!` + `.then()`  | Single stream for the graph | **Strict** within the graph | Kernel launch patterns             |
 
 :::{tip}
 Sequential `.await` calls *appear* ordered from the host's perspective (each waits before the next starts), but the GPU work for each `.await` runs on whichever stream the policy assigns. For truly independent operations you want to overlap, use `zip!` or `tokio::join!`.
@@ -428,11 +590,11 @@ Sequential `.await` calls *appear* ordered from the host's perspective (each wai
 ```rust
 // Bad: Many small syncs
 for i in 0..1000 {
-    let result = kernel_op(data[i]).sync_on(&stream);
+    let result = kernel(data[i]).sync_on(&stream);
 }
 
 // Good: Build graph, sync once
-let ops: Vec<_> = (0..1000).map(|i| kernel_op(data[i])).collect();
+let ops: Vec<_> = (0..1000).map(|i| kernel(data[i])).collect();
 let results = join_all(ops).await;
 ```
 
@@ -443,7 +605,7 @@ The default round-robin policy already enables this — consecutive operations l
 ```rust
 // These naturally overlap with the default 4-stream pool:
 let compute_op = heavy_kernel(input.clone());
-let transfer_op = api::zeros([next_batch_size, dim]);
+let transfer_op = api::zeros(&[next_batch_size, dim]);
 
 // Submit both before waiting for either:
 let (result, next_buffer) = tokio::join!(compute_op, transfer_op);
@@ -473,23 +635,28 @@ launcher.grid((num_tiles as u32, 1, 1)).sync_on(&stream);
 
 | Concept                   | What it is                                                  |
 |---------------------------|-------------------------------------------------------------|
-| **DeviceOperation**       | Lazy computation description                                |
+| **DeviceOp**       | Lazy computation description                                |
 | **Stream**                | Ordered queue of GPU work                                   |
 | **SchedulingPolicy**      | Decides which stream each operation uses                    |
 | **Round-Robin (default)** | Rotates across 4 streams — enables overlap                  |
 | **SingleStream**          | All ops on one stream — strict ordering                     |
 | **sync_on()**             | Execute on an explicit stream and wait                      |
 | **await**                 | Execute via the default device's scheduling policy (async)  |
-| **.and_then()**           | Chain operations on the same stream                         |
-| **Arc**                   | Share data across operations                                |
+| **.then()**           | Chain operations on the same stream                         |
+| **zip!**                  | Combine multiple operations into one (fan-in)               |
+| **unzip**                 | Split a tuple operation into independent branches (fan-out) |
+| **.shared()**             | Cloneable, execute-once operation — share data across N branches |
+| **.map(f)**               | Transform output without new GPU work                       |
+| **.first()** / **.last()**| Extract first/last element from tuple output                |
+| **.boxed()**              | Type-erase an operation for heterogeneous collections       |
 
 **Key takeaways:**
 
 1. The default policy distributes work across **4 streams** — consecutive operations can overlap.
 2. Operations on the **same stream** are always ordered; operations on **different streams** are not.
-3. Use `.and_then()`, sequential `.await`, or `.sync_on()` with a shared stream to enforce ordering between dependent operations.
-4. Use `zip!`, `.apply()`, or `tokio::join!` to enable overlap for independent operations.
+3. Use `.then()`, sequential `.await`, or `.sync_on()` with a shared stream to enforce ordering between dependent operations.
+4. Use `zip!`, `.then()`, or `tokio::join!` to enable overlap for independent operations.
 
 ---
 
-Continue to [Performance Tuning](performance-tuning.md) for optimization techniques, [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOperation` model, or [Debugging](debugging.md) for troubleshooting.
+Continue to [Performance Tuning](performance-tuning.md) for optimization techniques, [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOp` model, or [Debugging](debugging.md) for troubleshooting.

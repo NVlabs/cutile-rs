@@ -11,7 +11,7 @@
 
 use std::ffi::{c_int, c_uint, c_void, CString};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicU32, Ordering},
     Arc,
 };
 
@@ -40,8 +40,6 @@ pub struct CudaContext {
         reason = "cached device capability for future async memory pool decisions"
     )]
     pub(crate) has_async_alloc: bool,
-    pub(crate) num_streams: AtomicUsize,
-    pub(crate) event_tracking: AtomicBool,
     pub(crate) error_state: AtomicU32,
 }
 
@@ -85,8 +83,6 @@ impl CudaContext {
             cu_ctx,
             ordinal,
             has_async_alloc,
-            num_streams: AtomicUsize::new(0),
-            event_tracking: AtomicBool::new(true),
             error_state: AtomicU32::new(0),
         });
         ctx.bind_to_thread()?;
@@ -161,39 +157,15 @@ impl CudaContext {
         ctx::set_flags(flags)
     }
 
-    /// Returns `true` if more than one stream has been created on this context.
-    pub fn is_in_multi_stream_mode(&self) -> bool {
-        self.num_streams.load(Ordering::Relaxed) > 0
-    }
-
-    /// Returns `true` if event tracking is enabled.
-    pub fn is_event_tracking(&self) -> bool {
-        self.event_tracking.load(Ordering::Relaxed)
-    }
-
-    /// Enables event tracking for stream synchronization on multi-stream transitions.
-    ///
-    /// # Safety
-    /// Caller must ensure no concurrent stream creation races with this call.
-    pub unsafe fn enable_event_tracking(&self) {
-        self.event_tracking.store(true, Ordering::Relaxed);
-    }
-
-    /// Disables event tracking.
-    ///
-    /// # Safety
-    /// Caller must ensure disabling tracking does not introduce data races.
-    pub unsafe fn disable_event_tracking(&self) {
-        self.event_tracking.store(false, Ordering::Relaxed);
-    }
-
     /// Checks and clears the context's recorded error state.
     pub fn check_err(&self) -> Result<(), DriverError> {
         let error_state = self.error_state.swap(0, Ordering::Relaxed);
         if error_state == 0 {
             Ok(())
         } else {
-            Err(DriverError(error_state))
+            Err(DriverError(unsafe {
+                std::mem::transmute::<u32, cuda_bindings::cudaError_enum>(error_state)
+            }))
         }
     }
 
@@ -219,7 +191,6 @@ impl Drop for CudaStream {
     fn drop(&mut self) {
         self.ctx.record_err(self.ctx.bind_to_thread());
         if !self.cu_stream.is_null() {
-            self.ctx.num_streams.fetch_sub(1, Ordering::Relaxed);
             self.ctx
                 .record_err(unsafe { stream::destroy(self.cu_stream) });
         }
@@ -237,10 +208,6 @@ impl CudaContext {
     /// Creates a new non-blocking CUDA stream on this context.
     pub fn new_stream(self: &Arc<Self>) -> Result<Arc<CudaStream>, DriverError> {
         self.bind_to_thread()?;
-        let prev_num_streams = self.num_streams.fetch_add(1, Ordering::Relaxed);
-        if prev_num_streams == 0 && self.is_event_tracking() {
-            self.synchronize()?;
-        }
         let cu_stream = stream::create(stream::StreamKind::NonBlocking)?;
         Ok(Arc::new(CudaStream {
             cu_stream,
@@ -253,7 +220,6 @@ impl CudaStream {
     /// Creates a new stream that waits on this stream's current work before proceeding.
     pub fn fork(&self) -> Result<Arc<Self>, DriverError> {
         self.ctx.bind_to_thread()?;
-        self.ctx.num_streams.fetch_add(1, Ordering::Relaxed);
         let cu_stream = stream::create(stream::StreamKind::NonBlocking)?;
         let stream = Arc::new(CudaStream {
             cu_stream,

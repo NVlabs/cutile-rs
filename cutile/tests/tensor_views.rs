@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use cutile;
 use cutile::api;
-use cutile::tensor::{IntoPartition, ToHostVec};
-use cutile::tile_kernel::DeviceOperation;
+use cutile::tensor::{IntoPartition, Reshape, ToHostVec};
+use cutile::tile_kernel::DeviceOp;
 
 mod common;
 
@@ -16,8 +16,6 @@ mod common;
 mod tensor_views_module {
     use cutile::core::*;
 
-    // These kernels let the same backing storage be passed through launchers with
-    // different expected tensor ranks.
     #[cutile::entry()]
     fn passthrough_1d(output: &mut Tensor<f32, { [4] }>, input: &Tensor<f32, { [-1] }>) {
         let tile: Tile<f32, { [4] }> = load_tile_like_1d(input, output);
@@ -35,28 +33,38 @@ mod tensor_views_module {
 fn arc_views_are_zero_copy() {
     common::with_test_stack(|| {
         let base = Arc::new(api::arange::<f32>(8).sync().expect("Failed."));
-        let view = base.view([2, 4]);
-        let dyn_view = base.try_view_dyn(&[4, 2]).expect("Failed.");
-        let flat = view.flatten_view();
+        let view = base.reshape(&[2, 4]).unwrap();
+        let dyn_view = base.reshape(&[4, 2]).unwrap();
+        let flat = base.reshape(&[8]).unwrap();
 
-        // All views must share the same device allocation and only differ in metadata.
-        assert_eq!(base.cu_deviceptr(), view.cu_deviceptr());
-        assert_eq!(base.cu_deviceptr(), dyn_view.cu_deviceptr());
-        assert_eq!(base.cu_deviceptr(), flat.cu_deviceptr());
-        assert_eq!(view.shape, vec![2, 4]);
-        assert_eq!(view.strides, vec![4, 1]);
-        assert_eq!(dyn_view.shape, vec![4, 2]);
-        assert_eq!(dyn_view.strides, vec![2, 1]);
-        assert_eq!(flat.shape, vec![8]);
-        assert_eq!(flat.strides, vec![1]);
+        assert_eq!(
+            base.device_pointer().cu_deviceptr(),
+            view.device_pointer().cu_deviceptr()
+        );
+        assert_eq!(
+            base.device_pointer().cu_deviceptr(),
+            dyn_view.device_pointer().cu_deviceptr()
+        );
+        assert_eq!(
+            base.device_pointer().cu_deviceptr(),
+            flat.device_pointer().cu_deviceptr()
+        );
+        assert_eq!(view.shape(), vec![2, 4]);
+        assert_eq!(view.strides(), vec![4, 1]);
+        assert_eq!(dyn_view.shape(), vec![4, 2]);
+        assert_eq!(dyn_view.strides(), vec![2, 1]);
+        assert_eq!(flat.shape(), vec![8]);
+        assert_eq!(flat.strides(), vec![1]);
 
         let base_host: Vec<f32> = (&base).to_host_vec().sync().expect("Failed.");
         let flat_host: Vec<f32> = flat.to_host_vec().sync().expect("Failed.");
         assert_eq!(base_host, flat_host);
 
-        // A real copy allocates fresh storage, so its pointer must differ from the views above.
-        let copied = base.copy().sync().expect("Failed.");
-        assert_ne!(base.cu_deviceptr(), copied.cu_deviceptr());
+        let copied = base.dup().sync().expect("Failed.");
+        assert_ne!(
+            base.device_pointer().cu_deviceptr(),
+            copied.device_pointer().cu_deviceptr()
+        );
     });
 }
 
@@ -64,8 +72,8 @@ fn arc_views_are_zero_copy() {
 fn invalid_view_shape_is_rejected() {
     common::with_test_stack(|| {
         let base = Arc::new(api::arange::<f32>(8).sync().expect("Failed."));
-        assert!(base.try_view([5]).is_err());
-        assert!(base.try_view_dyn(&[2, 2]).is_err());
+        assert!(base.reshape(&[5]).is_err());
+        assert!(base.reshape(&[2, 2]).is_err());
     });
 }
 
@@ -73,9 +81,7 @@ fn invalid_view_shape_is_rejected() {
 fn shared_storage_blocks_mutable_partition() {
     common::with_test_stack(|| {
         let base = Arc::new(api::arange::<f32>(8).sync().expect("Failed."));
-        let _view = base.view([2, 4]);
-        // Unwrapping the outer Arc gives back a Tensor value, but the backing storage is still
-        // shared with `_view`, so mutable partitioning must be rejected.
+        let _view = base.reshape(&[2, 4]).unwrap();
         let owned = Arc::try_unwrap(base).expect("Expected unique outer Arc.");
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             let _ = owned.partition([8]);
@@ -88,11 +94,10 @@ fn shared_storage_blocks_mutable_partition() {
 fn arc_views_work_with_different_rank_kernels() {
     common::with_test_stack(|| {
         let base = Arc::new(api::arange::<f32>(4).sync().expect("Failed."));
-        // These are two metadata views over the same storage, shaped to match different kernels.
-        let input_1d = base.view([4]);
-        let input_2d = base.view([2, 2]);
+        let input_1d = base.reshape(&[4]).unwrap();
+        let input_2d = base.reshape(&[2, 2]).unwrap();
 
-        let output_1d = api::zeros::<1, f32>([4]).sync().expect("Failed.");
+        let output_1d = api::zeros::<f32>(&[4]).sync().expect("Failed.");
         let (result_1d, _input_1d) =
             tensor_views_module::passthrough_1d(output_1d.partition([4]), input_1d)
                 .sync()
@@ -103,7 +108,7 @@ fn arc_views_work_with_different_rank_kernels() {
             .sync()
             .expect("Failed.");
 
-        let output_2d = api::zeros::<2, f32>([2, 2]).sync().expect("Failed.");
+        let output_2d = api::zeros::<f32>(&[2, 2]).sync().expect("Failed.");
         let (result_2d, _input_2d) =
             tensor_views_module::passthrough_2d(output_2d.partition([2, 2]), input_2d)
                 .sync()

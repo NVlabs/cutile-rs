@@ -42,7 +42,7 @@ An alias for [Tile Block](#tile-block), used throughout this book to emphasize t
 
 Multiple tile blocks making progress over a period of time by being scheduled onto available Streaming Multiprocessors (SMs). This aligns with Rust's definition of concurrency — different parts of a program executing *independently*, not necessarily at the exact same instant — extended to the GPU context: when a kernel is launched with more tile blocks than there are SMs, the GPU's hardware scheduler assigns tile blocks to SMs as resources become available. Some tile blocks execute in parallel while others are pending, but from the programmer's perspective all tile blocks are logically concurrent — their relative order of execution is unspecified and they are independent of one another.
 
-On the host side, concurrency also arises through CUDA streams and async/await: multiple `DeviceOperation`s submitted to different streams can overlap in time, and the async runtime schedules them without requiring the programmer to specify an exact execution order.
+On the host side, concurrency also arises through CUDA streams and async/await: multiple `DeviceOp`s submitted to different streams can overlap in time, and the async runtime schedules them without requiring the programmer to specify an exact execution order.
 
 ## Parallel Execution
 
@@ -99,13 +99,13 @@ Tensor shape dimensions specified as `-1` in the kernel signature (e.g., `Tensor
 
 cuTile Rust compiles kernels at first invocation through a multi-stage pipeline: Rust AST → MLIR → cubin. The compiled binary is cached in memory (in a thread-local `HashMap`) so subsequent launches with the same generics are instant. A new combination of const generics or type parameters produces a new compilation.
 
-## DeviceOperation
+## DeviceOp
 
-A lazy description of GPU work — allocation, kernel launch, or data transfer — that is not executed until either `.sync_on(&stream)`, `.await`, or `tokio::spawn()` is invoked. `DeviceOperation`s can be composed with `zip!`, `.apply()`, and `.and_then()` to build dataflow graphs before submitting GPU work.
+A lazy description of GPU work — allocation, kernel launch, or data transfer — that is not executed until either `.sync_on(&stream)`, `.sync()`, or `.await` is invoked. `DeviceOp`s can be composed with `zip!`, `.then()`, `.map()`, `.shared()`, and `.first()`/`.last()` to build dataflow graphs before submitting GPU work. Kernel launchers accept `Tensor<T>`, `Arc<Tensor<T>>`, `&Tensor<T>`, scalars, and `DeviceOp` arguments directly via `IntoDeviceOp` and `KernelInput`. The return type matches the input type — you get back what you put in.
 
 ## DeviceFuture
 
-A `DeviceFuture` is a future that has been assigned resources — specifically, a device stream on which to execute — but has not yet started GPU work. A `DeviceFuture` is created when a `DeviceOperation` is scheduled (e.g., via `into_future()`), at which point the scheduling policy selects a stream. The actual GPU work is not submitted until the `DeviceFuture` is polled for the first time, which happens when you `.await` it or `tokio::spawn` it.
+A `DeviceFuture` is a future that has been assigned resources — specifically, a device stream on which to execute — but has not yet started GPU work. A `DeviceFuture` is created when a `DeviceOp` is scheduled (e.g., via `into_future()`), at which point the scheduling policy selects a stream. The actual GPU work is not submitted until the `DeviceFuture` is polled for the first time, which happens when you `.await` it or `tokio::spawn` it.
 
 ## Broadcasting
 

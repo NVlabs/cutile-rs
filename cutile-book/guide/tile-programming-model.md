@@ -58,7 +58,7 @@ To process a large tensor, you **partition** it — dividing the tensor into a g
 Mutable tensors must be partitioned on the host side before kernel launch:
 
 ```rust
-let tensor = zeros([1024, 1024]).sync_on(&stream)?;
+let tensor = zeros(&[1024, 1024]).sync_on(&stream)?;
 let partitioned = tensor.partition([64, 64]);  // 16×16 = 256 sub-tensors
 ```
 
@@ -128,7 +128,7 @@ At kernel launch time, the launcher calls `.grid()` on each `&mut Tensor` parame
 
 ```rust
 // Grid is inferred from z's partition: (16, 16, 1)
-let z = zeros([1024, 1024]).sync_on(&stream)?.partition([64, 64]);
+let z = zeros(&[1024, 1024]).sync_on(&stream)?.partition([64, 64]);
 let (z, _x, _y) = add(z, x, y).sync_on(&stream)?;
 ```
 

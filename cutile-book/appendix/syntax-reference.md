@@ -271,7 +271,7 @@ let shifted = tile + 1.0f32;
 let result = fma(x, y, z);
 
 // x * y + z with explicit rounding mode
-let result = fma_op(x, y, z, "nearest_even");
+let result = fma(x, y, z, "nearest_even");
 ```
 
 ---
@@ -810,6 +810,19 @@ acc = true_div(acc, l_i.broadcast(const_shape![BM, D]));
 
 ## Host-Side API
 
+### Kernel Parameter Types
+
+| Kernel param | Host input | Return type |
+|---|---|---|
+| `&Tensor<T, S>` | `Tensor<T>`, `Arc<Tensor<T>>`, or `&Tensor<T>` | Same as input |
+| `&mut Tensor<T, S>` | `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>` | Same as input |
+| Scalar (`f32`, `i32`, etc.) | Same scalar | Same scalar |
+| `*mut T` (unsafe only) | `DevicePointer<T>` | `DevicePointer<T>` |
+
+Borrowed forms (`&Tensor<T>`, `Partition<&mut Tensor<T>>`) introduce a
+lifetime that prevents `tokio::spawn` at compile time — use `Arc` and
+owned partitions for spawned tasks.
+
 ### Launching Kernels (Sync)
 
 ```rust
@@ -818,30 +831,34 @@ use my_module::kernel;
 let ctx = CudaContext::new(0)?;
 let stream = ctx.new_stream()?;
 
-// Create tensors
-let x: Arc<Tensor<f32>> = ones([32, 32]).arc().sync_on(&stream)?;
-let z = zeros([32, 32]).partition([4, 4]).sync_on(&stream)?;
+// Borrow-based: no Arc, no unpartition, no return capture.
+let x = ones::<f32>(&[32, 32]).sync_on(&stream)?;
+let mut z = zeros::<f32>(&[32, 32]).sync_on(&stream)?;
 
-// Launch with generics
-let generics = vec!["f32".to_string(), "16".to_string()];
-let (z, _x) = kernel(z, x)
-    .generics(generics)
-    .grid((8, 8, 1))  // Optional: explicit grid
+let _ = kernel((&mut z).partition([4, 4]), &x)
+    .generics(vec!["f32".to_string(), "16".to_string()])
     .sync_on(&stream)?;
+// z already has the result.
 
-// Get results
+// Owned variant (useful when building lazy graphs):
+let x: Arc<Tensor<f32>> = ones(&[32, 32]).sync_on(&stream)?.into();
+let z = zeros(&[32, 32]).partition([4, 4]).sync_on(&stream)?;
+
+let (z, _x) = kernel(z, x)
+    .generics(vec!["f32".to_string(), "16".to_string()])
+    .sync_on(&stream)?;
 let z_host: Vec<f32> = z.unpartition().to_host_vec().sync_on(&stream)?;
 ```
 
 ### Launching Kernels (Async)
 
 ```rust
-use my_module::kernel_op;
+use my_module::kernel;
 
-let x = ones([32, 32]).arc();
-let z = zeros::<2, f32>([32, 32]).partition([4, 4]);
+let x = ones(&[32, 32]).map(Into::into);
+let z = zeros(&[32, 32]).partition([4, 4]);
 
-let (z, _x) = kernel_op(z, x).unzip();
+let (z, _x) = kernel(z, x).unzip();
 
 let z_host: Vec<f32> = z.unpartition().await?.to_host_vec().await?;
 ```

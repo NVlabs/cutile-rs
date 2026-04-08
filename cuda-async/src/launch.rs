@@ -7,9 +7,8 @@
 
 use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
-use crate::device_operation::{DeviceOperation, ExecutionContext};
+use crate::device_operation::{DeviceOp, ExecutionContext};
 use crate::error::DeviceError;
-use crate::scheduling_policies::SchedulingPolicy;
 use anyhow::{Context, Result};
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::{launch_kernel, CudaFunction, CudaStream, DType, LaunchConfig};
@@ -34,9 +33,9 @@ impl Drop for AsyncKernelLaunch {
         let _ = self
             .args
             .iter()
-            .map(|&arg| {
+            .map(|arg| {
                 // Reconstruct the boxes. Pointers will be dropped when they go out of scope.
-                unsafe { Box::from_raw(arg as *mut usize) }
+                unsafe { Box::from_raw(*arg) }
             })
             .collect::<Vec<_>>();
     }
@@ -90,9 +89,9 @@ impl AsyncKernelLaunch {
     /// # Safety
     /// The caller must ensure the kernel arguments and launch config are valid.
     unsafe fn launch(mut self, stream: &Arc<CudaStream>) -> Result<(), DeviceError> {
-        let cfg = self.cfg.ok_or_else(|| {
-            DeviceError::Launch("Await called before launching the kernel.".to_string())
-        })?;
+        let cfg = self.cfg.ok_or(DeviceError::Launch(
+            "Await called before launching the kernel.".to_string(),
+        ))?;
         launch_kernel(
             self.func.cu_function(),
             cfg.grid_dim,
@@ -138,13 +137,13 @@ impl<T: DType> KernelArgument for T {
     }
 }
 
-impl DeviceOperation for AsyncKernelLaunch {
+impl DeviceOp for AsyncKernelLaunch {
     type Output = ();
 
     unsafe fn execute(
         self,
         ctx: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         self.launch(ctx.get_cuda_stream())
     }
 }
@@ -153,9 +152,16 @@ impl IntoFuture for AsyncKernelLaunch {
     type Output = Result<(), DeviceError>;
     type IntoFuture = DeviceFuture<(), AsyncKernelLaunch>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            let mut f = DeviceFuture::new();
+            f.device_operation = Some(self);
+            f.execution_context = Some(ExecutionContext::new(stream));
+            Ok(f)
+        }) {
             Ok(Ok(future)) => future,
-            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
         }
     }
 }

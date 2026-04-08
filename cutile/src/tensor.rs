@@ -46,7 +46,7 @@
 //! use cutile::api;
 //! use cutile::tensor::IntoPartition;
 //!
-//! let tensor = api::zeros([256]).await;
+//! let tensor = api::zeros(&[256]).await;
 //! let partitioned = tensor.partition([64]);  // 4 tiles
 //! assert_eq!(partitioned.grid(), (4, 1, 1));
 //! ```
@@ -66,7 +66,7 @@
 //! ```rust,ignore
 //! use cutile::tensor::ToHostVec;
 //!
-//! let tensor = api::ones([1024]).await;
+//! let tensor = api::ones(&[1024]).await;
 //! let host_vec: Vec<f32> = tensor.to_host_vec().await;
 //! ```
 //!
@@ -121,10 +121,10 @@
 //! use cutile::api;
 //!
 //! // Create tensor
-//! let tensor = api::zeros::<f32>([1024]).await;
+//! let tensor = api::zeros::<f32>(&[1024]).await;
 //!
 //! // Access properties
-//! println!("Shape: {:?}", tensor.shape);
+//! println!("Shape: {:?}", tensor.shape());
 //! println!("Size: {}", tensor.size());
 //! println!("Bytes: {}", tensor.num_bytes());
 //! ```
@@ -135,7 +135,7 @@
 //! use cutile::api;
 //! use cutile::tensor::IntoPartition;
 //!
-//! let tensor = api::zeros([256]).await;
+//! let tensor = api::zeros(&[256]).await;
 //! let partitioned = tensor.partition([64]);
 //!
 //! // Use in kernel launch
@@ -148,7 +148,7 @@
 //! use cutile::api;
 //! use cutile::tensor::ToHostVec;
 //!
-//! let gpu_tensor = api::ones([1024]).await;
+//! let gpu_tensor = api::ones(&[1024]).await;
 //! let cpu_vec: Vec<f32> = gpu_tensor.to_host_vec().await;
 //! assert_eq!(cpu_vec.len(), 1024);
 //! ```
@@ -160,7 +160,7 @@
 //! use cutile::tensor::IntoPartitionArc;
 //! use std::sync::Arc;
 //!
-//! let tensor = Arc::new(api::zeros([256]).await);
+//! let tensor = Arc::new(api::zeros(&[256]).await);
 //!
 //! // Can partition Arc<Tensor> directly
 //! let partitioned = tensor.partition_arc([64]);
@@ -180,7 +180,7 @@
 //!
 //! ```rust,ignore
 //! // Safe: Each block writes to non-overlapping tiles
-//! let z = api::zeros([256]).partition([64]);
+//! let z = api::zeros(&[256]).partition([64]);
 //! // Block 0: writes to [0:64)
 //! // Block 1: writes to [64:128)
 //! // Block 2: writes to [128:192)
@@ -200,16 +200,15 @@
 //! - [`tile_async`](crate::tile_async) - Async execution infrastructure
 //! - [`core`](crate::core) - GPU kernel DSL types
 
-use crate::api::{copy, copy_device_to_host_vec, copy_host_vec_to_device};
+use crate::api::{copy_device_to_host_vec, copy_host_vec_to_device};
 use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
 use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
-use cuda_async::device_operation::{value, DeviceOperation};
-use cuda_async::error::DeviceError;
+use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
+use cuda_core::malloc_async;
 use cuda_core::sys::CUdeviceptr;
-use cuda_core::{malloc_async, CudaStream};
 use cuda_core::{DType, DTypeId};
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -235,7 +234,7 @@ use std::sync::Arc;
 /// use cutile::api;
 ///
 /// // Create a tensor and partition it into 64-element tiles
-/// let tensor = api::ones([256]).await;
+/// let tensor = api::ones(&[256]).await;
 /// let partitioned = tensor.partition([64]);
 ///
 /// // The partition has 4 tiles: (256 / 64 = 4)
@@ -248,13 +247,13 @@ use std::sync::Arc;
 /// Partitions automatically calculate the launch grid for kernels:
 ///
 /// ```rust,ignore
-/// let x = api::zeros([128, 128]).partition([32, 32]);
+/// let x = api::zeros(&[128, 128]).partition([32, 32]);
 /// assert_eq!(x.grid(), (4, 4, 1)); // 128/32 = 4 in each dimension
 /// ```
 pub struct Partition<T> {
     pub(crate) object: T,
-    pub partition_shape: Vec<i32>,
-    pub partition_strides: Vec<i32>,
+    pub partition_shape: Vec<usize>,
+    pub partition_strides: Vec<usize>,
 }
 
 impl<T> Partition<T> {
@@ -287,6 +286,11 @@ impl<T: DType> Partition<Tensor<T>> {
         T::DTYPE
     }
 
+    /// Returns the data type name as a string.
+    pub fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+
     /// Calculates the CUDA launch grid dimensions based on the partition.
     ///
     /// The grid is computed as `tensor_shape / partition_shape` for each dimension.
@@ -295,10 +299,10 @@ impl<T: DType> Partition<Tensor<T>> {
     /// ## Examples
     ///
     /// ```rust,ignore
-    /// let x = api::zeros([256]).partition([64]);
+    /// let x = api::zeros(&[256]).partition([64]);
     /// assert_eq!(x.grid(), (4, 1, 1));
     ///
-    /// let y = api::zeros([128, 256]).partition([32, 64]);
+    /// let y = api::zeros(&[128, 256]).partition([32, 64]);
     /// assert_eq!(y.grid(), (4, 4, 1));
     /// ```
     ///
@@ -306,19 +310,11 @@ impl<T: DType> Partition<Tensor<T>> {
     ///
     /// Panics if the tensor rank is greater than 3.
     pub fn grid(&self) -> Result<(u32, u32, u32), Error> {
-        let check_i32 = |x: &i32| *x > 0;
-        if !self.object.shape.iter().all(check_i32) {
-            // TODO (hme): This check may be relaxed or unnecessary if we let shapes be u32.
-            //  Doing so can't break future features around dynamic shape dims in tile kernels.
+        if !self.object.shape.iter().all(|&x| x > 0) {
             return tensor_error_result("Shape dimensions must be positive.");
         }
-        let to_u32 = |x: &i32| *x as u32;
-        let shape = self.object.shape.iter().map(to_u32).collect::<Vec<u32>>();
-        let partition_shape = self
-            .partition_shape
-            .iter()
-            .map(to_u32)
-            .collect::<Vec<u32>>();
+        let shape: Vec<u32> = self.object.shape.iter().map(|&x| x as u32).collect();
+        let partition_shape: Vec<u32> = self.partition_shape.iter().map(|&x| x as u32).collect();
         let rank = shape.len();
         match rank {
             1 => Ok((u32::div_ceil(shape[0], partition_shape[0]), 1, 1)),
@@ -353,10 +349,10 @@ pub trait IntoPartition {
     /// ## Examples
     ///
     /// ```rust,ignore
-    /// let tensor = api::zeros([1024]).await;
+    /// let tensor = api::zeros(&[1024]).await;
     /// let partitioned = tensor.partition([128]); // 8 partitions
     /// ```
-    fn partition<const RANK: usize>(self, partition_shape: [i32; RANK]) -> Partition<Self>
+    fn partition<const RANK: usize>(self, partition_shape: [usize; RANK]) -> Partition<Self>
     where
         Self: Sized;
 }
@@ -371,12 +367,12 @@ pub trait IntoPartitionArc {
     /// ## Examples
     ///
     /// ```rust,ignore
-    /// let tensor = Arc::new(api::zeros([1024]).await);
+    /// let tensor = Arc::new(api::zeros(&[1024]).await);
     /// let partitioned = tensor.partition([128]);
     /// ```
     fn partition<const RANK: usize>(
         self: Arc<Self>,
-        partition_shape: [i32; RANK],
+        partition_shape: [usize; RANK],
     ) -> Partition<Self>
     where
         Self: Sized;
@@ -402,22 +398,21 @@ pub trait IntoPartitionArc {
 /// use cutile::api;
 ///
 /// // Create tensors using the API
-/// let x = api::zeros::<f32>([1024]).await;
-/// let y = api::ones::<f32>([512, 512]).await;
+/// let x = api::zeros::<f32>(&[1024]).await;
+/// let y = api::ones::<f32>(&[512, 512]).await;
 /// let z = api::arange::<i32>(256).await;
 /// ```
 ///
 /// ### Copying and reshaping
 ///
 /// ```rust,ignore
-/// let x = api::zeros([1024]).await;
-/// let x_arc = Arc::new(x);
+/// let x: Tensor<f32> = api::zeros(&[1024]).await;
 ///
-/// // Copy to create a new tensor
-/// let y = x_arc.copy().await;
+/// // Duplicate to create a new tensor with the same data
+/// let y: Tensor<f32> = x.dup().await;
 ///
 /// // Reshape (must preserve total size)
-/// let reshaped = y.reshape([32, 32]); // 1024 = 32 * 32
+/// let reshaped = y.reshape(&[32, 32]); // 1024 = 32 * 32
 /// ```
 ///
 /// ### Transferring to host
@@ -431,8 +426,8 @@ pub trait IntoPartitionArc {
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
     pub(crate) storage: Arc<DeviceBuffer>,
-    pub shape: Vec<i32>,
-    pub strides: Vec<i32>,
+    pub(crate) shape: Vec<i32>,
+    pub(crate) strides: Vec<i32>,
     _dtype: PhantomData<T>,
 }
 
@@ -607,7 +602,7 @@ impl<T: DType> Tensor<T> {
     /// // Must initialize before use
     /// let tensor = unsafe { uninit.assume_init() };
     /// ```
-    pub fn uninitialized(len: usize) -> impl DeviceOperation<Output = MaybeUninit<Self>> {
+    pub fn uninitialized(len: usize) -> impl DeviceOp<Output = MaybeUninit<Self>> {
         assert!(len > 0, "Non-zero length required.");
         device_operation::with_context(move |ctx| {
             let num_bytes = len * size_of::<T>();
@@ -627,7 +622,7 @@ impl<T: DType> Tensor<T> {
         T::DTYPE
     }
 
-    pub fn cu_deviceptr(&self) -> CUdeviceptr {
+    pub(crate) fn cu_deviceptr(&self) -> CUdeviceptr {
         self.storage.cu_deviceptr()
     }
 
@@ -640,40 +635,33 @@ impl<T: DType> Tensor<T> {
         unsafe { DevicePointer::from_cu_deviceptr(self.cu_deviceptr()) }
     }
 
+    /// Returns the tensor's shape.
+    pub fn shape(&self) -> &[i32] {
+        &self.shape
+    }
+
+    /// Returns the tensor's strides.
+    pub fn strides(&self) -> &[i32] {
+        &self.strides
+    }
+
     /// Returns the total number of elements in the tensor.
     pub fn size(&self) -> usize {
         debug_assert_eq!(self.typed_num_bytes(), self.storage_num_bytes());
         self.num_elements()
     }
 
-    /// Creates a copy of this tensor on the GPU.
+    /// Creates an independent copy of this tensor's GPU data.
     ///
     /// Returns a device operation that, when executed, will allocate new GPU memory
     /// and copy the tensor's data.
-    pub fn copy(self: &Arc<Self>) -> impl DeviceOperation<Output = Self> {
-        copy(self)
-    }
-
-    /// Synchronously copies this tensor on the GPU using the specified stream.
-    pub fn copy_sync(self: &Arc<Self>, stream: &Arc<CudaStream>) -> Result<Self, DeviceError> {
-        copy(self).sync_on(stream)
+    pub fn dup(&self) -> impl DeviceOp<Output = Self> {
+        crate::api::dup(self)
     }
 
     /// Returns the total size of the tensor in bytes.
-    pub fn num_bytes(self: &Arc<Self>) -> usize {
-        let n = self.typed_num_bytes();
-        debug_assert_eq!(n, self.storage_num_bytes());
-        n
-    }
-
-    /// Returns the size of the tensor in megabytes (base 10).
-    pub fn num_mb(self: &Arc<Self>) -> usize {
-        self.num_bytes() / 10usize.pow(6)
-    }
-
-    /// Returns the size of the tensor in gigabytes (base 10).
-    pub fn num_gb(self: &Arc<Self>) -> usize {
-        self.num_bytes() / 10usize.pow(9)
+    pub fn num_bytes(&self) -> usize {
+        self.typed_num_bytes()
     }
 
     /// Returns `true` if the tensor metadata describes a contiguous row-major layout.
@@ -681,182 +669,60 @@ impl<T: DType> Tensor<T> {
         self.strides == contiguous_strides(&self.shape)
     }
 
-    /// Reshapes the tensor to a new shape without copying data.
+    /// Create an `Arc<Tensor<T>>` that shares this tensor's device memory.
     ///
-    /// The new shape must have the same total number of elements as the original.
-    /// This operation updates the shape and stride information but does not move data.
+    /// # Safety
     ///
-    /// ## Examples
-    ///
-    /// ```rust,ignore
-    /// let x = api::arange::<f32>(1024).await;
-    /// let reshaped = x.reshape([32, 32]); // 1024 = 32 * 32
-    /// ```
-    ///
-    /// ## Panics
-    ///
-    /// Panics if:
-    /// - The new shape has a different total number of elements
-    pub fn reshape<const RANK: usize>(mut self, shape: [usize; RANK]) -> Self {
-        // Make sure it's a valid shape for this tensor.
-        let shape = shape.iter().map(|x| *x as i32).collect::<Vec<_>>();
-        assert_eq!(
-            shape.iter().product::<i32>(),
-            self.shape.iter().product::<i32>()
-        );
-        self.shape = shape.to_vec();
+    /// Two tensors sharing storage can cause mutable aliasing if both are
+    /// passed to kernels. The caller must ensure only one is written at a
+    /// time. Prefer `tensor.view()` (returns `TensorView`) for safe
+    /// borrow-based sharing.
+    pub unsafe fn into_shared_alias(&self) -> Arc<Self> {
+        Arc::new(Self {
+            storage: self.storage.clone(),
+            shape: self.shape.clone(),
+            strides: self.strides.clone(),
+            _dtype: PhantomData,
+        })
+    }
+
+    // Internal: reshape without validation. Caller must ensure element count matches.
+    pub(crate) fn reshape_unchecked(mut self, shape: &[usize]) -> Self {
+        let shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         self.strides = contiguous_strides(&shape);
+        self.shape = shape;
         self
     }
 
-    pub fn reshape_dyn(mut self, shape: &[usize]) -> Self {
-        let shape = shape.iter().map(|x| *x as i32).collect::<Vec<_>>();
-        assert_eq!(
-            shape.iter().product::<i32>(),
-            self.shape.iter().product::<i32>()
-        );
-        self.shape = shape.to_vec();
-        self.strides = contiguous_strides(&shape);
-        self
-    }
-
-    /// Flattens an owned tensor into a rank-1 tensor without copying data.
-    pub fn flatten(self) -> Self {
-        let size = self.size();
-        self.reshape([size])
-    }
-
-    /// Creates a zero-copy Arc-backed view with a new static shape.
-    pub fn try_view<const RANK: usize>(
-        self: &Arc<Self>,
-        shape: [usize; RANK],
-    ) -> Result<Arc<Self>, Error> {
-        self.try_view_dyn(&shape)
-    }
-
-    /// Creates a zero-copy Arc-backed view with a new runtime shape.
-    pub fn try_view_dyn(self: &Arc<Self>, shape: &[usize]) -> Result<Arc<Self>, Error> {
+    // Internal: create a new Arc sharing storage with different shape.
+    // Used by ReshapeOp and the Reshape trait impl for &Arc<Tensor<T>>.
+    pub(crate) fn reshape_shared(self: &Arc<Self>, shape: &[usize]) -> Result<Arc<Self>, Error> {
         self.validate_view_shape(shape)?;
-        let shape = shape.iter().map(|x| *x as i32).collect::<Vec<_>>();
+        let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
         Ok(Arc::new(Self {
             storage: self.storage.clone(),
-            strides: contiguous_strides(&shape),
-            shape,
+            strides: contiguous_strides(&new_shape),
+            shape: new_shape,
             _dtype: PhantomData,
         }))
     }
 
-    /// Flattens an Arc-backed tensor into a rank-1 view without copying data.
-    pub fn try_flatten_view(self: &Arc<Self>) -> Result<Arc<Self>, Error> {
-        self.try_view([self.size()])
-    }
-
-    /// Creates a zero-copy Arc-backed view with a new static shape.
+    /// Reinterprets the tensor's bytes as a different type with a new shape.
     ///
-    /// ## Examples
-    ///
-    /// ```rust,ignore
-    ///
-    /// let x = Arc::new(api::arange::<f32>(8).await);
-    /// let y = x.view([2, 4]);
-    /// ```
-    ///
-    /// ## Errors
-    ///
-    /// This convenience API panics on failure instead of returning an error.
-    /// Use [`Tensor::try_view`] to handle failures as `Result`.
-    ///
-    /// ## Panics
-    ///
-    /// Panics if the tensor is not contiguous or if the target shape does not preserve
-    /// the logical element count.
-    pub fn view<const RANK: usize>(self: &Arc<Self>, shape: [usize; RANK]) -> Arc<Self> {
-        self.try_view(shape)
-            .expect("Failed to create zero-copy tensor view.")
-    }
-
-    /// Creates a zero-copy Arc-backed view with a new runtime shape.
-    pub fn view_dyn(self: &Arc<Self>, shape: &[usize]) -> Arc<Self> {
-        self.try_view_dyn(shape)
-            .expect("Failed to create zero-copy tensor view.")
-    }
-
-    /// Flattens an Arc-backed tensor into a rank-1 view without copying data.
-    ///
-    /// ## Examples
-    ///
-    /// ```rust,ignore
-    /// let x = Arc::new(api::arange::<f32>(8).await).view([2, 4]);
-    /// let y = x.flatten_view();
-    /// ```
-    ///
-    /// ## Errors
-    ///
-    /// This convenience API panics on failure instead of returning an error.
-    /// Use [`Tensor::try_flatten_view`] to handle failures as `Result`.
-    ///
-    /// ## Panics
-    ///
-    /// Panics if the tensor is not contiguous.
-    pub fn flatten_view(self: &Arc<Self>) -> Arc<Self> {
-        self.try_flatten_view()
-            .expect("Failed to create zero-copy tensor view.")
-    }
-
-    /// Creates a zero-copy reinterpret view with a new static shape.
-    pub fn try_reinterpret<U: DType, const RANK: usize>(
-        self: &Arc<Self>,
-        shape: [usize; RANK],
-    ) -> Result<Arc<Tensor<U>>, Error> {
-        self.try_reinterpret_dyn(&shape)
-    }
-
-    /// Creates a zero-copy reinterpret view with a new runtime shape.
-    pub fn try_reinterpret_dyn<U: DType>(
+    /// Zero-copy. Returns `Err` if the tensor is not contiguous, the total
+    /// byte size doesn't match, or the pointer alignment is incompatible.
+    pub fn reinterpret<U: DType>(
         self: &Arc<Self>,
         shape: &[usize],
     ) -> Result<Arc<Tensor<U>>, Error> {
         self.validate_reinterpret_shape::<U>(shape)?;
-        let shape = shape.iter().map(|x| *x as i32).collect::<Vec<_>>();
+        let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
         Ok(Arc::new(Tensor::<U> {
             storage: self.storage.clone(),
-            strides: contiguous_strides(&shape),
-            shape,
+            strides: contiguous_strides(&new_shape),
+            shape: new_shape,
             _dtype: PhantomData,
         }))
-    }
-
-    /// Creates a zero-copy reinterpret view with a new static shape.
-    ///
-    /// ## Examples
-    ///
-    /// ```rust,ignore
-    /// let bits: Arc<Vec<u32>> = Arc::new(vec![0x3f800000, 0x40000000]);
-    /// let base = Arc::new(bits.copy_to_device_tensor().await);
-    /// let floats = base.reinterpret::<f32, 1>([2]);
-    /// ```
-    ///
-    /// ## Errors
-    ///
-    /// This convenience API panics on failure instead of returning an error.
-    /// Use [`Tensor::try_reinterpret`] to handle failures as `Result`.
-    ///
-    /// ## Panics
-    ///
-    /// Panics if the tensor is not contiguous, if the target shape does not preserve
-    /// total byte size, or if pointer alignment is incompatible with the target type.
-    pub fn reinterpret<U: DType, const RANK: usize>(
-        self: &Arc<Self>,
-        shape: [usize; RANK],
-    ) -> Arc<Tensor<U>> {
-        self.try_reinterpret(shape)
-            .expect("Failed to reinterpret tensor storage.")
-    }
-
-    /// Creates a zero-copy reinterpret view with a new runtime shape.
-    pub fn reinterpret_dyn<U: DType>(self: &Arc<Self>, shape: &[usize]) -> Arc<Tensor<U>> {
-        self.try_reinterpret_dyn(shape)
-            .expect("Failed to reinterpret tensor storage.")
     }
 }
 
@@ -876,35 +742,133 @@ impl<T: DType> Tensor<T> {
 /// ```
 pub trait ToHostVec<T: Send> {
     /// Copies the tensor data from GPU to host memory, returning a `Vec<T>`.
-    fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>>;
+    fn to_host_vec(self) -> impl DeviceOp<Output = Vec<T>>;
 }
 
 impl<T: DType> ToHostVec<T> for Tensor<T> {
-    fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>> {
+    fn to_host_vec(self) -> impl DeviceOp<Output = Vec<T>> {
         let arc_self = Arc::new(self);
         copy_device_to_host_vec(&arc_self)
     }
 }
 
 impl<T: DType> ToHostVec<T> for Arc<Tensor<T>> {
-    fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>> {
+    fn to_host_vec(self) -> impl DeviceOp<Output = Vec<T>> {
         copy_device_to_host_vec(&self)
     }
 }
 
 impl<T: DType> ToHostVec<T> for &Arc<Tensor<T>> {
-    fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>> {
+    fn to_host_vec(self) -> impl DeviceOp<Output = Vec<T>> {
         copy_device_to_host_vec(self)
+    }
+}
+
+// ── Reshape trait ────────────────────────────────────────────────────────────
+
+/// Reshape a tensor or Arc<Tensor> to a new shape.
+///
+/// - On `Tensor<T>`: consumes and returns a reshaped `Tensor<T>`.
+/// - On `&Arc<Tensor<T>>`: creates a new `Arc` sharing device memory.
+pub trait Reshape {
+    type Output;
+    fn reshape(self, shape: &[usize]) -> Result<Self::Output, Error>;
+}
+
+impl<T: DType> Reshape for Tensor<T> {
+    type Output = Tensor<T>;
+    fn reshape(self, shape: &[usize]) -> Result<Tensor<T>, Error> {
+        let current_elems: i32 = self.shape.iter().product();
+        let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
+        if new_elems != current_elems {
+            return tensor_error_result("reshape: new shape must preserve element count.");
+        }
+        Ok(self.reshape_unchecked(shape))
+    }
+}
+
+impl<'a, T: DType> Reshape for &'a Arc<Tensor<T>> {
+    type Output = Arc<Tensor<T>>;
+    fn reshape(self, shape: &[usize]) -> Result<Arc<Tensor<T>>, Error> {
+        self.reshape_shared(shape)
+    }
+}
+
+// ── TensorView ──────────────────────────────────────────────────────────────
+
+/// A borrowed, reshaped view of a tensor.
+///
+/// Created by [`Tensor::view`]. The view borrows the base tensor's device
+/// memory with different shape/strides metadata. The borrow checker ensures
+/// the base tensor can't be mutated while the view exists.
+///
+/// Kernel `&Tensor` params accept `&TensorView<T>` via `KernelInput`.
+///
+/// ```rust,ignore
+/// let tensor = api::ones::<f32>(&[1024]).sync()?;
+/// let view = tensor.view(&[32, 32])?;    // borrows tensor
+/// kernel(out, &view).sync()?;             // view accepted as &Tensor param
+/// // view dropped — tensor can be mutated again
+/// ```
+pub struct TensorView<'a, T: DType> {
+    base: &'a Tensor<T>,
+    shape: Vec<i32>,
+    strides: Vec<i32>,
+}
+
+impl<'a, T: DType> TensorView<'a, T> {
+    pub fn shape(&self) -> &[i32] {
+        &self.shape
+    }
+    pub fn strides(&self) -> &[i32] {
+        &self.strides
+    }
+    pub fn size(&self) -> usize {
+        self.shape.iter().map(|&x| x as usize).product()
+    }
+    /// Re-view with a different shape.
+    pub fn view(&self, shape: &[usize]) -> Result<TensorView<'_, T>, Error> {
+        let current_elems: i32 = self.shape.iter().product();
+        let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
+        if new_elems != current_elems {
+            return tensor_error_result("view: new shape must preserve element count.");
+        }
+        let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
+        Ok(TensorView {
+            base: self.base,
+            shape: new_shape.clone(),
+            strides: contiguous_strides(&new_shape),
+        })
+    }
+}
+
+impl<T: DType> Tensor<T> {
+    /// Create a borrowed view with a different shape.
+    ///
+    /// The view borrows `self` — the tensor can't be mutated while the
+    /// view exists. No allocation or copy.
+    pub fn view(&self, shape: &[usize]) -> Result<TensorView<'_, T>, Error> {
+        let current_elems: i32 = self.shape.iter().product();
+        let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
+        if new_elems != current_elems {
+            return tensor_error_result("view: new shape must preserve element count.");
+        }
+        let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
+        Ok(TensorView {
+            base: self,
+            shape: new_shape.clone(),
+            strides: contiguous_strides(&new_shape),
+        })
     }
 }
 
 impl<T: DType> IntoPartitionArc for Tensor<T> {
     fn partition<const RANK: usize>(
         self: Arc<Tensor<T>>,
-        partition_shape: [i32; RANK],
+        partition_shape: [usize; RANK],
     ) -> Partition<Tensor<T>> {
         let partition_shape = partition_shape.to_vec();
-        let partition_strides = self.strides.clone();
+        let partition_strides: Vec<usize> = self.strides.iter().map(|&s| s as usize).collect();
         let tensor = Arc::try_unwrap(self).expect("Failed to convert Arc to Partition.");
         tensor.assert_unique_storage();
         Partition::<Tensor<T>> {
@@ -916,9 +880,9 @@ impl<T: DType> IntoPartitionArc for Tensor<T> {
 }
 
 impl<T: DType> IntoPartition for Tensor<T> {
-    fn partition<const RANK: usize>(self, partition_shape: [i32; RANK]) -> Partition<Tensor<T>> {
+    fn partition<const RANK: usize>(self, partition_shape: [usize; RANK]) -> Partition<Tensor<T>> {
         let partition_shape = partition_shape.to_vec();
-        let partition_strides = self.strides.clone();
+        let partition_strides: Vec<usize> = self.strides.iter().map(|&s| s as usize).collect();
         self.assert_unique_storage();
         Partition::<Tensor<T>> {
             object: self,
@@ -928,13 +892,101 @@ impl<T: DType> IntoPartition for Tensor<T> {
     }
 }
 
-pub trait Unpartition<T: DType> {
-    /// Unwraps the partition to produce the underlying value.
-    fn unpartition(self) -> impl DeviceOperation<Output = Tensor<T>>;
+// ── Partition<&'a mut Tensor<T>> ─────────────────────────────────────────────
+
+/// Partition a mutably borrowed tensor. The partition borrows the tensor,
+/// so no `unpartition()` is needed — the tensor already has the kernel's output.
+pub trait PartitionMut<'a, T: DType> {
+    fn partition<const RANK: usize>(
+        self,
+        partition_shape: [usize; RANK],
+    ) -> Partition<&'a mut Tensor<T>>;
 }
 
-impl<T: DType, DI: DeviceOperation<Output = Partition<Tensor<T>>>> Unpartition<T> for DI {
-    fn unpartition(self) -> impl DeviceOperation<Output = Tensor<T>> {
+impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
+    fn partition<const RANK: usize>(
+        self,
+        partition_shape: [usize; RANK],
+    ) -> Partition<&'a mut Tensor<T>> {
+        let partition_shape = partition_shape.to_vec();
+        let partition_strides: Vec<usize> = self.strides.iter().map(|&s| s as usize).collect();
+        Partition {
+            object: self,
+            partition_shape,
+            partition_strides,
+        }
+    }
+}
+
+impl<'a, T: DType> Partition<&'a mut Tensor<T>> {
+    pub fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+
+    pub fn grid(&self) -> Result<(u32, u32, u32), Error> {
+        if !self.object.shape.iter().all(|&x| x > 0) {
+            return tensor_error_result("Shape dimensions must be positive.");
+        }
+        let shape: Vec<u32> = self.object.shape.iter().map(|&x| x as u32).collect();
+        let partition_shape: Vec<u32> = self.partition_shape.iter().map(|&x| x as u32).collect();
+        let rank = shape.len();
+        match rank {
+            1 => Ok((u32::div_ceil(shape[0], partition_shape[0]), 1, 1)),
+            2 => Ok((
+                u32::div_ceil(shape[0], partition_shape[0]),
+                u32::div_ceil(shape[1], partition_shape[1]),
+                1,
+            )),
+            3 => Ok((
+                u32::div_ceil(shape[0], partition_shape[0]),
+                u32::div_ceil(shape[1], partition_shape[1]),
+                u32::div_ceil(shape[2], partition_shape[2]),
+            )),
+            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
+        }
+    }
+}
+
+impl<'a, T: DType + Sync> IntoDeviceOp<Partition<&'a mut Tensor<T>>>
+    for Partition<&'a mut Tensor<T>>
+{
+    type Op = Value<Partition<&'a mut Tensor<T>>>;
+    fn into_op(self) -> Value<Partition<&'a mut Tensor<T>>> {
+        value(self)
+    }
+}
+
+/// Extension trait for partitioning an `Arc<Tensor<T>>` by consuming sole ownership.
+pub trait TryPartition<T: DType> {
+    /// Consumes the Arc and partitions the tensor.
+    ///
+    /// Returns `Err` if the Arc has other owners (refcount > 1) or the
+    /// underlying storage is shared with views.
+    fn try_partition<const RANK: usize>(
+        self,
+        partition_shape: [usize; RANK],
+    ) -> Result<Partition<Tensor<T>>, Error>;
+}
+
+impl<T: DType> TryPartition<T> for Arc<Tensor<T>> {
+    fn try_partition<const RANK: usize>(
+        self,
+        partition_shape: [usize; RANK],
+    ) -> Result<Partition<Tensor<T>>, Error> {
+        let tensor = Arc::try_unwrap(self).map_err(|_| {
+            crate::error::tensor_error("try_partition: Arc<Tensor> has multiple owners")
+        })?;
+        Ok(tensor.partition(partition_shape))
+    }
+}
+
+pub trait Unpartition<T: DType> {
+    /// Unwraps the partition to produce the underlying value.
+    fn unpartition(self) -> impl DeviceOp<Output = Tensor<T>>;
+}
+
+impl<T: DType, DI: DeviceOp<Output = Partition<Tensor<T>>>> Unpartition<T> for DI {
+    fn unpartition(self) -> impl DeviceOp<Output = Tensor<T>> {
         UnwrapPartition { op: self }
     }
 }
@@ -957,7 +1009,7 @@ impl<T: DType> DeviceVec<Tensor<T>> {
         let device_vec: Arc<Tensor<i64>> = copy_host_vec_to_device(&i64vec)
             .sync()
             .expect("Failed to execute device operation.")
-            .reshape([v.len()])
+            .reshape_unchecked(&[v.len()])
             .into();
         let host_vec: Vec<Arc<Tensor<T>>> = v.into_iter().map(Arc::new).collect::<Vec<_>>();
         DeviceVec {
@@ -1009,5 +1061,353 @@ impl<T: DType> IntoIterator for DeviceVec<Tensor<T>> {
     type IntoIter = DeviceVecIntoIter<Tensor<T>>;
     fn into_iter(self) -> Self::IntoIter {
         DeviceVecIntoIter { items: self }
+    }
+}
+
+// IntoDeviceOp impls for Tensor types
+
+impl<T: DType> IntoDeviceOp<Partition<Tensor<T>>> for Partition<Tensor<T>> {
+    type Op = Value<Partition<Tensor<T>>>;
+    fn into_op(self) -> Value<Partition<Tensor<T>>> {
+        value(self)
+    }
+}
+
+impl<T: DType> IntoDeviceOp<Tensor<T>> for Tensor<T> {
+    type Op = Value<Tensor<T>>;
+    fn into_op(self) -> Value<Tensor<T>> {
+        value(self)
+    }
+}
+
+impl<'a, T: DType + Sync> IntoDeviceOp<&'a Tensor<T>> for &'a Tensor<T> {
+    type Op = Value<&'a Tensor<T>>;
+    fn into_op(self) -> Value<&'a Tensor<T>> {
+        value(self)
+    }
+}
+
+// KernelInput impls — how &Tensor kernel params are held and recovered.
+
+use cuda_async::launch::AsyncKernelLaunch;
+
+// ── KernelOutput trait ──────────────────────────────────────────────────────
+//
+// Abstracts over Partition<Tensor<T>> and Partition<&mut Tensor<T>> so the
+// macro-generated launcher accepts both for &mut Tensor params.
+
+/// How a `&mut Tensor` kernel param is stored during execution and recovered.
+///
+/// | Input | Stored | Returned |
+/// |---|---|---|
+/// | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` |
+/// | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` |
+pub trait KernelOutputStored<T: DType>: Send {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
+    fn grid(&self) -> Result<(u32, u32, u32), Error>;
+    fn dtype_str(&self) -> &'static str;
+    fn partition_shape_as_i32(&self) -> Vec<i32>;
+    fn strides_hint(&self) -> Vec<i32>;
+    fn shape_as_i32(&self) -> Vec<i32>;
+}
+
+pub trait KernelOutput<T: DType>: Send + Sized {
+    type Stored: KernelOutputStored<T>;
+    type Returned: Send;
+    fn prepare(self) -> Self::Stored;
+    fn recover(stored: Self::Stored) -> Self::Returned;
+}
+
+impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        unsafe {
+            launcher.push_device_ptr(self.object.cu_deviceptr());
+        }
+        for dim in self.object.shape.iter() {
+            launcher.push_arg(*dim);
+        }
+        for stride in self.object.strides.iter() {
+            launcher.push_arg(*stride);
+        }
+        for dim in self.partition_shape.iter() {
+            launcher.push_arg(*dim as i32);
+        }
+        for stride in self.partition_strides.iter() {
+            launcher.push_arg(*stride as i32);
+        }
+    }
+    fn grid(&self) -> Result<(u32, u32, u32), Error> {
+        let shape: Vec<u32> = self.shape_as_i32().iter().map(|&x| x as u32).collect();
+        let pshape: Vec<u32> = self
+            .partition_shape_as_i32()
+            .iter()
+            .map(|&x| x as u32)
+            .collect();
+        match shape.len() {
+            1 => Ok((u32::div_ceil(shape[0], pshape[0]), 1, 1)),
+            2 => Ok((
+                u32::div_ceil(shape[0], pshape[0]),
+                u32::div_ceil(shape[1], pshape[1]),
+                1,
+            )),
+            3 => Ok((
+                u32::div_ceil(shape[0], pshape[0]),
+                u32::div_ceil(shape[1], pshape[1]),
+                u32::div_ceil(shape[2], pshape[2]),
+            )),
+            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
+        }
+    }
+    fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+    fn partition_shape_as_i32(&self) -> Vec<i32> {
+        self.partition_shape.iter().map(|&x| x as i32).collect()
+    }
+    fn strides_hint(&self) -> Vec<i32> {
+        let len = self.partition_strides.len();
+        let mut res = vec![-1; len];
+        res[len - 1] = 1;
+        res
+    }
+    fn shape_as_i32(&self) -> Vec<i32> {
+        self.object.shape.clone()
+    }
+}
+
+impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        unsafe {
+            launcher.push_device_ptr(self.object.cu_deviceptr());
+        }
+        for dim in self.object.shape.iter() {
+            launcher.push_arg(*dim);
+        }
+        for stride in self.object.strides.iter() {
+            launcher.push_arg(*stride);
+        }
+        for dim in self.partition_shape.iter() {
+            launcher.push_arg(*dim as i32);
+        }
+        for stride in self.partition_strides.iter() {
+            launcher.push_arg(*stride as i32);
+        }
+    }
+    fn grid(&self) -> Result<(u32, u32, u32), Error> {
+        let shape: Vec<u32> = self.shape_as_i32().iter().map(|&x| x as u32).collect();
+        let pshape: Vec<u32> = self
+            .partition_shape_as_i32()
+            .iter()
+            .map(|&x| x as u32)
+            .collect();
+        match shape.len() {
+            1 => Ok((u32::div_ceil(shape[0], pshape[0]), 1, 1)),
+            2 => Ok((
+                u32::div_ceil(shape[0], pshape[0]),
+                u32::div_ceil(shape[1], pshape[1]),
+                1,
+            )),
+            3 => Ok((
+                u32::div_ceil(shape[0], pshape[0]),
+                u32::div_ceil(shape[1], pshape[1]),
+                u32::div_ceil(shape[2], pshape[2]),
+            )),
+            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
+        }
+    }
+    fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+    fn partition_shape_as_i32(&self) -> Vec<i32> {
+        self.partition_shape.iter().map(|&x| x as i32).collect()
+    }
+    fn strides_hint(&self) -> Vec<i32> {
+        let len = self.partition_strides.len();
+        let mut res = vec![-1; len];
+        res[len - 1] = 1;
+        res
+    }
+    fn shape_as_i32(&self) -> Vec<i32> {
+        self.object.shape.clone()
+    }
+}
+
+impl<T: DType> KernelOutput<T> for Partition<Tensor<T>> {
+    type Stored = Partition<Tensor<T>>;
+    type Returned = Partition<Tensor<T>>;
+    fn prepare(self) -> Self::Stored {
+        self
+    }
+    fn recover(stored: Self::Stored) -> Self::Returned {
+        stored
+    }
+}
+
+impl<'a, T: DType> KernelOutput<T> for Partition<&'a mut Tensor<T>> {
+    type Stored = Partition<&'a mut Tensor<T>>;
+    type Returned = Partition<&'a mut Tensor<T>>;
+    fn prepare(self) -> Self::Stored {
+        self
+    }
+    fn recover(stored: Self::Stored) -> Self::Returned {
+        stored
+    }
+}
+
+// ── KernelInput traits ──────────────────────────────────────────────────────
+//
+// Defined here (not in cuda-async) so that impls on Arc<Tensor<T>> satisfy
+// the orphan rule — both trait and Tensor<T> are in the same crate.
+
+/// How a stored kernel input pushes its arguments to the launcher.
+///
+/// Implemented for `Arc<Tensor<T>>` and `&Tensor<T>`. Both push the same
+/// data: device pointer, shape, and strides.
+pub trait KernelInputStored: Send {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
+    fn shape(&self) -> &[i32];
+    fn strides(&self) -> &[i32];
+    fn dtype_str(&self) -> &'static str;
+}
+
+/// Converts a user-provided kernel input into a stored form for execution,
+/// and recovers the caller's original type afterward.
+///
+/// | Input | Stored | Returned | `'static`? |
+/// |---|---|---|---|
+/// | `Tensor<T>` | `Arc<Tensor<T>>` | `Tensor<T>` | Yes |
+/// | `Arc<Tensor<T>>` | `Arc<Tensor<T>>` | `Arc<Tensor<T>>` | Yes |
+/// | `&'a Tensor<T>` | `&'a Tensor<T>` | `&'a Tensor<T>` | No |
+pub trait KernelInput<T: DType>: Send + Sized {
+    type Stored: KernelInputStored;
+    type Returned: Send;
+    fn prepare(self) -> Self::Stored;
+    fn recover(stored: Self::Stored) -> Self::Returned;
+}
+
+// ── KernelInputStored impls ─────────────────────────────────────────────────
+
+impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        unsafe {
+            launcher.push_device_ptr(self.cu_deviceptr());
+        }
+        for dim in self.shape.iter() {
+            launcher.push_arg(*dim);
+        }
+        for stride in self.strides.iter() {
+            launcher.push_arg(*stride);
+        }
+    }
+    fn shape(&self) -> &[i32] {
+        Tensor::shape(self)
+    }
+    fn strides(&self) -> &[i32] {
+        Tensor::strides(self)
+    }
+    fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+}
+
+impl<'a, T: DType + Sync> KernelInputStored for &'a Tensor<T> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        unsafe {
+            launcher.push_device_ptr(self.cu_deviceptr());
+        }
+        for dim in self.shape.iter() {
+            launcher.push_arg(*dim);
+        }
+        for stride in self.strides.iter() {
+            launcher.push_arg(*stride);
+        }
+    }
+    fn shape(&self) -> &[i32] {
+        Tensor::shape(self)
+    }
+    fn strides(&self) -> &[i32] {
+        Tensor::strides(self)
+    }
+    fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+}
+
+// ── KernelInput impls ───────────────────────────────────────────────────────
+
+impl<T: DType> KernelInput<T> for Tensor<T> {
+    type Stored = Arc<Tensor<T>>;
+    type Returned = Tensor<T>;
+    fn prepare(self) -> Arc<Tensor<T>> {
+        Arc::new(self)
+    }
+    fn recover(stored: Arc<Tensor<T>>) -> Tensor<T> {
+        Arc::try_unwrap(stored).expect("KernelInput::recover: Arc has multiple owners")
+    }
+}
+
+impl<T: DType> KernelInput<T> for Arc<Tensor<T>> {
+    type Stored = Arc<Tensor<T>>;
+    type Returned = Arc<Tensor<T>>;
+    fn prepare(self) -> Arc<Tensor<T>> {
+        self
+    }
+    fn recover(stored: Arc<Tensor<T>>) -> Arc<Tensor<T>> {
+        stored
+    }
+}
+
+impl<'a, T: DType + Sync> KernelInput<T> for &'a Tensor<T> {
+    type Stored = &'a Tensor<T>;
+    type Returned = &'a Tensor<T>;
+    fn prepare(self) -> &'a Tensor<T> {
+        self
+    }
+    fn recover(stored: &'a Tensor<T>) -> &'a Tensor<T> {
+        stored
+    }
+}
+
+// ── TensorView KernelInput impls ────────────────────────────────────────────
+
+impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        // Push the base tensor's device pointer with the VIEW's shape/strides.
+        unsafe {
+            launcher.push_device_ptr(self.base.cu_deviceptr());
+        }
+        for dim in self.shape.iter() {
+            launcher.push_arg(*dim);
+        }
+        for stride in self.strides.iter() {
+            launcher.push_arg(*stride);
+        }
+    }
+    fn shape(&self) -> &[i32] {
+        &self.shape
+    }
+    fn strides(&self) -> &[i32] {
+        &self.strides
+    }
+    fn dtype_str(&self) -> &'static str {
+        T::DTYPE.as_str()
+    }
+}
+
+impl<'a, T: DType + Sync> KernelInput<T> for &'a TensorView<'a, T> {
+    type Stored = &'a TensorView<'a, T>;
+    type Returned = &'a TensorView<'a, T>;
+    fn prepare(self) -> Self::Stored {
+        self
+    }
+    fn recover(stored: Self::Stored) -> Self::Returned {
+        stored
+    }
+}
+
+impl<'a, T: DType + Sync> IntoDeviceOp<&'a TensorView<'a, T>> for &'a TensorView<'a, T> {
+    type Op = Value<&'a TensorView<'a, T>>;
+    fn into_op(self) -> Value<&'a TensorView<'a, T>> {
+        value(self)
     }
 }

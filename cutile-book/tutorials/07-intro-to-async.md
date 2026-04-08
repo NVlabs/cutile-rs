@@ -21,16 +21,16 @@ With async, the CPU can do other work while the GPU computes:
 
 ---
 
-## DeviceOperation
+## DeviceOp
 
-In cutile, GPU work is represented as a `DeviceOperation` — a description of work to be done, not yet executed:
+In cutile, GPU work is represented as a `DeviceOp` — a description of work to be done, not yet executed:
 
-- `DeviceOperation` describes the work.
+- `DeviceOp` describes the work.
 - `.await`, `tokio::spawn(.)`, or `.sync_on(.)` executes it.
 
 ```rust
-// This creates a DeviceOperation, but doesn't execute yet!
-let tensor_op = api::ones([1024, 1024]);  // Returns impl DeviceOperation
+// This creates a DeviceOp, but doesn't execute yet!
+let tensor_op = api::ones(&[1024, 1024]);  // Returns impl DeviceOp
 
 // Nothing has happened on the GPU yet...
 
@@ -44,7 +44,7 @@ let tensor: Tensor<f32> = tensor_op.await;             // Async API
 
 ## Sync vs Async APIs
 
-In cutile, a `DeviceOperation` can be executed with either sync or async APIs. Given a particular operation `op`:
+In cutile, a `DeviceOp` can be executed with either sync or async APIs. Given a particular operation `op`:
 
 | API | Description |
 |----------|-------------|
@@ -62,7 +62,7 @@ In cutile, a `DeviceOperation` can be executed with either sync or async APIs. G
 ```rust
 use cutile::api::{ones, zeros};
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
-use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel, TensorDeviceOpToHostVec};
+use cutile::tile_kernel::{PartitionOp, TileKernel, ToHostVecOp};
 use cuda_async::device_operation::*;
 use std::sync::Arc;
 
@@ -82,23 +82,25 @@ mod async_add_module {
     }
 }
 
-use async_add_module::add_apply;
+use async_add_module::add;
 
 #[tokio::main]
-async fn main() {
-    let x: Arc<Tensor<f32>> = ones([32, 32]).arc().await?;
-    let y: Arc<Tensor<f32>> = ones([32, 32]).arc().await?;
+async fn main() -> Result<(), DeviceError> {
+    let x: Arc<Tensor<f32>> = ones(&[32, 32]).map(Into::into).await?;
+    let y: Arc<Tensor<f32>> = ones(&[32, 32]).map(Into::into).await?;
 
-    let z_op = zeros::<2, f32>([32, 32]);
-    let args = zip!(
-        z_op.partition([4, 4]),           // Output, partitioned into tiles
-        x.device_operation(),             // Input x as DeviceOperation
-        y.device_operation()              // Input y as DeviceOperation
-    );
-    let (z, _x, _y) = args.apply(add_apply).unzip();
-
-    let z_host: Vec<f32> = z.unpartition().to_host_vec().await?;
+    // Unified launcher: pass output partition and inputs directly.
+    let z_host: Vec<f32> = add(
+        zeros(&[32, 32]).partition([4, 4]),  // Output, partitioned into tiles
+        x,                                    // Input x (Arc<Tensor> via IntoDeviceOp)
+        y,                                    // Input y
+    )
+    .first()
+    .unpartition()
+    .to_host_vec()
+    .await?;
     println!("z[0] = {} (expected 2.0)", z_host[0]);
+    Ok(())
 }
 ```
 
@@ -116,58 +118,50 @@ z[0] = 2 (expected 2.0)
 
 ```rust
 #[tokio::main]
-async fn main() {
-    let batch1_op = prepare_batch(1);  // Returns DeviceOperation
-    let batch2_op = prepare_batch(2);  // Returns DeviceOperation
+async fn main() -> Result<(), DeviceError> {
+    let batch1_op = prepare_batch(1);  // Returns DeviceOp
+    let batch2_op = prepare_batch(2);  // Returns DeviceOp
 
-    let batch1 = batch1_op.await;
+    let batch1 = batch1_op.await?;
 
     let result1_op = process_kernel(batch1);
     let result1_handle = tokio::spawn(result1_op);  // Non-blocking
 
     // batch 2 data can be prepared while batch 1's kernel runs
-    let batch2 = batch2_op.await;
+    let batch2 = batch2_op.await?;
 
-    let result2 = process_kernel(batch2).await;
+    let result2 = process_kernel(batch2).await?;
 
-    let result1 = result1_handle.await;
+    let result1 = result1_handle.await?;
+    Ok(())
 }
 ```
 
 ---
 
-## Composing DeviceOperations
+## Composing DeviceOps
 
-### `zip!` — Combine Operations for Kernels
+### Unified Kernel Launcher
 
-`zip!` combines multiple DeviceOperations into a tuple that can be passed to kernels:
+The kernel launcher accepts both `DeviceOp` and plain values directly — no `zip!` needed:
+
+```rust
+// Pass output partition and inputs directly.
+let result = kernel(output_op.partition([4, 4]), input1, input2)
+    .first()           // Extract the output
+    .unpartition()
+    .await?;
+```
+
+### `zip!` — Combine Operations Manually
+
+For cases where you need explicit control, `zip!` combines multiple DeviceOps into a tuple:
 
 ```rust
 use cuda_async::device_operation::*;
 
-let args = zip!(
-    output_op.partition([4, 4]),   // Partitioned output
-    input1.device_operation(),     // Input as DeviceOperation
-    input2.device_operation()      // Another input
-);
-
-let (out, _in1, _in2) = args.apply(kernel_apply).unzip();
-```
-
-### `apply` — Run Kernels on DeviceOperations
-
-```rust
-let args = zip!(output_op, input_op);
-let (output, _input) = args.apply(some_kernel_apply).unzip();
-
-let result = output.await;
-```
-
-Use `kernel_op(...)` instead when the arguments are still separate `DeviceOperation`s rather than already grouped with `zip!`:
-
-```rust
-let output_op = kernel_op(z_op, input_op);
-let output = output_op.await;
+let combined = zip!(op_a, op_b, op_c);
+let (a, b, c) = combined.await?;
 ```
 
 ---
@@ -187,16 +181,46 @@ Start with sync for learning, move to async for production.
 
 ---
 
+## Borrowed Inputs and Spawn Safety
+
+Kernel `&Tensor` params accept three input forms: `Tensor<T>`, `Arc<Tensor<T>>`,
+and `&Tensor<T>`. Borrowed inputs (`&Tensor<T>`) work with `.sync_on()` and
+`.await`, but the compiler rejects them with `tokio::spawn`:
+
+```rust
+let weights: Tensor<f32> = api::ones(&[1024]).sync_on(&stream)?;
+
+// OK — borrow is contained in the sync call.
+let result = my_kernel(out, &weights).sync_on(&stream)?;
+
+// OK — borrow checker ensures weights outlives the await.
+let result = my_kernel(out, &weights).await?;
+
+// COMPILE ERROR — &weights is not 'static, so the future can't be spawned.
+let handle = tokio::spawn(my_kernel(out, &weights));
+//                                       ^^^^^^^^ borrowed value does not live long enough
+```
+
+This is enforced at compile time by Rust's lifetime system. If you need to
+spawn, use `Arc<Tensor<T>>` instead:
+
+```rust
+let weights: Arc<Tensor<f32>> = api::ones(&[1024]).sync_on(&stream)?.into();
+let handle = tokio::spawn(my_kernel(out, weights));  // OK — Arc is 'static
+```
+
+---
+
 ## Key Takeaways
 
 | Concept | What It Means |
 |---------|---------------|
-| **DeviceOperation** | A description of GPU work, not yet executed |
+| **DeviceOp** | A description of GPU work, not yet executed |
 | **.await** | Execute the operation and get the result |
 | **Async enables overlap** | CPU can do work while GPU computes |
-| **zip!** | Combine multiple operations for kernel input |
-| **apply** | Launch a kernel from one grouped `DeviceOperation` |
-| **`*_op`** | Launch a kernel from separate `DeviceOperation` arguments |
+| **Unified launcher** | Kernel functions accept DeviceOps and plain values directly |
+| **zip!** | Combine multiple operations into a tuple |
+| **.then()** | Chain follow-up work on the same stream |
 
 ---
 
@@ -211,10 +235,10 @@ Use `zip!` to create 4 tensors in parallel.
 :::{dropdown} Answer
 ```rust
 let (a, b, c, d) = zip!(
-    ones([100, 100]).arc(),
-    zeros([100, 100]).arc(),
-    randn(0.0, 1.0, [100, 100]).arc(),
-    arange(10000).arc()
+    ones(&[100, 100]).map(Into::into),
+    zeros(&[100, 100]).map(Into::into),
+    randn(0.0, 1.0, [100, 100]).map(Into::into),
+    arange(10000).map(Into::into)
 ).await?;
 ```
 :::

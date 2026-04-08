@@ -20,7 +20,7 @@ Modern NVIDIA GPUs (H100 shown) have a multi-level memory hierarchy:
 
 ```rust
 // Tensors live in global memory
-let x: Arc<Tensor<f32>> = ones([1024, 1024]).arc().sync_on(&stream)?;
+let x: Arc<Tensor<f32>> = ones(&[1024, 1024]).map(Into::into).sync_on(&stream)?;
 ```
 
 **Best practices:**
@@ -102,7 +102,7 @@ Partitioning logically divides a tensor into a grid of equally sized sub-regions
 
 ```rust
 // 1024×1024 tensor, processed as 16×16 tiles
-let output = zeros([1024, 1024])
+let output = zeros(&[1024, 1024])
     .partition([16, 16]);  // Creates 64×64 = 4096 tiles
 
 // Each tile knows its position

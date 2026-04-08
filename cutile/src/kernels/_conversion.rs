@@ -16,16 +16,13 @@
 ///
 /// ```rust,ignore
 /// use cutile::api;
-/// use cutile::kernels::conversion::convert_apply;
+/// use cutile::kernels::conversion::convert;
 ///
 /// // Convert f32 tensor to f16
-/// let src = Arc::new(api::randn(0.0, 1.0, [1024]).await);
-/// let dst = api::zeros::<f16>([1024]).partition([128]);
+/// let src: Arc<Tensor<f32>> = api::randn(0.0, 1.0, [1024], None).await?.into();
+/// let dst = api::zeros::<f16>(&[1024]).partition([128]);
 ///
-/// let result = zip!(src, dst)
-///     .apply(convert_apply)
-///     .unpartition()
-///     .await;
+/// let (src, dst) = convert(src, dst).await?;
 /// ```
 
 #[crate::module(tile_rust_crate = true)]
@@ -52,21 +49,17 @@ pub mod conversion {
     /// ## Examples
     ///
     /// ```rust,ignore
-    /// use cutile::kernels::conversion::convert_apply;
+    /// use cutile::kernels::conversion::convert;
     ///
-    /// // Convert f32 to f16
-    /// let src_f32 = Arc::new(api::arange::<f32>(1024).await);
-    /// let dst_f16 = api::zeros::<f16>([1024]).partition([128]);
-    /// let result = zip!(src_f32, dst_f16)
-    ///     .apply(convert_apply)
-    ///     .unzip();
+    /// // Convert f32 to f16 — unified launcher, no zip! needed.
+    /// let src_f32: Arc<Tensor<f32>> = api::arange(1024).await?.into();
+    /// let dst_f16 = api::zeros::<f16>(&[1024]).partition([128]);
+    /// let (src, dst) = convert(src_f32, dst_f16).await?;
     ///
     /// // Convert i32 to f32
-    /// let src_i32 = Arc::new(api::arange::<i32>(1024).await);
-    /// let dst_f32 = api::zeros::<f32>([1024]).partition([128]);
-    /// let result = zip!(src_i32, dst_f32)
-    ///     .apply(convert_apply)
-    ///     .unzip();
+    /// let src_i32: Arc<Tensor<i32>> = api::arange(1024).await?.into();
+    /// let dst_f32 = api::zeros::<f32>(&[1024]).partition([128]);
+    /// let (src, dst) = convert(src_i32, dst_f32).await?;
     /// ```
     ///
     /// ## Supported Conversions

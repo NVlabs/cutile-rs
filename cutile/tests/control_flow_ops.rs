@@ -205,7 +205,7 @@ fn compile_control_flow_test() -> () {
 #[test]
 fn compile_if_result_test() -> () {
     common::with_test_stack(|| {
-        let arg: Tensor<i64> = ones([16]).sync().expect("Failed.");
+        let arg: Tensor<i64> = ones(&[16]).sync().expect("Failed.");
         // If true, double and add 2.
         let (result, _) = if_return_test_kernel(arg.partition([4]), true)
             .sync()
@@ -214,7 +214,7 @@ fn compile_if_result_test() -> () {
         assert!(result.iter().all(|x| *x == 4));
 
         // If false, triple and add 3.
-        let arg: Tensor<i64> = ones([16]).sync().expect("Failed.");
+        let arg: Tensor<i64> = ones(&[16]).sync().expect("Failed.");
         let (result, _) = if_return_test_kernel(arg.partition([4]), false)
             .sync()
             .expect("Failed.");
@@ -228,7 +228,7 @@ fn execute_break_test() -> () {
     common::with_test_stack(|| {
         // break_test_kernel loads output, doubles it twice (loop runs 2 iterations then breaks),
         // and stores the result. Starting from 1.0, we expect 1.0 * 2 * 2 = 4.0.
-        let arg: Tensor<f32> = ones([16]).sync().expect("Failed.");
+        let arg: Tensor<f32> = ones(&[16]).sync().expect("Failed.");
         let (result,) = break_test_kernel(arg.partition([4]))
             .sync()
             .expect("Failed.");

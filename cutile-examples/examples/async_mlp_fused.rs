@@ -6,10 +6,9 @@ use cuda_async::device_context;
 use cuda_async::device_context::global_policy;
 use cuda_async::device_operation::*;
 use cuda_async::launch::AsyncKernelLaunch;
-use cuda_async::scheduling_policies::WithDeviceId;
 use cuda_core::LaunchConfig;
 use cutile::tensor::{Tensor, ToHostVec};
-use cutile::tile_kernel::IntoDeviceOperationPartition;
+use cutile::tile_kernel::PartitionOp;
 use cutile::{api, error::Error};
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
@@ -56,10 +55,8 @@ pub mod my_kernels {
 }
 
 // Simulate loading input data.
-fn load_data<const RANK: usize>(
-    batch_size: [usize; RANK],
-) -> impl DeviceOperation<Output = Tensor<f32>> {
-    api::randn_f32(0.0, 1.0, batch_size, None)
+fn load_data<const RANK: usize>(batch_size: [usize; RANK]) -> impl DeviceOp<Output = Tensor<f32>> {
+    api::randn(0.0, 1.0, batch_size, None)
 }
 
 use my_kernels::_module_asts;
@@ -69,10 +66,10 @@ async fn main() -> Result<(), Error> {
     // Data
     let (m, n, k) = (16, 16, 16);
     let (bm, bn, bk) = (4, 4, 4);
-    let data = load_data([m, n]).arc().await?;
-    let w0 = api::randn_f32(0.0f32, 1.0, [n, k], None).arc().await?; // impl DeviceOperation
-    let w1 = api::randn_f32(0.0f32, 1.0, [k], None).arc().await?; // impl DeviceOperation
-    let out = api::zeros::<1, f32>([m]).partition([bm]).await?;
+    let data = load_data([m, n]).await?.into();
+    let w0 = api::randn(0.0f32, 1.0, [n, k], None).await?.into();
+    let w1 = api::randn(0.0f32, 1.0, [k], None).await?.into();
+    let out = api::zeros::<f32>(&[m]).partition([bm]).await?;
 
     // Compilation
     let module_name = "my_kernels";
@@ -108,9 +105,9 @@ async fn main() -> Result<(), Error> {
     )?;
     let module_op: ModuleOperation = compiler.compile()?;
     println!("{}", module_op.as_operation().to_string());
-    let device = global_policy(0)?;
-    let module_filename = compile_module(&module_op, &get_gpu_name(device.get_device_id()));
-    let module = device_context::load_module_from_file(&module_filename, device.get_device_id())?;
+    let _device = global_policy(0)?;
+    let module_filename = compile_module(&module_op, &get_gpu_name(0));
+    let module = device_context::load_module_from_file(&module_filename, 0)?;
     let function = Arc::new(
         module
             .load_function(function_entry)

@@ -34,7 +34,7 @@
   <!-- Main Title -->
   <text x="475" y="38" text-anchor="middle" font-size="24" font-weight="700" fill="#ffffff" letter-spacing="-0.5">Lazy Computation Graph</text>
   <line x1="325" y1="50" x2="625" y2="50" stroke="#76B900" stroke-width="2" opacity="0.6"/>
-  <text x="475" y="72" text-anchor="middle" font-size="14" font-weight="500" fill="#8b949e">DeviceOperations compose into graphs that run on .await</text>
+  <text x="475" y="72" text-anchor="middle" font-size="14" font-weight="500" fill="#8b949e">DeviceOps compose into graphs that run on .await</text>
 
   <!-- Input nodes (stacked vertically on left) -->
   <g transform="translate(40, 115)">

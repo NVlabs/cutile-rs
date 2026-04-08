@@ -4,13 +4,13 @@
  */
 extern crate core;
 
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::{DeviceOp, Unzippable6};
 use cuda_core::CudaContext;
 use cutile;
-use cutile::api::{randn_f32, zeros};
+use cutile::api::{randn, zeros};
 use cutile::error::Error;
-use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
-use cutile::tile_kernel::TileKernel;
+use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec, Unpartition};
+use cutile::tile_kernel::{TileKernel, ToHostVecOp};
 use std::sync::Arc;
 
 #[cutile::module]
@@ -28,10 +28,10 @@ mod my_module {
         const BN: i32, // KV Sequence length partition size.
         const D: i32,  // Hidden size (weights).
     >(
+        out: &mut Tensor<f32, { [1, BM, D] }>, // (b*h, m, d)
         q: &Tensor<f32, { [-1, -1, -1, -1] }>, // (b, h, m, d)
         k: &Tensor<f32, { [-1, -1, -1, -1] }>, // (b, hkv, n, d) where n == m
         v: &Tensor<f32, { [-1, -1, -1, -1] }>, // (b, hkv, n, d) where n == m
-        out: &mut Tensor<f32, { [1, BM, D] }>, // (b*h, m, d)
         qk_scale: f32,
         query_group_size: i32,
     ) {
@@ -149,9 +149,9 @@ fn fmha(
     hkv: usize, // number of heads (key/value).
     m: usize,   // sequence length.
     d: usize,   // hidden size.
-    bm: i32,    // q seq len part size.
-    bn: i32,    // k, v seq len part size.
-    bbh: i32,   // batch * num_heads part size.
+    bm: usize,  // q seq len part size.
+    bn: usize,  // k, v seq len part size.
+    bbh: usize, // batch * num_heads part size.
 ) -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
     let ctx = CudaContext::new(0)?;
@@ -159,42 +159,43 @@ fn fmha(
     let stream = ctx.new_stream()?;
 
     let seed = 123;
-    let q: Arc<Tensor<f32>> = randn_f32(0f32, 1., [b, h, m, d], Some(seed))
+    let q: Arc<Tensor<f32>> = randn(0f32, 1., [b, h, m, d], Some(seed))
         .sync_on(&stream)?
         .into();
-    let k: Arc<Tensor<f32>> = randn_f32(0f32, 1., [b, hkv, m, d], Some(seed))
+    let k: Arc<Tensor<f32>> = randn(0f32, 1., [b, hkv, m, d], Some(seed))
         .sync_on(&stream)?
         .into();
-    let v: Arc<Tensor<f32>> = randn_f32(0f32, 1., [b, hkv, m, d], Some(seed))
+    let v: Arc<Tensor<f32>> = randn(0f32, 1., [b, hkv, m, d], Some(seed))
         .sync_on(&stream)?
         .into();
     // launch grid = (b*h, m/bm, 1)
-    let out: Partition<Tensor<f32>> = zeros([b * h, m, d])
+    let out: Partition<Tensor<f32>> = zeros(&[b * h, m, d])
         .sync_on(&stream)?
-        .partition([bbh, bm, d as i32]);
+        .partition([bbh, bm, d]);
     assert_eq!(out.grid()?, ((b * h) as u32, (m / bm as usize) as u32, 1));
 
-    let qk_scale = 1.0 / f32::sqrt(q.shape[3] as f32);
+    let qk_scale = 1.0 / f32::sqrt(q.shape()[3] as f32);
 
     // This is always 1.
-    let num_heads = q.shape[1];
-    let kv_num_heads = k.shape[1];
+    let num_heads = q.shape()[1];
+    let kv_num_heads = k.shape()[1];
     assert_eq!(num_heads % kv_num_heads, 0);
     let query_group_size = num_heads / kv_num_heads;
 
     let generics = vec![bm.to_string(), bn.to_string(), d.to_string()];
-    let (_, _, _, out, _, _) = fmha_kernel(
+    let out_vec: Vec<f32> = fmha_kernel(
+        out,
         q.clone(),
         k.clone(),
         v.clone(),
-        out,
         qk_scale,
         query_group_size,
     )
     .generics(generics)
+    .first()
+    .unpartition()
+    .to_host_vec()
     .sync_on(&stream)?;
-
-    let out_vec: Vec<f32> = out.unpartition().to_host_vec().sync_on(&stream)?;
     let q_host: Vec<f32> = q.to_host_vec().sync_on(&stream)?;
     let k_host: Vec<f32> = k.to_host_vec().sync_on(&stream)?;
     let v_host: Vec<f32> = v.to_host_vec().sync_on(&stream)?;

@@ -2,10 +2,10 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile;
-use cutile::api::{rand_f32, randn_f32, zeros};
+use cutile::api::{rand, randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
 use std::sync::Arc;
@@ -43,11 +43,9 @@ fn main() -> Result<(), Error> {
     let bm = 4;
     let p: f32 = 0.4;
     let seed = 123;
-    let x: Arc<Tensor<f32>> = randn_f32(0.0, 1.0, [m], Some(seed))
-        .sync_on(&stream)?
-        .into();
-    let x_keep: Arc<Tensor<f32>> = rand_f32([m], Some(seed)).sync_on(&stream)?.into();
-    let out: Partition<Tensor<f32>> = zeros([m]).sync_on(&stream)?.partition([bm]);
+    let x: Arc<Tensor<f32>> = randn(0.0, 1.0, [m], Some(seed)).sync_on(&stream)?.into();
+    let x_keep: Arc<Tensor<f32>> = rand([m], Some(seed)).sync_on(&stream)?.into();
+    let out: Partition<Tensor<f32>> = zeros(&[m]).sync_on(&stream)?.partition([bm]);
     let (_, _x, _x_keep, out) = dropout(p, x, x_keep, out).sync_on(&stream)?;
     let out_host: Vec<f32> = out.unpartition().to_host_vec().sync_on(&stream)?;
     for i in 0..out_host.len() {

@@ -12,13 +12,11 @@
 //! start from a clean `DEVICE_CONTEXTS`.
 
 use cuda_async::device_context::{
-    get_default_device, init_device_contexts, new_device_context, set_default_device,
-    DEFAULT_DEVICE_ID, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE,
+    get_default_device, init_device_contexts, set_default_device, DEFAULT_DEVICE_ID,
 };
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::Value;
 use cuda_async::error::{device_assert, device_error, DeviceError};
-use cuda_async::scheduling_policies::{GlobalSchedulingPolicy, StreamPoolRoundRobin};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -176,8 +174,10 @@ fn set_default_device_changes_value() {
 #[test]
 fn new_device_context_with_invalid_device_returns_driver_error() {
     // Device ordinal 9999 should not exist on any reasonable system.
-    let policy = unsafe { StreamPoolRoundRobin::new(9999, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE) };
-    let result = new_device_context(9999, GlobalSchedulingPolicy::RoundRobin(policy));
+    // CudaContext::new(9999) will fail with a driver error, which propagates
+    // through new_device_context.
+    let result = cuda_core::CudaContext::new(9999);
+    let result = result.map_err(DeviceError::Driver);
     match result {
         Err(DeviceError::Driver(_)) => { /* expected */ }
         Err(other) => panic!("expected Driver variant, got: {other:?}"),
