@@ -396,12 +396,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let call_arg_val = &call_arg_values[i];
                         let call_arg_ty = call_arg_val.ty.clone();
                         call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
-                        if let Some(ref string_lit_expr) = call_arg_val.string_literal {
-                            if let Expr::Lit(lit_expr) = string_lit_expr {
-                                if let syn::Lit::Str(s) = &lit_expr.lit {
-                                    arg_string_values.insert(param_name.to_string(), s.value());
-                                }
-                            }
+                        if let Some(Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(s),
+                            ..
+                        })) = &call_arg_val.string_literal
+                        {
+                            arg_string_values.insert(param_name.to_string(), s.value());
                         }
                         arg_types.insert(param_name.to_string(), call_arg_ty);
                     }
@@ -526,13 +526,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 let call_arg_val = &call_arg_values[i];
                                 let call_arg_ty = call_arg_val.ty.clone();
                                 call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
-                                if let Some(ref string_lit_expr) = call_arg_val.string_literal {
-                                    if let Expr::Lit(lit_expr) = string_lit_expr {
-                                        if let syn::Lit::Str(s) = &lit_expr.lit {
-                                            arg_string_values
-                                                .insert(param_name.to_string(), s.value());
-                                        }
-                                    }
+                                if let Some(Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(s),
+                                    ..
+                                })) = &call_arg_val.string_literal
+                                {
+                                    arg_string_values.insert(param_name.to_string(), s.value());
                                 }
                                 arg_types.insert(param_name.to_string(), call_arg_ty);
                             }

@@ -374,29 +374,26 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
 
         // arg[6]: latency (Option<i32>)
-        let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) =
+        let hint_params = if let Some(Expr::Lit(ExprLit {
+            lit: Lit::Int(int_lit),
+            ..
+        })) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
         {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
-        }
+            [(
+                "latency".to_string(),
+                int_lit.base10_parse::<i32>().unwrap(),
+            )]
+            .into()
+        } else {
+            Default::default()
+        };
 
-        let mut opt_hints = vec![];
-        if let Some(load_store_hints_attr) = self
+        let opt_hints = self
             .optimization_hints
-            .get_load_store_hints(&self.context, hint_params)?
-        {
-            opt_hints.push(load_store_hints_attr);
-        }
+            .get_load_store_hints(&self.context, &hint_params)?
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let operand_segments = format!(
             "array<i32: 1, {}, {}, {}>",
@@ -573,29 +570,26 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
 
         // arg[6]: latency (Option<i32>)
-        let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) =
+        let hint_params = if let Some(Expr::Lit(ExprLit {
+            lit: Lit::Int(int_lit),
+            ..
+        })) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
         {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
-        }
+            [(
+                "latency".to_string(),
+                int_lit.base10_parse::<i32>().unwrap(),
+            )]
+            .into()
+        } else {
+            Default::default()
+        };
 
-        let mut opt_hints = vec![];
-        if let Some(load_store_hints_attr) = self
+        let opt_hints = self
             .optimization_hints
-            .get_load_store_hints(&self.context, hint_params)?
-        {
-            opt_hints.push(load_store_hints_attr);
-        }
+            .get_load_store_hints(&self.context, &hint_params)?
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let operand_segments = format!("array<i32: 1, 1, {}, {}>", mask_count, token_count);
 
@@ -1125,7 +1119,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
         let index_values = index_values_vec;
 
-        let mut opt_hints = vec![];
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         let fn_params = get_sig_param_names(&fn_item.sig);
         for hint_param in cuda_tile_op_hint_params {
@@ -1165,12 +1158,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        if let Some(load_store_hints_attr) = self
+        let opt_hints = self
             .optimization_hints
-            .get_load_store_hints(&self.context, hint_params)?
-        {
-            opt_hints.push(load_store_hints_attr);
-        }
+            .get_load_store_hints(&self.context, &hint_params)?
+            .into_iter()
+            .collect::<Vec<_>>();
         let op = op_builder
             .add_results(&[tile_result_ty, token_result_ty])
             .add_operands(&[cuda_tile_view_value])
@@ -1278,7 +1270,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
         let index_values = index_values_vec;
 
-        let mut opt_hints = vec![];
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         let fn_params = get_sig_param_names(&fn_item.sig);
         for hint_param in cuda_tile_op_hint_params {
@@ -1320,12 +1311,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        if let Some(load_store_hints_attr) = self
+        let opt_hints = self
             .optimization_hints
-            .get_load_store_hints(&self.context, hint_params)?
-        {
-            opt_hints.push(load_store_hints_attr);
-        }
+            .get_load_store_hints(&self.context, &hint_params)?
+            .into_iter()
+            .collect::<Vec<_>>();
         let op = op_builder
             .add_results(&[token_result_ty])
             .add_operands(&[tile_value])

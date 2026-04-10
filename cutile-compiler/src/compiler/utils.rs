@@ -910,7 +910,7 @@ impl OptimizationHints {
     pub fn get_load_store_hints<'c>(
         &self,
         context: &'c Context,
-        hint_params: HashMap<String, i32>,
+        hint_params: &HashMap<String, i32>,
     ) -> Result<Option<(Identifier<'c>, Attribute<'c>)>, JITError> {
         if hint_params.is_empty() {
             return Ok(None);
@@ -920,11 +920,11 @@ impl OptimizationHints {
             .clone()
             .expect("Target gpu not yet specified. Did you compile?");
         let mut arch_hints_vec = vec![];
-        for (key, val) in hint_params.iter() {
+        for (key, &val) in hint_params {
             if key == "allow_tma" {
                 arch_hints_vec.push(format!(
                     "{key}={}",
-                    if *val != 0 { "true" } else { "false" }
+                    if val != 0 { "true" } else { "false" }
                 ));
             } else {
                 arch_hints_vec.push(format!("{key}={val}"));
