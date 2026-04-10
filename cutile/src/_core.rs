@@ -3041,6 +3041,23 @@ pub mod core {
         unreachable!()
     }
 
+    /// Computes element-wise base-2 exponential (2^x) with flush-to-zero.
+    ///
+    /// Same as [`exp2`], but flushes denormal results to zero. This can
+    /// improve performance on GPU hardware. Only supported for f32.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,ignore
+    /// let x: Tile<f32, {[128]}> = ...; // [0.0, 1.0, 2.0, ...]
+    /// let result = exp2_ftz(x); // [1.0, 2.0, 4.0, ...]
+    /// ```
+    #[cuda_tile::op(name="cuda_tile.exp2", params=["x"], named_attributes=["flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn exp2_ftz<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
     /// Computes element-wise base-2 logarithm of floating-point tiles.
     ///
     /// Returns a tile where each element is the base-2 logarithm of the
@@ -3133,15 +3150,22 @@ pub mod core {
     /// let result = maxf(a, b); // [2.0, 5.0, 6.0, ...]
     /// ```
     ///
-    /// ## TODO (np)
-    ///
-    /// Add support for optional unit attributes `propagate_nan` and `flush_to_zero`:
-    /// - `propagate_nan`: Controls NaN handling (IEEE 754-2019 maximum vs maximumNumber)
-    /// - `flush_to_zero`: Flushes denormals to zero (f32 only)
-    /// These require implementing a mechanism for user-controllable unit attributes.
     #[cuda_tile::op(name="cuda_tile.maxf", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn maxf<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise floating-point maximum with flush-to-zero.
+    ///
+    /// Same as [`maxf`], but flushes denormal inputs and results to zero.
+    /// Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.maxf", params=["lhs", "rhs"], named_attributes=["flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn maxf_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+    ) -> Tile<E, S> {
         unreachable!()
     }
 
@@ -3157,16 +3181,22 @@ pub mod core {
     /// let b: Tile<f32, {[128]}> = ...; // [2.0, 4.0, 6.0, ...]
     /// let result = minf(a, b); // [1.0, 4.0, 3.0, ...]
     /// ```
-    ///
-    /// ## TODO (np)
-    ///
-    /// Add support for optional unit attributes `propagate_nan` and `flush_to_zero`:
-    /// - `propagate_nan`: Controls NaN handling (IEEE 754-2019 minimum vs minimumNumber)
-    /// - `flush_to_zero`: Flushes denormals to zero (f32 only)
-    /// These require implementing a mechanism for user-controllable unit attributes.
     #[cuda_tile::op(name="cuda_tile.minf", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn minf<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise floating-point minimum with flush-to-zero.
+    ///
+    /// Same as [`minf`], but flushes denormal inputs and results to zero.
+    /// Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.minf", params=["lhs", "rhs"], named_attributes=["flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn minf_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+    ) -> Tile<E, S> {
         unreachable!()
     }
 

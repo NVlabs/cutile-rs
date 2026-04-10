@@ -87,6 +87,29 @@ mod unary_math_ops_module {
     }
 
     #[cutile::entry()]
+    fn exp2_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = exp2_ftz(x);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn maxf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = maxf_ftz(x, y);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn minf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = minf_ftz(x, y);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
     fn unary_math_ops_bf16_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
         // Verifies bf16 unary math operation lowering
         let x: Tile<bf16, S> = load_tile_mut(output);
@@ -279,6 +302,111 @@ fn compile_pow() -> () {
         );
 
         println!("\n✓ pow operation verified in MLIR output");
+    });
+}
+
+#[test]
+fn compile_exp2_ftz() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            "exp2_ftz_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== EXP2 FTZ MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("exp2"),
+            "Expected exp2 operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("flush_to_zero"),
+            "Expected flush_to_zero attribute in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_maxf_ftz() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            "maxf_ftz_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== MAXF FTZ MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("maxf"),
+            "Expected maxf operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("flush_to_zero"),
+            "Expected flush_to_zero attribute in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_minf_ftz() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            "minf_ftz_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== MINF FTZ MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("minf"),
+            "Expected minf operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("flush_to_zero"),
+            "Expected flush_to_zero attribute in MLIR output"
+        );
     });
 }
 

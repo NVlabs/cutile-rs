@@ -750,8 +750,8 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
             return_type: ("Tile", &["_", "R"]),
         }),
         // Unary operations.
-        "ceil" | "cosh" | "cos" | "exp" | "exp2" | "log" | "log2" | "rsqrt" | "sinh" | "sin"
-        | "sqrt" | "tanh" | "tan" => Some(VariadicOpData {
+        "ceil" | "cosh" | "cos" | "exp" | "exp2" | "exp2_ftz" | "log" | "log2" | "rsqrt"
+        | "sinh" | "sin" | "sqrt" | "tanh" | "tan" => Some(VariadicOpData {
             const_length_vars: &["N"],
             cga_map: HashMap::from([("S", "N")]),
             input_map: vec![(0, "Tile", &["S"])],
@@ -794,15 +794,14 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
             output_map: ("Tile", &["S"]),
             return_type: ("Tile", &["_", "S"]),
         }),
-        "pow" | "maxf" | "minf" | "andi" | "ori" | "xori" | "shli" | "shri" => {
-            Some(VariadicOpData {
-                const_length_vars: &["N"],
-                cga_map: HashMap::from([("S", "N")]),
-                input_map: vec![(0, "Tile", &["S"]), (1, "Tile", &["S"])],
-                output_map: ("Tile", &["S"]),
-                return_type: ("Tile", &["_", "S"]),
-            })
-        }
+        "pow" | "maxf" | "maxf_ftz" | "minf" | "minf_ftz" | "andi" | "ori" | "xori" | "shli"
+        | "shri" => Some(VariadicOpData {
+            const_length_vars: &["N"],
+            cga_map: HashMap::from([("S", "N")]),
+            input_map: vec![(0, "Tile", &["S"]), (1, "Tile", &["S"])],
+            output_map: ("Tile", &["S"]),
+            return_type: ("Tile", &["_", "S"]),
+        }),
         "bitcast" => Some(VariadicOpData {
             const_length_vars: &["N"],
             cga_map: HashMap::from([("S", "N")]),
