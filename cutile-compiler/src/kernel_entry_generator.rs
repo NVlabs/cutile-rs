@@ -197,11 +197,7 @@ impl TensorInput {
         fn_args
     }
 
-    fn get_dynamic_elements(
-        &self,
-        static_elements: &Vec<String>,
-        i_arg_name: String,
-    ) -> Vec<String> {
+    fn get_dynamic_elements(&self, static_elements: &[String], i_arg_name: String) -> Vec<String> {
         let var_name = self.var_name.clone();
         let mut dynamic_elements = vec![];
         for (i, dim) in static_elements.iter().enumerate() {
@@ -508,7 +504,7 @@ pub fn generate_entry_point(
                                     if s == "- 1" {
                                         -1
                                     } else {
-                                        s.parse::<i32>().expect(format!("{s}").as_str())
+                                        s.parse::<i32>().unwrap_or_else(|_| panic!("{s}"))
                                     }
                                 })
                                 .collect::<Vec<i32>>(),
