@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_context::global_policy;
-use cuda_async::device_operation::{value, with_context, DeviceOperation};
+use cuda_async::device_operation::{value, with_context, DeviceOp};
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_core::LaunchConfig;
 use cutile;
-use cutile::api::{arange, DeviceOperationReshape};
+use cutile::api::arange;
+use cutile::api::DeviceOpReshape;
 use cutile::tensor::{IntoPartition, ToHostVec};
 use cutile::tile_kernel::{compile_from_context, CompileOptions};
 use my_module::_module_asts;
@@ -20,7 +21,7 @@ mod my_module {
     use cutile::core::*;
 
     #[cutile::entry()]
-    fn saxpy<const S: [i32; 2]>(a: f32, x: &Tensor<f32, { [-1, -1] }>, y: &mut Tensor<f32, S>) {
+    fn saxpy<const S: [i32; 2]>(y: &mut Tensor<f32, S>, a: f32, x: &Tensor<f32, { [-1, -1] }>) {
         let tile_a: Tile<f32, S> = a.broadcast(y.shape());
         let tile_x: Tile<f32, S> = load_tile_like_2d(x, y);
         let tile_y: Tile<f32, S> = y.load();
@@ -37,8 +38,8 @@ async fn main() -> Result<(), DeviceError> {
     let y_partition_strides = strides;
     let function_generics: Vec<String> = y_partition_shape.iter().map(|x| x.to_string()).collect();
     let stride_args: Vec<(String, Vec<i32>)> = vec![
-        ("x".to_string(), strides.to_vec()),
         ("y".to_string(), y_partition_strides.to_vec()),
+        ("x".to_string(), strides.to_vec()),
     ];
 
     // We can start compiling the function while we fetch input.
@@ -57,14 +58,14 @@ async fn main() -> Result<(), DeviceError> {
             );
             value(func)
         })
-        .schedule(policy.as_scheduling_policy().unwrap())?
+        .schedule(&policy)?
         .await
     });
 
     // Spawn allocation of tensor 1 and 2.
     let a: f32 = 2.0;
-    let x: Arc<_> = arange::<f32>(num_elements).reshape([4, 8]).await?.into();
-    let y = arange::<f32>(num_elements).reshape([4, 8]).await?;
+    let x: Arc<_> = arange::<f32>(num_elements).reshape(&[4, 8]).await?.into();
+    let y = arange::<f32>(num_elements).reshape(&[4, 8]).await?;
 
     // We need the function to build the launcher, so we wait on compilation.
     let (function, _) = compilation_task
@@ -75,21 +76,21 @@ async fn main() -> Result<(), DeviceError> {
         let y_part = y.partition(y_partition_shape);
         let mut launcher = AsyncKernelLaunch::new(function.clone());
         launcher
+            .push_arg(&y_part)
             .push_arg(a)
             .push_arg_arc(&x)
-            .push_arg(&y_part)
             .set_launch_config(LaunchConfig {
                 grid_dim: y_part.grid().expect("Invalid grid."),
                 block_dim: (1, 1, 1),
                 shared_mem_bytes: 0,
             });
         launcher
-            .and_then(|_| {
+            .then(|_| {
                 let mut launcher = AsyncKernelLaunch::new(function.clone());
                 launcher
+                    .push_arg(&y_part)
                     .push_arg(a)
                     .push_arg_arc(&x)
-                    .push_arg(&y_part)
                     .set_launch_config(LaunchConfig {
                         grid_dim: y_part.grid().expect("Invalid grid."),
                         block_dim: (1, 1, 1),
@@ -97,12 +98,12 @@ async fn main() -> Result<(), DeviceError> {
                     });
                 launcher
             })
-            .and_then(|_| {
+            .then(|_| {
                 let mut launcher = AsyncKernelLaunch::new(function.clone());
                 launcher
+                    .push_arg(&y_part)
                     .push_arg(a)
                     .push_arg_arc(&x)
-                    .push_arg(&y_part)
                     .set_launch_config(LaunchConfig {
                         grid_dim: y_part.grid().expect("Invalid grid."),
                         block_dim: (1, 1, 1),

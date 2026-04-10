@@ -26,8 +26,8 @@
 //! use cutile::api;
 //!
 //! // Create tensors on GPU
-//! let x = api::ones::<f32>([1024]).await;
-//! let y = api::zeros::<f32>([1024]).await;
+//! let x = api::ones::<f32>(&[1024]).await;
+//! let y = api::zeros::<f32>(&[1024]).await;
 //! let z = api::arange::<f32>(256).await;
 //!
 //! // All operations are async and execute on GPU
@@ -54,15 +54,16 @@
 //!     }
 //! }
 //!
-//! // Use the kernel with partitioned tensors
-//! let x = api::ones([256]).partition([64]);
-//! let y = api::ones([256]).partition([64]);
-//! let z = api::zeros([256]).partition([64]);
-//!
-//! let result = zip!(z, x, y)
-//!     .apply(kernels::vector_add_apply)
-//!     .generics(vec!["f32".to_string(), "64".to_string()])
-//!     .await; // Automatically launches with grid (4, 1, 1)
+//! // Output-first: &mut param is first. Pass DeviceOps directly.
+//! let result = kernels::vector_add(
+//!     api::zeros(&[256]).partition([64]),
+//!     api::ones(&[256]),
+//!     api::ones(&[256]),
+//! )
+//! .first()
+//! .unpartition()
+//! .to_host_vec()
+//! .await?;
 //! ```
 //!
 //! ### Async GPU pipelines
@@ -70,25 +71,18 @@
 //! ```rust,ignore
 //! use cutile::api;
 //!
-//! async fn compute_pipeline() -> Tensor<f32> {
-//!     // All operations execute asynchronously on GPU
-//!     let x = api::randn(0.0, 1.0, [1024, 1024]).await;
-//!     let y = api::randn(0.0, 1.0, [1024, 1024]).await;
-//!     
-//!     // Use built-in kernels
-//!     use cutile::kernels::linalg::gemm_apply;
-//!     
-//!     let x_part = x.partition([128, 128]);
-//!     let y_part = y.partition([128, 128]);
-//!     let z = api::zeros([1024, 1024]).partition([128, 128]);
-//!     
-//!     zip!(z, x_part, y_part)
-//!         .apply(gemm_apply)
-//!         .generics(vec!["128".to_string(), "128".to_string(),
-//!                        "32".to_string(), "1024".to_string()])
-//!         .unpartition()
-//!         .await
-//! }
+//! // All operations are lazy — no GPU work until .await
+//! let x = api::randn(0.0, 1.0, &[1024, 1024]).await?;
+//! let y = api::randn(0.0, 1.0, &[1024, 1024]).await?;
+//!
+//! let z = gemm(
+//!     api::zeros(&[1024, 1024]).partition([128, 128]),
+//!     x, y,
+//! )
+//! .generics(vec!["128".into(), "128".into(), "32".into(), "1024".into()])
+//! .first()
+//! .unpartition()
+//! .await?;
 //! ```
 //!
 //! ## Module Organization
@@ -108,7 +102,7 @@
 //!
 //! ```rust,ignore
 //! // Create a tensor and partition it into 64-element tiles
-//! let x = api::ones([256]).partition([64]); // Creates 4 partitions
+//! let x = api::ones(&[256]).partition([64]); // Creates 4 partitions
 //! ```
 //!
 //! ### Tiles
@@ -129,7 +123,7 @@
 //!
 //! ```rust,ignore
 //! // Operations compose naturally with async/await
-//! let x = api::zeros([1024]).await;
+//! let x = api::zeros(&[1024]).await;
 //! let y = my_kernel(x).await;
 //! let z = another_kernel(y).await;
 //! ```
@@ -170,6 +164,7 @@ pub mod error;
 pub use _core::core;
 pub mod api;
 pub mod kernels;
+pub mod prelude;
 pub mod tensor;
 pub mod tile_kernel;
 pub mod utils;

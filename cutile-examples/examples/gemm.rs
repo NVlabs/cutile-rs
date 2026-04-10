@@ -11,6 +11,7 @@ use cutile::tensor::*;
 use cutile::tile_kernel::*;
 use cutile::DType;
 use my_module::gemm as gemm_kernel;
+use std::sync::Arc;
 
 #[cutile::module]
 mod my_module {
@@ -53,9 +54,9 @@ fn gemm<T: DType + std::fmt::Display>() -> Result<(), Error> {
         bk.to_string(),
         k.to_string(),
     ];
-    let z = api::zeros([m, n]).partition([bm, bn]).sync_on(&stream)?;
-    let x = api::ones([m, k]).arc().sync_on(&stream)?;
-    let y = api::ones([k, n]).arc().sync_on(&stream)?;
+    let z = api::zeros(&[m, n]).partition([bm, bn]).sync_on(&stream)?;
+    let x: Arc<Tensor<T>> = api::ones(&[m, k]).sync_on(&stream)?.into();
+    let y: Arc<Tensor<T>> = api::ones(&[k, n]).sync_on(&stream)?.into();
     let launcher = gemm_kernel(z, x.clone(), y.clone());
     let (z, _x, _y) = launcher.generics(generics.clone()).sync_on(&stream)?;
     let z_host: Vec<T> = z.unpartition().to_host_vec().sync_on(&stream)?;

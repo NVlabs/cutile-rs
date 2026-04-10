@@ -42,8 +42,8 @@ Transfer results to the CPU to inspect them after kernel execution:
 let ctx = CudaContext::new(0)?;
 let stream = ctx.new_stream()?;
 
-let x: Arc<Tensor<f32>> = ones([32, 32]).arc().sync_on(&stream)?;
-let z = zeros([32, 32]).sync_on(&stream)?.partition([4, 4]);
+let x: Arc<Tensor<f32>> = ones(&[32, 32]).map(Into::into).sync_on(&stream)?;
+let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
 
 let (z, _x) = my_kernel(z, x).sync_on(&stream)?;
 
@@ -221,7 +221,7 @@ Fix: ensure the CUDA toolkit version is compatible with the installed driver, an
 
 ```rust
 // WRONG: tensor dropped while kernel is still running
-let z: Tensor<f32> = zeros([len]).await?;
+let z: Tensor<f32> = zeros(&[len]).await?;
 let z_ptr = z.device_pointer();
 drop(z);  // Frees GPU memory!
 unsafe { add_ptr(z_ptr, ...) }.sync_on(&stream)?;  // Segfault or corruption

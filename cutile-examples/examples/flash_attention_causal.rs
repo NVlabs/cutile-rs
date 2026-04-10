@@ -4,10 +4,10 @@
  */
 extern crate core;
 
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile;
-use cutile::api::{randn_f32, zeros};
+use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
@@ -31,10 +31,10 @@ mod my_module {
         const CAUSAL: i32,
         const EVEN_K: i32,
     >(
+        out: &mut Tensor<f32, { [1, BM, D] }>, // (b*h, m, d)
         q: &Tensor<f32, { [-1, -1, -1, -1] }>, // (b, h, m, d)
         k: &Tensor<f32, { [-1, -1, -1, -1] }>, // (b, hkv, n, d)
         v: &Tensor<f32, { [-1, -1, -1, -1] }>, // (b, hkv, n, d)
-        out: &mut Tensor<f32, { [1, BM, D] }>, // (b*h, m, d)
         qk_scale: f32,
         input_pos: i32,
         query_group_size: i32,
@@ -217,25 +217,25 @@ fn run_attention_fmha(causal: bool) -> Result<(), Error> {
     let stream = ctx.new_stream()?;
 
     let (batch, heads, heads_kv, seq_len, head_dim) = (2usize, 8usize, 8usize, 64usize, 32usize);
-    let (bm, bn) = (32i32, 32i32);
-    let bbh = 1i32;
+    let (bm, bn) = (32, 32);
+    let bbh = 1usize;
     let input_pos = if causal { 5i32 } else { 0i32 };
     let even_k = seq_len as i32 % bn == 0;
     let qk_scale = 1.0 / f32::sqrt(head_dim as f32);
     let query_group_size = (heads / heads_kv) as i32;
 
-    let q: Arc<Tensor<f32>> = randn_f32(0.0, 1.0, [batch, heads, seq_len, head_dim], Some(7))
+    let q: Arc<Tensor<f32>> = randn(0.0, 1.0, [batch, heads, seq_len, head_dim], Some(7))
         .sync_on(&stream)?
         .into();
-    let k: Arc<Tensor<f32>> = randn_f32(0.0, 1.0, [batch, heads_kv, seq_len, head_dim], Some(11))
+    let k: Arc<Tensor<f32>> = randn(0.0, 1.0, [batch, heads_kv, seq_len, head_dim], Some(11))
         .sync_on(&stream)?
         .into();
-    let v: Arc<Tensor<f32>> = randn_f32(0.0, 1.0, [batch, heads_kv, seq_len, head_dim], Some(13))
+    let v: Arc<Tensor<f32>> = randn(0.0, 1.0, [batch, heads_kv, seq_len, head_dim], Some(13))
         .sync_on(&stream)?
         .into();
-    let out: Partition<Tensor<f32>> = zeros([batch * heads, seq_len, head_dim])
+    let out: Partition<Tensor<f32>> = zeros(&[batch * heads, seq_len, head_dim])
         .sync_on(&stream)?
-        .partition([bbh, bm, head_dim as i32]);
+        .partition([bbh, bm, head_dim]);
 
     let generics = vec![
         bm.to_string(),
@@ -246,11 +246,11 @@ fn run_attention_fmha(causal: bool) -> Result<(), Error> {
         (even_k as i32).to_string(),
     ];
 
-    let (_, _, _, out, _, _, _): (_, _, _, Partition<Tensor<f32>>, _, _, _) = fmha(
+    let (out, _, _, _, _, _, _) = fmha(
+        out,
         q.clone(),
         k.clone(),
         v.clone(),
-        out,
         qk_scale,
         input_pos,
         query_group_size,

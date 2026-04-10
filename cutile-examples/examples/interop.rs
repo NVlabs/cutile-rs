@@ -12,16 +12,15 @@
 //! Shows:
 //!   - Loading a kernel from inline PTX via `load_module_from_ptx`
 //!   - Launching with `AsyncKernelLaunch` (`push_arg` / `push_device_ptr`)
-//!   - Wrapping a custom kernel in a `DeviceOperation` struct for a safe call-site
+//!   - Wrapping a custom kernel in a `DeviceOp` struct for a safe call-site
 //!   - Chaining tile and custom kernels on the same stream with `and_then`
 
 use cuda_async::device_context::{load_module_from_ptx, with_default_device_policy};
 use cuda_async::device_future::DeviceFuture;
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_async::device_operation::ExecutionContext;
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
-use cuda_async::scheduling_policies::SchedulingPolicy;
 use cuda_core::{CudaFunction, LaunchConfig};
 use cutile::api::{arange, zeros};
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec};
@@ -101,7 +100,7 @@ $done:
 ";
 
 // ---------------------------------------------------------------------------
-// Safe DeviceOperation wrapper for the custom scale kernel.
+// Safe DeviceOp wrapper for the custom scale kernel.
 //
 // The struct's typed fields enforce the correct argument signature.  `unsafe`
 // is confined to the `execute` implementation where device pointers are
@@ -116,7 +115,7 @@ struct ScaleKernel {
     output: Tensor<f32>,
 }
 
-impl DeviceOperation for ScaleKernel {
+impl DeviceOp for ScaleKernel {
     type Output = (Arc<Tensor<f32>>, Tensor<f32>);
 
     // Safety: execute is unsafe because it enqueues work on a CUDA stream
@@ -126,7 +125,7 @@ impl DeviceOperation for ScaleKernel {
     unsafe fn execute(
         self,
         ctx: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let mut launcher = AsyncKernelLaunch::new(self.function);
         launcher.push_arg(self.n);
         launcher.push_arg(self.scale);
@@ -137,8 +136,8 @@ impl DeviceOperation for ScaleKernel {
         // The kernel accesses elements 0..n, each at byte offset gid * 4, so both allocations are large enough.
         unsafe {
             launcher
-                .push_device_ptr(self.input.cu_deviceptr())
-                .push_device_ptr(self.output.cu_deviceptr());
+                .push_device_ptr(self.input.device_pointer().cu_deviceptr())
+                .push_device_ptr(self.output.device_pointer().cu_deviceptr());
         }
         launcher.set_launch_config(LaunchConfig {
             grid_dim: (self.n.div_ceil(256), 1, 1),
@@ -156,7 +155,10 @@ impl IntoFuture for ScaleKernel {
     type Output = Result<(Arc<Tensor<f32>>, Tensor<f32>), DeviceError>;
     type IntoFuture = DeviceFuture<(Arc<Tensor<f32>>, Tensor<f32>), ScaleKernel>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
@@ -170,7 +172,7 @@ impl IntoFuture for ScaleKernel {
 #[tokio::main()]
 async fn main() -> Result<(), cutile::error::Error> {
     let num_elements = 2usize.pow(5);
-    let tile_size = 4i32;
+    let tile_size = 4usize;
     let scale = 3.0f32;
     let device_id = 0;
 
@@ -179,16 +181,16 @@ async fn main() -> Result<(), cutile::error::Error> {
     let scale_function = Arc::new(module.load_function("scale_f32")?);
 
     // Step 2: Allocate input tensors.
-    let x: Arc<Tensor<f32>> = arange(num_elements).arc().await?;
-    let y: Arc<Tensor<f32>> = arange(num_elements).arc().await?;
-    let z: Tensor<f32> = zeros::<1, f32>([num_elements]).await?;
+    let x: Arc<Tensor<f32>> = arange(num_elements).await?.into();
+    let y: Arc<Tensor<f32>> = arange(num_elements).await?.into();
+    let z: Tensor<f32> = zeros::<f32>(&[num_elements]).await?;
 
     // Step 3: Run tile add kernel — z = x + y.
     let (z_part, _x, _y) = tile_add::add(z.partition([tile_size]), x.clone(), y.clone()).await?;
     let z: Tensor<f32> = z_part.unpartition();
 
     // Step 4: Run custom scale kernel — w = scale * z.
-    let w: Tensor<f32> = zeros::<1, f32>([num_elements]).await?;
+    let w: Tensor<f32> = zeros::<f32>(&[num_elements]).await?;
     let (_z, w) = ScaleKernel {
         function: scale_function,
         n: num_elements as u32,

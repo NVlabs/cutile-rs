@@ -4,7 +4,7 @@
 # -- Project information -----------------------------------------------------
 project = 'cuTile Rust'
 copyright = '2025, NVIDIA Corporation'
-author = 'Nihal Pasham, NVIDIA Corporation'
+author = 'Nihal Pasham'
 release = '0.1.0'
 
 # -- General configuration ---------------------------------------------------
@@ -12,7 +12,6 @@ extensions = [
     'myst_parser',           # Markdown support
     'sphinx_copybutton',     # Copy button on code blocks
     'sphinx_design',         # Cards, grids, tabs
-    'sphinx_sitemap',        # Generate sitemap.xml for SEO
 ]
 
 # Markdown configuration
@@ -104,6 +103,3 @@ html_show_sourcelink = False
 
 # Title in sidebar
 html_title = "cuTile Rust"
-
-# SEO
-html_baseurl = 'https://nvlabs.github.io/cutile-rs/'

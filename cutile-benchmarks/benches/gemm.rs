@@ -3,13 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::{value, DeviceOp};
 use cuda_core::CudaContext;
 use cutile::api;
 use cutile::core::f16;
-use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel};
+use cutile::tile_kernel::{PartitionOp, TileKernel};
 use kernels::*;
 use std::iter::zip;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cutile::module]
@@ -114,8 +115,14 @@ fn ocean_gemm(c: &mut Criterion) {
             bn.to_string(),
             bk.to_string(),
         ];
-        let x = api::ones([m, k]).arc().sync_on(&stream).expect("Failed.");
-        let y = api::ones([k, n]).arc().sync_on(&stream).expect("Failed.");
+        let x = api::ones(&[m, k])
+            .then(|t| value(Arc::new(t)))
+            .sync_on(&stream)
+            .expect("Failed.");
+        let y = api::ones(&[k, n])
+            .then(|t| value(Arc::new(t)))
+            .sync_on(&stream)
+            .expect("Failed.");
 
         let num_ops = (2 * m * n * k) as f64;
         let label = n.to_string();
@@ -123,8 +130,8 @@ fn ocean_gemm(c: &mut Criterion) {
         group.throughput(Throughput::Elements(num_ops as u64));
         group.bench_with_input(BenchmarkId::new("N", &label), &label, |b, _size_mb| {
             b.iter_custom(|iters| {
-                let mut z = api::zeros::<2, f16>([m, n])
-                    .partition([bm as i32, bn as i32])
+                let mut z = api::zeros::<f16>(&[m, n])
+                    .partition([bm, bn])
                     .sync_on(&stream)
                     .expect("Failed.");
                 stream.synchronize().expect("Failed to synchronize.");

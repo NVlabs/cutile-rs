@@ -14,11 +14,12 @@
 //! is a measurable fraction of total time.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile::api;
 use cutile::core::f16;
-use cutile::tile_kernel::{IntoDeviceOperationPartition, TileKernel};
+use cutile::tensor::{IntoPartition, Partition, Tensor};
+use cutile::tile_kernel::TileKernel;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -67,15 +68,21 @@ fn launch_overhead(c: &mut Criterion) {
         bk.to_string(),
     ];
 
-    let x: Arc<_> = api::ones([n, n]).arc().sync_on(&stream).expect("Failed.");
-    let y: Arc<_> = api::ones([n, n]).arc().sync_on(&stream).expect("Failed.");
+    let x: Arc<Tensor<f16>> = api::ones::<f16>(&[n, n])
+        .sync_on(&stream)
+        .expect("Failed.")
+        .into();
+    let y: Arc<Tensor<f16>> = api::ones::<f16>(&[n, n])
+        .sync_on(&stream)
+        .expect("Failed.")
+        .into();
 
     // JIT warmup + steady-state warmup for sync_on path.
     {
-        let mut z = api::zeros::<2, f16>([n, n])
-            .partition([bm as i32, bn as i32])
+        let mut z: Partition<Tensor<f16>> = api::zeros::<f16>(&[n, n])
             .sync_on(&stream)
-            .expect("Failed.");
+            .expect("Failed.")
+            .partition([bm, bn]);
         for _ in 0..WARMUP_ITERS {
             let (local_z, _, _, _) = unsafe {
                 kernels::gemm(z, x.clone(), y.clone(), n as i32)
@@ -92,10 +99,10 @@ fn launch_overhead(c: &mut Criterion) {
     // 1. sync_on: execute + stream.synchronize(), no callbacks.
     group.bench_function(BenchmarkId::new("mode", "sync_on"), |b| {
         b.iter_custom(|iters| {
-            let mut z = api::zeros::<2, f16>([n, n])
-                .partition([bm as i32, bn as i32])
+            let mut z: Partition<Tensor<f16>> = api::zeros::<f16>(&[n, n])
                 .sync_on(&stream)
-                .expect("Failed.");
+                .expect("Failed.")
+                .partition([bm, bn]);
             stream.synchronize().expect("Failed.");
             let start = Instant::now();
             for _ in 0..iters {
@@ -118,10 +125,10 @@ fn launch_overhead(c: &mut Criterion) {
         .expect("Failed to build tokio runtime.");
     {
         rt.block_on(async {
-            let mut z = api::zeros::<2, f16>([n, n])
-                .partition([bm as i32, bn as i32])
+            let mut z: Partition<Tensor<f16>> = api::zeros::<f16>(&[n, n])
                 .sync_on(&stream)
-                .expect("Failed.");
+                .expect("Failed.")
+                .partition([bm, bn]);
             for _ in 0..WARMUP_ITERS {
                 let (local_z, _, _, _) = unsafe {
                     kernels::gemm(z, x.clone(), y.clone(), n as i32).generics(generics.clone())
@@ -139,10 +146,10 @@ fn launch_overhead(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("mode", "await"), |b| {
         b.iter_custom(|iters| {
             rt.block_on(async {
-                let mut z = api::zeros::<2, f16>([n, n])
-                    .partition([bm as i32, bn as i32])
+                let mut z: Partition<Tensor<f16>> = api::zeros::<f16>(&[n, n])
                     .sync_on(&stream)
-                    .expect("Failed.");
+                    .expect("Failed.")
+                    .partition([bm, bn]);
                 stream.synchronize().expect("Failed.");
                 let start = Instant::now();
                 for _ in 0..iters {
@@ -160,10 +167,10 @@ fn launch_overhead(c: &mut Criterion) {
 
     // Steady-state warmup for async_on path.
     {
-        let mut z = api::zeros::<2, f16>([n, n])
-            .partition([bm as i32, bn as i32])
+        let mut z: Partition<Tensor<f16>> = api::zeros::<f16>(&[n, n])
             .sync_on(&stream)
-            .expect("Failed.");
+            .expect("Failed.")
+            .partition([bm, bn]);
         for _ in 0..WARMUP_ITERS {
             unsafe {
                 let (local_z, _, _, _) = kernels::gemm(z, x.clone(), y.clone(), n as i32)
@@ -180,10 +187,10 @@ fn launch_overhead(c: &mut Criterion) {
     // 3. async_on: execute only, single synchronize at end.
     group.bench_function(BenchmarkId::new("mode", "async_on"), |b| {
         b.iter_custom(|iters| {
-            let mut z = api::zeros::<2, f16>([n, n])
-                .partition([bm as i32, bn as i32])
+            let mut z: Partition<Tensor<f16>> = api::zeros::<f16>(&[n, n])
                 .sync_on(&stream)
-                .expect("Failed.");
+                .expect("Failed.")
+                .partition([bm, bn]);
             stream.synchronize().expect("Failed.");
             let start = Instant::now();
             for _ in 0..iters {

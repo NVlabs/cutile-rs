@@ -43,7 +43,7 @@ exp(x_i - max) / Σ exp(x_j - max)
 ## The Code
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile;
 use cutile::api::arange;
@@ -89,8 +89,8 @@ fn main() -> Result<(), Error> {
     let (bm, bn) = (2i32, n as i32);
 
     let input: Arc<Tensor<f32>> = arange(m * n).sync_on(&stream)?.into();
-    let x: Arc<Tensor<f32>> = input.copy_sync(&stream)?.reshape([m, n]).into();
-    let y = input.copy_sync(&stream)?.reshape([m, n]).partition([bm, bn]);
+    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape([m, n]).into();
+    let y = input.dup().sync_on(&stream)?.reshape([m, n]).partition([bm, bn]);
 
     let (_x, y) = softmax(x, y).sync_on(&stream)?;
     let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;

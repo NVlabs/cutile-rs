@@ -4,10 +4,11 @@
  */
 extern crate core;
 
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile;
-use cutile::api::{arange, zeros, DeviceOperationReshape};
+use cutile::api::DeviceOpReshape;
+use cutile::api::{arange, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
@@ -84,16 +85,12 @@ fn main() -> Result<(), Error> {
     let dim_map = [0, 1, 3, 2];
 
     let bbh = partition[dim_map[0]] * partition[dim_map[1]];
-    let partition_shape_rank3 = [
-        bbh as i32,
-        partition[dim_map[2]] as i32,
-        partition[dim_map[3]] as i32,
-    ];
+    let partition_shape_rank3 = [bbh, partition[dim_map[2]], partition[dim_map[3]]];
     let src: Arc<Tensor<f32>> = arange(b * h * m * d)
-        .reshape([b, h, m, d])
+        .reshape(&[b, h, m, d])
         .sync_on(&stream)?
         .into();
-    let dst: Partition<Tensor<f32>> = zeros([b * h, d, m])
+    let dst: Partition<Tensor<f32>> = zeros(&[b * h, d, m])
         .sync_on(&stream)?
         .partition(partition_shape_rank3);
 
@@ -104,7 +101,7 @@ fn main() -> Result<(), Error> {
         .collect();
     generics.insert(0, "f32".to_string());
     let grid = dst.grid();
-    println!("in shape = {:?}", src.shape);
+    println!("in shape = {:?}", src.shape());
     println!("in tile = {:?}", partition);
     println!("out shape = {:?}", [b * h, d, m]);
     println!("out tile = {:?}", partition_shape_rank3);

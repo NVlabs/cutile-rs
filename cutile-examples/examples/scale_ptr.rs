@@ -72,7 +72,7 @@ async fn main() -> Result<(), cutile::error::Error> {
     let scale = 3.0f32;
 
     let input: Tensor<f32> = arange(len).await?;
-    let output: Tensor<f32> = zeros([len]).await?;
+    let output: Tensor<f32> = zeros(&[len]).await?;
 
     let out_ptr = output.device_pointer();
     let in_ptr = input.device_pointer();

@@ -341,7 +341,7 @@ pub fn infer_launch_grid(
 
 /// A compiled CUDA kernel generated from Rust code that can be launched on the GPU.
 ///
-/// `TileKernel` extends `DeviceOperation` with kernel-specific functionality. Kernels are
+/// `TileKernel` extends [`DeviceOp`] with kernel-specific functionality. Kernels are
 /// automatically generated from Rust functions marked with `#[cutile::entry]` and compiled
 /// to MLIR, then to CUDA PTX at runtime.
 ///
@@ -354,13 +354,10 @@ pub fn infer_launch_grid(
 /// ### Basic kernel launch
 ///
 /// ```rust,ignore
-/// use cutile::tile_async::TileKernel;
-/// use cuda_async::device_operation::DeviceOperation;
-///
 /// #[cutile::module]
 /// mod my_module {
 ///     use cutile::core::*;
-///     
+///
 ///     #[cutile::entry]
 ///     fn hello_world() {
 ///         let pid = get_tile_block_id();
@@ -371,59 +368,30 @@ pub fn infer_launch_grid(
 /// // Launch with explicit grid
 /// my_module::hello_world()
 ///     .grid((4, 1, 1))
-///     .sync_on(&stream);
+///     .sync_on(&stream)?;
 /// ```
 ///
 /// ### Kernel with arguments and grid inference
 ///
 /// ```rust,ignore
-/// #[cutile::module]
-/// mod kernels {
-///     use cutile::core::*;
-///     
-///     #[cutile::entry]
-///     fn add<T: ElementType, const N: i32>(
-///         z: &mut Tensor<T, {[N]}>,
-///         x: &Tensor<T, {[N]}>,
-///         y: &Tensor<T, {[N]}>,
-///     ) {
-///         let tile_x = load_tile_mut(x);
-///         let tile_y = load_tile_mut(y);
-///         z.store(tile_x + tile_y);
-///     }
-/// }
-///
-/// use kernels::add_apply;
-///
-/// // Grid is inferred from partitioned tensors
-/// let x = api::ones([256]).partition([64]);
-/// let y = api::ones([256]).partition([64]);
-/// let z = api::zeros([256]).partition([64]);
-///
-/// let result = zip!(z, x, y)
-///     .apply(add_apply)
-///     .generics(vec!["f32".to_string(), "256".to_string()])
-///     .await; // Automatically launches with grid (4, 1, 1)
-/// ```
-///
-/// When your inputs are already `DeviceOperation`s, prefer `.apply(...)`
-/// rather than a separate op-taking kernel wrapper:
-///
-/// ```rust,ignore
-/// let x = api::randn(0.0, 1.0, [256]);
-/// let y = api::randn(0.0, 1.0, [256]);
-/// let z = api::zeros([256]);
-///
-/// let result = zip!(z, x, y)
-///     .apply(add_apply)
-///     .generics(vec!["f32".to_string(), "256".to_string()])
-///     .await;
+/// // Output-first convention: &mut param is the first argument.
+/// // Grid is inferred from partitioned tensors.
+/// // The unified launcher accepts both plain values and DeviceOps.
+/// let result = add(
+///     api::zeros(&[256]).partition([64]),
+///     api::ones(&[256]),
+///     api::ones(&[256]),
+/// )
+/// .first()        // extract the &mut output
+/// .unpartition()  // recover Tensor from Partition
+/// .to_host_vec()
+/// .sync()?;
 /// ```
 ///
 /// ### Using with async composition
 ///
 /// ```rust,ignore
-/// async fn pipeline() -> impl DeviceOperation<Output=Tensor<f32>> {
+/// async fn pipeline() -> impl DeviceOp<Output=Tensor<f32>> {
 ///     let x = api::randn(0.0, 1.0, [128, 128]).await;
 ///     
 ///     // Chain kernel operations
@@ -438,9 +406,9 @@ pub fn infer_launch_grid(
 ///     z
 /// }
 /// ```
-pub trait TileKernel<ARGS: Send, DI>: DeviceOperation<Output = ARGS>
+pub trait TileKernel<ARGS: Send, DI, STORED: Send = ARGS>: DeviceOp<Output = ARGS>
 where
-    DI: DeviceOperation<Output = ARGS>,
+    DI: DeviceOp<Output = STORED>,
 {
     /// Compiles the kernel from module ASTs, returning the CUDA function and validator.
     fn compile<F: Fn() -> Vec<Module>>(
@@ -573,10 +541,31 @@ impl<T: DType> KernelArgument for &Partition<Tensor<T>> {
             launcher.push_arg(*stride);
         }
         for dim in self.partition_shape.iter() {
-            launcher.push_arg(*dim);
+            launcher.push_arg(*dim as i32);
         }
         for stride in self.partition_strides.iter() {
+            launcher.push_arg(*stride as i32);
+        }
+    }
+}
+
+/// Same as above but for borrowed mutable tensor partitions.
+impl<'a, T: DType> KernelArgument for &Partition<&'a mut Tensor<T>> {
+    fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
+        unsafe {
+            launcher.push_device_ptr(self.object.cu_deviceptr());
+        }
+        for dim in self.object.shape.iter() {
+            launcher.push_arg(*dim);
+        }
+        for stride in self.object.strides.iter() {
             launcher.push_arg(*stride);
+        }
+        for dim in self.partition_shape.iter() {
+            launcher.push_arg(*dim as i32);
+        }
+        for stride in self.partition_strides.iter() {
+            launcher.push_arg(*stride as i32);
         }
     }
 }
@@ -592,37 +581,37 @@ impl<T: DType> KernelArgument for &Partition<Tensor<T>> {
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_async::IntoDeviceOperationPartition;
+/// use cutile::tile_async::PartitionOp;
 ///
 /// // Partition a tensor operation before it executes
-/// let x = api::ones([1024]).partition([128]);  // Creates 8 partitions
+/// let x = api::ones(&[1024]).partition([128]);  // Creates 8 partitions
 ///
 /// // Use partitioned tensors with kernels for automatic grid inference
 /// let y = api::randn(0.0, 1.0, [256, 256]).partition([64, 64]);  // 4x4 grid
 /// let result = my_kernel(y).await;  // Grid (4, 4, 1) inferred automatically
 /// ```
-pub trait IntoDeviceOperationPartition<I, DI>
+pub trait PartitionOp<I, DI>
 where
     I: Send + IntoPartition + IntoPartitionArc,
-    DI: DeviceOperation<Output = I>,
+    DI: DeviceOp<Output = I>,
 {
     /// Partitions the output of this device operation into tiles of the given shape.
     ///
     /// The partition shape determines how the tensor is divided across CUDA thread blocks.
     fn partition<const RANK: usize>(
         self,
-        partition_shape: [i32; RANK],
+        partition_shape: [usize; RANK],
     ) -> DeviceOperationPartition<RANK, I, DI>;
 }
 
-impl<I, DI> IntoDeviceOperationPartition<I, DI> for DI
+impl<I, DI> PartitionOp<I, DI> for DI
 where
     I: Send + IntoPartition + IntoPartitionArc,
-    DI: DeviceOperation<Output = I>,
+    DI: DeviceOp<Output = I>,
 {
     fn partition<const RANK: usize>(
         self,
-        partition_shape: [i32; RANK],
+        partition_shape: [usize; RANK],
     ) -> DeviceOperationPartition<RANK, I, DI>
     where
         Self: Sized,
@@ -645,42 +634,39 @@ where
 /// ## Examples
 ///
 /// ```rust,ignore
-/// // Create a partitioned tensor asynchronously
-/// let x = api::zeros([1024]).partition([64]);  // DeviceOperationPartition
-/// let partitioned = x.await;  // Partition<Tensor<f32>>
+/// // Create a partitioned tensor operation
+/// let z = api::zeros(&[1024]).partition([64]);
 ///
-/// // Use with kernel that accepts partitioned inputs
-/// let result = zip!(partitioned, other_partitioned)
-///     .apply(my_kernel_apply)
-///     .await;
+/// // Pass directly to kernel — grid inferred from partition
+/// let result = my_kernel(z, x, y).first().unpartition().sync()?;
 /// ```
 pub struct DeviceOperationPartition<const RANK: usize, I, DI>
 where
     I: Send + IntoPartition + IntoPartitionArc,
-    DI: DeviceOperation<Output = I>,
+    DI: DeviceOp<Output = I>,
 {
-    partition_shape: [i32; RANK],
+    partition_shape: [usize; RANK],
     op: DI,
 }
 
 unsafe impl<const RANK: usize, I, DI> Send for DeviceOperationPartition<RANK, I, DI>
 where
     I: Send + IntoPartition + IntoPartitionArc,
-    DI: DeviceOperation<Output = I>,
+    DI: DeviceOp<Output = I>,
 {
 }
 
-impl<const RANK: usize, I, DI> DeviceOperation for DeviceOperationPartition<RANK, I, DI>
+impl<const RANK: usize, I, DI> DeviceOp for DeviceOperationPartition<RANK, I, DI>
 where
     I: Send + IntoPartition + IntoPartitionArc,
-    DI: DeviceOperation<Output = I>,
+    DI: DeviceOp<Output = I>,
 {
     type Output = Partition<I>;
 
     unsafe fn execute(
         self,
         context: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let val = self.op.execute(context)?;
         Ok(val.partition(self.partition_shape))
     }
@@ -689,12 +675,15 @@ where
 impl<const RANK: usize, I, DI> IntoFuture for DeviceOperationPartition<RANK, I, DI>
 where
     I: Send + IntoPartition + IntoPartitionArc,
-    DI: DeviceOperation<Output = I>,
+    DI: DeviceOp<Output = I>,
 {
     type Output = Result<Partition<I>, DeviceError>;
     type IntoFuture = DeviceFuture<Partition<I>, DeviceOperationPartition<RANK, I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),
             Err(e) => DeviceFuture::failed(e),
@@ -719,7 +708,7 @@ where
 /// use cutile::tile_async::unwrap_partition;
 ///
 /// // After a kernel operation on partitioned tensors
-/// let x = api::ones([256]).partition([64]);
+/// let x = api::ones(&[256]).partition([64]);
 /// let y = my_kernel(x).await;  // Returns Partition<Tensor<f32>>
 ///
 /// // Unwrap back to a regular tensor
@@ -727,26 +716,23 @@ where
 /// ```
 pub struct UnwrapPartition<I: Send, DI>
 where
-    DI: DeviceOperation<Output = Partition<I>>,
+    DI: DeviceOp<Output = Partition<I>>,
 {
     pub(crate) op: DI,
 }
 
-unsafe impl<I: Send, DI> Send for UnwrapPartition<I, DI> where
-    DI: DeviceOperation<Output = Partition<I>>
-{
-}
+unsafe impl<I: Send, DI> Send for UnwrapPartition<I, DI> where DI: DeviceOp<Output = Partition<I>> {}
 
-impl<I: Send, DI> DeviceOperation for UnwrapPartition<I, DI>
+impl<I: Send, DI> DeviceOp for UnwrapPartition<I, DI>
 where
-    DI: DeviceOperation<Output = Partition<I>>,
+    DI: DeviceOp<Output = Partition<I>>,
 {
     type Output = I;
 
     unsafe fn execute(
         self,
         context: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let val = self.op.execute(context)?;
         Ok(val.unpartition())
     }
@@ -754,12 +740,15 @@ where
 
 impl<I: Send, DI> IntoFuture for UnwrapPartition<I, DI>
 where
-    DI: DeviceOperation<Output = Partition<I>>,
+    DI: DeviceOp<Output = Partition<I>>,
 {
     type Output = Result<I, DeviceError>;
     type IntoFuture = DeviceFuture<I, UnwrapPartition<I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),
             Err(e) => DeviceFuture::failed(e),
@@ -788,7 +777,7 @@ where
 /// ```
 pub fn unwrap_partition<I: Send, DI>(op: DI) -> UnwrapPartition<I, DI>
 where
-    DI: DeviceOperation<Output = Partition<I>>,
+    DI: DeviceOp<Output = Partition<I>>,
 {
     UnwrapPartition { op }
 }
@@ -798,26 +787,23 @@ where
 /// A device operation that copies a tensor from device memory to a host `Vec<T>`.
 pub struct TensorToHostVec<T: DType, DI>
 where
-    DI: DeviceOperation<Output = Tensor<T>>,
+    DI: DeviceOp<Output = Tensor<T>>,
 {
     pub(crate) op: DI,
 }
 
-unsafe impl<T: DType, DI> Send for TensorToHostVec<T, DI> where
-    DI: DeviceOperation<Output = Tensor<T>>
-{
-}
+unsafe impl<T: DType, DI> Send for TensorToHostVec<T, DI> where DI: DeviceOp<Output = Tensor<T>> {}
 
-impl<T: DType, DI> DeviceOperation for TensorToHostVec<T, DI>
+impl<T: DType, DI> DeviceOp for TensorToHostVec<T, DI>
 where
-    DI: DeviceOperation<Output = Tensor<T>>,
+    DI: DeviceOp<Output = Tensor<T>>,
 {
     type Output = Vec<T>;
 
     unsafe fn execute(
         self,
         context: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let tensor = self.op.execute(context)?;
         let cu_deviceptr = tensor.cu_deviceptr();
         let size = tensor.size();
@@ -830,12 +816,15 @@ where
 
 impl<T: DType, DI> IntoFuture for TensorToHostVec<T, DI>
 where
-    DI: DeviceOperation<Output = Tensor<T>>,
+    DI: DeviceOp<Output = Tensor<T>>,
 {
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, TensorToHostVec<T, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),
             Err(e) => DeviceFuture::failed(e),
@@ -844,14 +833,14 @@ where
 }
 
 /// Extension trait for converting a tensor device operation into a host `Vec<T>` operation.
-pub trait TensorDeviceOpToHostVec<T: DType> {
+pub trait ToHostVecOp<T: DType> {
     /// Wraps this operation to copy the resulting tensor to a host `Vec<T>`.
-    fn to_host_vec(self) -> impl DeviceOperation<Output = Vec<T>>
+    fn to_host_vec(self) -> impl DeviceOp<Output = Vec<T>>
     where
-        Self: DeviceOperation<Output = Tensor<T>>,
+        Self: DeviceOp<Output = Tensor<T>>,
     {
         TensorToHostVec { op: self }
     }
 }
 
-impl<T: DType, DI> TensorDeviceOpToHostVec<T> for DI where DI: DeviceOperation<Output = Tensor<T>> {}
+impl<T: DType, DI> ToHostVecOp<T> for DI where DI: DeviceOp<Output = Tensor<T>> {}

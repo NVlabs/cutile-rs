@@ -38,9 +38,9 @@ fn main() -> Result<(), Error> {
     let ctx = CudaContext::new(0)?;
     let stream = ctx.new_stream()?;
 
-    let x: Arc<Tensor<f32>> = ones([1024, 1024]).arc().sync_on(&stream)?;
-    let y: Arc<Tensor<f32>> = ones([1024, 1024]).arc().sync_on(&stream)?;
-    let z = zeros([1024, 1024]).sync_on(&stream)?.partition([64, 64]);
+    let x: Arc<Tensor<f32>> = ones(&[1024, 1024]).map(Into::into).sync_on(&stream)?;
+    let y: Arc<Tensor<f32>> = ones(&[1024, 1024]).map(Into::into).sync_on(&stream)?;
+    let z = zeros(&[1024, 1024]).sync_on(&stream)?.partition([64, 64]);
 
     let (z, _x, _y) = add(z, x, y).sync_on(&stream)?;
     Ok(())
@@ -184,4 +184,4 @@ Both use the same underlying compilation pipeline and generate equivalent GPU co
 - Learn about the [Data Model](data-model.md) for details on types and shapes
 - Explore [Memory Hierarchy](memory-hierarchy.md) for performance optimization
 - See [Async Execution](async-execution.md) for concurrent CPU/GPU work
-- See [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOperation` model
+- See [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOp` model

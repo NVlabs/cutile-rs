@@ -7,7 +7,7 @@ In cutile, tile threads run concurrently and each tile knows its coordinates via
 ---
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use std::sync::Arc;
 use cutile;
@@ -39,11 +39,11 @@ fn main() -> Result<(), Error> {
     let stream = ctx.new_stream()?;
     
     // Create input tensors: 32×32 matrices filled with 1.0
-    let x: Arc<Tensor<f32>> = ones([32, 32]).sync_on(&stream)?.into();
-    let y: Arc<Tensor<f32>> = ones([32, 32]).sync_on(&stream)?.into();
+    let x: Arc<Tensor<f32>> = ones(&[32, 32]).sync_on(&stream)?.into();
+    let y: Arc<Tensor<f32>> = ones(&[32, 32]).sync_on(&stream)?.into();
     
     // Create output tensor, PARTITIONED into 4×4 sub-tensors.
-    let z = zeros([32, 32]).sync_on(&stream)?.partition([4, 4]);
+    let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
     
     // Run the kernel — one tile thread per sub-tensor, for a total of 64 threads.
     let (z, _x, _y) = add(z, x, y).sync_on(&stream)?;
@@ -71,7 +71,7 @@ Partitioning divides a tensor into a grid of sub-regions, each processed by one 
 ### Host-Side Partitioning (Required for `&mut Tensor`)
 
 ```rust
-let z = zeros([32, 32]).sync_on(&stream)?.partition([4, 4]);
+let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
 ```
 
 1. Creates a 32×32 output tensor initialized to zeros.
@@ -177,7 +177,7 @@ fn my_kernel(...) {
 Modify the partition to `[8, 8]`:
 
 ```rust
-let z = zeros([32, 32]).sync_on(&stream)?.partition([8, 8]);
+let z = zeros(&[32, 32]).sync_on(&stream)?.partition([8, 8]);
 ```
 
 - How many tile threads are launched?

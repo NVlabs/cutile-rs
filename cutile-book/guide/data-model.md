@@ -200,17 +200,22 @@ On the host, you allocate tensors, partition them, and pass them to kernel launc
 
 ```rust
 // Host-side Tensor<T> — parameterized by element type only
-let tensor: Tensor<f32> = zeros([1024, 1024]).sync_on(&stream)?;
+let mut tensor: Tensor<f32> = zeros(&[1024, 1024]).sync_on(&stream)?;
 
-// Host-side Partition<Tensor<T>> — wraps a tensor with a partition_shape
+// Owned partition — moves the tensor into the partition
 let partitioned: Partition<Tensor<f32>> = tensor.partition([16, 16]);
-// 64×64 = 4096 sub-tensors, each 16×16
 
-// Shared reference for read-only inputs
-let shared: Arc<Tensor<f32>> = ones([1024, 1024]).arc().sync_on(&stream)?;
+// Borrowed partition — borrows mutably, tensor written in place
+let partitioned_ref = (&mut tensor).partition([16, 16]);
+
+// Read-only inputs: borrow, Arc, or owned
+let input: &Tensor<f32> = &tensor;           // borrow
+let shared: Arc<Tensor<f32>> = Arc::new(tensor);  // shared ownership
 ```
 
-The generated launcher accepts `Partition<Tensor<T>>` for every `&mut Tensor` parameter and `Arc<Tensor<T>>` for every `&Tensor` parameter.
+The generated launcher accepts multiple forms for each parameter type.
+`&Tensor` params accept `&Tensor<T>`, `Arc<Tensor<T>>`, or `Tensor<T>`.
+`&mut Tensor` params accept `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>`.
 
 ### Device-Side Types
 

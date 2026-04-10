@@ -41,9 +41,9 @@
   <rect width="920" height="660" fill="url(#grid)" opacity="0.5"/>
   
   <!-- Main Title -->
-  <text x="400" y="38" text-anchor="middle" font-size="24" font-weight="700" fill="#ffffff" letter-spacing="-0.5">DeviceOperation Execution Flow</text>
+  <text x="400" y="38" text-anchor="middle" font-size="24" font-weight="700" fill="#ffffff" letter-spacing="-0.5">DeviceOp Execution Flow</text>
   <line x1="230" y1="50" x2="570" y2="50" stroke="#76B900" stroke-width="2" opacity="0.6"/>
-  <text x="400" y="72" text-anchor="middle" font-size="14" font-weight="500" fill="#8b949e">What happens when you .await a DeviceOperation</text>
+  <text x="400" y="72" text-anchor="middle" font-size="14" font-weight="500" fill="#8b949e">What happens when you .await a DeviceOp</text>
 
   <!-- Column Headers -->
   <g transform="translate(0, 95)">

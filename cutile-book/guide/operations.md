@@ -68,7 +68,7 @@ let result = a * x + y;
 let result = fma(a, x, y);
 
 // Fused multiply-add with rounding mode
-let result = fma_op(a, x, y, rounding_mode);
+let result = fma(a, x, y, rounding_mode);
 ```
 
 ---

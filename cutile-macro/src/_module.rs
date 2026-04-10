@@ -51,7 +51,7 @@
 //! For each `#[entry]` function, launchers are generated that:
 //! - Compiles the kernel to CUDA
 //! - Manages kernel invocation
-//! - Support direct calls and `.apply(...)` composition
+//! - Support direct calls with `IntoDeviceOp` arguments
 //! - Provides type-safe parameter passing
 
 use convert_case::{Case, Casing};
@@ -171,9 +171,10 @@ pub fn get_asts_ident() -> Ident {
 ///     fn __cutile_user_impl_my_kernel(...) { ... }
 ///
 ///     // Kernel launchers (for #[entry] functions)
-///     pub fn my_kernel(...) -> impl DeviceOperation { ... }
-///     pub fn my_kernel_op(...) -> impl DeviceOperation { ... }
-///     pub fn my_kernel_apply(...) -> impl DeviceOperation { ... }
+///     pub fn my_kernel<_K0: KernelInput<T>, ...>(...) -> MyKernel<T, _K0, DI>
+///         // unified launcher — accepts Tensor<T>, Arc<Tensor<T>>, &Tensor<T>
+///     pub fn my_kernel_apply(...) -> MyKernel<T, Arc<Tensor<T>>, DI>
+///         // internal tuple-input variant (used by api.rs)
 /// }
 /// ```
 // TODO (hme): Prevent reserved names from being used.
@@ -333,6 +334,7 @@ fn module_inner(
                 use #tile_rust_crate_root::error::{*};
                 use #tile_rust_crate_root::DType;
                 use #tile_rust_crate_root::{tensor};
+                use #tile_rust_crate_root::tensor::{KernelInput, KernelInputStored, KernelOutput, KernelOutputStored};
                 use #tile_rust_crate_root::tile_kernel::{*};
                 use #tile_rust_crate_root::cuda_async::error::{*};
                 use #tile_rust_crate_root::cuda_async::scheduling_policies::SchedulingPolicy;
@@ -607,7 +609,7 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
 
 /// Generates the complete kernel launcher struct and implementations.
 ///
-/// Creates a launcher struct that implements `TileKernel`, `DeviceOperation`, and
+/// Creates a launcher struct that implements `TileKernel`, `DeviceOp`, and
 /// `IntoFuture` for a kernel entry point. This enables the ergonomic launcher API
 /// for launching GPU kernels.
 ///
@@ -621,7 +623,7 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
 /// Token stream containing:
 /// 1. The launcher struct definition (e.g., `pub struct MyKernel<T, DI> { ... }`)
 /// 2. `TileKernel` impl (provides `.grid()`, `.const_grid()`, `.generics()` methods)
-/// 3. `DeviceOperation` impl (provides `.execute()` for actual kernel launch)
+/// 3. `DeviceOp` impl (provides `.execute()` for actual kernel launch)
 /// 4. `IntoFuture` impl (enables `.await` syntax)
 ///
 /// ## Generated API
@@ -645,53 +647,89 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
     let launcher_args_name = format!("{}Args", launcher_name);
     let unsafety = item.sig.unsafety;
 
-    let (required_generics, (launcher_args_type, launcher_type_def), device_op_impl) =
-        generate_kernel_launcher(
-            item,
-            &module_name,
-            &function_name,
-            function_entry_name.as_str(),
-            &launcher_name,
-            &launcher_args_name,
-        )?;
+    let (
+        required_generics,
+        (stored_args_type, returned_args_type),
+        device_op_impl,
+        kernel_input_info,
+    ) = generate_kernel_launcher(
+        item,
+        &module_name,
+        &function_name,
+        function_entry_name.as_str(),
+        &launcher_name,
+        &launcher_args_name,
+    )?;
 
     let launcher_ident = Ident::new(launcher_name.as_str(), Span::call_site());
-    let _launcher_args_ident = Ident::new(launcher_args_name.as_str(), Span::call_site());
 
     let generic_params = required_generics.get_required_generics();
     let generic_args = required_generics.get_generic_args();
 
-    let device_op_param: GenericParam =
-        parse_quote! { DI: DeviceOperation<Output=#launcher_args_type> };
-    let device_op_arg: GenericArgument = parse_quote! { DI };
-
-    // Struct
+    // Build struct generics: kernel params + _K: KernelInput + _P: KernelOutput + DI
     let mut struct_generics = generic_params.clone();
+    for (ki_idx, ki_name) in kernel_input_info.type_param_names.iter().enumerate() {
+        let elem = &kernel_input_info.element_type_names[ki_idx];
+        struct_generics.params.push(
+            syn::parse_str::<GenericParam>(&format!("{ki_name}: KernelInput<{elem}>")).unwrap(),
+        );
+    }
+    for (ko_idx, ko_name) in kernel_input_info.ko_type_param_names.iter().enumerate() {
+        let elem = &kernel_input_info.ko_element_type_names[ko_idx];
+        struct_generics.params.push(
+            syn::parse_str::<GenericParam>(&format!("{ko_name}: KernelOutput<{elem}>")).unwrap(),
+        );
+    }
+    let device_op_param: GenericParam = parse_quote! { DI: DeviceOp<Output=#stored_args_type> };
     struct_generics.params.push(device_op_param.clone());
+
     let mut struct_args = generic_args.clone();
+    for ki_name in &kernel_input_info.type_param_names {
+        struct_args
+            .args
+            .push(syn::parse_str::<GenericArgument>(ki_name).unwrap());
+    }
+    for ko_name in &kernel_input_info.ko_type_param_names {
+        struct_args
+            .args
+            .push(syn::parse_str::<GenericArgument>(ko_name).unwrap());
+    }
+    let device_op_arg: GenericArgument = parse_quote! { DI };
     struct_args.args.push(device_op_arg.clone());
 
     // impl TileKernel
     let tile_kernel_impl_type_params = struct_generics.clone();
     let tile_kernel_type_args: AngleBracketedGenericArguments =
-        parse_quote! { <#launcher_args_type, #device_op_arg> };
-
-    // impl DeviceOperation
-    let _device_operation_impl_type_params = struct_generics.clone();
+        parse_quote! { <#returned_args_type, #device_op_arg, #stored_args_type> };
 
     // impl IntoFuture
     let into_future_impl_type_params = struct_generics.clone();
 
+    // Build PhantomData to consume KernelInput type params and kernel type params.
+    let mut phantom_types: Vec<syn::Type> = vec![];
+    for ki_name in &kernel_input_info.type_param_names {
+        phantom_types.push(syn::parse_str::<syn::Type>(ki_name.as_str()).unwrap());
+    }
+    for ko_name in &kernel_input_info.ko_type_param_names {
+        phantom_types.push(syn::parse_str::<syn::Type>(ko_name.as_str()).unwrap());
+    }
+    // Also include kernel type params (T, SrcType, etc.) that may not appear
+    // directly in the struct fields now that arg types use KernelInput associated types.
+    for param in &generic_params.params {
+        if let syn::GenericParam::Type(tp) = param {
+            phantom_types.push(syn::parse_str::<syn::Type>(&tp.ident.to_string()).unwrap());
+        }
+    }
+    let ki_phantom_types = phantom_types;
+
     let result = quote! {
 
-        #launcher_type_def
-
-        #[derive(Debug)]
         pub struct #launcher_ident #struct_generics {
             _const_grid: bool,
             _grid: (u32, u32, u32),
             input: Option<DI>,
             function_generics: Option<Vec<String>>,
+            _phantom: std::marker::PhantomData<( #(#ki_phantom_types,)* )>,
             _compile_options: CompileOptions,
         }
 
@@ -702,12 +740,12 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
                     _grid: (0, 0, 0),
                     input: Some(input),
                     function_generics: None,
+                    _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
                 }
             }
         }
 
-        // TileKernel impl provides things like the compile method.
         impl #tile_kernel_impl_type_params TileKernel #tile_kernel_type_args for #launcher_ident #struct_args {
             fn grid(mut self, grid: (u32, u32, u32)) -> Self {
                 self._grid = grid;
@@ -731,12 +769,11 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
                 self
             }
         }
-        // Easily convert into a future.
         impl #into_future_impl_type_params IntoFuture for #launcher_ident #struct_args {
-            type Output = Result<#launcher_args_type, DeviceError>;
-            type IntoFuture = DeviceFuture<#launcher_args_type, #launcher_ident #struct_args>;
+            type Output = Result<#returned_args_type, DeviceError>;
+            type IntoFuture = DeviceFuture<#returned_args_type, #launcher_ident #struct_args>;
             fn into_future(self) -> Self::IntoFuture {
-                match with_default_device_policy(|policy| policy.schedule(self)) {
+                match with_default_device_policy(|policy| { let stream = policy.next_stream()?; Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream))) }) {
                     Ok(Ok(future)) => future,
                     Ok(Err(e)) => DeviceFuture::failed(e),
                     Err(e) => DeviceFuture::failed(e),
@@ -744,7 +781,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             }
         }
 
-        // Implements DeviceOperation, along with the generated launcher functions.
+        // Implements DeviceOp, along with the generated launcher functions.
         #device_op_impl
     };
 

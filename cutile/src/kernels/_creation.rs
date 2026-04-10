@@ -32,12 +32,12 @@ pub mod creation {
     /// This kernel is used by `api::full()`, `api::zeros()`, and `api::ones()`.
     ///
     /// ```rust,ignore
-    /// use cutile::kernels::creation::full_apply;
+    /// use cutile::kernels::creation::full;
     ///
     /// let val = 42.0f32;
-    /// let tensor = api::zeros([1024]).partition([128]);
+    /// let tensor = api::zeros(&[1024]).partition([128]);
     /// let result = value((val, tensor))
-    ///     .apply(full_apply)
+    ///     .then(full)
     ///     .unzip();
     /// ```
     #[crate::entry()]
@@ -65,13 +65,13 @@ pub mod creation {
     /// This kernel is used by `api::arange()`.
     ///
     /// ```rust,ignore
-    /// use cutile::kernels::creation::arange_apply;
+    /// use cutile::kernels::creation::arange;
     ///
     /// let tensor = Tensor::<i32>::uninitialized(256)
     ///     .await
     ///     .partition([64]);
     /// let result = value((tensor,))
-    ///     .apply(arange_apply)
+    ///     .then(arange)
     ///     .unzip();
     /// // Result contains [0, 1, 2, ..., 255]
     /// ```

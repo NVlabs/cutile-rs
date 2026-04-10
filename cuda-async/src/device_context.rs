@@ -6,7 +6,7 @@
 //! Thread-local GPU device state, kernel cache, and scheduling policy management.
 
 use crate::error::{device_assert, device_error, DeviceError};
-use crate::scheduling_policies::{GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin};
+use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ type DeviceFunctionValidators = HashMap<String, Arc<Validator>>;
 /// Each GPU device has one `AsyncDeviceContext` stored in a thread-local map. It holds:
 ///
 /// - A [`CudaContext`] for driver API calls.
-/// - A [`GlobalSchedulingPolicy`] that decides which stream each operation runs on.
+/// - A [`SchedulingPolicy`] that decides which stream each operation runs on.
 /// - A cache of already-compiled kernel functions (keyed by [`FunctionKey::get_hash_string()`]).
 ///
 /// The context is lazily initialized on first use with the default round-robin policy
@@ -87,7 +87,7 @@ pub struct AsyncDeviceContext {
     // TODO: (hme): This will hurt perf due to contention. This should at least be static (OnceLock?).
     context: Arc<CudaContext>,
     deallocator_stream: Arc<CudaStream>,
-    policy: Arc<GlobalSchedulingPolicy>,
+    policy: Arc<dyn SchedulingPolicy>,
     functions: DeviceFunctions,
     validators: DeviceFunctionValidators,
 }
@@ -154,17 +154,15 @@ pub fn init_device_contexts_default() -> Result<(), DeviceError> {
 /// runtime auto-initialize with the default policy.
 pub fn new_device_context(
     device_id: usize,
-    mut policy: GlobalSchedulingPolicy,
+    policy: Arc<dyn SchedulingPolicy>,
 ) -> Result<AsyncDeviceContext, DeviceError> {
-    // device_id is a usize, device_id >= 0 is always true.
     let context = CudaContext::new(device_id)?;
-    policy.init(&context)?;
     let deallocator_stream = context.new_stream()?;
     Ok(AsyncDeviceContext {
         device_id,
         context,
         deallocator_stream,
-        policy: Arc::new(policy),
+        policy,
         functions: HashMap::new(),
         validators: HashMap::new(),
     })
@@ -187,7 +185,7 @@ pub fn new_device_context(
 pub fn init_device(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
-    policy: GlobalSchedulingPolicy,
+    policy: Arc<dyn SchedulingPolicy>,
 ) -> Result<(), DeviceError> {
     let device_context = new_device_context(device_id, policy)?;
     let pred = hashmap.insert(device_id, device_context).is_none();
@@ -198,13 +196,19 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let policy =
-        unsafe { StreamPoolRoundRobin::new(device_id, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE) };
-    init_device(
-        hashmap,
+    let context = CudaContext::new(device_id)?;
+    let policy = StreamPoolRoundRobin::new(&context, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
+    let deallocator_stream = context.new_stream()?;
+    let device_context = AsyncDeviceContext {
         device_id,
-        GlobalSchedulingPolicy::RoundRobin(policy),
-    )
+        context,
+        deallocator_stream,
+        policy: Arc::new(policy),
+        functions: HashMap::new(),
+        validators: HashMap::new(),
+    };
+    let pred = hashmap.insert(device_id, device_context).is_none();
+    device_assert(device_id, pred, "Device is already initialized.")
 }
 
 pub fn with_global_device_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
@@ -218,7 +222,7 @@ where
                 init_device_contexts_default()?;
                 ctx.devices
                     .take()
-                    .ok_or_else(|| device_error(device_id, "Failed to initialize context"))?
+                    .ok_or(device_error(device_id, "Failed to initialize context"))?
             }
         };
         if !hashmap.contains_key(&device_id) {
@@ -226,7 +230,7 @@ where
         }
         let device_context = hashmap
             .get(&device_id)
-            .ok_or_else(|| device_error(device_id, "Failed to get context"))?;
+            .ok_or(device_error(device_id, "Failed to get context"))?;
         let r = f(device_context);
         ctx.devices.replace(Some(hashmap));
         Ok(r)
@@ -244,7 +248,7 @@ where
                 init_device_contexts_default()?;
                 ctx.devices
                     .take()
-                    .ok_or_else(|| device_error(device_id, "Failed to initialize context"))?
+                    .ok_or(device_error(device_id, "Failed to initialize context"))?
             }
         };
         if !hashmap.contains_key(&device_id) {
@@ -252,7 +256,7 @@ where
         }
         let device_context = hashmap
             .get_mut(&device_id)
-            .ok_or_else(|| device_error(device_id, "Failed to get context"))?;
+            .ok_or(device_error(device_id, "Failed to get context"))?;
         let r = f(device_context);
         ctx.devices.replace(Some(hashmap));
         Ok(r)
@@ -262,7 +266,7 @@ where
 /// Run a closure with a reference to the scheduling policy for `device_id`.
 pub fn with_device_policy<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
-    F: FnOnce(&Arc<GlobalSchedulingPolicy>) -> R,
+    F: FnOnce(&Arc<dyn SchedulingPolicy>) -> R,
 {
     with_global_device_context(device_id, |device_context| f(&device_context.policy))
 }
@@ -271,10 +275,8 @@ where
 ///
 /// Useful when you need to schedule operations on a specific device outside the
 /// default `.await` / `.sync()` path.
-pub fn global_policy(device_id: usize) -> Result<Arc<GlobalSchedulingPolicy>, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        Arc::clone(&device_context.policy)
-    })
+pub fn global_policy(device_id: usize) -> Result<Arc<dyn SchedulingPolicy>, DeviceError> {
+    with_global_device_context(device_id, |device_context| device_context.policy.clone())
 }
 
 pub unsafe fn with_deallocator_stream<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
@@ -306,7 +308,7 @@ where
 /// ```rust,ignore
 /// // Thread dedicated to device 1:
 /// set_default_device(1);
-/// let tensor = api::zeros([1024, 1024]).await; // runs on GPU 1
+/// let tensor = api::zeros(&[1024, 1024]).await; // runs on GPU 1
 /// ```
 pub fn set_default_device(default_device_id: usize) {
     DEVICE_CONTEXTS.with(|ctx| {
@@ -316,11 +318,11 @@ pub fn set_default_device(default_device_id: usize) {
 
 /// Run a closure with the scheduling policy of the current thread's default device.
 ///
-/// This is the function called internally by [`DeviceOperation::sync()`] and by the
+/// This is the function called internally by [`DeviceOp::sync()`] and by the
 /// [`IntoFuture`] implementation to schedule operations when no explicit device is given.
 pub fn with_default_device_policy<F, R>(f: F) -> Result<R, DeviceError>
 where
-    F: FnOnce(&Arc<GlobalSchedulingPolicy>) -> R,
+    F: FnOnce(&Arc<dyn SchedulingPolicy>) -> R,
 {
     let default_device = get_default_device();
     with_global_device_context(default_device, |device_context| f(&device_context.policy))
@@ -359,7 +361,7 @@ pub fn insert_cuda_function(
 ) -> Result<(), DeviceError> {
     with_global_device_context_mut(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let res = device_context.functions.insert(key, value);
+        let res = device_context.functions.insert(key.clone(), value);
         device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
     })?
 }
@@ -385,11 +387,11 @@ pub fn get_cuda_function(
 ) -> Result<Arc<CudaFunction>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let (_module, function) = device_context
+        let entry = device_context
             .functions
             .get(&key)
-            .ok_or_else(|| device_error(device_id, "Failed to get cuda function."))?;
-        Ok(Arc::clone(function))
+            .ok_or(device_error(device_id, "Failed to get cuda function."))?;
+        Ok(entry.1.clone())
     })?
 }
 
@@ -400,7 +402,7 @@ pub fn insert_function_validator(
 ) -> Result<(), DeviceError> {
     with_global_device_context_mut(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let res = device_context.validators.insert(key, value);
+        let res = device_context.validators.insert(key.clone(), value);
         device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
     })?
 }
@@ -411,10 +413,10 @@ pub fn get_function_validator(
 ) -> Result<Arc<Validator>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
         let key = func_key.get_hash_string();
-        let validator = device_context
+        let entry = device_context
             .validators
             .get(&key)
-            .ok_or_else(|| device_error(device_id, "Failed to get function validator."))?;
-        Ok(Arc::clone(validator))
+            .ok_or(device_error(device_id, "Failed to get function validator."))?;
+        Ok(entry.clone())
     })?
 }

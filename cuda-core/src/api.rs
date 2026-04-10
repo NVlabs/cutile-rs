@@ -258,6 +258,48 @@ pub mod curand {
             unsafe { assert!(curandDestroyGenerator(self.curand_gen) == 0) };
         }
     }
+
+    /// Trait for types that support cuRAND normal distribution generation.
+    pub trait RandNormal: Sized + Send {
+        /// Generate normally distributed values into device memory.
+        ///
+        /// # Safety
+        /// `dptr` must be valid device memory with capacity for `len` elements.
+        unsafe fn generate_normal(rng: &RNG, dptr: CUdeviceptr, len: usize, mean: Self, std: Self);
+    }
+
+    impl RandNormal for f32 {
+        unsafe fn generate_normal(rng: &RNG, dptr: CUdeviceptr, len: usize, mean: f32, std: f32) {
+            rng.generate_normal_f32(dptr, len, mean, std);
+        }
+    }
+
+    impl RandNormal for f64 {
+        unsafe fn generate_normal(rng: &RNG, dptr: CUdeviceptr, len: usize, mean: f64, std: f64) {
+            rng.generate_normal_f64(dptr, len, mean, std);
+        }
+    }
+
+    /// Trait for types that support cuRAND uniform distribution generation.
+    pub trait RandUniform: Sized + Send {
+        /// Generate uniformly distributed values in `[0, 1)` into device memory.
+        ///
+        /// # Safety
+        /// `dptr` must be valid device memory with capacity for `len` elements.
+        unsafe fn generate_uniform(rng: &RNG, dptr: CUdeviceptr, len: usize);
+    }
+
+    impl RandUniform for f32 {
+        unsafe fn generate_uniform(rng: &RNG, dptr: CUdeviceptr, len: usize) {
+            rng.generate_uniform_f32(dptr, len);
+        }
+    }
+
+    impl RandUniform for f64 {
+        unsafe fn generate_uniform(rng: &RNG, dptr: CUdeviceptr, len: usize) {
+            rng.generate_uniform_f64(dptr, len);
+        }
+    }
 }
 
 /// Queries a device attribute value for the given device.

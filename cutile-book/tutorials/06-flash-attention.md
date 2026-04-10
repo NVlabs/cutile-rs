@@ -121,14 +121,14 @@ For each Q tile (row block of the output):
 ## The Code
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use std::sync::Arc;
 use cutile;
-use cutile::api::{randn_f32, zeros};
+use cutile::api::{randn, zeros};
 use cutile::error::Error;
-use cutile::tensor::{CopyToHost, IntoPartition, Partition, Tensor, Unpartition};
-use cutile::tile_kernel::TileKernel;
+use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec, Unpartition};
+use cutile::tile_kernel::{PartitionOp, TileKernel, ToHostVecOp};
 
 #[cutile::module]
 mod fmha_module {
@@ -227,16 +227,16 @@ fn main() -> Result<(), Error> {
     let (bm, bn) = (64, 32);
 
     let seed = 42u64;
-    let q: Arc<Tensor<f32>> = randn_f32(0., 1., [batch, heads, seq_len, head_dim], Some(seed))
+    let q: Arc<Tensor<f32>> = randn(0., 1., [batch, heads, seq_len, head_dim], Some(seed))
         .sync_on(&stream)?.into();
-    let k: Arc<Tensor<f32>> = randn_f32(0., 1., [batch, heads, seq_len, head_dim], Some(seed + 1))
+    let k: Arc<Tensor<f32>> = randn(0., 1., [batch, heads, seq_len, head_dim], Some(seed + 1))
         .sync_on(&stream)?.into();
-    let v: Arc<Tensor<f32>> = randn_f32(0., 1., [batch, heads, seq_len, head_dim], Some(seed + 2))
+    let v: Arc<Tensor<f32>> = randn(0., 1., [batch, heads, seq_len, head_dim], Some(seed + 2))
         .sync_on(&stream)?.into();
 
-    let out: Partition<Tensor<f32>> = zeros([batch * heads, seq_len, head_dim])
+    let out = zeros(&[batch * heads, seq_len, head_dim])
         .sync_on(&stream)?
-        .partition([1, bm, head_dim as i32]);
+        .partition([1, bm, head_dim]);
 
     let qk_scale = 1.0 / f32::sqrt(head_dim as f32);
     let generics = vec![bm.to_string(), bn.to_string(), head_dim.to_string()];
@@ -245,8 +245,8 @@ fn main() -> Result<(), Error> {
         .generics(generics)
         .sync_on(&stream)?;
 
-    let out_host = out.unpartition().copy_to_host().sync_on(&stream)?;
-    println!("Output shape: {:?}", out_host.shape());
+    let out_host: Vec<f32> = out.unpartition().to_host_vec().sync_on(&stream)?;
+    println!("Output length: {}", out_host.len());
 
     Ok(())
 }
@@ -255,7 +255,7 @@ fn main() -> Result<(), Error> {
 **Output:**
 
 ```text
-Output shape: [8, 128, 64]
+Output length: 65536
 ```
 
 ---

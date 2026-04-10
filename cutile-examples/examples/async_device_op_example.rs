@@ -10,7 +10,7 @@ use cutile::tile_kernel::global_policy;
 
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
-    // Create a scheduler, which schedules an instance of DeviceOperation on a device stream.
+    // Create a scheduler, which schedules an instance of DeviceOp on a device stream.
     // The schedule operation produces an implementation of Future.
     let _policy = global_policy(0);
 

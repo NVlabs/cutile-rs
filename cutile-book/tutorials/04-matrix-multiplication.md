@@ -52,7 +52,7 @@ Each element of A is used BN times. Each element of B is used BM times. This **d
 ## The Code
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use std::sync::Arc;
 use cutile;
@@ -101,14 +101,15 @@ fn main() -> Result<(), Error> {
         bm.to_string(), bn.to_string(), bk.to_string(), k.to_string()
     ];
 
-    let z = api::zeros([m, n]).partition([bm, bn]).sync_on(&stream)?;
-    let x: Arc<Tensor<f32>> = api::ones([m, k]).arc().sync_on(&stream)?;
-    let y: Arc<Tensor<f32>> = api::ones([k, n]).arc().sync_on(&stream)?;
+    let z = api::zeros(&[m, n]).partition([bm, bn]).sync_on(&stream)?;
+    let x: Arc<Tensor<f32>> = api::ones(&[m, k]).map(Into::into).sync_on(&stream)?;
+    let y: Arc<Tensor<f32>> = api::ones(&[k, n]).map(Into::into).sync_on(&stream)?;
 
     let (z, _x, _y) = gemm(z, x, y).generics(generics).sync_on(&stream)?;
 
     let z_host: Vec<f32> = z.unpartition().to_host_vec().sync_on(&stream)?;
     println!("z[0] = {} (expected {})", z_host[0], k);
+
 
     Ok(())
 }
@@ -225,7 +226,7 @@ fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i3
 | `E` | `z`, `x`, `y` | `z.dtype()` | Yes |
 | `BM` | `z` (`&mut`) | `z.partition_shape[0]` | Yes |
 | `BN` | `z` (`&mut`) | `z.partition_shape[1]` | Yes |
-| `K` | `x`, `y` | `x.shape[1]` | Yes |
+| `K` | `x`, `y` | `x.shape()[1]` | Yes |
 | `BK` | — | — | No |
 
 `BM` and `BN` are known at kernel launch time because they are embedded in the `Partition` created by `.partition([bm, bn])`. `K` is known because it appears as a dimension of the input tensors `x` and `y`. But `BK` does not appear in the type of any kernel argument — it is only used *inside* the kernel body when partitioning `x` and `y` into tiles:

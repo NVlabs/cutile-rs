@@ -21,7 +21,7 @@ Broadcasting is conceptual — the GPU doesn't actually allocate memory for all 
 ---
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use std::sync::Arc;
 use cutile;
@@ -56,8 +56,8 @@ fn main() -> Result<(), Error> {
     
     // Create x and y as [0, 1, 2, ..., 31] reshaped to 4×8
     let input: Arc<Tensor<f32>> = arange(32usize).sync_on(&stream)?.into();
-    let x: Arc<Tensor<f32>> = input.copy_sync(&stream)?.reshape([4, 8]).into();
-    let y = input.copy_sync(&stream)?.reshape([4, 8]).partition([2, 2]);
+    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape([4, 8]).into();
+    let y = input.dup().sync_on(&stream)?.reshape([4, 8]).partition([2, 2]);
     
     // Run: y = 2.0 * x + y = 2*x + x = 3*x
     let (a, _x, y) = saxpy(a, x, y).sync_on(&stream)?;

@@ -53,19 +53,16 @@ impl KernelNaming {
         &self.public_name
     }
 
-    /// Returns the public helper used with `.apply(...)`.
+    /// Returns the `_apply` variant name (legacy, still generated).
     ///
-    /// Example: `zip!(...).apply(my_kernel_apply)`.
+    /// Prefer the unified launcher `<kernel>(...)` which accepts `IntoDeviceOp` args directly.
     pub fn apply_name(&self) -> String {
         format!("{}_apply", self.public_name)
     }
 
-    /// Returns the launcher helper for separate `DeviceOperation` arguments.
+    /// Returns the `_op` variant name (legacy, still generated).
     ///
-    /// In other words:
-    /// - `<kernel>(...)` is the public ergonomic entry point
-    /// - `<kernel>_apply(...)` is the public composition hook
-    /// - `<kernel>_op(...)` is the public helper for separate lazy arguments
+    /// Prefer the unified launcher `<kernel>(...)` which accepts `IntoDeviceOp` args directly.
     pub fn device_op_helper_name(&self) -> String {
         format!("{}_op", self.public_name)
     }

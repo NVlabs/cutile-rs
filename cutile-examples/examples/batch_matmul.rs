@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile;
 use cutile::api::{ones, zeros};
@@ -17,9 +17,9 @@ mod my_module {
 
     #[cutile::entry()]
     fn batch_matmul<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i32>(
+        c: &mut Tensor<E, { [1, BM, BN] }>,
         a: &Tensor<E, { [-1, -1, K] }>,
         b: &Tensor<E, { [-1, K, -1] }>,
-        c: &mut Tensor<E, { [1, BM, BN] }>,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id(); // (batch_idx, m_idx, n_idx)
         let batch_idx = pid.0;
@@ -52,11 +52,11 @@ fn main() -> Result<(), Error> {
 
     let batch = 4usize;
     let (m, n, k) = (128usize, 256usize, 64usize);
-    let (bm, bn, bk) = (64i32, 64i32, 32i32);
+    let (bm, bn, bk) = (64, 64, 32);
 
-    let a: Arc<Tensor<f32>> = ones([batch, m, k]).sync_on(&stream)?.into();
-    let b: Arc<Tensor<f32>> = ones([batch, k, n]).sync_on(&stream)?.into();
-    let c: Partition<Tensor<f32>> = zeros([batch, m, n])
+    let a: Arc<Tensor<f32>> = ones(&[batch, m, k]).sync_on(&stream)?.into();
+    let b: Arc<Tensor<f32>> = ones(&[batch, k, n]).sync_on(&stream)?.into();
+    let c: Partition<Tensor<f32>> = zeros(&[batch, m, n])
         .sync_on(&stream)?
         .partition([1, bm, bn]);
 
@@ -67,7 +67,7 @@ fn main() -> Result<(), Error> {
         bk.to_string(),
         k.to_string(),
     ];
-    let (_a, _b, c) = batch_matmul(a, b, c).generics(generics).sync_on(&stream)?;
+    let (c, _a, _b) = batch_matmul(c, a, b).generics(generics).sync_on(&stream)?;
     let c_host: Vec<f32> = c.unpartition().to_host_vec().sync_on(&stream)?;
 
     let expected = k as f32;

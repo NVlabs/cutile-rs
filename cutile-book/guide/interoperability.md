@@ -2,7 +2,7 @@
 
 The tile model handles dense tensor algebra well — GEMM, element-wise operations, reductions, convolutions — but some algorithms depend on **warp-level primitives** (`__shfl_sync`, `__ballot_sync`, `__reduce_sync`) for things like custom scan/prefix-sum, cooperative groups, or irregular data access patterns. For these, write the kernel in CUDA C++ and integrate it using the approach below.
 
-A custom CUDA kernel can participate in the same `DeviceOperation` execution model as your tile kernels — sharing streams, chaining with `.and_then()`, and avoiding unnecessary synchronization.
+A custom CUDA kernel can participate in the same `DeviceOp` execution model as your tile kernels — sharing streams, chaining with `.then()`, and avoiding unnecessary synchronization.
 
 ## Step 1: Compile Your CUDA Kernel
 
@@ -41,7 +41,7 @@ let function = Arc::new(module.load_function("my_kernel_entry")?);
 
 ## Step 3: Launch via AsyncKernelLaunch
 
-`AsyncKernelLaunch` is a `DeviceOperation` that wraps the CUDA driver's kernel launch API:
+`AsyncKernelLaunch` is a `DeviceOp` that wraps the CUDA driver's kernel launch API:
 
 ```rust
 use cuda_async::launch::AsyncKernelLaunch;
@@ -64,7 +64,7 @@ launcher.set_launch_config(LaunchConfig {
     shared_mem_bytes: 0,
 });
 
-// Execute as a DeviceOperation — integrates with the async model.
+// Execute as a DeviceOp — integrates with the async model.
 launcher.await?;
 ```
 
@@ -83,16 +83,16 @@ Neither the Rust compiler nor the CUDA driver validates these invariants — mis
 
 Scalar arguments (like `num_elements as u32`) are copied into the kernel's parameter space — the kernel reads the value, not an address. Any type implementing `DType` can be pushed safely with `push_arg`.
 
-To prevent data races, use stream ordering: operations chained with `.and_then()` on the same stream execute in order and see each other's writes. Operations on different streams require explicit synchronization.
+To prevent data races, use stream ordering: operations chained with `.then()` on the same stream execute in order and see each other's writes. Operations on different streams require explicit synchronization.
 
 > **Why generated cuTile Rust kernels don't require `unsafe`:** When you write a tile kernel with `#[cutile::entry]`, the generated launcher uses the `KernelArgument` and `ArcKernelArgument` implementations for `Tensor<T>` and `Partition<Tensor<T>>`. These implementations call `push_device_ptr` internally, but can do so safely because the framework controls both sides: device pointers come from framework-managed allocations (guaranteed valid), and the ownership model — `Partition` for exclusive access, `Arc<Tensor>` for shared reads — prevents aliasing at the type level. Custom kernels bypass this: you are pushing pointers that the framework didn't allocate and can't track, so the safety burden falls on you.
 
-You can wrap a custom kernel launch in a struct that implements `DeviceOperation`. The struct's typed fields enforce the correct argument signature, and `unsafe` is confined to `execute`:
+You can wrap a custom kernel launch in a struct that implements `DeviceOp`. The struct's typed fields enforce the correct argument signature, and `unsafe` is confined to `execute`:
 
 ```rust
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
-use cuda_async::device_operation::{DeviceOperation, ExecutionContext};
+use cuda_async::device_operation::{DeviceOp, ExecutionContext};
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_async::scheduling_policies::SchedulingPolicy;
@@ -107,7 +107,7 @@ pub struct ScaleKernel {
     output: Tensor<f32>,
 }
 
-impl DeviceOperation for ScaleKernel {
+impl DeviceOp for ScaleKernel {
     type Output = (Arc<Tensor<f32>>, Tensor<f32>);
 
     // execute is unsafe because it enqueues async GPU work without
@@ -117,7 +117,7 @@ impl DeviceOperation for ScaleKernel {
     unsafe fn execute(
         self,
         ctx: &ExecutionContext,
-    ) -> Result<<Self as DeviceOperation>::Output, DeviceError> {
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let mut launcher = AsyncKernelLaunch::new(self.function);
         launcher.push_arg(self.n);
         launcher.push_arg(self.scale);
@@ -138,7 +138,7 @@ impl DeviceOperation for ScaleKernel {
     }
 }
 
-// IntoFuture is a supertrait of DeviceOperation. Every custom DeviceOperation
+// IntoFuture is a supertrait of DeviceOp. Every custom DeviceOp
 // needs this boilerplate to enable `.await` and `.sync()`.
 impl IntoFuture for ScaleKernel {
     type Output = Result<(Arc<Tensor<f32>>, Tensor<f32>), DeviceError>;
@@ -156,7 +156,7 @@ This is the same pattern the `#[cutile::entry]` macro uses to generate safe laun
 
 ## Step 4: Compose with Tile Kernels
 
-`AsyncKernelLaunch` implements `DeviceOperation`, so it chains with tile kernels. This pipeline runs a tile add (`z = x + y`), then the custom scale wrapper (`w = scale * z`):
+`AsyncKernelLaunch` implements `DeviceOp`, so it chains with tile kernels. This pipeline runs a tile add (`z = x + y`), then the custom scale wrapper (`w = scale * z`):
 
 ```rust
 // Run the tile add kernel — z = x + y.
@@ -165,7 +165,7 @@ let (z_part, _x, _y) =
 let z: Tensor<f32> = z_part.unpartition();
 
 // Run the custom scale kernel — w = scale * z.
-let w: Tensor<f32> = zeros::<1, f32>([num_elements]).await?;
+let w: Tensor<f32> = zeros(&[num_elements]).await?;
 let (_z, w) = ScaleKernel {
     function: scale_function,
     n: num_elements as u32,
@@ -185,7 +185,7 @@ See [`interop.rs`](https://github.com/NVlabs/cutile-rs/blob/main/cutile-examples
 For more direct control, use `with_context` to access the CUDA stream and issue driver API calls directly:
 
 ```rust
-use cuda_async::device_operation::{with_context, value, DeviceOperation};
+use cuda_async::device_operation::{with_context, value, DeviceOp};
 use cuda_async::device_operation::ExecutionContext;
 use cuda_core::{malloc_async, memcpy_htod_async, free_async};
 
@@ -217,7 +217,7 @@ with_context(move |ctx: &ExecutionContext| {
 .await?;
 ```
 
-This gives you full access to the CUDA driver API while participating in the `DeviceOperation` model. Everything inside the `unsafe` block is your responsibility to get right.
+This gives you full access to the CUDA driver API while participating in the `DeviceOp` model. Everything inside the `unsafe` block is your responsibility to get right.
 
 ---
 
@@ -242,4 +242,4 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 
 ---
 
-Continue to [Debugging](debugging.md) for troubleshooting, or see [Performance Tuning](performance-tuning.md) for optimization techniques. This chapter builds on the `DeviceOperation` model introduced in [Async Execution](async-execution.md).
+Continue to [Debugging](debugging.md) for troubleshooting, or see [Performance Tuning](performance-tuning.md) for optimization techniques. This chapter builds on the `DeviceOp` model introduced in [Async Execution](async-execution.md).

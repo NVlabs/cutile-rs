@@ -14,9 +14,7 @@ We encourage early experimentation and welcome feedback to help validate design 
 ## 🚀 Get Started in 5 Minutes
 
 ```rust
-use cuda_async::device_operation::DeviceOperation;
-use cuda_async::error::DeviceError;
-use cutile::{self, api, tile_kernel::IntoDeviceOperationPartition};
+use cutile::prelude::*;
 use my_module::add;
 
 #[cutile::module]
@@ -34,11 +32,12 @@ mod my_module {
     }
 }
 
-fn main() -> Result<(), DeviceError> {
-    let z = api::zeros([32, 32]).partition([4, 4]).sync()?;
-    let x = api::ones([32, 32]).arc().sync()?;
-    let y = api::ones([32, 32]).arc().sync()?;
-    let (_z, _x, _y) = add(z, x, y).sync()?;
+fn main() -> Result<(), cuda_async::error::DeviceError> {
+    let x = api::ones::<f32>(&[1024, 1024]).sync()?;
+    let y = api::ones::<f32>(&[1024, 1024]).sync()?;
+    let mut z = api::zeros::<f32>(&[1024, 1024]).sync()?;
+
+    add((&mut z).partition([64, 64]), &x, &y).sync()?;
     Ok(())
 }
 ```
@@ -83,6 +82,7 @@ tutorials/06-flash-attention
 tutorials/07-intro-to-async
 tutorials/08-data-parallel-mlp
 tutorials/09-pointer-addition
+tutorials/10-cuda-graphs
 ```
 
 ```{toctree}
@@ -97,6 +97,7 @@ guide/execution-model
 guide/memory-hierarchy
 guide/operations
 guide/async-execution
+guide/deviceop-reference
 guide/performance-tuning
 guide/interoperability
 guide/debugging

@@ -5,7 +5,7 @@
 //! Kernel launcher generation.
 //!
 //! This module generates launcher functions for GPU kernel entry points
-//! with support for direct invocation and `.apply(...)`-based composition.
+//! with support for direct invocation via `IntoDeviceOp` arguments.
 //! These launchers provide a type-safe interface for invoking
 //! CUDA Tile kernels from Rust code.
 //!
@@ -14,8 +14,8 @@
 //! For each function marked with `#[cutile::entry]`, this module generates:
 //!
 //! - an unsuffixed launcher for materialized arguments
-//! - an `_apply` helper for `.apply(...)` composition
-//! - an internal helper for `DeviceOperation` arguments
+//! - auto-wraps Tensor→Arc for &Tensor params via IntoDeviceOp
+//! - an internal helper for `DeviceOp` arguments
 //!
 //! Together these helpers:
 //!
@@ -39,20 +39,20 @@
 //! pub fn my_kernel<T: Send + DType>(
 //!     output: Partition<Tensor<T>>,
 //!     input: Arc<Tensor<T>>,
-//! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
+//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Wraps materialized values and delegates to my_kernel_op
 //! }
 //!
 //! pub fn my_kernel_op<T: Send + DType>(
-//!     output: impl DeviceOperation<Output = Partition<Tensor<T>>>,
-//!     input: impl DeviceOperation<Output = Arc<Tensor<T>>>,
-//! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
+//!     output: impl DeviceOp<Output = Partition<Tensor<T>>>,
+//!     input: impl DeviceOp<Output = Arc<Tensor<T>>>,
+//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Launches from separate lazy arguments
 //! }
 //!
-//! pub fn my_kernel_apply<T: Send + DType>(
+//! // (_apply no longer generated)<T: Send + DType>(
 //!     inputs: (Partition<Tensor<T>>, Arc<Tensor<T>>),
-//! ) -> impl DeviceOperation<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
+//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Launches from one grouped lazy argument tuple
 //! }
 //! ```
@@ -69,9 +69,13 @@
 //!
 //! Kernel parameters are transformed for the launcher:
 //!
-//! - `&mut Tensor<T, S>` → `Partition<Tensor<T>>` (mutable, partitioned)
-//! - `&Tensor<T, S>` → `Arc<Tensor<T>>` (immutable, shared)
+//! - `&mut Tensor<T, S>` → `impl KernelOutput<T>` (accepts `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>`)
+//! - `&Tensor<T, S>` → `impl KernelInput<T>` (accepts `Tensor<T>`, `Arc<Tensor<T>>`, or `&Tensor<T>`)
+//! - `*mut T` → `DevicePointer<T>` (unsafe only)
 //! - Scalars remain unchanged
+//!
+//! Both `&Tensor` and `&mut Tensor` params return the same type that was passed in
+//! via `KernelInput::recover` / `KernelOutput::recover`.
 //!
 //! ## Grid Inference
 //!
@@ -319,7 +323,7 @@ pub fn zip_cons(inputs: &[String], var_name: &str, wrap_as_val: bool) -> ExprBlo
 /// For inputs `["a", "b", "c"]`, generates code equivalent to:
 /// ```rust,ignore
 /// let result = zip!(a, zip!(b, c));
-/// let result = result.and_then(|(a, (b, c))| value((a, b, c)));
+/// let result = result.then(|(a, (b, c))| value((a, b, c)));
 /// ```
 pub fn zip_and_then_flatten(inputs: &[String], var_name: &str, wrap_as_val: bool) -> ExprBlock {
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
@@ -346,7 +350,7 @@ pub fn zip_and_then_flatten(inputs: &[String], var_name: &str, wrap_as_val: bool
     }
     zip_block.block.stmts.push(parse_stmt(format!(
         r#"
-            let {var_name} = {var_name}.and_then(|{}| {{
+            let {var_name} = {var_name}.then(|{}| {{
                 value({})
             }});
         "#,
@@ -444,9 +448,9 @@ pub fn to_tuple_string(args: &[String]) -> String {
 /// This is the main function that transforms a kernel function (marked with `#[entry]`)
 /// into launcher helpers that can be called from Rust code. It generates:
 /// 1. Type aliases for kernel arguments
-/// 2. A launcher struct implementing `DeviceOperation`
+/// 2. A launcher struct implementing `DeviceOp`
 /// 3. A direct launcher for materialized arguments
-/// 4. An `_apply` helper for `.apply(...)` composition
+/// 4. Auto-wraps Tensor→Arc for &Tensor params
 ///
 /// ## Parameters
 ///
@@ -472,7 +476,7 @@ pub fn to_tuple_string(args: &[String]) -> String {
 /// pub struct MyKernel<T> {
 ///     args: MyKernelArgs<T>,
 /// }
-/// impl<T: DType> DeviceOperation for MyKernel<T> {
+/// impl<T: DType> DeviceOp for MyKernel<T> {
 ///     type Output = ();
 ///     unsafe fn execute(mut self, ctx: &ExecutionContext) -> Self::Output {
 ///         // Kernel launch logic here
@@ -485,13 +489,21 @@ pub fn generate_kernel_launcher(
     function_name: &str,
     function_entry_name: &str,
     launcher_name: &str,
-    launcher_args_name: &str,
-) -> Result<(RequiredGenerics, (Type, TokenStream2), TokenStream2), Error> {
+    _launcher_args_name: &str,
+) -> Result<
+    (
+        RequiredGenerics,
+        (Type, Type),
+        TokenStream2,
+        KernelInputInfo,
+    ),
+    Error,
+> {
     let unsafety = item.sig.unsafety;
     let is_unsafe = unsafety.is_some();
     let launcher_ident = Ident::new(launcher_name, Span::call_site());
     let mut launcher_method = syn::parse2::<ImplItemFn>(quote! {
-        unsafe fn execute(mut self, ctx: &ExecutionContext) -> Result<<Self as DeviceOperation>::Output, DeviceError> {}
+        unsafe fn execute(mut self, ctx: &ExecutionContext) -> Result<<Self as DeviceOp>::Output, DeviceError> {}
     })
     .unwrap();
 
@@ -504,18 +516,17 @@ pub fn generate_kernel_launcher(
     let mut launch_grid_expr_strs = vec![];
     let mut validator_statements = vec![];
     let mut arg_types: Vec<Type> = vec![];
+    // Track element type per param (Some for &Tensor params, None for others).
+    let mut param_element_types: Vec<Option<String>> = vec![];
 
     let mut required_generics: RequiredGenerics = RequiredGenerics::new(&item.sig.generics);
-    // println!("required_generics: {}", required_generics.get_required_generics().to_token_stream().to_string());
     for (i, ty) in input_types.iter().enumerate() {
         let var_name = &param_names[i];
-        // Currently only supporting scalars, &Tensor, and &mut Tensor.
-        // This should be enough to do everything safely.
-        // Added support for * mut T to allow for unsafe kernels.
         match ty {
             Type::Reference(ref_ty) => {
                 let res = get_tensor_code(i, var_name, ref_ty, &mut required_generics)?;
                 arg_types.push(res.fn_arg.ty.as_ref().clone());
+                param_element_types.push(res.element_type_name);
                 stride_args.push(res.stride_expr_str);
                 builder_statements.extend(res.builder_statements);
                 launch_grid_expr_strs.extend(res.launch_grid_expr_strs);
@@ -536,6 +547,7 @@ pub fn generate_kernel_launcher(
                     );
                 }
                 builder_statements.push(parse_stmt(format!("kernel_launch.push_arg({var_name});")));
+                param_element_types.push(None);
             }
             Type::Ptr(ptr_type) => {
                 // Let's require this to be unsafe, even though all unsafe operations on pointers
@@ -568,6 +580,7 @@ pub fn generate_kernel_launcher(
                 builder_statements.push(parse_stmt(format!(
                     "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
                 )));
+                param_element_types.push(None);
             }
             _ => {
                 return ty.err("Unable to generate launcher: unsupported parameter type.");
@@ -575,23 +588,197 @@ pub fn generate_kernel_launcher(
         }
     }
 
+    // Build KernelInput metadata: which params are &Tensor (Arc) and need
+    // KernelInput type params on the launcher struct.
+    let mut ki_type_param_names: Vec<String> = vec![];
+    let mut ki_element_type_names: Vec<String> = vec![];
+    let mut ki_param_idx: Vec<Option<usize>> = vec![];
+    // Build KernelOutput metadata: which params are &mut Tensor (Partition).
+    let mut ko_type_param_names: Vec<String> = vec![];
+    let mut ko_element_type_names: Vec<String> = vec![];
+    let mut ko_param_idx: Vec<Option<usize>> = vec![];
+    for (i, ty) in arg_types.iter().enumerate() {
+        let ty_str = ty.to_token_stream().to_string();
+        if ty_str.starts_with("Arc <") {
+            let idx = ki_type_param_names.len();
+            ki_type_param_names.push(format!("_K{}", idx));
+            ki_element_type_names.push(
+                param_element_types[i]
+                    .clone()
+                    .expect("&Tensor param must have element type"),
+            );
+            ki_param_idx.push(Some(idx));
+            ko_param_idx.push(None);
+        } else if ty_str.contains("Partition") {
+            let idx = ko_type_param_names.len();
+            ko_type_param_names.push(format!("_P{}", idx));
+            // Extract element type from "tensor :: Partition < tensor :: Tensor < T > >"
+            let elem = ty_str
+                .split("Tensor <")
+                .nth(1)
+                .and_then(|s| s.split('>').next())
+                .map(|s| s.trim().to_string())
+                .expect("Partition param must have element type");
+            ko_element_type_names.push(elem);
+            ko_param_idx.push(Some(idx));
+            ki_param_idx.push(None);
+        } else {
+            ki_param_idx.push(None);
+            ko_param_idx.push(None);
+        }
+    }
+    // Build the recovered return tuple expression:
+    // KernelInput params call recover, KernelOutput params call recover, others pass through.
+    let recovered_fields: Vec<String> = param_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if let Some(ki_idx) = ki_param_idx[i] {
+                let ki_name = &ki_type_param_names[ki_idx];
+                let elem = &ki_element_type_names[ki_idx];
+                format!("<{ki_name} as KernelInput<{elem}>>::recover({name})")
+            } else if let Some(ko_idx) = ko_param_idx[i] {
+                let ko_name = &ko_type_param_names[ko_idx];
+                let elem = &ko_element_type_names[ko_idx];
+                format!("<{ko_name} as KernelOutput<{elem}>>::recover({name})")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let recovered_tuple_str = to_tuple_string(&recovered_fields);
+    let kernel_input_info = KernelInputInfo {
+        type_param_names: ki_type_param_names,
+        element_type_names: ki_element_type_names,
+        param_kernel_input_idx: ki_param_idx.clone(),
+        ko_type_param_names: ko_type_param_names.clone(),
+        ko_element_type_names: ko_element_type_names.clone(),
+        param_kernel_output_idx: ko_param_idx.clone(),
+        recovered_tuple_str: recovered_tuple_str.clone(),
+    };
+
+    // Build stored and returned arg type lists for KernelInput parameterization.
+    // Stored types are what DI produces and execute() receives.
+    // Returned types are what execute() returns after calling recover.
+    let ki_info = &kernel_input_info;
+    let stored_arg_types: Vec<Type> = arg_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| {
+            if let Some(ki_idx) = ki_info.param_kernel_input_idx[i] {
+                let ki_name = &ki_info.type_param_names[ki_idx];
+                let elem = &ki_info.element_type_names[ki_idx];
+                syn::parse_str::<Type>(&format!("<{ki_name} as KernelInput<{elem}>>::Stored"))
+                    .unwrap()
+            } else if let Some(ko_idx) = ki_info.param_kernel_output_idx[i] {
+                let ko_name = &ki_info.ko_type_param_names[ko_idx];
+                let elem = &ki_info.ko_element_type_names[ko_idx];
+                syn::parse_str::<Type>(&format!("<{ko_name} as KernelOutput<{elem}>>::Stored"))
+                    .unwrap()
+            } else {
+                ty.clone()
+            }
+        })
+        .collect();
+    let returned_arg_types: Vec<Type> = arg_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| {
+            if let Some(ki_idx) = ki_info.param_kernel_input_idx[i] {
+                let ki_name = &ki_info.type_param_names[ki_idx];
+                let elem = &ki_info.element_type_names[ki_idx];
+                syn::parse_str::<Type>(&format!("<{ki_name} as KernelInput<{elem}>>::Returned"))
+                    .unwrap()
+            } else if let Some(ko_idx) = ki_info.param_kernel_output_idx[i] {
+                let ko_name = &ki_info.ko_type_param_names[ko_idx];
+                let elem = &ki_info.ko_element_type_names[ko_idx];
+                syn::parse_str::<Type>(&format!("<{ko_name} as KernelOutput<{elem}>>::Returned"))
+                    .unwrap()
+            } else {
+                ty.clone()
+            }
+        })
+        .collect();
+
+    // Build inline tuple types (no type alias — simpler with associated types).
+    let stored_args_type: Type = parse_quote! { ( #(#stored_arg_types,)* ) };
+    let returned_args_type: Type = parse_quote! { ( #(#returned_arg_types,)* ) };
+    let stored_args_type_str = stored_args_type.to_token_stream().to_string();
+
     // Prepare generics.
     let generic_params = required_generics.get_required_generics();
     let generic_args = required_generics.get_generic_args();
-    let (launcher_args_type, launcher_arg_type_def) =
-        generate_launcher_arg_types(&generic_args, &arg_types, launcher_name, launcher_args_name);
-    let launcher_args_type_str = launcher_args_type.to_token_stream().to_string();
-    let device_op_param: GenericParam =
-        parse_quote! { DI: DeviceOperation<Output=#launcher_args_type> };
-    let device_op_arg: GenericArgument = parse_quote! { DI };
+
+    // Add KernelInput (_K) and KernelOutput (_P) type params to struct generics.
     let mut struct_generics = generic_params.clone();
+    for (ki_idx, ki_name) in ki_info.type_param_names.iter().enumerate() {
+        let elem = &ki_info.element_type_names[ki_idx];
+        struct_generics.params.push(
+            syn::parse_str::<GenericParam>(&format!("{ki_name}: KernelInput<{elem}>")).unwrap(),
+        );
+    }
+    for (ko_idx, ko_name) in ki_info.ko_type_param_names.iter().enumerate() {
+        let elem = &ki_info.ko_element_type_names[ko_idx];
+        struct_generics.params.push(
+            syn::parse_str::<GenericParam>(&format!("{ko_name}: KernelOutput<{elem}>")).unwrap(),
+        );
+    }
+    let device_op_param: GenericParam = parse_quote! { DI: DeviceOp<Output=#stored_args_type> };
     struct_generics.params.push(device_op_param.clone());
+
     let mut struct_args = generic_args.clone();
+    for ki_name in &ki_info.type_param_names {
+        struct_args
+            .args
+            .push(syn::parse_str::<GenericArgument>(ki_name).unwrap());
+    }
+    for ko_name in &ki_info.ko_type_param_names {
+        struct_args
+            .args
+            .push(syn::parse_str::<GenericArgument>(ko_name).unwrap());
+    }
+    let device_op_arg: GenericArgument = parse_quote! { DI };
     struct_args.args.push(device_op_arg.clone());
+
+    // Build stored_args_type using _S/_Q names for the unified launcher's context.
+    let launcher_stored_arg_types: Vec<Type> = arg_types
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| {
+            if let Some(ki_idx) = ki_info.param_kernel_input_idx[i] {
+                let elem = &ki_info.element_type_names[ki_idx];
+                syn::parse_str::<Type>(&format!("<_S{i} as KernelInput<{elem}>>::Stored")).unwrap()
+            } else if let Some(ko_idx) = ki_info.param_kernel_output_idx[i] {
+                let elem = &ki_info.ko_element_type_names[ko_idx];
+                syn::parse_str::<Type>(&format!("<_Q{i} as KernelOutput<{elem}>>::Stored")).unwrap()
+            } else {
+                ty.clone()
+            }
+        })
+        .collect();
+    let launcher_stored_args_type: Type = parse_quote! { ( #(#launcher_stored_arg_types,)* ) };
+
+    // launch_output_type is used for the unified launcher's return type.
     let mut launch_output_type = generic_args.clone();
+    for (i, is_arc) in ki_param_idx.iter().enumerate() {
+        if is_arc.is_some() {
+            launch_output_type
+                .args
+                .push(syn::parse_str::<GenericArgument>(&format!("_S{}", i)).unwrap());
+        }
+    }
+    for (i, is_part) in ko_param_idx.iter().enumerate() {
+        if is_part.is_some() {
+            launch_output_type
+                .args
+                .push(syn::parse_str::<GenericArgument>(&format!("_Q{}", i)).unwrap());
+        }
+    }
     let impl_device_op: GenericArgument =
-        parse_quote! { impl DeviceOperation<Output=#launcher_args_type> };
+        parse_quote! { impl DeviceOp<Output=#launcher_stored_args_type> };
     launch_output_type.args.push(impl_device_op);
+
+    // ── execute() method body ───────────────────────────────────────────────
 
     let init_stmts = syn::parse2::<ExprBlock>(quote! {{
         let module_name = #module_name;
@@ -604,7 +791,7 @@ pub fn generate_kernel_launcher(
     .stmts;
     launcher_method.block.stmts.extend(init_stmts);
     launcher_method.block.stmts.push(parse_stmt(format!(
-        r#"let {param_names_tuple_str}: {launcher_args_type_str} = input.execute(ctx)?;"#
+        r#"let {param_names_tuple_str}: {stored_args_type_str} = input.execute(ctx)?;"#
     )));
 
     if !required_generics.names.is_empty() {
@@ -638,7 +825,6 @@ pub fn generate_kernel_launcher(
             function_generics, stride_args, const_grid,
             compile_options
         )?;
-        // Do validation here.
     }})
     .unwrap()
     .block
@@ -646,20 +832,17 @@ pub fn generate_kernel_launcher(
     launcher_method.block.stmts.extend(compile_stmts);
     launcher_method.block.stmts.extend(validator_statements);
 
-    // Add launcher arguments.
     launcher_method.block.stmts.push(parse_stmt(
         "let mut kernel_launch = AsyncKernelLaunch::new(function.clone());".to_string(),
     ));
     launcher_method.block.stmts.extend(builder_statements);
 
-    // Infer launch grid.
     launcher_method.block.stmts.push(parse_stmt(format!(
         "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
         launch_grid_expr_strs.join(",")
     )));
 
     let launch_stmts = syn::parse2::<ExprBlock>(quote! {{
-        // Launch the kernel. This is the same for all functions.
         kernel_launch
             .set_launch_config(LaunchConfig {
                 grid_dim: launch_grid,
@@ -672,116 +855,221 @@ pub fn generate_kernel_launcher(
     .block
     .stmts;
     launcher_method.block.stmts.extend(launch_stmts);
-    launcher_method.block.stmts.push(parse_stmt(format!(
-        r#"return Ok({param_names_tuple_str});"#
-    )));
+    // Return with KernelInput::recover applied to each &Tensor param.
+    launcher_method
+        .block
+        .stmts
+        .push(parse_stmt(format!(r#"return Ok({recovered_tuple_str});"#)));
 
-    // Generate launcher apply function. This is the simplest case.
-    let kernel_return_type = quote! {
-        #launcher_ident #launch_output_type
-    };
+    // ── _apply launcher (used internally by api.rs) ───────────────────────
+    // Takes a concrete tuple with Arc<Tensor<T>> for &Tensor params.
+    // Specialized: _K = Arc<Tensor<T>> for all KernelInput params.
+
     let kernel_naming = KernelNaming::new(function_name);
+    let concrete_args_type: Type = parse_quote! { ( #(#arg_types,)* ) };
+
+    // Build launch_output_type specialized with Arc for _apply.
+    let mut apply_launch_output_type = generic_args.clone();
+    for ki_name in &ki_info.type_param_names {
+        // Find the corresponding Arc<Tensor<T>> type for this _K param.
+        let ki_idx_in_types = ki_info
+            .param_kernel_input_idx
+            .iter()
+            .enumerate()
+            .find(|(_, idx)| {
+                idx.map(|k| ki_info.type_param_names[k] == *ki_name)
+                    .unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .unwrap();
+        let arc_type = &arg_types[ki_idx_in_types];
+        apply_launch_output_type.args.push(
+            syn::parse_str::<GenericArgument>(&arc_type.to_token_stream().to_string()).unwrap(),
+        );
+    }
+    // Also specialize _P = Partition<Tensor<T>> for _apply.
+    for ko_name in &ki_info.ko_type_param_names {
+        let ko_idx_in_types = ki_info
+            .param_kernel_output_idx
+            .iter()
+            .enumerate()
+            .find(|(_, idx)| {
+                idx.map(|k| ki_info.ko_type_param_names[k] == *ko_name)
+                    .unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .unwrap();
+        let part_type = &arg_types[ko_idx_in_types];
+        apply_launch_output_type.args.push(
+            syn::parse_str::<GenericArgument>(&part_type.to_token_stream().to_string()).unwrap(),
+        );
+    }
+    let apply_impl_device_op: GenericArgument =
+        parse_quote! { impl DeviceOp<Output=#concrete_args_type> };
+    apply_launch_output_type.args.push(apply_impl_device_op);
+
+    let apply_return_type = quote! { #launcher_ident #apply_launch_output_type };
     let apply_name = kernel_naming.apply_name();
     let launcher_apply_ident = Ident::new(apply_name.as_str(), Span::call_site());
     let launcher_apply = syn::parse2::<ItemFn>(quote! {
-        pub #unsafety fn #launcher_apply_ident #generic_params (input: #launcher_args_type) -> #kernel_return_type {
+        pub #unsafety fn #launcher_apply_ident #generic_params (input: #concrete_args_type) -> #apply_return_type {
             return #launcher_ident::launch(value(input));
         }
     })
     .unwrap();
 
-    // These are the type aliases generated for the argument types for this kernel function.
+    // ── Unified launcher (the primary public entry point) ───────────────────
+
+    let kernel_return_type = quote! { #launcher_ident #launch_output_type };
+
     let arg_aliases = arg_types
         .iter()
         .map(|i| i.to_token_stream().to_string())
         .collect::<Vec<_>>();
 
-    // Generate internal op-based launcher. Uses the apply function and operates on
-    // a flat tuple of `DeviceOperation` arguments.
-    let op_name = kernel_naming.device_op_helper_name();
-    let launcher_op_ident = Ident::new(op_name.as_str(), Span::call_site());
-    let mut launcher_op = syn::parse2::<ItemFn>(quote! {
-        pub #unsafety fn #launcher_op_ident #generic_params() -> #kernel_return_type {}
-    })
-    .unwrap();
-    let mut function_params = vec![];
-    launcher_op.sig.generics.make_where_clause();
-    for (i, _arg_ty) in arg_types.iter().enumerate() {
-        let function_param = format!("arg{}", i);
-        let type_param = format!("DI{}", i);
-        let type_bound = format!("DeviceOperation<Output={}>", arg_aliases[i]);
-        launcher_op.sig.inputs.push(FnArg::Typed(
-            syn::parse2::<PatType>(
-                format!("{}: {}", function_param, type_param)
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap(),
-        ));
-        launcher_op.sig.generics.params.push(GenericParam::Type(
-            syn::parse2::<TypeParam>(type_param.parse().unwrap()).unwrap(),
-        ));
-        let where_clause = launcher_op
-            .sig
-            .generics
-            .where_clause
-            .as_mut()
-            .expect("Impossible.");
-        where_clause.predicates.push(
-            syn::parse2::<WherePredicate>(
-                format!("{}: {}", type_param, type_bound).parse().unwrap(),
-            )
-            .unwrap(),
-        );
-        function_params.push(function_param);
-    }
-    let input_zips = zip_and_then_flatten(&function_params, "input", false);
-    launcher_op.block.stmts.extend(input_zips.block.stmts);
-    launcher_op.block.stmts.push(parse_stmt(format!(
-        "return {}::launch(input);",
-        launcher_ident
-    )));
-
-    // Generate the public launcher that accepts materialized arguments.
     let launcher_direct_ident = Ident::new(kernel_naming.public_name(), Span::call_site());
     let mut launcher_direct = syn::parse2::<ItemFn>(quote! {
         pub #unsafety fn #launcher_direct_ident #generic_params() -> #kernel_return_type {}
     })
     .unwrap();
+    launcher_direct.sig.generics.make_where_clause();
+    let mut function_params = vec![];
+    let mut is_arc_param = vec![];
     for (i, _arg_ty) in arg_types.iter().enumerate() {
-        let function_param = &function_params[i];
-        let type_param = &arg_aliases[i];
+        let function_param = format!("arg{}", i);
+        let type_param_name = format!("_A{}", i);
+        let arg_type_str = &arg_aliases[i];
+        let is_arc = arg_type_str.starts_with("Arc <");
+        is_arc_param.push(is_arc);
+
         launcher_direct.sig.inputs.push(FnArg::Typed(
             syn::parse2::<PatType>(
-                format!("{}: {}", function_param, type_param)
+                format!("{}: {}", function_param, type_param_name)
                     .parse()
                     .unwrap(),
             )
             .unwrap(),
         ));
-    }
-    let return_op = format!(
-        "return {op_name}({});",
-        function_params
-            .iter()
-            .map(|var| zippable(var, true))
-            .collect::<Vec<String>>()
-            .join(", ")
-    );
 
-    launcher_direct.block.stmts.push(parse_stmt(return_op));
+        let where_clause = launcher_direct
+            .sig
+            .generics
+            .where_clause
+            .as_mut()
+            .expect("Impossible.");
+
+        if is_arc {
+            // KernelInput bound: accepts Tensor<T>, Arc<Tensor<T>>, or &Tensor<T>.
+            let intermediate_type = format!("_S{}", i);
+            launcher_direct.sig.generics.params.push(GenericParam::Type(
+                syn::parse2::<TypeParam>(type_param_name.parse().unwrap()).unwrap(),
+            ));
+            launcher_direct.sig.generics.params.push(GenericParam::Type(
+                syn::parse2::<TypeParam>(intermediate_type.parse().unwrap()).unwrap(),
+            ));
+            where_clause.predicates.push(
+                syn::parse2::<WherePredicate>(
+                    format!("{}: IntoDeviceOp<{}>", type_param_name, intermediate_type)
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap(),
+            );
+            let ki_idx = ki_param_idx[i].unwrap();
+            let elem = &ki_info.element_type_names[ki_idx];
+            where_clause.predicates.push(
+                syn::parse2::<WherePredicate>(
+                    format!("{}: KernelInput<{}>", intermediate_type, elem)
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap(),
+            );
+        } else if ko_param_idx[i].is_some() {
+            // KernelOutput bound: accepts Partition<Tensor<T>> or Partition<&mut Tensor<T>>.
+            let intermediate_type = format!("_Q{}", i);
+            launcher_direct.sig.generics.params.push(GenericParam::Type(
+                syn::parse2::<TypeParam>(type_param_name.parse().unwrap()).unwrap(),
+            ));
+            launcher_direct.sig.generics.params.push(GenericParam::Type(
+                syn::parse2::<TypeParam>(intermediate_type.parse().unwrap()).unwrap(),
+            ));
+            where_clause.predicates.push(
+                syn::parse2::<WherePredicate>(
+                    format!("{}: IntoDeviceOp<{}>", type_param_name, intermediate_type)
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap(),
+            );
+            let ko_idx = ko_param_idx[i].unwrap();
+            let elem = &ki_info.ko_element_type_names[ko_idx];
+            where_clause.predicates.push(
+                syn::parse2::<WherePredicate>(
+                    format!("{}: KernelOutput<{}>", intermediate_type, elem)
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap(),
+            );
+        } else {
+            // Scalars: direct IntoDeviceOp bound.
+            launcher_direct.sig.generics.params.push(GenericParam::Type(
+                syn::parse2::<TypeParam>(type_param_name.parse().unwrap()).unwrap(),
+            ));
+            where_clause.predicates.push(
+                syn::parse2::<WherePredicate>(
+                    format!("{}: IntoDeviceOp<{}>", type_param_name, arg_type_str)
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        function_params.push(function_param);
+    }
+    // Convert each arg into a DeviceOp, applying KernelInput::prepare for
+    // &Tensor params and KernelOutput::prepare for &mut Tensor params.
+    let mut di_var_names: Vec<String> = vec![];
+    for (i, var) in function_params.iter().enumerate() {
+        let di_var = format!("_di{}", i);
+        if is_arc_param[i] {
+            launcher_direct.block.stmts.push(parse_stmt(format!(
+                "let {di_var} = {var}.into_op().map(KernelInput::prepare);"
+            )));
+        } else if ko_param_idx[i].is_some() {
+            launcher_direct.block.stmts.push(parse_stmt(format!(
+                "let {di_var} = {var}.into_op().map(KernelOutput::prepare);"
+            )));
+        } else {
+            launcher_direct
+                .block
+                .stmts
+                .push(parse_stmt(format!("let {di_var} = {var}.into_op();")));
+        }
+        di_var_names.push(di_var);
+    }
+    let input_zips = zip_and_then_flatten(&di_var_names, "input", false);
+    launcher_direct.block.stmts.extend(input_zips.block.stmts);
+    launcher_direct.block.stmts.push(parse_stmt(format!(
+        "return {}::launch(input);",
+        launcher_ident
+    )));
+
+    let returned_args_type_2 = returned_args_type.clone();
     Ok((
         required_generics,
-        (launcher_args_type.clone(), launcher_arg_type_def),
+        (stored_args_type, returned_args_type),
         quote! {
-            impl #struct_generics DeviceOperation for #launcher_ident #struct_args {
-                type Output = #launcher_args_type;
+            impl #struct_generics DeviceOp for #launcher_ident #struct_args {
+                type Output = #returned_args_type_2;
                 #launcher_method
             }
+            impl #struct_generics GraphNode for #launcher_ident #struct_args {}
             #launcher_apply
-            #launcher_op
             #launcher_direct
         },
+        kernel_input_info,
     ))
 }
 
@@ -822,6 +1110,25 @@ fn parse_expr(s: String) -> Expr {
     syn::parse::<Expr>(s.parse().unwrap()).unwrap()
 }
 
+/// Metadata about KernelInput params for the struct definition in _module.rs.
+pub struct KernelInputInfo {
+    /// Names of the KernelInput type params, e.g., ["_K0", "_K1"].
+    pub type_param_names: Vec<String>,
+    /// Element type name for each KernelInput param, e.g., ["T", "SrcType"].
+    pub element_type_names: Vec<String>,
+    /// For each param in the args tuple, the index into type_param_names (if it's
+    /// a KernelInput param), or None (if it's a partition/scalar).
+    pub param_kernel_input_idx: Vec<Option<usize>>,
+    /// Names of the KernelOutput type params, e.g., ["_P0", "_P1"].
+    pub ko_type_param_names: Vec<String>,
+    /// Element type name for each KernelOutput param.
+    pub ko_element_type_names: Vec<String>,
+    /// For each param, the index into ko_type_param_names (if partition).
+    pub param_kernel_output_idx: Vec<Option<usize>>,
+    /// The "recovered" return expression with both KernelInput and KernelOutput recover calls.
+    pub recovered_tuple_str: String,
+}
+
 /// Code generation result for a tensor kernel parameter.
 ///
 /// Contains all the generated code components needed for a single tensor
@@ -839,6 +1146,8 @@ struct TensorLaunchCode {
     builder_statements: Vec<Stmt>,
     launch_grid_expr_strs: Vec<String>,
     validator_statements: ExprBlock,
+    /// Element type name (e.g., "T", "SrcType", "f32") for &Tensor params.
+    element_type_name: Option<String>,
 }
 
 /// Generates launcher code for a tensor kernel parameter.
@@ -902,27 +1211,20 @@ fn get_tensor_code(
         syn::parse::<PatType>(format!("{var_name}: {tensor_type}").parse().unwrap()).unwrap();
     // Stride expr.
     let stride_expr_str = if ty.mutability.is_some() {
-        // TODO (hme): Re-enable this for const stride?
-        // format!(r#"("{var_name}".to_string(), {var_name}.partition_strides.to_vec())"#)
         format!(
             r#"(
             "{var_name}".to_string(),
-            {{
-                let len = {var_name}.partition_strides.len();
-                let mut res = vec![-1; len];
-                res[len-1] = 1;
-                res
-            }}
+            KernelOutputStored::strides_hint(&{var_name})
         )"#
         )
     } else {
         // TODO (hme): Re-enable this for const stride?
-        // format!(r#"("{var_name}".to_string(), {var_name}.strides.to_vec())"#)
+        // format!(r#"("{var_name}".to_string(), {var_name}.strides().to_vec())"#)
         format!(
             r#"(
         "{var_name}".to_string(),
         {{
-            let len = {var_name}.strides.len();
+            let len = {var_name}.strides().len();
             let mut res = vec![-1; len];
             res[len-1] = 1;
             res
@@ -936,26 +1238,27 @@ fn get_tensor_code(
     let mut builder_statements = vec![];
     let mut launch_grid_expr_strs = vec![];
     let validator_statements = if ty.mutability.is_some() {
-        builder_statements.push(parse_stmt(format!("kernel_launch.push_arg(&{var_name});")));
-        launch_grid_expr_strs.push(format!("{var_name}.grid()?"));
+        builder_statements.push(parse_stmt(format!(
+            "KernelOutputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
+        )));
+        launch_grid_expr_strs.push(format!("KernelOutputStored::grid(&{var_name})?"));
         syn::parse2::<ExprBlock>(quote! {{
             {
                 let ValidParamType::Tensor(tensor_validator) = &validator.params[#var_idx] else {
                     panic!("Unexpected validator type {:#?}", &validator.params[#var_idx]);
                 };
                 let valid_shape = &tensor_validator.shape;
-                let given_shape = &#var_ident.partition_shape;
+                let given_shape: Vec<i32> = KernelOutputStored::partition_shape_as_i32(&#var_ident);
                 kernel_launch_assert(valid_shape.len() == given_shape.len(),
                     format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()).as_str())?;
-                kernel_launch_assert(valid_shape == given_shape,
+                kernel_launch_assert(valid_shape == &given_shape,
                     format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape, given_shape).as_str())?;
-                // TODO (hme): add validation for strides here too.
             }
         }})
         .unwrap()
     } else {
         builder_statements.push(parse_stmt(format!(
-            "kernel_launch.push_arg_arc(&{var_name});"
+            "KernelInputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
         )));
 
         syn::parse2::<ExprBlock>(quote! {{
@@ -964,7 +1267,7 @@ fn get_tensor_code(
                     panic!("Unexpected validator type {:#?}", &validator.params[#var_idx]);
                 };
                 let valid_shape = &tensor_validator.shape;
-                let given_shape = &#var_ident.shape;
+                let given_shape = #var_ident.shape();
                 kernel_launch_assert(valid_shape.len() == given_shape.len(),
                     format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()).as_str())?;
                 let valid_shape_mixed = zip(valid_shape, given_shape).map(|(&expected, &given)|{
@@ -981,12 +1284,18 @@ fn get_tensor_code(
         .unwrap()
     };
 
+    let element_type_name = if ty.mutability.is_none() {
+        Some(dtype.clone())
+    } else {
+        None
+    };
     Ok(TensorLaunchCode {
         fn_arg,
         stride_expr_str,
         builder_statements,
         launch_grid_expr_strs,
         validator_statements,
+        element_type_name,
     })
 }
 
@@ -1037,16 +1346,16 @@ pub fn infer_shape_params_from_tensor_type(
                             .push(last_ident.clone());
                         required_generics.expressions.insert(
                             last_ident.clone(),
-                            Some(format!("vec![{var_name}.dtype().as_str().to_string()]")),
+                            Some(format!("vec![{var_name}.dtype_str().to_string()]")),
                         );
                     }
                     SupportedGenericType::ConstArray => {
                         // This is a CGA type.
                         if is_mutable {
-                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.partition_shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                            required_generics.expressions.insert(last_ident.clone(), Some(format!("KernelOutputStored::partition_shape_as_i32(&{var_name}).iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
                         } else {
                             // This might make sense for a small tensor.
-                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape.iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
+                            required_generics.expressions.insert(last_ident.clone(), Some(format!("{var_name}.shape().iter().map(|x| x.to_string()).collect::<Vec<String>>()")));
                         }
                     }
                     SupportedGenericType::ConstScalar => {
@@ -1098,12 +1407,12 @@ pub fn infer_shape_params_from_tensor_type(
                                         }
                                         SupportedGenericType::ConstScalar => {
                                             if is_mutable {
-                                                required_generics.expressions.insert(ident.clone(), Some(format!("vec![{var_name}.partition_shape[{i}].to_string()]")));
+                                                required_generics.expressions.insert(ident.clone(), Some(format!("vec![KernelOutputStored::partition_shape_as_i32(&{var_name})[{i}].to_string()]")));
                                             } else {
                                                 required_generics.expressions.insert(
                                                     ident.clone(),
                                                     Some(format!(
-                                                        "vec![{var_name}.shape[{i}].to_string()]"
+                                                        "vec![{var_name}.shape()[{i}].to_string()]"
                                                     )),
                                                 );
                                             }

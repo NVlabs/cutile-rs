@@ -72,7 +72,7 @@
 //! The macro transforms this into:
 //! - An AST builder function for MLIR compilation
 //! - A direct launcher function (`vector_add`)
-//! - An `.apply(...)` helper (`vector_add_apply`)
+//! - A unified launcher that accepts both values and DeviceOps
 //! - Type metadata for shape inference
 //! - Proper handling of generic parameters
 //!
@@ -142,7 +142,7 @@ mod validate_dsl_syntax;
 ///
 /// - MLIR AST builder functions for compilation to CUDA
 /// - Direct launcher functions for host-side execution
-/// - `.apply(...)` helpers for composing existing `DeviceOperation`s
+/// - `Unified launchers accepting `IntoDeviceOp` for each parameter
 /// - Type metadata for shape inference and validation
 ///
 /// ## Basic Usage
@@ -159,9 +159,7 @@ mod validate_dsl_syntax;
 ///     }
 /// }
 ///
-/// // Generated: kernels::my_kernel() direct launcher
-/// // Generated: kernels::my_kernel_op() helper for separate DeviceOperations
-/// // Generated: kernels::my_kernel_apply() composition helper
+/// // Generated: kernels::my_kernel() unified launcher (accepts IntoDeviceOp args)
 /// ```
 ///
 /// ## Attributes
@@ -175,7 +173,6 @@ mod validate_dsl_syntax;
 ///
 /// 1. **AST Builder** - `<function>_ast()` - Builds MLIR representation
 /// 2. **Direct Launcher** - `<function>()` - Wraps materialized values as device operations
-/// 3. **Apply Helper** - `<function>_apply()` - Composition entry point for `.apply(...)`
 /// 4. **Metadata** - Type information for shape inference
 ///
 /// ## See Also

@@ -6,12 +6,14 @@
 //! Async runtime for CUDA device operations, providing futures-based kernel launching
 //! and device memory management.
 
+pub mod cuda_graph;
 pub mod device_buffer;
 pub mod device_context;
 pub mod device_future;
 pub mod device_operation;
 pub mod error;
 pub mod launch;
+pub mod prelude;
 pub mod scheduling_policies;
 
 pub use futures;

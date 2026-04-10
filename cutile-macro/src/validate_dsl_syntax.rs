@@ -124,7 +124,7 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
                 if type_name == "Tensor" {
                     ty.err("Tensors cannot be moved into kernel functions. \
                                   &mut Tensor corresponds to a partitioned tensor argument (e.g. x.partition([...])), \
-                                  and &Tensor corresponds to tensor reference argument (e.g. x.arc()).")?;
+                                  and &Tensor corresponds to a tensor reference argument (e.g. Arc::new(x) or x.into()).")?;
                 }
             }
             Type::Ptr(ptr_type) => {

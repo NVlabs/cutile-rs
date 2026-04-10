@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use cuda_async::device_operation::DeviceOperation;
+use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
 use cutile::api::{randn_f16, zeros};
 use cutile::core::f16;
@@ -75,7 +75,7 @@ fn softmax(c: &mut Criterion) {
             &label.1,
             |b, _size_mb| {
                 b.iter_custom(|iters| {
-                    let mut out: Partition<Tensor<f16>> = zeros([m, n])
+                    let mut out: Partition<Tensor<f16>> = zeros(&[m, n])
                         .sync_on(&stream)
                         .expect("Failed.")
                         .partition([bm, bn]);

@@ -35,6 +35,10 @@ name = "rmsnorm"
 harness = false
 
 [[bench]]
+name = "execution_lock"
+harness = false
+
+[[bench]]
 name = "launch_overhead"
 harness = false
 
@@ -44,4 +48,3 @@ cutile-compiler = { workspace = true }
 cuda-async = { workspace = true }
 cuda-core = { workspace = true }
 cutile = { workspace = true }
-cutile-examples = { workspace = true }
