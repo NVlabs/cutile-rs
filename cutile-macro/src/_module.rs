@@ -530,7 +530,7 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
     );
     // println!("structure {ident}: {attributes:#?}");
     let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
+        Some(attributes) => match attributes.name_as_str().unwrap() {
             "cuda_tile :: variadic_struct" => {
                 let items = variadic_struct(&attributes, item)?;
                 let structs = items.iter().map(|item| item.0.clone()).collect::<Vec<_>>();

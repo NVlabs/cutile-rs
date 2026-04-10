@@ -776,7 +776,7 @@ impl CUDATileModules {
         if matches!(
             generic_vars.instantiate_type(receiver_rust_ty, self.primitives())?,
             TypeInstance::ElementType(_)
-        ) {
+      ) {
             if let Some(impls) = self
                 .name_resolver
                 .trait_impls()

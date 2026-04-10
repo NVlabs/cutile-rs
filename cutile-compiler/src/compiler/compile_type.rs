@@ -35,11 +35,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         match ty {
             // Array, Slice, and Tuple compile to the same compiler representation (compound values).
             syn::Type::Tuple(tuple) => {
-                if tuple.elems.len() == 0 {
+                if tuple.elems.is_empty() {
                     return Ok(None);
                 } else {
                     let unknown_type_instance = TypeInstanceUserType::instantiate(
-                        &ty,
+                        ty,
                         generic_vars,
                         &self.modules.primitives(),
                     )
@@ -50,7 +50,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             syn::Type::Array(_) => {
                 let unknown_type_instance = TypeInstanceUserType::instantiate(
-                    &ty,
+                    ty,
                     generic_vars,
                     &self.modules.primitives(),
                 )
@@ -60,7 +60,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             syn::Type::Slice(_) => {
                 let unknown_type_instance = TypeInstanceUserType::instantiate(
-                    &ty,
+                    ty,
                     generic_vars,
                     &self.modules.primitives(),
                 )
@@ -69,7 +69,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 return Ok(Some(TileRustType::new_compound(type_instance)));
             }
             syn::Type::Reference(ref_ty) => {
-                let mut res = self.compile_type(&*ref_ty.elem, generic_vars, type_params)?;
+                let mut res = self.compile_type(&ref_ty.elem, generic_vars, type_params)?;
                 match &mut res {
                     Some(cuda_tile_ty) => {
                         cuda_tile_ty.rust_ty = ty.clone();
@@ -96,7 +96,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ty_attrs = self.modules.get_cuda_tile_type_attrs(type_name.as_str());
                         if ty_attrs.is_none() {
                             let unknown_type_instance = TypeInstanceUserType::instantiate(
-                                &ty,
+                                ty,
                                 generic_vars,
                                 &self.modules.primitives(),
                             )
@@ -107,7 +107,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 type_instance,
                             )));
                         }
-                        structure = Some((type_name.clone(), &item_struct));
+                        structure = Some((type_name.clone(), item_struct));
                         type_instance =
                             Some(generic_vars.instantiate_type(ty, &self.modules.primitives())?);
                     } else {
@@ -142,7 +142,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 None => return self.jit_error_result(&ty.span(), "Failed to compile type"),
             },
             syn::Type::Ptr(_) => {
-                let type_name = get_type_ident(&ty);
+                let type_name = get_type_ident(ty);
                 if type_name.is_none() {
                     return self.jit_error_result(&ty.span(), "Failed to compile type");
                 }
@@ -190,7 +190,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     &ty.span(),
                     &format!(
                         "Unable to compile compiling type {} using attrs {ty_attrs:#?}",
-                        ty.to_token_stream().to_string()
+                        ty.to_token_stream()
                     ),
                 );
             }
@@ -270,7 +270,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     &ty.span(),
                     &format!(
                         "Unable to compile type {} using attrs {scalar_attrs:#?}",
-                        element_instance.generic_ty.to_token_stream().to_string()
+                        element_instance.generic_ty.to_token_stream()
                     ),
                 );
             }
@@ -300,7 +300,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     &ty.span(),
                     &format!(
                         "Unable to compile compiling type {} using attrs {pointer_attrs:#?}",
-                        ty.to_token_stream().to_string()
+                        ty.to_token_stream()
                     ),
                 );
             }
@@ -319,10 +319,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 TypeInstance::PtrType(ptr_instance),
             )?));
         } else {
-            return self.jit_error_result(
+            self.jit_error_result(
                 &ty.span(),
                 &format!("Unable to instantiate Scalar or Pointer impls: type_instance={type_instance:#?}"),
-            );
+            )
         }
     }
 }
