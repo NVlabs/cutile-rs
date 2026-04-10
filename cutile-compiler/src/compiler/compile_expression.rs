@@ -1249,8 +1249,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "failed to compile range end expression",
                         );
                     };
-                    let iterand_lower_const = start_val.bounds.clone();
-                    let iterand_upper_const = end_val.bounds.clone();
+                    let iterand_lower_const = start_val.bounds;
+                    let iterand_upper_const = end_val.bounds;
                     let lower_bound = start_val.value.unwrap();
                     let upper_bound = end_val.value.unwrap();
                     let step_value = if let Some(step_expr) = maybe_step_expr {
@@ -1434,7 +1434,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }) = self.compile_expression(
                         module,
                         loop_block_id,
-                        &*while_expr.cond,
+                        &while_expr.cond,
                         generic_vars,
                         &mut loop_variables,
                         return_type.clone(),
@@ -1577,7 +1577,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let Some(conditional_val) = self.compile_expression(
                         module,
                         block_id,
-                        &*if_expr.cond,
+                        &if_expr.cond,
                         generic_vars,
                         ctx,
                         None,
@@ -1797,7 +1797,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         module,
                         block_id,
                         &block_expr.block,
-                        &generic_vars,
+                        generic_vars,
                         &mut inner_block_vars,
                         return_type,
                     )?;
@@ -1822,7 +1822,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         module,
                         block_id,
                         &block_expr.block,
-                        &generic_vars,
+                        generic_vars,
                         &mut inner_block_vars,
                         return_type,
                     )?;
@@ -1894,14 +1894,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         };
                         fields.insert(field_name, field_value);
                     }
-                    return Ok(Some(TileRustValue::new_struct(fields, return_type)));
+                    Ok(Some(TileRustValue::new_struct(fields, return_type)))
                 }
                 Expr::Reference(ref_expr) => {
                     // TODO (hme): Check whether all expr types can be supported.
                     let return_type = match return_type {
                         Some(ty) => {
                             if let syn::Type::Reference(ref_type) = ty.rust_ty {
-                                self.compile_type(&*ref_type.elem, generic_vars, &HashMap::new())?
+                                self.compile_type(&ref_type.elem, generic_vars, &HashMap::new())?
                             } else {
                                 None
                             }
@@ -1941,12 +1941,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             ctx,
                             return_type,
                         )?),
-                        _ => {
-                            return self.jit_error_result(
-                                &ref_expr.span(),
-                                "this reference expression form is not supported",
-                            )
-                        }
+                        _ => self.jit_error_result(
+                            &ref_expr.span(),
+                            "this reference expression form is not supported",
+                        ),
                     }
                 }
                 Expr::Tuple(tuple_expr) => {
@@ -1982,7 +1980,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         match self.compile_expression(
                             module,
                             block_id,
-                            &elem,
+                            elem,
                             generic_vars,
                             ctx,
                             elem_return_type,
@@ -2034,14 +2032,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             Some(return_type) => {
                                 match &return_type.rust_ty {
                                     syn::Type::Array(array_type) => self.compile_type(
-                                        &*array_type.elem,
+                                        &array_type.elem,
                                         generic_vars,
                                         &HashMap::new(),
                                     )?,
                                     syn::Type::Slice(slice) => {
                                         // TODO (hme): Confirm this is right.
                                         self.compile_type(
-                                            &*slice.elem,
+                                            &slice.elem,
                                             generic_vars,
                                             &HashMap::new(),
                                         )?
@@ -2051,7 +2049,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             &elem.span(),
                                             &format!(
                                                 "unexpected element type `{}`",
-                                                return_type.rust_ty.to_token_stream().to_string()
+                                                return_type.rust_ty.to_token_stream()
                                             ),
                                         )
                                     }
@@ -2062,7 +2060,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         match self.compile_expression(
                             module,
                             block_id,
-                            &elem,
+                            elem,
                             generic_vars,
                             ctx,
                             elem_ty,
@@ -2076,8 +2074,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             }
                         };
                     }
-                    let return_type = if return_type.is_none() {
-                        if values.len() == 0 {
+                    let return_type = if let Some(return_type) = return_type {
+                        return_type
+                    } else {
+                        if values.is_empty() {
                             return self.jit_error_result(
                                 &array_expr.span(),
                                 "unable to infer type for empty array; add a type annotation",
@@ -2107,8 +2107,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 )
                             }
                         }
-                    } else {
-                        return_type.unwrap()
                     };
                     Ok(Some(TileRustValue::new_compound(values, return_type)))
                 }
@@ -2172,8 +2170,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         );
                     };
                     let values: Vec<TileRustValue> = vec![value; len];
-                    let return_type = if return_type.is_none() {
-                        if values.len() == 0 {
+                    let return_type = if let Some(return_type) = return_type {
+                        return_type
+                    } else {
+                        if values.is_empty() {
                             return self.jit_error_result(
                                 &repeat_expr.span(),
                                 "unable to infer type for zero-length repeat expression; add a type annotation",
@@ -2203,8 +2203,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 )
                             }
                         }
-                    } else {
-                        return_type.unwrap()
                     };
                     Ok(Some(TileRustValue::new_compound(values, return_type)))
                 }
@@ -2330,7 +2328,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     return_type,
                                 );
                             }
-                            let ident = get_ident_from_path_expr(&path_expr);
+                            let ident = get_ident_from_path_expr(path_expr);
                             // Handle Some(...) specially - it's a Rust Option constructor, not a function call
                             if ident.to_string() == "Some" {
                                 if call_expr.args.len() != 1 {
@@ -2375,9 +2373,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     option_type,
                                 )));
                             }
-                            if let Some(_) = self
+                            if self
                                 .modules
                                 .get_cuda_tile_op_attrs(ident.to_string().as_str())
+                                .is_some()
                             {
                                 Ok(self.compile_cuda_tile_op_call(
                                     module,
@@ -2412,24 +2411,22 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                         module_name,
                                         fn_item,
                                         call_expr,
-                                        &generic_vars,
+                                        generic_vars,
                                         ctx,
                                         return_type,
                                     )?)
                                 }
                             } else {
-                                return self.jit_error_result(
+                                self.jit_error_result(
                                     &call_expr.func.span(),
                                     &format!("call to `{}` is not supported", &call_expr_func_str),
-                                );
+                                )
                             }
                         }
-                        _ => {
-                            return self.jit_error_result(
-                                &call_expr.func.span(),
-                                &format!("Call to {} not supported.", &call_expr_func_str),
-                            )
-                        }
+                        _ => self.jit_error_result(
+                            &call_expr.func.span(),
+                            &format!("Call to {} not supported.", &call_expr_func_str),
+                        ),
                     }
                 }
                 Expr::MethodCall(method_call_expr) => {
@@ -2466,8 +2463,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Ok(self.inline_method_call(
                         module,
                         block_id,
-                        &method_call_expr,
-                        &generic_vars,
+                        method_call_expr,
+                        generic_vars,
                         ctx,
                         return_type,
                     )?)
@@ -2505,7 +2502,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let Some(field_value) = fields.get(&field_name.to_string()) else {
                                 return self.jit_error_result(
                                     &field_name.span(),
-                                    &format!("{} is not a field.", field_name.to_string()),
+                                    &format!("{} is not a field.", field_name),
                                 );
                             };
                             Ok(Some(field_value.clone()))
@@ -2572,7 +2569,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     let str = format!("-{}", int_lit.base10_digits());
                                     let val = -int_lit
                                         .base10_parse::<i32>()
-                                        .expect(format!("Failed to parse literal {str}").as_str())
+                                        .unwrap_or_else(|_| panic!("Failed to parse literal {str}"))
                                         as i64;
                                     (str, Some(Bounds::exact(val)))
                                 }
@@ -2624,12 +2621,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 op_result, ct_type, bounds,
                             )))
                         }
-                        _ => {
-                            return self.jit_error_result(
-                                &unary_expr.span(),
-                                "Non-const unary expressions not supported.",
-                            )
-                        }
+                        _ => self.jit_error_result(
+                            &unary_expr.span(),
+                            "Non-const unary expressions not supported.",
+                        ),
                     }
                 }
                 Expr::Cast(cast_expr) => {
@@ -2637,7 +2632,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         .compile_expression(
                             module,
                             block_id,
-                            &*cast_expr.expr,
+                            &cast_expr.expr,
                             generic_vars,
                             ctx,
                             None,
@@ -2686,7 +2681,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             &lit_expr.span(),
                             &format!(
                                 "Failed to infer type for lit expr {}.",
-                                lit_expr.to_token_stream().to_string()
+                                lit_expr.to_token_stream()
                             ),
                         );
                     };
@@ -2702,7 +2697,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let str = int_lit.base10_digits().to_string();
                             let val = int_lit
                                 .base10_parse::<i32>()
-                                .expect(format!("Failed to parse literal {str}").as_str())
+                                .unwrap_or_else(|_| panic!("Failed to parse literal {str}"))
                                 as i64;
                             (str, Some(Bounds::exact(val)))
                         }
@@ -2759,7 +2754,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Ok(self.compile_binary_op(
                         module,
                         block_id,
-                        &bin_expr,
+                        bin_expr,
                         generic_vars,
                         ctx,
                         return_type.clone(),
@@ -2831,17 +2826,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // Closures cannot be used as standalone expressions in CUDA Tile.
                     // They are only supported as arguments to specific operations (e.g., reduce, scan)
                     // that compile them into tile-ir regions.
-                    return self.jit_error_result(
+                    self.jit_error_result(
                         &closure_expr.span(),
                         "closures are not supported as standalone values; \
                          they can only be used as arguments to operations like `reduce()` or `scan()`",
-                    );
+                    )
                 }
                 Expr::Index(index_expr) => {
                     let Some(expr_val) = self.compile_expression(
                         module,
                         block_id,
-                        &*index_expr.expr,
+                        &index_expr.expr,
                         generic_vars,
                         ctx,
                         return_type.clone(),
@@ -2858,7 +2853,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let Some(index_val) = self.compile_expression(
                         module,
                         block_id,
-                        &*index_expr.index,
+                        &index_expr.index,
                         generic_vars,
                         ctx,
                         i32_type,
@@ -2935,10 +2930,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         "indexing is only supported on tuple/compound values and shape-like descriptors",
                     );
                 }
-                _ => {
-                    return self
-                        .jit_error_result(&expr.span(), "this expression form is not supported")
-                }
+                _ => self.jit_error_result(&expr.span(), "this expression form is not supported"),
             }
         }) // stacker::maybe_grow
     }
