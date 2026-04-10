@@ -255,7 +255,7 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let device = Device::new(device_id)?;
+    let device = get_or_init_cuda_context(device_id)?;
     let policy = StreamPoolRoundRobin::new(&device, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
     let deallocator_stream = device.new_stream()?;
     let device_context = AsyncDeviceContext {
