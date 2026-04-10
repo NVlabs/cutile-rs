@@ -249,16 +249,13 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let context = CudaContext::new(device_id)?;
+    let context = get_or_init_cuda_context(device_id)?;
     let policy = StreamPoolRoundRobin::new(&context, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
     let deallocator_stream = context.new_stream()?;
     let device_context = AsyncDeviceContext {
         device_id,
-        context,
         deallocator_stream,
         policy: Arc::new(policy),
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     };
     let pred = hashmap.insert(device_id, device_context).is_none();
     device_assert(device_id, pred, "Device is already initialized.")
