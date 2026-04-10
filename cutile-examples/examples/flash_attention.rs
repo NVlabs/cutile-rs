@@ -20,8 +20,7 @@ mod my_module {
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
                        optimization_hints = (
-                         tensor_dim_factor = 16,
-                         sm_120 = (num_cta_in_cga=1,),
+                         sm_120 = (num_cta_in_cga=1, max_divisibility=16,),
                        ))]
     fn fmha<
         const BM: i32, // Q sequence length partition size.

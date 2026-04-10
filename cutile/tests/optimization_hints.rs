@@ -75,6 +75,7 @@ fn compile_kernel(name: &str, strides: &[(&str, &[i32])], options: &CompileOptio
         name,
         &[128.to_string()],
         strides,
+        &[],
         None,
         gpu_name,
         options,

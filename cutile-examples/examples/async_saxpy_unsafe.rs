@@ -58,6 +58,7 @@ async fn main() -> Result<(), Error> {
                 "saxpy_entry",
                 function_generics,
                 stride_args,
+                vec![],
                 None,
                 CompileOptions::default(),
             );

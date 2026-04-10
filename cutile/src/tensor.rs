@@ -423,11 +423,14 @@ pub trait IntoPartitionArc {
 /// let gpu_tensor = api::arange::<f32>(100).await;
 /// let cpu_vec: Vec<f32> = gpu_tensor.to_host_vec().await;
 /// ```
+pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
+
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
     pub(crate) storage: Arc<DeviceBuffer>,
     pub(crate) shape: Vec<i32>,
     pub(crate) strides: Vec<i32>,
+    pub(crate) spec: SpecializationBits,
     _dtype: PhantomData<T>,
 }
 
@@ -501,10 +504,18 @@ impl<T: DType> Tensor<T> {
         strides: Vec<i32>,
     ) -> Self {
         Self::assert_valid_metadata(&shape, &strides, device_buffer.len_bytes());
+        let storage = Arc::new(device_buffer);
+        let spec = compute_spec(
+            storage.cu_deviceptr(),
+            &shape,
+            &strides,
+            size_of::<T>() as i32,
+        );
         Self {
-            storage: Arc::new(device_buffer),
+            storage,
             shape,
             strides,
+            spec,
             _dtype: PhantomData,
         }
     }
@@ -645,6 +656,11 @@ impl<T: DType> Tensor<T> {
         &self.strides
     }
 
+    /// Returns the tensor's specialization bits.
+    pub fn spec(&self) -> &SpecializationBits {
+        &self.spec
+    }
+
     /// Returns the total number of elements in the tensor.
     pub fn size(&self) -> usize {
         debug_assert_eq!(self.typed_num_bytes(), self.storage_num_bytes());
@@ -682,6 +698,7 @@ impl<T: DType> Tensor<T> {
             storage: self.storage.clone(),
             shape: self.shape.clone(),
             strides: self.strides.clone(),
+            spec: self.spec.clone(),
             _dtype: PhantomData,
         })
     }
@@ -690,6 +707,12 @@ impl<T: DType> Tensor<T> {
     pub(crate) fn reshape_unchecked(mut self, shape: &[usize]) -> Self {
         let shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         self.strides = contiguous_strides(&shape);
+        self.spec = compute_spec(
+            self.storage.cu_deviceptr(),
+            &shape,
+            &self.strides,
+            size_of::<T>() as i32,
+        );
         self.shape = shape;
         self
     }
@@ -699,10 +722,18 @@ impl<T: DType> Tensor<T> {
     pub(crate) fn reshape_shared(self: &Arc<Self>, shape: &[usize]) -> Result<Arc<Self>, Error> {
         self.validate_view_shape(shape)?;
         let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
+        let new_strides = contiguous_strides(&new_shape);
+        let spec = compute_spec(
+            self.storage.cu_deviceptr(),
+            &new_shape,
+            &new_strides,
+            size_of::<T>() as i32,
+        );
         Ok(Arc::new(Self {
             storage: self.storage.clone(),
-            strides: contiguous_strides(&new_shape),
+            strides: new_strides,
             shape: new_shape,
+            spec,
             _dtype: PhantomData,
         }))
     }
@@ -717,10 +748,18 @@ impl<T: DType> Tensor<T> {
     ) -> Result<Arc<Tensor<U>>, Error> {
         self.validate_reinterpret_shape::<U>(shape)?;
         let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
+        let new_strides = contiguous_strides(&new_shape);
+        let spec = compute_spec(
+            self.storage.cu_deviceptr(),
+            &new_shape,
+            &new_strides,
+            size_of::<U>() as i32,
+        );
         Ok(Arc::new(Tensor::<U> {
             storage: self.storage.clone(),
-            strides: contiguous_strides(&new_shape),
+            strides: new_strides,
             shape: new_shape,
+            spec,
             _dtype: PhantomData,
         }))
     }
@@ -812,8 +851,10 @@ impl<'a, T: DType> Reshape for &'a Arc<Tensor<T>> {
 /// ```
 pub struct TensorView<'a, T: DType> {
     base: &'a Tensor<T>,
+    offset_bytes: usize,
     shape: Vec<i32>,
     strides: Vec<i32>,
+    spec: SpecializationBits,
 }
 
 impl<'a, T: DType> TensorView<'a, T> {
@@ -822,6 +863,9 @@ impl<'a, T: DType> TensorView<'a, T> {
     }
     pub fn strides(&self) -> &[i32] {
         &self.strides
+    }
+    pub fn spec(&self) -> &SpecializationBits {
+        &self.spec
     }
     pub fn size(&self) -> usize {
         self.shape.iter().map(|&x| x as usize).product()
@@ -834,10 +878,19 @@ impl<'a, T: DType> TensorView<'a, T> {
             return tensor_error_result("view: new shape must preserve element count.");
         }
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
+        let new_strides = contiguous_strides(&new_shape);
+        let spec = compute_spec(
+            self.base.storage.cu_deviceptr(),
+            &new_shape,
+            &new_strides,
+            size_of::<T>() as i32,
+        );
         Ok(TensorView {
             base: self.base,
-            shape: new_shape.clone(),
-            strides: contiguous_strides(&new_shape),
+            offset_bytes: self.offset_bytes,
+            shape: new_shape,
+            strides: new_strides,
+            spec,
         })
     }
 }
@@ -854,10 +907,19 @@ impl<T: DType> Tensor<T> {
             return tensor_error_result("view: new shape must preserve element count.");
         }
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
+        let new_strides = contiguous_strides(&new_shape);
+        let spec = compute_spec(
+            self.storage.cu_deviceptr(),
+            &new_shape,
+            &new_strides,
+            size_of::<T>() as i32,
+        );
         Ok(TensorView {
             base: self,
-            shape: new_shape.clone(),
-            strides: contiguous_strides(&new_shape),
+            offset_bytes: 0,
+            shape: new_shape,
+            strides: new_strides,
+            spec,
         })
     }
 }
@@ -1108,6 +1170,7 @@ pub trait KernelOutputStored<T: DType>: Send {
     fn dtype_str(&self) -> &'static str;
     fn partition_shape_as_i32(&self) -> Vec<i32>;
     fn strides_hint(&self) -> Vec<i32>;
+    fn spec(&self) -> &SpecializationBits;
     fn shape_as_i32(&self) -> Vec<i32>;
 }
 
@@ -1165,10 +1228,15 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
         self.partition_shape.iter().map(|&x| x as i32).collect()
     }
     fn strides_hint(&self) -> Vec<i32> {
-        let len = self.partition_strides.len();
-        let mut res = vec![-1; len];
-        res[len - 1] = 1;
-        res
+        self.object
+            .spec
+            .stride_one
+            .iter()
+            .map(|&is_one| if is_one { 1 } else { -1 })
+            .collect()
+    }
+    fn spec(&self) -> &SpecializationBits {
+        &self.object.spec
     }
     fn shape_as_i32(&self) -> Vec<i32> {
         self.object.shape.clone()
@@ -1222,10 +1290,15 @@ impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
         self.partition_shape.iter().map(|&x| x as i32).collect()
     }
     fn strides_hint(&self) -> Vec<i32> {
-        let len = self.partition_strides.len();
-        let mut res = vec![-1; len];
-        res[len - 1] = 1;
-        res
+        self.object
+            .spec
+            .stride_one
+            .iter()
+            .map(|&is_one| if is_one { 1 } else { -1 })
+            .collect()
+    }
+    fn spec(&self) -> &SpecializationBits {
+        &self.object.spec
     }
     fn shape_as_i32(&self) -> Vec<i32> {
         self.object.shape.clone()
@@ -1267,6 +1340,7 @@ pub trait KernelInputStored: Send {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn shape(&self) -> &[i32];
     fn strides(&self) -> &[i32];
+    fn spec(&self) -> &SpecializationBits;
     fn dtype_str(&self) -> &'static str;
 }
 
@@ -1292,6 +1366,7 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());
         }
+        launcher.push_arg(0i32); // no offset for non-view tensors
         for dim in self.shape.iter() {
             launcher.push_arg(*dim);
         }
@@ -1304,6 +1379,9 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
     }
     fn strides(&self) -> &[i32] {
         Tensor::strides(self)
+    }
+    fn spec(&self) -> &SpecializationBits {
+        Tensor::spec(self)
     }
     fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
@@ -1315,6 +1393,7 @@ impl<'a, T: DType + Sync> KernelInputStored for &'a Tensor<T> {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());
         }
+        launcher.push_arg(0i32); // no offset for non-view tensors
         for dim in self.shape.iter() {
             launcher.push_arg(*dim);
         }
@@ -1327,6 +1406,9 @@ impl<'a, T: DType + Sync> KernelInputStored for &'a Tensor<T> {
     }
     fn strides(&self) -> &[i32] {
         Tensor::strides(self)
+    }
+    fn spec(&self) -> &SpecializationBits {
+        Tensor::spec(self)
     }
     fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
@@ -1373,9 +1455,12 @@ impl<'a, T: DType + Sync> KernelInput<T> for &'a Tensor<T> {
 impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         // Push the base tensor's device pointer with the VIEW's shape/strides.
+        // The offset is applied device-side via ptr.offset() in the entry generator.
         unsafe {
             launcher.push_device_ptr(self.base.cu_deviceptr());
         }
+        let offset_elements = (self.offset_bytes / std::mem::size_of::<T>()) as i32;
+        launcher.push_arg(offset_elements);
         for dim in self.shape.iter() {
             launcher.push_arg(*dim);
         }
@@ -1388,6 +1473,9 @@ impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
     }
     fn strides(&self) -> &[i32] {
         &self.strides
+    }
+    fn spec(&self) -> &SpecializationBits {
+        TensorView::spec(self)
     }
     fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()

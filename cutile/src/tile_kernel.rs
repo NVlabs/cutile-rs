@@ -13,6 +13,7 @@ use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile::ModuleOperation;
 use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
+use cutile_compiler::specialization::SpecializationBits;
 use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
@@ -41,6 +42,7 @@ pub struct TileFunctionKey {
     function_name: String,
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
+    pub spec_args: Vec<(String, SpecializationBits)>,
     pub grid: Option<(u32, u32, u32)>,
     pub compile_options: CompileOptions,
 }
@@ -51,6 +53,7 @@ impl TileFunctionKey {
         function_name: String,
         function_generics: Vec<String>,
         stride_args: Vec<(String, Vec<i32>)>,
+        spec_args: Vec<(String, SpecializationBits)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
     ) -> Self {
@@ -59,6 +62,7 @@ impl TileFunctionKey {
             function_name,
             function_generics,
             stride_args,
+            spec_args,
             grid,
             compile_options,
         }
@@ -163,6 +167,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     function_entry: &str,
     function_generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
+    spec_args: Vec<(String, SpecializationBits)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
 ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
@@ -173,6 +178,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         function_name.to_string(),
         function_generics,
         stride_args,
+        spec_args,
         const_grid,
         compile_options,
     );
@@ -211,25 +217,22 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         //     let mlir = module_op.as_operation().to_string();
         //     mlir
         // };
-        let args = (
+        let stride_args_refs: Vec<(&str, &[i32])> = key
+            .stride_args
+            .iter()
+            .map(|x| (x.0.as_str(), x.1.as_slice()))
+            .collect();
+        let spec_args_refs: Vec<(&str, &SpecializationBits)> =
+            key.spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
             module_name,
             function_name,
             &key.function_generics,
-            &key.stride_args
-                .iter()
-                .map(|x| (x.0.as_str(), x.1.as_slice()))
-                .collect::<Vec<_>>(),
+            &stride_args_refs,
+            &spec_args_refs,
             const_grid,
             gpu_name.clone(),
-        );
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            args.0,
-            args.1,
-            args.2,
-            args.3,
-            args.4,
-            args.5.clone(),
             &key.compile_options,
         )?;
         let validator: Validator = compiler.get_validator();
@@ -420,6 +423,7 @@ where
         function_entry: &str,
         function_generics: Vec<String>,
         stride_args: Vec<(String, Vec<i32>)>,
+        spec_args: Vec<(String, SpecializationBits)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
     ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
@@ -431,6 +435,7 @@ where
             function_entry,
             function_generics,
             stride_args,
+            spec_args,
             grid,
             compile_options,
         )

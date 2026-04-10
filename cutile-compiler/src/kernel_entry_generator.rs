@@ -33,7 +33,8 @@ struct TensorInput {
     input_tensor_shape: InputTensorShape,
     static_strides: Vec<String>,
     pub mutable: bool,
-    pub tensor_dim_factor: Option<i32>,
+    pub max_divisibility: Option<i32>,
+    pub spec: Option<crate::specialization::SpecializationBits>,
 }
 
 impl TensorInput {
@@ -42,6 +43,7 @@ impl TensorInput {
         src_fn_arg: &FnArg,
         generic_vars: &GenericVars,
         stride_args: &HashMap<String, Vec<i32>>,
+        spec_args: &HashMap<String, crate::specialization::SpecializationBits>,
         primitives: &HashMap<(String, String), ItemImpl>,
         opt_hints: &OptimizationHints,
     ) -> Result<Self, JITError> {
@@ -63,7 +65,12 @@ impl TensorInput {
         let dim_type = "i32".to_string();
         let rank = input_tensor_shape.shape.len() as i32;
         let mutable = get_type_mutability(ty);
-        let tensor_dim_factor = opt_hints.tensor_dim_factor.clone();
+        let max_divisibility = opt_hints
+            .target_gpu_name
+            .as_ref()
+            .and_then(|gpu| opt_hints.get_sm_hints(gpu))
+            .and_then(|hints| hints.max_divisibility);
+        let spec = spec_args.get(var_name.as_str()).cloned();
         let res = Self {
             fn_name,
             var_name,
@@ -73,7 +80,8 @@ impl TensorInput {
             input_tensor_shape,
             static_strides,
             mutable,
-            tensor_dim_factor,
+            max_divisibility,
+            spec,
         };
         res.validate()?;
         Ok(res)
@@ -141,6 +149,12 @@ impl TensorInput {
         let mut fn_args = Punctuated::<FnArg, Token![,]>::new();
         // ptr
         fn_args.push(self.ptr_arg());
+        if !self.mutable {
+            // Immutable tensors receive an element offset from the host
+            // (for TensorView slicing). Mutable tensors compute their
+            // offset from block ID in generate_statements.
+            fn_args.push(self.i_arg("offset", 0));
+        }
         // dims
         for i in 0..self.rank {
             fn_args.push(self.dim_arg(i));
@@ -197,6 +211,29 @@ impl TensorInput {
         stmt
     }
 
+    /// Returns the byte size of an element type string (e.g., "f32" -> 4).
+    fn element_type_size(element_type: &str) -> i32 {
+        match element_type {
+            "bool" | "u8" | "i8" => 1,
+            "u16" | "i16" | "f16" | "bf16" => 2,
+            "u32" | "i32" | "f32" => 4,
+            "u64" | "i64" | "f64" => 8,
+            _ => 1,
+        }
+    }
+
+    /// Computes effective divisor: auto-inferred from spec, capped by max_divisibility.
+    /// When max_divisibility is set, it acts as a ceiling (max_divisibility).
+    /// When no spec is available, max_divisibility is used directly as before.
+    fn effective_div(&self, inferred: Option<i32>) -> i32 {
+        match (inferred, self.max_divisibility) {
+            (Some(auto_val), Some(max_div)) => auto_val.min(max_div),
+            (Some(auto_val), None) => auto_val,
+            (None, Some(fallback)) => fallback,
+            (None, None) => 1,
+        }
+    }
+
     fn generate_statements(&self) -> Vec<Stmt> {
         let mut statements = Vec::new();
         let var_name = &self.var_name;
@@ -224,13 +261,12 @@ impl TensorInput {
         let dynamic_dims: Vec<String> =
             self.get_dynamic_elements(&self.input_tensor_shape.shape, dim_i_arg_name.to_string());
         let dims_var = format!("{var_name}_{dims_arg_name}");
-        for dynamic_dim_var in &dynamic_dims {
+        for (i, dynamic_dim_var) in dynamic_dims.iter().enumerate() {
             statements.push(Self::get_assume_non_negative_stmt(dynamic_dim_var.clone()));
-            if let Some(tensor_dim_factor) = self.tensor_dim_factor {
-                statements.push(Self::get_assume_div_by(
-                    dynamic_dim_var.clone(),
-                    tensor_dim_factor,
-                ));
+            let inferred = self.spec.as_ref().and_then(|s| s.shape_div.get(i).copied());
+            let div = self.effective_div(inferred);
+            if div > 1 {
+                statements.push(Self::get_assume_div_by(dynamic_dim_var.clone(), div));
             }
         }
         let dims = syn::parse2::<syn::Stmt>(
@@ -260,15 +296,17 @@ impl TensorInput {
         let strides_arg_name = format!("{}s", stride_i_arg_name);
         let dynamic_strides: Vec<String> =
             self.get_dynamic_elements(&self.static_strides, stride_i_arg_name.to_string());
-        for dynamic_stride_var in &dynamic_strides {
+        for (i, dynamic_stride_var) in dynamic_strides.iter().enumerate() {
             statements.push(Self::get_assume_non_negative_stmt(
                 dynamic_stride_var.clone(),
             ));
-            if let Some(tensor_dim_factor) = self.tensor_dim_factor {
-                statements.push(Self::get_assume_div_by(
-                    dynamic_stride_var.clone(),
-                    tensor_dim_factor,
-                ));
+            let inferred = self
+                .spec
+                .as_ref()
+                .and_then(|s| s.stride_div.get(i).copied());
+            let div = self.effective_div(inferred);
+            if div > 1 {
+                statements.push(Self::get_assume_div_by(dynamic_stride_var.clone(), div));
             }
         }
         let strides_var = format!("{var_name}_{strides_arg_name}");
@@ -336,15 +374,27 @@ impl TensorInput {
             statements.push(partition_ptr_stmnt);
             partition_ptr_var
         } else {
-            ptr_var
+            // Immutable tensors: apply the host-provided element offset.
+            let offset_var = format!("{var_name}_offset_0");
+            let offset_ptr_var = format!("{var_name}_offset_ptr");
+            let offset_ptr_stmnt = syn::parse2::<syn::Stmt>(
+                format!("let {offset_ptr_var}: PointerTile<*mut {element_type}, {{[]}}> = {ptr_var}.offset({offset_var});").parse().unwrap()
+            ).unwrap();
+            statements.push(offset_ptr_stmnt);
+            // The offset is in elements, so the result pointer maintains
+            // element alignment. Emit assume_div_by with the element size
+            // unconditionally — this is always valid and must not be capped
+            // by max_divisibility.
+            let elem_size = Self::element_type_size(element_type);
+            if elem_size > 1 {
+                statements.push(Self::get_assume_div_by(offset_ptr_var.clone(), elem_size));
+            }
+            offset_ptr_var
         };
-        // If any of the underlying dimensions are divisible by a factor of 16,
-        // then so is the pointer.
-        if let Some(tensor_dim_factor) = self.tensor_dim_factor {
-            statements.push(Self::get_assume_div_by(
-                final_ptr_var.clone(),
-                tensor_dim_factor,
-            ));
+        let inferred_ptr_div = self.spec.as_ref().map(|s| s.base_ptr_div);
+        let ptr_div = self.effective_div(inferred_ptr_div);
+        if ptr_div > 1 {
+            statements.push(Self::get_assume_div_by(final_ptr_var.clone(), ptr_div));
         }
 
         let tensor_stmnt = syn::parse2::<syn::Stmt>(
@@ -365,6 +415,7 @@ pub fn generate_entry_point(
     fn_item: &ItemFn,
     generic_vars: &GenericVars,
     stride_args: &HashMap<String, Vec<i32>>,
+    spec_args: &HashMap<String, crate::specialization::SpecializationBits>,
     primitives: &HashMap<(String, String), ItemImpl>,
     opt_hints: &OptimizationHints,
 ) -> Result<(ItemFn, Validator), JITError> {
@@ -395,6 +446,7 @@ pub fn generate_entry_point(
                             param,
                             generic_vars,
                             stride_args,
+                            spec_args,
                             primitives,
                             opt_hints,
                         )?;

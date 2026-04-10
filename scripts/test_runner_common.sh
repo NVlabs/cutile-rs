@@ -88,15 +88,20 @@ run_examples() {
 
 run_benches() {
     local benches_dir="$1"
+    local extra_features="${2:-}"
     local benches_passed=0
     local benches_failed=0
     local failed_benches=()
+    local features_flag=""
+    if [[ -n "$extra_features" ]]; then
+        features_flag="--features $extra_features"
+    fi
 
     mapfile -t benches < <(find "$benches_dir" -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
 
     for bench in "${benches[@]}"; do
         echo -e "  Running benchmark: ${bench}"
-        if cargo bench --bench "$bench" --quiet >/dev/null 2>&1; then
+        if cargo bench --bench "$bench" $features_flag --quiet >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} ${bench}"
             ((benches_passed++))
         else

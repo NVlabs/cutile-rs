@@ -24,7 +24,7 @@ mod my_module {
     #[cutile::entry(
         print_ir=true,
         unchecked_accesses=false,
-        optimization_hints = (tensor_dim_factor = 16,)
+        optimization_hints = (sm_120 = (max_divisibility = 16,),)
     )]
     unsafe fn tensor_permute<
         T: ElementType,

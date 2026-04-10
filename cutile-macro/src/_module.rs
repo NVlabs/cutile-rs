@@ -334,7 +334,7 @@ fn module_inner(
                 use #tile_rust_crate_root::error::{*};
                 use #tile_rust_crate_root::DType;
                 use #tile_rust_crate_root::{tensor};
-                use #tile_rust_crate_root::tensor::{KernelInput, KernelInputStored, KernelOutput, KernelOutputStored};
+                use #tile_rust_crate_root::tensor::{KernelInput, KernelInputStored, KernelOutput, KernelOutputStored, SpecializationBits};
                 use #tile_rust_crate_root::tile_kernel::{*};
                 use #tile_rust_crate_root::cuda_async::error::{*};
                 use #tile_rust_crate_root::cuda_async::scheduling_policies::SchedulingPolicy;

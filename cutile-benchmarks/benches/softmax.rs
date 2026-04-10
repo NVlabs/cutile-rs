@@ -18,8 +18,7 @@ mod kernels {
 
     #[cutile::entry(print_ir=false, unchecked_accesses=true,
         optimization_hints = (
-            tensor_dim_factor = 8,
-            sm_120 = (occupancy = 1,),
+            sm_120 = (occupancy = 1, max_divisibility = 8,),
     ))]
     unsafe fn softmax<const BM: i32, const BN: i32>(
         x: &Tensor<f16, { [-1, -1] }>,
@@ -38,10 +37,17 @@ mod kernels {
 
 fn softmax(c: &mut Criterion) {
     let mut group = c.benchmark_group("softmax");
-    group
-        .warm_up_time(Duration::from_millis(1000))
-        .sample_size(10usize.pow(2))
-        .measurement_time(Duration::from_millis(5000));
+    if cfg!(feature = "smoke-test") {
+        group
+            .warm_up_time(Duration::from_millis(1))
+            .sample_size(10)
+            .measurement_time(Duration::from_millis(1));
+    } else {
+        group
+            .warm_up_time(Duration::from_millis(500))
+            .sample_size(20)
+            .measurement_time(Duration::from_millis(2000));
+    }
 
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
@@ -100,5 +106,14 @@ fn softmax(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, softmax);
+fn bench_config() -> Criterion {
+    if cfg!(feature = "smoke-test") {
+        Criterion::default()
+            .without_plots()
+            .save_baseline("smoke-discard".to_string())
+    } else {
+        Criterion::default()
+    }
+}
+criterion_group!(name = benches; config = bench_config(); targets = softmax);
 criterion_main!(benches);

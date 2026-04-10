@@ -93,6 +93,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         function_name: &str,
         function_generic_args: &[String],
         stride_args: &[(&str, &[i32])],
+        spec_args: &[(&str, &crate::specialization::SpecializationBits)],
         const_grid: Option<(u32, u32, u32)>,
         gpu_name: String,
         compile_options: &CompileOptions,
@@ -143,12 +144,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             .map(|(k, v)| (k.to_string(), v.to_vec()))
             .collect::<HashMap<_, _>>();
 
+        let spec_args_map: HashMap<String, crate::specialization::SpecializationBits> = spec_args
+            .iter()
+            .map(|(k, v)| (k.to_string(), (*v).clone()))
+            .collect();
+
         let generic_vars = GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
 
         let (entry, validator) = generate_entry_point(
             &function,
             &generic_vars,
             &stride_args,
+            &spec_args_map,
             &modules.primitives,
             &optimization_hints,
         )?;
