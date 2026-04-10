@@ -180,11 +180,7 @@ impl TensorInput {
         fn_args
     }
 
-    fn get_dynamic_elements(
-        &self,
-        static_elements: &Vec<String>,
-        i_arg_name: String,
-    ) -> Vec<String> {
+    fn get_dynamic_elements(&self, static_elements: &[String], i_arg_name: String) -> Vec<String> {
         let var_name = self.var_name.clone();
         let mut dynamic_elements = vec![];
         for (i, dim) in static_elements.iter().enumerate() {
@@ -340,7 +336,7 @@ impl TensorInput {
         let ptr_var = format!("{var_name}_ptr");
         let final_ptr_var = if self.mutable {
             let pid_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let pid: (i32, i32, i32) = get_tile_block_id();")
+                "let pid: (i32, i32, i32) = get_tile_block_id();"
                     .parse()
                     .unwrap(),
             )
@@ -500,7 +496,7 @@ pub fn generate_entry_point(
                                     if s == "- 1" {
                                         -1
                                     } else {
-                                        s.parse::<i32>().expect(format!("{s}").as_str())
+                                        s.parse::<i32>().unwrap_or_else(|_| panic!("{s}"))
                                     }
                                 })
                                 .collect::<Vec<i32>>(),
@@ -632,74 +628,41 @@ pub fn get_tensor_shape(
     let mut shape: Option<InputTensorShape> = None;
     for generic_arg in &type_generic_args.args {
         match generic_arg {
-            GenericArgument::Type(type_param) => {
+            GenericArgument::Type(syn::Type::Path(type_path)) => {
                 // Currently, this is either shape or element_type
-                match type_param {
-                    syn::Type::Path(type_path) => {
-                        let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
-                        // println!("get_variadic_type_args: Type::Path: {}", last_ident);
-                        if generic_vars.inst_array.contains_key(&last_ident) {
-                            // This is something like Shape<D> for const generic array D: [i32; N].
-                            let array_instance = generic_vars.inst_array.get(&last_ident).unwrap();
-                            shape = Some(InputTensorShape {
-                                generic_cga_var: Some(last_ident.clone()),
-                                shape_param: last_ident,
-                                shape: array_instance.iter().map(|elem| elem.to_string()).collect(),
-                            });
-                        }
-                    }
-                    _ => {}
+                let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
+                // println!("get_variadic_type_args: Type::Path: {}", last_ident);
+                if let Some(array_instance) = generic_vars.inst_array.get(&last_ident) {
+                    // This is something like Shape<D> for const generic array D: [i32; N].
+                    shape = Some(InputTensorShape {
+                        generic_cga_var: Some(last_ident.clone()),
+                        shape_param: last_ident,
+                        shape: array_instance.iter().map(|elem| elem.to_string()).collect(),
+                    });
                 }
             }
-            GenericArgument::Const(const_param) => {
-                // println!("expand GenericArgument::Const? {const_param:#?}");
-                match const_param {
-                    Expr::Block(block_expr) => {
-                        // This is something like Tensor<E, {[...]}>
-                        if block_expr.block.stmts.len() != 1 {
-                            return SourceLocation::unknown().jit_error_result(&format!(
-                                "Expected exactly 1 statement in block expression, got {}",
-                                block_expr.block.stmts.len()
-                            ));
-                        }
-                        let statement = &block_expr.block.stmts[0];
-                        let Stmt::Expr(statement_expr, _) = statement else {
-                            return SourceLocation::unknown()
-                                .jit_error_result("Unexpected block expression.");
-                        };
-                        match statement_expr {
-                            Expr::Array(array_expr) => {
-                                // This is something like Tensor<E, {[1, 2, -1]}>
-                                let mut _shape = vec![];
-                                for elem in &array_expr.elems {
-                                    match elem {
-                                        Expr::Lit(lit) => {
-                                            let val = match &lit.lit {
-                                                Lit::Int(int_lit) => int_lit.to_string(),
-                                                _ => return SourceLocation::unknown().jit_error_result(
-                                                    &format!("Unexpected array element {elem:#?} in {array_expr:#?}"),
-                                                ),
-                                            };
-                                            _shape.push(val);
-                                        }
-                                        Expr::Unary(unary_expr) => {
-                                            _shape.push(unary_expr.to_token_stream().to_string());
-                                        }
-                                        Expr::Path(path) => {
-                                            let ident = get_ident_from_path_expr(path);
-                                            match generic_vars
-                                                .inst_i32
-                                                .get(ident.to_string().as_str())
-                                            {
-                                                Some(val) => _shape.push(val.to_string()),
-                                                None => {
-                                                    return SourceLocation::unknown()
-                                                        .jit_error_result(&format!(
-                                                            "Undefined generic parameter {ident}"
-                                                        ));
-                                                }
-                                            }
-                                        }
+            GenericArgument::Const(Expr::Block(block_expr)) => {
+                // This is something like Tensor<E, {[...]}>
+                if block_expr.block.stmts.len() != 1 {
+                    return SourceLocation::unknown().jit_error_result(&format!(
+                        "Expected exactly 1 statement in block expression, got {}",
+                        block_expr.block.stmts.len()
+                    ));
+                }
+                let statement = &block_expr.block.stmts[0];
+                let Stmt::Expr(statement_expr, _) = statement else {
+                    return SourceLocation::unknown()
+                        .jit_error_result("Unexpected block expression.");
+                };
+                match statement_expr {
+                    Expr::Array(array_expr) => {
+                        // This is something like Tensor<E, {[1, 2, -1]}>
+                        let mut _shape = vec![];
+                        for elem in &array_expr.elems {
+                            match elem {
+                                Expr::Lit(lit) => {
+                                    let val = match &lit.lit {
+                                        Lit::Int(int_lit) => int_lit.to_string(),
                                         _ => {
                                             return SourceLocation::unknown().jit_error_result(
                                                 &format!(
@@ -707,72 +670,79 @@ pub fn get_tensor_shape(
                                         ),
                                             )
                                         }
+                                    };
+                                    _shape.push(val);
+                                }
+                                Expr::Unary(unary_expr) => {
+                                    _shape.push(unary_expr.to_token_stream().to_string());
+                                }
+                                Expr::Path(path) => {
+                                    let ident = get_ident_from_path_expr(path);
+                                    match generic_vars.inst_i32.get(ident.to_string().as_str()) {
+                                        Some(val) => _shape.push(val.to_string()),
+                                        None => {
+                                            return SourceLocation::unknown().jit_error_result(
+                                                &format!("Undefined generic parameter {ident}"),
+                                            );
+                                        }
                                     }
                                 }
+                                _ => {
+                                    return SourceLocation::unknown().jit_error_result(&format!(
+                                        "Unexpected array element {elem:#?} in {array_expr:#?}"
+                                    ))
+                                }
+                            }
+                        }
+                        shape = Some(InputTensorShape {
+                            generic_cga_var: None,
+                            shape_param: block_expr.block.to_token_stream().to_string(),
+                            shape: _shape,
+                        });
+                    }
+                    Expr::Repeat(repeat_expr) => {
+                        // println!("Expr::Repeat: {:?}", repeat_expr.expr);
+                        let thing_to_repeat = repeat_expr.expr.to_token_stream().to_string();
+                        match &*repeat_expr.len {
+                            Expr::Path(len_path) => {
+                                // This is something like Tensor<E, {[-1; N]}>
+                                let num_rep_var = len_path.to_token_stream().to_string();
+                                let Some(num_rep) = generic_vars.get_i32(&num_rep_var) else {
+                                    return SourceLocation::unknown().jit_error_result(&format!(
+                                        "Expected instance for generic argument {}",
+                                        num_rep_var
+                                    ));
+                                };
                                 shape = Some(InputTensorShape {
                                     generic_cga_var: None,
                                     shape_param: block_expr.block.to_token_stream().to_string(),
-                                    shape: _shape,
+                                    shape: vec![thing_to_repeat; num_rep as usize],
                                 });
                             }
-                            Expr::Repeat(repeat_expr) => {
-                                // println!("Expr::Repeat: {:?}", repeat_expr.expr);
-                                let thing_to_repeat =
-                                    repeat_expr.expr.to_token_stream().to_string();
-                                match &*repeat_expr.len {
-                                    Expr::Path(len_path) => {
-                                        // This is something like Tensor<E, {[-1; N]}>
-                                        let num_rep_var = len_path.to_token_stream().to_string();
-                                        if !generic_vars.get_i32(&num_rep_var).is_some() {
-                                            return SourceLocation::unknown().jit_error_result(
-                                                &format!(
-                                                    "Expected instance for generic argument {}",
-                                                    num_rep_var
-                                                ),
-                                            );
-                                        }
-                                        let num_rep = generic_vars.get_i32(&num_rep_var).unwrap();
-                                        shape = Some(InputTensorShape {
-                                            generic_cga_var: None,
-                                            shape_param: block_expr
-                                                .block
-                                                .to_token_stream()
-                                                .to_string(),
-                                            shape: vec![thing_to_repeat; num_rep as usize],
-                                        });
-                                    }
-                                    Expr::Lit(len_lit) => {
-                                        // This is something like Tensor<E, {[-1; 3]}>
-                                        let num_rep: u32 = len_lit
-                                            .to_token_stream()
-                                            .to_string()
-                                            .parse::<u32>()
-                                            .unwrap();
-                                        shape = Some(InputTensorShape {
-                                            generic_cga_var: None,
-                                            shape_param: block_expr
-                                                .block
-                                                .to_token_stream()
-                                                .to_string(),
-                                            shape: vec![thing_to_repeat; num_rep as usize],
-                                        });
-                                    }
-                                    _ => {
-                                        return SourceLocation::unknown().jit_error_result(
-                                            &format!(
-                                                "Unexpected repeat expression: {repeat_expr:#?}"
-                                            ),
-                                        )
-                                    }
-                                }
+                            Expr::Lit(len_lit) => {
+                                // This is something like Tensor<E, {[-1; 3]}>
+                                let num_rep: u32 = len_lit
+                                    .to_token_stream()
+                                    .to_string()
+                                    .parse::<u32>()
+                                    .unwrap();
+                                shape = Some(InputTensorShape {
+                                    generic_cga_var: None,
+                                    shape_param: block_expr.block.to_token_stream().to_string(),
+                                    shape: vec![thing_to_repeat; num_rep as usize],
+                                });
                             }
                             _ => {
-                                return SourceLocation::unknown()
-                                    .jit_error_result("Unexpected block expression.")
+                                return SourceLocation::unknown().jit_error_result(&format!(
+                                    "Unexpected repeat expression: {repeat_expr:#?}"
+                                ))
                             }
                         }
                     }
-                    _ => {}
+                    _ => {
+                        return SourceLocation::unknown()
+                            .jit_error_result("Unexpected block expression.")
+                    }
                 }
             }
             _ => {}

@@ -21,7 +21,7 @@ use syn::ItemImpl;
 /// Build a `TypeInstance::StructuredType` for a synthetic tile type with element info.
 fn synthetic_tile_instance(rust_ty: syn::Type, element_name: &str, shape: &[i32]) -> TypeInstance {
     let elem_ty = syn::parse_str::<syn::Type>(element_name).unwrap_or(rust_ty.clone());
-    TypeInstance::StructuredType(crate::generics::TypeInstanceStructuredType {
+    TypeInstance::StructuredType(Box::new(crate::generics::TypeInstanceStructuredType {
         generic_ty: rust_ty.clone(),
         instance_ty: rust_ty,
         primitive_type: Some(crate::generics::TypInstancePrimitiveType::ElementType(
@@ -32,12 +32,12 @@ fn synthetic_tile_instance(rust_ty: syn::Type, element_name: &str, shape: &[i32]
             },
         )),
         shape: shape.to_vec(),
-    })
+    }))
 }
 
 /// Build a `TypeInstance::StructuredType` for a synthetic pointer tile type.
 fn synthetic_ptr_instance(rust_ty: syn::Type, element_name: &str) -> TypeInstance {
-    TypeInstance::StructuredType(crate::generics::TypeInstanceStructuredType {
+    TypeInstance::StructuredType(Box::new(crate::generics::TypeInstanceStructuredType {
         generic_ty: rust_ty.clone(),
         instance_ty: rust_ty.clone(),
         primitive_type: Some(crate::generics::TypInstancePrimitiveType::PtrType(
@@ -49,7 +49,7 @@ fn synthetic_ptr_instance(rust_ty: syn::Type, element_name: &str) -> TypeInstanc
             },
         )),
         shape: vec![],
-    })
+    }))
 }
 
 /// A compiled type binding: maps a Rust `syn::Type` to its CUDA Tile type metadata.

@@ -115,6 +115,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )?))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_binary_op_from_values(
         &self,
         module: &mut Module,
@@ -133,8 +134,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &format!(
                     "binary `{:?}` requires operands of the same type, but got `{}` and `{}`",
                     tile_rust_arithmetic_op,
-                    lhs.ty.rust_ty.to_token_stream().to_string(),
-                    rhs.ty.rust_ty.to_token_stream().to_string()
+                    lhs.ty.rust_ty.to_token_stream(),
+                    rhs.ty.rust_ty.to_token_stream()
                 ),
             );
         }
@@ -164,7 +165,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &format!(
                     "unable to determine element type for `{:?}` on `{}`",
                     tile_rust_arithmetic_op,
-                    operand_type.rust_ty.to_token_stream().to_string()
+                    operand_type.rust_ty.to_token_stream()
                 ),
             );
         };
@@ -173,7 +174,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 span,
                 &format!(
                     "type `{}` cannot be used with binary `{:?}`",
-                    operand_type.rust_ty.to_token_stream().to_string(),
+                    operand_type.rust_ty.to_token_stream(),
                     tile_rust_arithmetic_op
                 ),
             );
@@ -391,7 +392,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     span,
                     &format!(
                         "Binary operation is not implemented for {}",
-                        operand_rust_ty.to_token_stream().to_string()
+                        operand_rust_ty.to_token_stream()
                     ),
                 );
             }
@@ -403,7 +404,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // Try to infer from lhs/rhs.
                 if is_cmp {
                     let bool_ty = syn::parse2::<syn::Type>("bool".parse().unwrap()).unwrap();
-                    self.compile_type(&bool_ty, &generic_vars, &HashMap::new())?
+                    self.compile_type(&bool_ty, generic_vars, &HashMap::new())?
                         .unwrap()
                 } else {
                     operand_type
@@ -425,7 +426,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         } else {
             None
         };
-        if let Some(bounds) = &op_bounds {
+        if let Some(bounds) = op_bounds {
             if bounds.is_exact() {
                 // The lower/upper bounds are equivalent — emit a constant
                 // instead. The op allocated above becomes dead (not appended

@@ -117,7 +117,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         // 7. Build stride_args HashMap.
         let stride_args: HashMap<String, Vec<i32>> = stride_args
-            .into_iter()
+            .iter()
             .map(|(k, v)| (k.to_string(), v.to_vec()))
             .collect::<HashMap<_, _>>();
 
@@ -131,7 +131,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .collect();
         let scalar_hints_map: HashMap<String, crate::specialization::DivHint> = HashMap::new();
         let (entry, validator) = generate_entry_point(
-            &function,
+            function,
             &generic_vars,
             &stride_args,
             &spec_args_map,
@@ -143,8 +143,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // 10. Check namespace collision.
         if modules
             .functions()
-            .get(kernel_naming.entry_name().as_str())
-            .is_some()
+            .contains_key(kernel_naming.entry_name().as_str())
         {
             return modules
                 .resolve_span(module_name, &function.span())
@@ -284,7 +283,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &r_param_type.span(),
                         &format!(
                             "unable to compile parameter type `{}`",
-                            r_param_type.to_token_stream().to_string()
+                            r_param_type.to_token_stream()
                         ),
                     );
                 }
@@ -397,7 +396,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut result = vec![];
         for arg in args {
             let value = self
-                .compile_expression(module, block_id, &arg, generic_args, ctx, None)?
+                .compile_expression(module, block_id, arg, generic_args, ctx, None)?
                 .ok_or(self.jit_error(
                     &arg.span(),
                     &format!(
@@ -432,7 +431,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let rust_ty_str = type_name::<T>();
         let rust_ty = syn::parse2::<syn::Type>(rust_ty_str.parse()?).unwrap();
         let tr_ty = self
-            .compile_type(&rust_ty, &generic_vars, &HashMap::new())?
+            .compile_type(&rust_ty, generic_vars, &HashMap::new())?
             .ok_or(self.jit_error(&rust_ty.span(), "failed to compile constant"))?;
         self.compile_constant_from_exact_bounds(module, block_id, bounds, tr_ty)
     }

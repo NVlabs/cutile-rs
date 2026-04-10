@@ -197,18 +197,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         };
 
-        let cuda_tile_op_params = op_attrs
-            .parse_string_arr("params")
-            .unwrap_or_else(|| vec![]);
+        let cuda_tile_op_params = op_attrs.parse_string_arr("params").unwrap_or_default();
         let cuda_tile_op_attribute_params = op_attrs
             .parse_string_arr("attribute_params")
-            .unwrap_or_else(|| vec![]);
-        let cuda_tile_op_hint_params = op_attrs
-            .parse_string_arr("hint_params")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_default();
+        let cuda_tile_op_hint_params = op_attrs.parse_string_arr("hint_params").unwrap_or_default();
         let cuda_tile_op_named_attributes = op_attrs
             .parse_string_arr("named_attributes")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_default();
         let cuda_tile_op_static_params = op_attrs
             .parse_string_arr("static_params")
             .unwrap_or_default();
@@ -257,6 +253,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_compile_cuda_tile_special_op(
         &self,
         module: &mut Module,
@@ -1015,6 +1012,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_load_view_tko(
         &self,
         module: &mut Module,
@@ -1084,7 +1082,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         let mut index_values_vec = Vec::new();
         for value in index_value.values.as_ref().unwrap().iter() {
-            let Some(v) = value.value.clone() else {
+            let Some(v) = value.value else {
                 return self.jit_error_result(
                     &call_expr.args[1].span(),
                     &format!("Unexpected nested array {index_arg_str}"),
@@ -1253,7 +1251,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         let mut index_values_vec = Vec::new();
         for value in index_value.values.as_ref().unwrap().iter() {
-            let Some(v) = value.value.clone() else {
+            let Some(v) = value.value else {
                 return self.jit_error_result(
                     &call_expr.args[2].span(),
                     &format!("Unexpected nested array {index_arg_str}"),
@@ -1676,6 +1674,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     /// General-purpose op compilation for CUDA Tile dialect operations.
+    #[allow(clippy::too_many_arguments)]
     fn compile_general_op(
         &self,
         module: &mut Module,
@@ -1704,17 +1703,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
 
         let return_type = if return_type.is_none() {
-            match rust_function_name.as_str() {
-                "constant" => {
-                    return self.jit_error_result(
-                        &call_expr.span(),
-                        &format!(
-                            "Return type required for {}",
-                            call_expr.to_token_stream().to_string()
-                        ),
-                    )
-                }
-                _ => {}
+            if rust_function_name == "constant" {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    &format!("Return type required for {}", call_expr.to_token_stream()),
+                );
             }
             self.derive_type(
                 module,
@@ -1742,9 +1735,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let field_meta_expr_parts = field_meta_expr_str.split(".").collect::<Vec<&str>>();
                 let field_meta_expr_param = field_meta_expr_parts[0];
                 let mut succeeded = false;
-                for i in 0..param_names.len() {
-                    if param_names[i] == field_meta_expr_param {
-                        let call_expr_arg = &call_expr.args[i];
+                for (param_name, call_expr_arg) in param_names.iter().zip(call_expr.args.iter()) {
+                    if param_name == field_meta_expr_param {
                         let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
                         let final_expr_str =
                             field_meta_expr_str.replace(field_meta_expr_param, &call_expr_arg_str);
@@ -1777,56 +1769,52 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut operand_lengths: Vec<String> = vec![];
         let mut op_operands: Vec<Value> = Vec::new();
         let mut compiled_args: Vec<TileRustValue> = Vec::new();
-        for i in 0..cuda_tile_op_params.len() {
-            let call_expr_arg = &call_expr.args[i];
+        for (op_param, call_expr_arg) in cuda_tile_op_params.iter().zip(call_expr.args.iter()) {
             let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
             let op_arg =
                 self.compile_expression(module, block_id, call_expr_arg, generic_args, ctx, None)?;
             if op_arg.is_none() {
-                return self
-                    .jit_error_result(&call_expr.args[i].span(), "Failed to compile op arg");
+                return self.jit_error_result(&call_expr_arg.span(), "Failed to compile op arg");
             }
             let op_arg = op_arg.unwrap();
             compiled_args.push(op_arg.clone());
-            let op_param = &cuda_tile_op_params[i];
             let mut arg_values: Vec<Value> = vec![];
-            if op_arg.value.is_some() {
-                arg_values.push(op_arg.value.clone().unwrap());
-            } else if op_arg.fields.is_some() {
-                let fields = op_arg.fields.as_ref().unwrap();
+            if let Some(value) = op_arg.value {
+                arg_values.push(value);
+            } else if let Some(fields) = op_arg.fields {
                 let op_path = op_param.split(".").collect::<Vec<&str>>();
                 if op_path.len() <= 1 {
-                    return self.jit_error_result(&call_expr.args[i].span(), &format!("Field expression required for struct param {call_expr_arg_str}, got {op_param}"));
+                    return self.jit_error_result(&call_expr_arg.span(), &format!("Field expression required for struct param {call_expr_arg_str}, got {op_param}"));
                 }
-                let field = *op_path.last().clone().unwrap();
+                let field = *op_path.last().unwrap();
                 match fields.get(field) {
                     Some(field_value) => {
-                        if field_value.value.is_some() {
-                            arg_values.push(field_value.value.clone().unwrap());
-                        } else if field_value.values.is_some() {
-                            for value in field_value.values.as_ref().unwrap().iter() {
-                                let Some(v) = value.value.clone() else {
-                                    return self.jit_error_result(&call_expr.args[i].span(), &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"));
+                        if let Some(value) = field_value.value {
+                            arg_values.push(value);
+                        } else if let Some(values) = &field_value.values {
+                            for value in values {
+                                let Some(v) = value.value else {
+                                    return self.jit_error_result(&call_expr_arg.span(), &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"));
                                 };
                                 arg_values.push(v);
                             }
                         } else if field_value.fields.is_some() {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!(
                                     "Unexpected nested struct {op_param} for {call_expr_arg_str}"
                                 ),
                             );
                         } else {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!("Unexpected op param {op_param} for {call_expr_arg_str}"),
                             );
                         }
                     }
                     None => {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Failed to access field {op_param} for {call_expr_arg_str}"),
                         )
                     }
@@ -1835,7 +1823,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 for value in op_arg.values.as_ref().unwrap().iter() {
                     let Some(v) = value.value.clone() else {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"),
                         );
                     };
@@ -1843,7 +1831,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             } else {
                 return self.jit_error_result(
-                    &call_expr.args[i].span(),
+                    &call_expr_arg.span(),
                     &format!("Unexpected op param {op_param} for {call_expr_arg_str}"),
                 );
             }
@@ -1857,7 +1845,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let (attr_name, attr_value) = (name_attr_split[0], name_attr_split[1]);
             if attr_name.starts_with("signedness") && attr_value == "inferred_signedness" {
                 let elem_ty = compiled_args
-                    .get(0)
+                    .first()
                     .and_then(|arg| {
                         arg.ty
                             .get_instantiated_rust_element_type(&self.modules.primitives())
@@ -1927,7 +1915,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut cuda_tile_op_attr_params_iter = cuda_tile_op_attribute_params.iter();
         let mut maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
         let fn_params = get_sig_param_names(&fn_item.sig);
-        for i in 0..fn_params.len() {
+        for (fn_param, call_expr_arg) in fn_params.iter().zip(call_expr.args.iter()) {
             if maybe_next_attr_param.is_none() {
                 break;
             }
@@ -1942,11 +1930,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let (attr_id, attr_ty): (&str, &str) = (op_attr[0], op_attr[1]);
             match attr_ty {
                 "array" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
-                    let call_expr_arg = &call_expr.args[i];
                     let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
                     let op_arg = self.compile_expression(
                         module,
@@ -1958,7 +1945,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     )?;
                     if op_arg.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Failed to compile attribute arg for {call_expr_arg_str}"),
                         );
                     }
@@ -1969,7 +1956,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 let Some(cga) = get_cga_from_type(&op_arg.ty.rust_ty, generic_args)
                                 else {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         "Failed to build attribute",
                                     );
                                 };
@@ -1982,31 +1969,31 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             }
                             _ => {
                                 return self.jit_error_result(
-                                    &call_expr.args[i].span(),
+                                    &call_expr_arg.span(),
                                     "Attribute type not implemented.",
                                 )
                             }
                         },
                         _ => {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 &format!("Unexpected call arg {call_expr_arg_str} for {next_attr}"),
                             )
                         }
                     }
                 }
                 "dense" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
-                    let (lit_value, _lit_ty_name) = match &call_expr.args[i] {
+                    let (lit_value, _lit_ty_name) = match &call_expr_arg {
                         Expr::Lit(lit_expr) => match &lit_expr.lit {
                             Lit::Bool(b) => (b.value.to_string(), "i1".to_string()),
                             Lit::Int(i) => (i.base10_digits().to_string(), "i32".to_string()),
                             Lit::Float(f) => (f.base10_digits().to_string(), "f32".to_string()),
                             _ => {
                                 return self.jit_error_result(
-                                    &call_expr.args[i].span(),
+                                    &call_expr_arg.span(),
                                     "Constant not supported",
                                 )
                             }
@@ -2014,7 +2001,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         Expr::Unary(unary_expr) => {
                             let UnOp::Neg(_) = unary_expr.op else {
                                 return self.jit_error_result(
-                                    &call_expr.args[i].span(),
+                                    &call_expr_arg.span(),
                                     "Only unary negation is supported for constant values",
                                 );
                             };
@@ -2028,14 +2015,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     }
                                     _ => {
                                         return self.jit_error_result(
-                                            &call_expr.args[i].span(),
+                                            &call_expr_arg.span(),
                                             "Unsupported literal type for negation",
                                         )
                                     }
                                 },
                                 _ => {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         "Only literal negation is supported for constant values",
                                     )
                                 }
@@ -2060,7 +2047,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 "E" => (get_const_hex(ty.as_str(), "e")?, ty.clone()),
                                 _ => {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
+                                        &call_expr_arg.span(),
                                         "Constant not supported",
                                     )
                                 }
@@ -2068,7 +2055,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                         _ => {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 "Unsupported expression for named attribute.",
                             )
                         }
@@ -2106,18 +2093,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     ));
                 }
                 "rounding" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
-                    let rounding_mode_str = match &call_expr.args[i] {
+                    let rounding_mode_str = match &call_expr_arg {
                         Expr::Lit(ExprLit {
                             lit: Lit::Str(lit_str),
                             ..
                         }) => lit_str.value(),
                         _ => {
                             return self.jit_error_result(
-                                &call_expr.args[i].span(),
+                                &call_expr_arg.span(),
                                 "Rounding mode must be a string literal.",
                             )
                         }
@@ -2131,7 +2118,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     ];
                     if !VALID_MODES.contains(&rounding_mode_str.as_str()) {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!(
                                 "Invalid rounding mode: \"{}\". Valid values are: {}",
                                 rounding_mode_str,
@@ -2150,28 +2137,28 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     attrs.push(int_attr(attr_id, 1));
                 }
                 "integer" => {
-                    if attr_id != fn_params[i] {
+                    if attr_id != fn_param {
                         continue;
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
                     let op_arg = self.compile_expression(
                         module,
                         block_id,
-                        &call_expr.args[i],
+                        &call_expr_arg,
                         generic_args,
                         ctx,
                         None,
                     )?;
                     if op_arg.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Failed to compile integer attribute {attr_id}"),
                         );
                     }
                     let op_arg = op_arg.unwrap();
                     if op_arg.value.is_none() {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Integer attribute {attr_id} must be a value"),
                         );
                     }
@@ -2179,11 +2166,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         if bounds.is_exact() {
                             attrs.push(int_attr(attr_id, bounds.start as i64));
                         } else {
-                            return self.jit_error_result(&call_expr.args[i].span(), &format!("Integer attribute {attr_id} must be a constant value, got bounds: {bounds:?}"));
+                            return self.jit_error_result(&call_expr_arg.span(), &format!("Integer attribute {attr_id} must be a constant value, got bounds: {bounds:?}"));
                         }
                     } else {
                         return self.jit_error_result(
-                            &call_expr.args[i].span(),
+                            &call_expr_arg.span(),
                             &format!("Integer attribute {attr_id} must be a constant value"),
                         );
                     }
@@ -2232,7 +2219,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     if let Type::Tuple(tuple_type) = &return_type.rust_ty {
                         let mut elem_types = vec![];
                         for elem in &tuple_type.elems {
-                            let elem_ty = self.compile_type(&elem, generic_args, &HashMap::new())?;
+                            let elem_ty = self.compile_type(elem, generic_args, &HashMap::new())?;
                             if elem_ty.is_none() { return self.jit_error_result(&call_expr.span(), "failed to compile type"); }
                             let elem_ty = elem_ty.unwrap();
                             if elem_ty.tile_ir_ty.is_none() { return self.jit_error_result(&call_expr.span(), "failed to compile tile type"); }
@@ -2334,10 +2321,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 let re_repl = Regex::new(r"\{\}").unwrap();
                 for (i, element_ty) in element_type_instance.into_iter().enumerate() {
-                    let rust_element_type_instance = element_ty.expect(
-                        format!("failed to determine element type for print argument {}", i)
-                            .as_str(),
-                    );
+                    let rust_element_type_instance = element_ty.unwrap_or_else(|| {
+                        panic!("failed to determine element type for print argument {}", i)
+                    });
                     if !re_repl.is_match(&str_literal) {
                         return self.jit_error_result(
                             &mac.span(),

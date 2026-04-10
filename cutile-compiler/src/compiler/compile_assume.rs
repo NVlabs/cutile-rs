@@ -56,7 +56,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "expected a simple function path for assume invocation",
             );
         };
-        let ident = get_ident_from_path_expr(&path_expr);
+        let ident = get_ident_from_path_expr(path_expr);
         let compiler_op_function = ident.to_string();
         let mut args =
             self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
@@ -75,7 +75,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "the first argument to `assume` must produce a value",
             );
         };
-        Ok(self.compile_value_assumption(
+        self.compile_value_assumption(
             module,
             block_id,
             val_value,
@@ -83,7 +83,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             &predicate_args,
             return_type,
             &call_expr.span(),
-        )?)
+        )
     }
 
     /// Generates tile-ir assume operation with appropriate predicate attribute.

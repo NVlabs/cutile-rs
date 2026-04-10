@@ -51,7 +51,7 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         .arg(&cubin_filename)
         .arg(&bc_filename)
         .output()
-        .expect(format!("Failed to launch tileiras for {bc_filename}").as_str());
+        .unwrap_or_else(|_| panic!("Failed to launch tileiras for {bc_filename}"));
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);

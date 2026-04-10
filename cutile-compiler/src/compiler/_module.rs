@@ -213,6 +213,7 @@ impl CUDATileModules {
         // Check if we're calling a method on a primitive type trait impl.
         let impls = match generic_vars.instantiate_type(receiver_rust_ty, self.primitives())? {
             TypeInstance::ElementType(_elem_ty) => {
+                #[allow(clippy::manual_map)]
                 match self
                     .name_resolver
                     .trait_impls()

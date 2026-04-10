@@ -61,7 +61,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     }
                                     Pat::Tuple(pat_tuple) => {
                                         ct_ty = self.compile_type(
-                                            &*pat_type.ty,
+                                            &pat_type.ty,
                                             generic_args,
                                             &HashMap::new(),
                                         )?;
@@ -75,7 +75,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                         let Some(tuple_value) = self.compile_expression(
                                             module,
                                             block_id,
-                                            &*init.expr,
+                                            &init.expr,
                                             generic_args,
                                             ctx,
                                             ct_ty.clone(),
@@ -147,11 +147,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                         )
                                     }
                                 }
-                                ct_ty = self.compile_type(
-                                    &*pat_type.ty,
-                                    generic_args,
-                                    &HashMap::new(),
-                                )?;
+                                ct_ty =
+                                    self.compile_type(&pat_type.ty, generic_args, &HashMap::new())?;
                             }
                             Pat::Ident(pat_ident) => {
                                 var_name = Some(pat_ident.ident.to_string());
@@ -167,7 +164,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 let Some(tuple_value) = self.compile_expression(
                                     module,
                                     block_id,
-                                    &*init.expr,
+                                    &init.expr,
                                     generic_args,
                                     ctx,
                                     ct_ty.clone(),
@@ -248,7 +245,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 match self.compile_expression(
                                     module,
                                     block_id,
-                                    &*init.expr,
+                                    &init.expr,
                                     generic_args,
                                     ctx,
                                     ct_ty,
@@ -266,7 +263,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             &init.expr.span(),
                                             &format!(
                                                 "failed to compile initializer: `{}`",
-                                                init.expr.to_token_stream().to_string()
+                                                init.expr.to_token_stream()
                                             ),
                                         )
                                     }
@@ -283,10 +280,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Stmt::Item(item) => {
                         match item {
                             Item::Const(const_item) => {
-                                let binding_name: Option<String> =
+                                let binding_name =
                                     Some(const_item.ident.to_string());
-                                let ct_ty: Option<TileRustType> = self.compile_type(
-                                    &*const_item.ty,
+                                let ct_ty = self.compile_type(
+                                    &const_item.ty,
                                     generic_args,
                                     &HashMap::new(),
                                 )?;
@@ -299,7 +296,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 match self.compile_expression(
                                     module,
                                     block_id,
-                                    &*const_item.expr,
+                                    &const_item.expr,
                                     generic_args,
                                     ctx,
                                     ct_ty,
@@ -313,7 +310,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             &const_item.expr.span(),
                                             &format!(
                                                 "failed to compile const initializer: `{}`",
-                                                const_item.expr.to_token_stream().to_string()
+                                                const_item.expr.to_token_stream()
                                             ),
                                         )
                                     }
@@ -374,7 +371,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 match self.compile_expression(
                                     module,
                                     block_id,
-                                    &*assign_expr.right,
+                                    &assign_expr.right,
                                     generic_args,
                                     ctx,
                                     None,
@@ -394,7 +391,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     return_value = self.compile_expression(
                                         module,
                                         block_id,
-                                        &*expr,
+                                        expr,
                                         generic_args,
                                         ctx,
                                         return_type.clone(),
@@ -409,7 +406,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 return_value = self.compile_expression(
                                     module,
                                     block_id,
-                                    &*expr,
+                                    expr,
                                     generic_args,
                                     ctx,
                                     return_type.clone(),
@@ -418,7 +415,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 self.compile_expression(
                                     module,
                                     block_id,
-                                    &*expr,
+                                    expr,
                                     generic_args,
                                     ctx,
                                     None,
@@ -473,7 +470,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     Some(BlockTerminator::Return) => {
                         self.resolve_span(&block_expr.span())
-                            .jit_assert(loop_carry_var_names.len() == 0, "unexpected state")?;
+                            .jit_assert(loop_carry_var_names.is_empty(), "unexpected state")?;
                         if return_value.is_some() {
                             return self.jit_error_result(
                                 &block_expr.span(),
