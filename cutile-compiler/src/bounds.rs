@@ -54,7 +54,7 @@ impl Add for Bounds<i64> {
     fn add(self, rhs: Bounds<i64>) -> Bounds<i64> {
         let a = self;
         let b = rhs;
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start + b.start,
             a.start + b.end,
             a.end + b.start,
@@ -77,7 +77,7 @@ impl Sub for Bounds<i64> {
     fn sub(self, rhs: Bounds<i64>) -> Bounds<i64> {
         let a = self;
         let b = rhs;
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start - b.start,
             a.start - b.end,
             a.end - b.start,
@@ -100,7 +100,7 @@ impl Mul for Bounds<i64> {
     fn mul(self, rhs: Bounds<i64>) -> Bounds<i64> {
         let a = self;
         let b = rhs;
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start * b.start,
             a.start * b.end,
             a.end * b.start,
@@ -135,7 +135,7 @@ impl Div for Bounds<i64> {
             (_, 0) => panic!("Division by zero"),
             (0, _) => panic!("Division by zero"),
             _ => {
-                let possible_bounds = vec![
+                let possible_bounds = [
                     a.start / b.start,
                     a.start / b.end,
                     a.end / b.start,
@@ -161,7 +161,7 @@ impl Rem for Bounds<i64> {
         let a = self;
         let b = rhs;
         // TODO (hme): Verify this one.
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start % b.start,
             a.start % b.end,
             a.end % b.start,
@@ -188,7 +188,7 @@ pub fn bop_bounds<F: Fn(i64, i64) -> i64>(a: &Bounds<i64>, b: &Bounds<i64>, f: F
     if a.is_exact() && b.is_exact() {
         return Bounds::exact(f(a.start, b.start));
     }
-    let possible_bounds = vec![
+    let possible_bounds = [
         f(a.start, b.start),
         f(a.start, b.end),
         f(a.end, b.start),

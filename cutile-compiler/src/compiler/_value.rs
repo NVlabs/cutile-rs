@@ -274,9 +274,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
     }
     /// Consumes self and removes a named type-metadata sub-field, returning it.
     pub fn take_type_meta_field(self, name: &str) -> Option<Self> {
-        let Some(mut type_meta) = self.type_meta else {
-            return None;
-        };
+        let mut type_meta = self.type_meta?;
         type_meta.fields.remove(name)
     }
     /// Inserts or replaces a named type-metadata sub-field.
@@ -368,7 +366,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             }
             Kind::PrimitiveType => {
                 // self.value is some. self.type_meta may be non-empty.
-                result.value = Some(values[pos].clone());
+                result.value = Some(values[pos]);
                 pos += 1;
                 if let Some(old_type_meta) = result.type_meta {
                     let res = old_type_meta.repack_from(values, pos)?;
@@ -378,7 +376,7 @@ impl<'c, 'a> TileRustValue<'c, 'a> {
             }
             Kind::StructuredType => {
                 // self.value is some. self.type_meta may be non-empty.
-                result.value = Some(values[pos].clone());
+                result.value = Some(values[pos]);
                 pos += 1;
                 if let Some(old_type_meta) = result.type_meta {
                     let res = old_type_meta.repack_from(values, pos)?;

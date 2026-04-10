@@ -30,10 +30,10 @@ pub fn parse_tile_entry<'c>(
     module_name: &str,
     entry: &str,
 ) -> ModuleOperation<'c> {
-    let location = Location::unknown(&context);
-    let module_op = cuda_tile::ModuleOperationBuilder::new(&context, location)
+    let location = Location::unknown(context);
+    let module_op = cuda_tile::ModuleOperationBuilder::new(context, location)
         .body({
-            let entry_op = operation_parse(&context, entry, None).unwrap();
+            let entry_op = operation_parse(context, entry, None).unwrap();
             let module_block = Block::new(&[]);
             module_block.append_operation(entry_op);
 
@@ -41,10 +41,10 @@ pub fn parse_tile_entry<'c>(
             region.append_block(module_block);
             region
         })
-        .sym_name(StringAttribute::new(&context, module_name))
+        .sym_name(StringAttribute::new(context, module_name))
         .build();
     assert!(module_op.as_operation().verify());
-    return module_op;
+    module_op
 }
 
 /// Compiles a CUDA Tile module operation to a `.cubin` file via `tileiras`, returning the path.
@@ -54,7 +54,7 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
     let bc_filename = format!("{}.bc", base_filename.to_str().unwrap());
     let cubin_filename = format!("{}.cubin", base_filename.to_str().unwrap());
 
-    let res = cuda_tile_write_bytecode(&module_op, bc_filename.as_str());
+    let res = cuda_tile_write_bytecode(module_op, bc_filename.as_str());
     assert!(res.is_ok());
     let output = Command::new("tileiras")
         .arg("--gpu-name")
@@ -65,7 +65,7 @@ pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
         .arg(&cubin_filename)
         .arg(&bc_filename)
         .output()
-        .expect(format!("Failed to launch tileiras for {bc_filename}").as_str());
+        .unwrap_or_else(|_| panic!("Failed to launch tileiras for {bc_filename}"));
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
