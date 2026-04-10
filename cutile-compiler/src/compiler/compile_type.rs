@@ -38,11 +38,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         match ty {
             // Array, Slice, and Tuple compile to the same compiler representation (compound values).
             Type::Tuple(tuple) => {
-                if tuple.elems.len() == 0 {
+                if tuple.elems.is_empty() {
                     return Ok(None);
                 } else {
                     let unknown_type_instance = TypeInstanceUserType::instantiate(
-                        &ty,
+                        ty,
                         generic_vars,
                         &self.modules.primitives,
                     )
@@ -58,7 +58,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 // Arrays in function parameters should be treated as compound unknown types
                 // The actual element handling happens in compile_expression for array literals
                 let unknown_type_instance =
-                    TypeInstanceUserType::instantiate(&ty, generic_vars, &self.modules.primitives)
+                    TypeInstanceUserType::instantiate(ty, generic_vars, &self.modules.primitives)
                         .unwrap();
                 let type_instance = TypeInstance::UserType(unknown_type_instance);
                 return Ok(Some(TileRustType::new_compound(
@@ -70,7 +70,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 // Slices in function parameters should be treated as compound unknown types
                 // The actual element handling happens in compile_expression for array literals
                 let unknown_type_instance =
-                    TypeInstanceUserType::instantiate(&ty, generic_vars, &self.modules.primitives)
+                    TypeInstanceUserType::instantiate(ty, generic_vars, &self.modules.primitives)
                         .unwrap();
                 let type_instance = TypeInstance::UserType(unknown_type_instance);
                 return Ok(Some(TileRustType::new_compound(
@@ -80,7 +80,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
             Type::Reference(ref_ty) => {
                 // This is okay since rust_ty is always the provided type we're compiling.
-                let mut res = self.compile_type(&*ref_ty.elem, generic_vars, type_params)?;
+                let mut res = self.compile_type(&ref_ty.elem, generic_vars, type_params)?;
                 match &mut res {
                     Some(cuda_tile_ty) => {
                         cuda_tile_ty.rust_ty = ty.clone();
@@ -100,7 +100,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 // This is a user-defined (not a cuda_tile) struct.
                                 // There is no corresponding cuda_tile type.
                                 let unknown_type_instance = TypeInstanceUserType::instantiate(
-                                    &ty,
+                                    ty,
                                     generic_vars,
                                     &self.modules.primitives,
                                 )
@@ -112,7 +112,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     type_instance,
                                 )));
                             }
-                            structure = Some((type_name.clone(), &item_struct));
+                            structure = Some((type_name.clone(), item_struct));
                             type_instance =
                                 Some(generic_vars.instantiate_type(ty, &self.modules.primitives)?);
                         } else {
@@ -150,7 +150,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
             }
             Type::Ptr(_) => {
-                let type_name = get_type_ident(&ty);
+                let type_name = get_type_ident(ty);
                 if type_name.is_none() {
                     return self.jit_error_result(&ty.span(), "Failed to compile type");
                 }
@@ -200,7 +200,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     &ty.span(),
                     &format!(
                         "Unable to compile compiling type {} using attrs {ty_attrs:#?}",
-                        ty.to_token_stream().to_string()
+                        ty.to_token_stream()
                     ),
                 );
             }
@@ -286,7 +286,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     &ty.span(),
                     &format!(
                         "Unable to compile type {} using attrs {scalar_attrs:#?}",
-                        element_instance.generic_ty.to_token_stream().to_string()
+                        element_instance.generic_ty.to_token_stream()
                     ),
                 );
             }
@@ -318,7 +318,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     &ty.span(),
                     &format!(
                         "Unable to compile compiling type {} using attrs {pointer_attrs:#?}",
-                        ty.to_token_stream().to_string()
+                        ty.to_token_stream()
                     ),
                 );
             }
@@ -339,10 +339,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 TypeInstance::PtrType(ptr_instance),
             )?));
         } else {
-            return self.jit_error_result(
+            self.jit_error_result(
                 &ty.span(),
                 &format!("Unable to instantiate Scalar or Pointer impls: type_instance={type_instance:#?}"),
-            );
+            )
         }
     }
     pub(crate) fn derive_type(
@@ -381,7 +381,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         &method_call_expr.method.span(),
                         &format!(
                             "Argument count mismatch for method {}: expected {} args, got {} compiled values",
-                            method_call_expr.method.to_string(),
+                            method_call_expr.method,
                             fn_arg_types.len(),
                             call_arg_values.len()
                         ),
@@ -409,14 +409,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
                 let mut generic_arg_inf = GenericArgInference::new_method(&impl_item, &impl_method);
                 generic_arg_inf.map_args_to_params(&call_arg_rust_tys, Some(self_ty));
-                generic_arg_inf
-                    .apply_provided_generics_method_call(&method_call_expr, generic_vars);
+                generic_arg_inf.apply_provided_generics_method_call(method_call_expr, generic_vars);
                 if !generic_arg_inf.verify() {
                     return self.jit_error_result(
                         &method_call_expr.method.span(),
                         &format!(
                             "Failed to infer all generic parameters for {}",
-                            method_call_expr.to_token_stream().to_string()
+                            method_call_expr.to_token_stream()
                         ),
                     );
                 }
@@ -478,8 +477,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         &method_call_expr.method.span(),
                         &format!(
                             "Failed to derive output for {} \ncall_output_type={}",
-                            method_call_expr.to_token_stream().to_string(),
-                            call_output_type.to_token_stream().to_string()
+                            method_call_expr.to_token_stream(),
+                            call_output_type.to_token_stream()
                         ),
                     );
                 }
@@ -488,7 +487,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             Expr::Call(call_expr) => {
                 match &*call_expr.func {
                     Expr::Path(path_expr) => {
-                        let ident = get_ident_from_path_expr(&path_expr);
+                        let ident = get_ident_from_path_expr(path_expr);
                         let Some((_, fn_item)) =
                             self.modules.get_function_by_name(&ident.to_string())
                         else {
@@ -511,7 +510,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 &call_expr.func.span(),
                                 &format!(
                                     "Argument count mismatch for {}: expected {} args, got {} compiled values",
-                                    ident.to_string(),
+                                    ident,
                                     fn_arg_types.len(),
                                     call_arg_values.len()
                                 ),
@@ -542,13 +541,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let mut generic_arg_inf =
                             GenericArgInference::new_function(fn_item.sig.clone());
                         generic_arg_inf.map_args_to_params(&call_arg_rust_tys, None);
-                        generic_arg_inf.apply_provided_generics_fn_call(&call_expr, generic_vars);
+                        generic_arg_inf.apply_provided_generics_fn_call(call_expr, generic_vars);
                         if !generic_arg_inf.verify() {
                             return self.jit_error_result(
                                 &call_expr.func.span(),
                                 &format!(
                                     "Failed to infer all generic parameters for {}",
-                                    call_expr.to_token_stream().to_string()
+                                    call_expr.to_token_stream()
                                 ),
                             );
                         }
@@ -617,28 +616,28 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             return self.jit_error_result(
                                 &call_expr.func.span(),
                                 &format!("Failed to derive output for {} \ngeneric_vars={generic_vars:#?} \ntype_params={type_params:#?}",
-                                    call_expr.to_token_stream().to_string()),
+                                    call_expr.to_token_stream()),
                             );
                         }
                         Ok(ct_type)
                     }
                     Expr::Closure(_) => {
-                        return self.jit_error_result(
+                        self.jit_error_result(
                             &call_expr.func.span(),
                             &format!(
                                 "Closure calls are not supported.\n\
                                  Closures can only be used as arguments to operations like reduce() or scan().\n\
                                  Found: {}",
-                                call_expr.to_token_stream().to_string()
+                                call_expr.to_token_stream()
                             ),
-                        );
+                        )
                     }
                     _ => {
-                        return self.jit_error_result(
+                        self.jit_error_result(
                             &call_expr.func.span(),
                             &format!(
                                 "Type derivation for {} not supported.",
-                                call_expr.func.to_token_stream().to_string()
+                                call_expr.func.to_token_stream()
                             ),
                         )
                     }
@@ -650,10 +649,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 else {
                     return self.jit_error_result(
                         &field_expr.base.span(),
-                        &format!(
-                            "Failed to compile {}",
-                            field_expr.to_token_stream().to_string()
-                        ),
+                        &format!("Failed to compile {}", field_expr.to_token_stream()),
                     );
                 };
                 let syn::Member::Named(field_name) = &field_expr.member else {
@@ -662,7 +658,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         "Only named member accesses are supported.",
                     );
                 };
-                if !base.fields.is_some() {
+                if base.fields.is_none() {
                     return self.jit_error_result(
                         &field_expr.base.span(),
                         &format!("Expected struct value, found: {base:#?}"),
@@ -672,7 +668,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let Some(field_value) = fields.get(&field_name.to_string()) else {
                     return self.jit_error_result(
                         &field_expr.member.span(),
-                        &format!("{} is not a field in {base:#?}.", field_name.to_string()),
+                        &format!("{} is not a field in {base:#?}.", field_name),
                     );
                 };
                 Ok(Some(field_value.ty.clone()))

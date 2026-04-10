@@ -386,7 +386,7 @@ pub fn trait_(mut item: ItemTrait) -> Result<TokenStream, Error> {
         &mut item.attrs,
     );
     let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
+        Some(attributes) => match attributes.name_as_str().unwrap() {
             "cuda_tile :: variadic_trait" => {
                 let items = variadic_trait(&attributes, item)?;
                 quote! {
@@ -452,7 +452,7 @@ pub fn implementation(mut item: ItemImpl) -> Result<TokenStream, Error> {
         &mut item.attrs,
     );
     let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
+        Some(attributes) => match attributes.name_as_str().unwrap() {
             "cuda_tile :: variadic_impl" => {
                 let items = variadic_impl(&attributes, item)?;
                 quote! {
@@ -509,7 +509,7 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
     );
     // println!("structure {ident}: {attributes:#?}");
     let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
+        Some(attributes) => match attributes.name_as_str().unwrap() {
             "cuda_tile :: variadic_struct" => {
                 let items = variadic_struct(&attributes, item)?;
                 let structs = items.iter().map(|item| item.0.clone()).collect::<Vec<_>>();
@@ -593,7 +593,7 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         item.sig.ident = Ident::new(internal_name.as_str(), item.sig.ident.span());
     }
     let concrete_items = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
+        Some(attributes) => match attributes.name_as_str().unwrap() {
             "cuda_tile :: variadic_op" => variadic_op(&attributes, item.clone())?,
             _ => vec![desugar_function_cgas(&item)?],
         },

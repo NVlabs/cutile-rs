@@ -84,7 +84,7 @@ impl CUDATileModules {
                                 //  The impl contains all the information we need.
                             }
                             Item::Impl(impl_item) => {
-                                let self_ident_str = get_type_str(&*impl_item.self_ty);
+                                let self_ident_str = get_type_str(&impl_item.self_ty);
                                 let trait_ident_str = match &impl_item.trait_ {
                                     Some((_, trait_path, _)) => {
                                         let last_seg = trait_path.segments.last().unwrap();
@@ -316,6 +316,7 @@ impl CUDATileModules {
         // Check if we're calling a method on a primitive type trait impl.
         let impls = match generic_vars.instantiate_type(receiver_rust_ty, &self.primitives)? {
             TypeInstance::ElementType(_elem_ty) => {
+                #[allow(clippy::manual_map)]
                 match self
                     .trait_impls
                     .get(&("BroadcastScalar".to_string(), "E".to_string()))
@@ -325,7 +326,7 @@ impl CUDATileModules {
                 }
             }
             _ => {
-                let ident = get_type_ident(&receiver_rust_ty);
+                let ident = get_type_ident(receiver_rust_ty);
                 if ident.is_none() {
                     return Ok(None);
                 }
@@ -359,7 +360,7 @@ impl CUDATileModules {
         let s = self
             .structs
             .get(struct_name)
-            .expect(format!("{struct_name} doesn't exist.").as_str());
+            .unwrap_or_else(|| panic!("{struct_name} doesn't exist."));
         for field in &s.fields {
             let Some(curr_field_ident) = &field.ident else {
                 continue;

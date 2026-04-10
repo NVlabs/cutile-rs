@@ -46,7 +46,7 @@ use syn::{Expr, ItemFn, Type};
 use anyhow::{Context as AnyhowContext, Result};
 
 /// Minimum remaining stack space before growing (1 MiB).
-pub(crate) const STACK_RED_ZONE: usize = 1 * 1024 * 1024;
+pub(crate) const STACK_RED_ZONE: usize = 1024 * 1024;
 /// Size of each new stack segment when growth is needed (10 MiB).
 pub(crate) const STACK_GROW_SIZE: usize = 10 * 1024 * 1024;
 
@@ -139,14 +139,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         optimization_hints.apply_compile_options(compile_options);
 
         let stride_args: HashMap<String, Vec<i32>> = stride_args
-            .into_iter()
+            .iter()
             .map(|(k, v)| (k.to_string(), v.to_vec()))
             .collect::<HashMap<_, _>>();
 
         let generic_vars = GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
 
         let (entry, validator) = generate_entry_point(
-            &function,
+            function,
             &generic_vars,
             &stride_args,
             &modules.primitives,
@@ -155,8 +155,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
         if modules
             .functions
-            .get(kernel_naming.entry_name().as_str())
-            .is_some()
+            .contains_key(kernel_naming.entry_name().as_str())
         {
             return modules
                 .resolve_span(module_name, &function.span())
@@ -221,13 +220,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if module_op.as_operation().verify() {
             Ok(module_op)
         } else {
-            return self.jit_error_result(
+            self.jit_error_result(
                 &self.function.span(),
-                &format!(
-                    "Failed to verify module {}",
-                    module_op.as_operation().to_string()
-                ),
-            );
+                &format!("Failed to verify module {}", module_op.as_operation()),
+            )
         }
     }
 
@@ -351,31 +347,30 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     )),
                 );
             }
-            match self.compile_type(&r_param_type, &generic_vars, &type_params)? {
+            match self.compile_type(r_param_type, generic_vars, &type_params)? {
                 Some(ty) => cuda_tile_argument_types.push(ty),
                 None => {
                     return self.jit_error_result(
                         &r_param_type.span(),
                         &format!(
                             "unable to compile parameter type `{}`",
-                            r_param_type.to_token_stream().to_string()
+                            r_param_type.to_token_stream()
                         ),
                     );
                 }
             }
         }
-        match self.compile_type(&r_result, &generic_vars, &HashMap::new())? {
-            Some(ty) => cuda_tile_return_types.push(ty),
-            None => {}
+        if let Some(ty) = self.compile_type(&r_result, generic_vars, &HashMap::new())? {
+            cuda_tile_return_types.push(ty)
         }
 
         let argument_types = cuda_tile_argument_types
             .iter()
-            .map(|ct_ty| ct_ty.cuda_tile_ty.clone().unwrap())
+            .flat_map(|ct_ty| ct_ty.cuda_tile_ty)
             .collect::<Vec<_>>();
         let result_types = cuda_tile_return_types
             .iter()
-            .map(|ct_ty| ct_ty.cuda_tile_ty.clone().unwrap())
+            .flat_map(|ct_ty| ct_ty.cuda_tile_ty)
             .collect::<Vec<_>>();
 
         let function_type = FunctionType::new(&self.context, &argument_types, &result_types);
@@ -394,7 +389,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         if let Some(entry_hints) = self.optimization_hints.get_entry_opt_hints(&self.context)? {
             attrs.push(entry_hints);
         }
-        let res = fn_builder
+        fn_builder
             .add_attributes(&attrs)
             .add_regions([{
                 let func_block = Block::new(
@@ -408,7 +403,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 for (i, name) in var_names.iter().enumerate() {
                     let ty = cuda_tile_argument_types[i].clone();
                     let value: Value = func_block.argument(i).unwrap().into();
-                    let mut val = TileRustValue::new_value_kind_like(value.clone(), ty);
+                    let mut val = TileRustValue::new_value_kind_like(value, ty);
                     val.mutability = if sig_param_mutability[i] {
                         Mutability::Mutable
                     } else {
@@ -440,13 +435,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 // TODO (hme): Cannot pass mutable reference to func_block,
                 //  but it is still mutable through &?
                 //  Refactor to produce func_block.
-                let return_value = self.compile_block(
-                    &func_block,
-                    &*fn_item.block,
-                    &generic_vars,
-                    &mut ctx,
-                    None,
-                )?;
+                let return_value =
+                    self.compile_block(&func_block, &fn_item.block, generic_vars, &mut ctx, None)?;
                 if return_value.is_some() {
                     return self.jit_error_result(
                         &fn_item.block.span(),
@@ -458,9 +448,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 region
             }])
             .build()
-            .unwrap()
-            .into();
-        Ok(res)
+            .map_err(|e| e.into())
     }
 
     // -----------------------------------------------------------------------
@@ -489,7 +477,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut result = vec![];
         for arg in args {
             let value = self
-                .compile_expression(builder, &arg, generic_args, ctx, None)?
+                .compile_expression(builder, arg, generic_args, ctx, None)?
                 .ok_or(self.jit_error(
                     &arg.span(),
                     &format!(
@@ -515,7 +503,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let mut result = vec![];
         for arg in args {
             let value = self
-                .compile_expression(builder, &arg, generic_args, ctx, None)?
+                .compile_expression(builder, arg, generic_args, ctx, None)?
                 .ok_or(self.jit_error(
                     &arg.span(),
                     &format!(
@@ -538,7 +526,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let rust_ty_str = type_name::<T>();
         let rust_ty = syn::parse2::<syn::Type>(rust_ty_str.parse()?).unwrap();
         let tr_ty = self
-            .compile_type(&rust_ty, &generic_vars, &HashMap::new())?
+            .compile_type(&rust_ty, generic_vars, &HashMap::new())?
             .ok_or(self.jit_error(&rust_ty.span(), "failed to compile constant"))?;
         self.compile_constant_from_exact_bounds(builder, bounds, tr_ty)
     }

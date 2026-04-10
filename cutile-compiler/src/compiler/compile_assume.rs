@@ -52,7 +52,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 "expected a simple function path for assume invocation",
             );
         };
-        let ident = get_ident_from_path_expr(&path_expr);
+        let ident = get_ident_from_path_expr(path_expr);
         let compiler_op_function = ident.to_string();
         let mut args = self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
         let val = args.remove(0);
@@ -70,14 +70,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 "the first argument to `assume` must produce a value",
             );
         };
-        Ok(self.compile_value_assumption(
+        self.compile_value_assumption(
             builder,
             val_value,
             compiler_op_function.as_str(),
             &predicate_args,
             return_type,
             &call_expr.span(),
-        )?)
+        )
     }
 
     /// Generates MLIR assume operation with appropriate predicate attribute.

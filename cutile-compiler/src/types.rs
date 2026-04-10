@@ -204,7 +204,7 @@ impl TypeParamPrimitive {
             }
             _ => SourceLocation::unknown().jit_error_result(&format!(
                 "unsupported primitive type `{}`",
-                self.rust_ty.to_token_stream().to_string()
+                self.rust_ty.to_token_stream()
             )),
         }
     }
@@ -555,10 +555,11 @@ pub fn get_ptr_type_instance(
     };
     if is_element_type(&maybe_element_type, primitives) {
         Some((prefix, maybe_element_type))
-    } else if let Some(element_type) = generic_vars.inst_types.get(&maybe_element_type) {
-        Some((prefix, element_type.to_string()))
     } else {
-        None
+        generic_vars
+            .inst_types
+            .get(&maybe_element_type)
+            .map(|element_type| (prefix, element_type.to_string()))
     }
 }
 
@@ -575,12 +576,12 @@ pub fn get_cuda_tile_element_type_from_rust_primitive_str(
 
 /// Returns the Rust identifier string for a primitive type.
 pub fn get_rust_element_type_primitive(ty: &syn::Type) -> String {
-    let type_ident = get_type_ident(&ty);
+    let type_ident = get_type_ident(ty);
     assert!(
         type_ident.is_some(),
         "get_element_type_primitive failed for {ty:#?}"
     );
-    return type_ident.unwrap().to_string();
+    type_ident.unwrap().to_string()
 }
 
 /// Returns the CUDA Tile element type string for a Rust primitive type.
@@ -612,8 +613,8 @@ pub fn get_element_type_structured(
     let (_type_ident, type_generic_args) = get_ident_generic_args(ty);
     let mut element_type: Option<String> = None;
     for generic_arg in &type_generic_args.args {
-        match generic_arg {
-            GenericArgument::Type(type_param) => match type_param {
+        if let GenericArgument::Type(type_param) = generic_arg {
+            match type_param {
                 syn::Type::Path(type_path) => {
                     let ident_str = type_path.path.segments.last().unwrap().ident.to_string();
                     if get_primitives_attrs("ElementType", &ident_str, primitives).is_some() {
@@ -635,8 +636,7 @@ pub fn get_element_type_structured(
                     element_type = get_element_type_structured(&type_ref.elem, primitives)
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
     element_type
@@ -647,9 +647,7 @@ pub fn get_cuda_tile_element_type_structured(
     ty: &syn::Type,
     primitives: &HashMap<(String, String), ItemImpl>,
 ) -> Option<String> {
-    let Some(rust_element_type) = get_element_type_structured(ty, primitives) else {
-        return None;
-    };
+    let rust_element_type = get_element_type_structured(ty, primitives)?;
     get_cuda_tile_element_type_from_rust_primitive_str(&rust_element_type, primitives)
 }
 
@@ -684,7 +682,7 @@ pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
                 Lit::Int(int_lit) => int_lit.base10_parse().unwrap(),
                 _ => unimplemented!("Unexpected array element {expr:#?}"),
             };
-            return val;
+            val
         }
         Expr::Unary(unary_expr) => match unary_expr.op {
             UnOp::Neg(_) => match &*unary_expr.expr {
@@ -693,7 +691,7 @@ pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
                         Lit::Int(int_lit) => int_lit.base10_parse().unwrap(),
                         _ => unimplemented!("Unexpected array element {expr:#?}"),
                     };
-                    return -val;
+                    -val
                 }
                 _ => panic!("Unexpected unary expr {unary_expr:#?}"),
             },
@@ -755,28 +753,20 @@ pub fn get_type_mutability(ty: &Type) -> bool {
 
 /// Tries to extract a const generic array from a type's generic arguments.
 pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>> {
-    let Some(mut type_generic_args) = maybe_generic_args(ty) else {
-        return None;
-    };
+    let mut type_generic_args = maybe_generic_args(ty)?;
     strip_generic_args_lifetimes(&mut type_generic_args);
     let mut result = None;
 
     for generic_arg in type_generic_args.args.iter() {
         match generic_arg {
             GenericArgument::Lifetime(_) => continue,
-            GenericArgument::Type(type_param) => {
+            GenericArgument::Type(syn::Type::Path(type_path)) => {
                 // Currently, this is either shape or element_type
-                match type_param {
-                    syn::Type::Path(type_path) => {
-                        let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
-                        // println!("get_variadic_type_args: Type::Path: {}", last_ident);
-                        if generic_vars.inst_array.contains_key(&last_ident) {
-                            // This is something like Shape<D> for const generic array D: [i32; N].
-                            let array_instance = generic_vars.inst_array.get(&last_ident).unwrap();
-                            result = Some(array_instance.clone());
-                        }
-                    }
-                    _ => {}
+                let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
+                // println!("get_variadic_type_args: Type::Path: {}", last_ident);
+                if let Some(array_instance) = generic_vars.inst_array.get(&last_ident) {
+                    // This is something like Shape<D> for const generic array D: [i32; N].
+                    result = Some(array_instance.clone());
                 }
             }
             GenericArgument::Const(const_expr) => {
@@ -861,13 +851,12 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                     Expr::Path(len_path) => {
                                         // This is something like Tensor<E, {[-1; N]}>
                                         let num_rep_var = len_path.to_token_stream().to_string();
-                                        if !generic_vars.get_i32(&num_rep_var).is_some() {
+                                        generic_vars.get_i32(&num_rep_var).unwrap_or_else(|| {
                                             panic!(
                                                 "Expected instance for generic argument {}",
                                                 num_rep_var
-                                            );
-                                        }
-                                        generic_vars.get_i32(&num_rep_var).unwrap()
+                                            )
+                                        })
                                     }
                                     Expr::Lit(len_lit) => {
                                         // This is something like Tensor<E, {[-1; 3]}>
