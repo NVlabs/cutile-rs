@@ -17,9 +17,10 @@
 
 use crate::common;
 use cutile::api;
+use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    compile_warmup, contains_cuda_function, execute_warmup, get_default_device, CompileOptions, DeviceOperation,
-    IntoDeviceOperationPartition, TileFunctionKey, TileKernel, WarmupSpec,
+    compile_warmup, contains_cuda_function, execute_warmup, get_default_device, CompileOptions,
+    TileFunctionKey, TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
     get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
@@ -53,12 +54,12 @@ fn stride_args() -> Vec<(String, Vec<i32>)> {
 
 // Helper: run a vector_add kernel with specific generics, return wall-clock time.
 fn timed_kernel_call(tile_size: &str) -> std::time::Duration {
-    let n: i32 = tile_size.parse().unwrap();
+    let n: usize = tile_size.parse().unwrap();
     let t0 = Instant::now();
-    let x = api::ones::<1, f32>([256]).sync().unwrap();
-    let y = api::ones::<1, f32>([256]).sync().unwrap();
-    let z = api::zeros::<1, f32>([256]).partition([n]).sync().unwrap();
-    let _result = bench_module::vector_add(z, x.into(), y.into())
+    let x = api::ones::<f32>(&[256]).sync().unwrap();
+    let y = api::ones::<f32>(&[256]).sync().unwrap();
+    let z = api::zeros::<f32>(&[256]).partition([n]).sync().unwrap();
+    let _result = bench_module::vector_add(z, &x, &y)
         .generics(vec!["f32".into(), tile_size.into()])
         .sync()
         .unwrap();
@@ -201,10 +202,10 @@ fn full_warmup_workflow() {
         // Step 2: Execute warmup with real data (warms CUDA runtime).
         let t1 = Instant::now();
         execute_warmup(|| {
-            let x = api::ones::<1, f32>([256]).sync()?;
-            let y = api::ones::<1, f32>([256]).sync()?;
-            let z = api::zeros::<1, f32>([256]).partition([128]).sync()?;
-            let _result = bench_module::vector_add(z, x.into(), y.into())
+            let x = api::ones::<f32>(&[256]).sync()?;
+            let y = api::ones::<f32>(&[256]).sync()?;
+            let z = api::zeros::<f32>(&[256]).partition([128]).sync()?;
+            let _result = bench_module::vector_add(z, &x, &y)
                 .generics(vec!["f32".into(), "128".into()])
                 .sync()?;
             Ok(())

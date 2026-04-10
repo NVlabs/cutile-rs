@@ -8,9 +8,10 @@
 use crate::common;
 use cutile::api;
 use cutile::jit_store::FileSystemJitStore;
+use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
     compile_warmup, contains_cuda_function, execute_warmup, get_default_device, get_kernel_cache,
-    load_module_from_bytes, CompileOptions, DeviceOperation, FunctionKey, IntoDeviceOperationPartition,
+    load_module_from_bytes, CompileOptions, FunctionKey,
     TileFunctionKey, TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
@@ -170,10 +171,10 @@ fn compile_warmup_persists_to_disk() {
 fn execute_warmup_runs_kernel() {
     common::with_test_stack(|| {
         execute_warmup(|| {
-            let x = api::ones::<1, f32>([256]).sync()?;
-            let y = api::ones::<1, f32>([256]).sync()?;
-            let z = api::zeros::<1, f32>([256]).partition([64]).sync()?;
-            let _result = warmup_test_module::vector_add(z, x.into(), y.into())
+            let x = api::ones::<f32>(&[256]).sync()?;
+            let y = api::ones::<f32>(&[256]).sync()?;
+            let z = api::zeros::<f32>(&[256]).partition([64]).sync()?;
+            let _result = warmup_test_module::vector_add(z, &x, &y)
                 .generics(vec!["f32".into(), "64".into()])
                 .sync()?;
             Ok(())
@@ -199,10 +200,10 @@ fn multi_thread_compile_dedup() {
                     .stack_size(common::TEST_STACK_SIZE)
                     .spawn(move || {
                         barrier.wait();
-                        let x = api::ones::<1, f32>([256]).sync().unwrap();
-                        let y = api::ones::<1, f32>([256]).sync().unwrap();
-                        let z = api::zeros::<1, f32>([256]).partition([8]).sync().unwrap();
-                        warmup_test_module::vector_add(z, x.into(), y.into())
+                        let x = api::ones::<f32>(&[256]).sync().unwrap();
+                        let y = api::ones::<f32>(&[256]).sync().unwrap();
+                        let z = api::zeros::<f32>(&[256]).partition([8]).sync().unwrap();
+                        warmup_test_module::vector_add(z, &x, &y)
                             .generics(vec!["f32".into(), "8".into()])
                             .sync()
                             .unwrap();
@@ -523,10 +524,10 @@ fn different_keys_parallel_compile() {
             .stack_size(common::TEST_STACK_SIZE)
             .spawn(move || {
                 b1.wait();
-                let x = api::ones::<1, f32>([256]).sync().unwrap();
-                let y = api::ones::<1, f32>([256]).sync().unwrap();
-                let z = api::zeros::<1, f32>([256]).partition([8]).sync().unwrap();
-                warmup_test_module::vector_add(z, x.into(), y.into())
+                let x = api::ones::<f32>(&[256]).sync().unwrap();
+                let y = api::ones::<f32>(&[256]).sync().unwrap();
+                let z = api::zeros::<f32>(&[256]).partition([8]).sync().unwrap();
+                warmup_test_module::vector_add(z, &x, &y)
                     .generics(vec!["f32".into(), "8".into()])
                     .sync()
                     .unwrap();
@@ -538,10 +539,10 @@ fn different_keys_parallel_compile() {
             .stack_size(common::TEST_STACK_SIZE)
             .spawn(move || {
                 b2.wait();
-                let x = api::ones::<1, f32>([512]).sync().unwrap();
-                let y = api::ones::<1, f32>([512]).sync().unwrap();
-                let z = api::zeros::<1, f32>([512]).partition([32]).sync().unwrap();
-                warmup_test_module::vector_add(z, x.into(), y.into())
+                let x = api::ones::<f32>(&[512]).sync().unwrap();
+                let y = api::ones::<f32>(&[512]).sync().unwrap();
+                let z = api::zeros::<f32>(&[512]).partition([32]).sync().unwrap();
+                warmup_test_module::vector_add(z, &x, &y)
                     .generics(vec!["f32".into(), "32".into()])
                     .sync()
                     .unwrap();
@@ -612,10 +613,10 @@ fn multi_thread_dedup_timing_evidence() {
                     .stack_size(common::TEST_STACK_SIZE)
                     .spawn(move || {
                         barrier.wait();
-                        let x = api::ones::<1, f32>([256]).sync().unwrap();
-                        let y = api::ones::<1, f32>([256]).sync().unwrap();
-                        let z = api::zeros::<1, f32>([256]).partition([4]).sync().unwrap();
-                        warmup_test_module::vector_add(z, x.into(), y.into())
+                        let x = api::ones::<f32>(&[256]).sync().unwrap();
+                        let y = api::ones::<f32>(&[256]).sync().unwrap();
+                        let z = api::zeros::<f32>(&[256]).partition([4]).sync().unwrap();
+                        warmup_test_module::vector_add(z, &x, &y)
                             .generics(vec!["f32".into(), "4".into()])
                             .sync()
                             .unwrap();
