@@ -6,7 +6,6 @@ extern crate core;
 
 use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
-use cutile;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
@@ -20,8 +19,7 @@ mod my_module {
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
                        optimization_hints = (
-                         tensor_dim_factor = 16,
-                         sm_120 = (num_cta_in_cga=1,),
+                         sm_120 = (num_cta_in_cga=1, max_divisibility=16,),
                        ))]
     fn fmha<
         const BM: i32, // Query sequence tile size.
@@ -141,6 +139,7 @@ mod my_module {
 
 use my_module::fmha;
 
+#[allow(clippy::too_many_arguments)]
 fn idx4(
     a: usize,
     b: usize,
@@ -154,6 +153,7 @@ fn idx4(
     (((a * hsz + b) * m + c) * dsz) + d
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fmha_ref_cpu(
     q: &[f32],
     k: &[f32],

@@ -672,6 +672,7 @@ pub unsafe fn verify_statements_raw(cuda_tile_module: MlirOperation) -> Result<(
 pub struct CompileOptions {
     pub occupancy: Option<i32>,
     pub num_cta_in_cga: Option<i32>,
+    pub max_divisibility: Option<i32>,
 }
 
 impl CompileOptions {
@@ -686,6 +687,11 @@ impl CompileOptions {
 
     pub fn num_cta_in_cga(mut self, num_cta_in_cga: i32) -> Self {
         self.num_cta_in_cga = Some(num_cta_in_cga);
+        self
+    }
+
+    pub fn max_divisibility(mut self, max_divisibility: i32) -> Self {
+        self.max_divisibility = Some(max_divisibility);
         self
     }
 }
@@ -709,7 +715,7 @@ pub struct SMHints {
     pub gpu_name: String,
     pub num_cta_in_cga: Option<i32>,
     pub occupancy: Option<i32>,
-    pub set_tensor_dim_factor: Option<i32>,
+    pub max_divisibility: Option<i32>,
 }
 
 impl SMHints {
@@ -719,7 +725,7 @@ impl SMHints {
             gpu_name,
             num_cta_in_cga: None,
             occupancy: None,
-            set_tensor_dim_factor: None,
+            max_divisibility: None,
         }
     }
 
@@ -742,13 +748,22 @@ impl SMHints {
         self.occupancy = Some(get_int_hint(hint)?);
         Ok(())
     }
+
+    /// Sets the max divisibility ceiling hint.
+    pub fn set_max_divisibility(&mut self, hint: &Expr) -> Result<(), JITError> {
+        if self.max_divisibility.is_some() {
+            return SourceLocation::unknown()
+                .jit_error_result("max_divisibility hint has already been set");
+        }
+        self.max_divisibility = Some(get_int_hint(hint)?);
+        Ok(())
+    }
 }
 
 /// Collection of optimization hints for kernel compilation, keyed by SM architecture.
 pub struct OptimizationHints {
     pub target_gpu_name: Option<String>,
     pub tile_as_hints: BTreeMap<String, SMHints>,
-    pub tensor_dim_factor: Option<i32>,
 }
 
 impl OptimizationHints {
@@ -757,18 +772,7 @@ impl OptimizationHints {
         Self {
             target_gpu_name: None,
             tile_as_hints: BTreeMap::new(),
-            tensor_dim_factor: None,
         }
-    }
-
-    /// Sets the tensor dimension factor hint.
-    pub fn set_tensor_dim_factor(&mut self, hint: &Expr) -> Result<(), JITError> {
-        if self.tensor_dim_factor.is_some() {
-            return SourceLocation::unknown()
-                .jit_error_result("tensor_dim_factor hint has already been set");
-        }
-        self.tensor_dim_factor = Some(get_int_hint(hint)?);
-        Ok(())
     }
 
     fn parse_key_value(expr: &Expr) -> Result<(String, Expr), JITError> {
@@ -805,10 +809,6 @@ impl OptimizationHints {
 
             let (opt_key, opt_value) = Self::parse_key_value(sm_key_val)?;
             match opt_key.as_str() {
-                // Architecture agnostic optimization hints.
-                "tensor_dim_factor" => {
-                    result.set_tensor_dim_factor(&opt_value)?;
-                }
                 _ => {
                     if !opt_key.starts_with("sm_") {
                         return SourceLocation::unknown().jit_error_result(&format!(
@@ -830,6 +830,9 @@ impl OptimizationHints {
                             }
                             "occupancy" => {
                                 sm_hints_result.set_occupancy(&hints)?;
+                            }
+                            "max_divisibility" => {
+                                sm_hints_result.set_max_divisibility(&hints)?;
                             }
                             "allow_tma" | "latency" => {
                                 return SourceLocation::unknown().jit_error_result(&format!(
@@ -866,7 +869,10 @@ impl OptimizationHints {
 
     /// Applies runtime compile options, overriding entry-level hints.
     pub fn apply_compile_options(&mut self, options: &CompileOptions) {
-        if options.occupancy.is_none() && options.num_cta_in_cga.is_none() {
+        if options.occupancy.is_none()
+            && options.num_cta_in_cga.is_none()
+            && options.max_divisibility.is_none()
+        {
             return;
         }
         let target_arch = self
@@ -882,6 +888,9 @@ impl OptimizationHints {
         }
         if let Some(num_cta_in_cga) = options.num_cta_in_cga {
             sm_hints.num_cta_in_cga = Some(num_cta_in_cga);
+        }
+        if let Some(max_divisibility) = options.max_divisibility {
+            sm_hints.max_divisibility = Some(max_divisibility);
         }
     }
 

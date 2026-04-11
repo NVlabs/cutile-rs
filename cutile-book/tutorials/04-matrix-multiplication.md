@@ -254,8 +254,7 @@ The `#[cutile::entry()]` attribute accepts `unchecked_accesses` and `optimizatio
 #[cutile::entry(
     unchecked_accesses = true,
     optimization_hints = (
-        tensor_dim_factor = 16,
-        sm_120 = (num_cta_in_cga = 2,),
+        sm_120 = (num_cta_in_cga = 2, max_divisibility = 16,),
     )
 )]
 unsafe fn gemm<T: ElementType, const BM: i32, const BN: i32, const BK: i32>(
@@ -280,8 +279,7 @@ unsafe fn gemm<T: ElementType, const BM: i32, const BN: i32, const BK: i32>(
 The key differences from the tutorial kernel:
 
 - **`unchecked_accesses = true`** removes bounds-checking overhead on every `load` and `store` call.
-- **`tensor_dim_factor = 16`** tells the compiler that tensor dimensions are multiples of 16, enabling more aggressive memory access optimizations.
-- **`sm_120 = (num_cta_in_cga = 2,)`** is an architecture-specific hint for Blackwell (SM 120) that groups two CTAs (Cooperative Thread Arrays) into a CGA for better inter-SM data sharing.
+- **`sm_120 = (num_cta_in_cga = 2, max_divisibility = 16,)`** is an architecture-specific hint for Blackwell (SM 120) that groups two CTAs into a CGA for better inter-SM data sharing and caps auto-inferred alignment at 16.
 - **`k` is passed as a runtime `i32`** rather than a const generic, so changing the K dimension does not trigger JIT recompilation.
 
 Note that even though this approach is `unsafe`, many of cuTile Rust's static guarantees still apply: tile shapes are still checked at compile time, `mma` dimensions are still validated, and the type system still prevents dtype mismatches. The `unsafe` annotation specifically opts out of runtime bounds checking, not the DSL's compile-time checks.

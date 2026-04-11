@@ -89,6 +89,7 @@ fn compile_and_get_error(
         function_name,
         &[128.to_string()],
         &[("output", &[1])],
+        &[],
         None,
         gpu_name,
         &CompileOptions::default(),

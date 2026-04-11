@@ -4,7 +4,6 @@
  */
 use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
-use cutile;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};

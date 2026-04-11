@@ -10,7 +10,6 @@ use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
 use cutile::tile_kernel::TileKernel;
 use kernels::*;
-use std::iter::zip;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +20,6 @@ mod kernels {
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
                        optimization_hints = (
-                         tensor_dim_factor = 16,
                          sm_120 = (num_cta_in_cga=1,),
                        ))]
     fn fmha_causal<
@@ -142,42 +140,40 @@ mod kernels {
 
 fn ocean_fmha_causal(c: &mut Criterion) {
     let mut group = c.benchmark_group("fmha_causal");
-    group
-        .warm_up_time(Duration::from_millis(5000))
-        .sample_size(10usize.pow(2))
-        .measurement_time(Duration::from_millis(5000));
+    if cfg!(feature = "smoke-test") {
+        group
+            .warm_up_time(Duration::from_millis(1))
+            .sample_size(10)
+            .measurement_time(Duration::from_millis(1));
+    } else {
+        group
+            .warm_up_time(Duration::from_millis(500))
+            .sample_size(20)
+            .measurement_time(Duration::from_millis(2000));
+    }
 
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
 
-    let mut context_lengths = vec![];
-    for exponent in 0..7 {
-        // This is what the ocean benchmark uses.
-        let scale: usize = 2usize.pow(exponent);
-        let m = (1024 * scale,);
-        context_lengths.push(m)
-    }
+    // This is what the ocean benchmark uses.
+    let context_lengths = (0..6).map(|i| (2usize.pow(10 + i),)).collect::<Vec<_>>();
     const TILE_SHAPE: (usize, usize) = (128, 64);
-    let hyper_params = vec![
-        [TILE_SHAPE].as_slice(),
-        [TILE_SHAPE].as_slice(),
-        [TILE_SHAPE].as_slice(),
-        [TILE_SHAPE].as_slice(),
-        [TILE_SHAPE].as_slice(),
-        [TILE_SHAPE].as_slice(),
-        [TILE_SHAPE].as_slice(),
+    let hyper_params = [
+        [TILE_SHAPE],
+        [TILE_SHAPE],
+        [TILE_SHAPE],
+        [TILE_SHAPE],
+        [TILE_SHAPE],
+        [TILE_SHAPE],
+        [TILE_SHAPE],
     ];
-    let slice = 0..6;
-    for (ctx_len, tile) in zip(
-        &context_lengths[slice.clone()],
-        &hyper_params[slice.clone()],
-    ) {
+    for (ctx_len, tile) in context_lengths.iter().zip(hyper_params.iter()) {
         // Using calculation from https://tridao.me/publications/flash3/flash3.pdf
         // 1. Seq len from 512-16k.
         // 2. Batch size set so total tokens is 16k (e.g. @ 16k seq len batch size is 1).
         // 3. "Hidden dim" is fixed to 2048, head dim is 64, 128 or 256.
         // With causal masking the FLOPs are halved: 2 * seqlen^2 * head_dim * num_heads * batch.
-        let (max_ctx_len,) = context_lengths[slice.clone().into_iter().last().unwrap()];
+        let (max_ctx_len,) = context_lengths.last().unwrap();
         let (seq_len,) = *ctx_len;
         let batch_size = max_ctx_len / seq_len;
         let num_heads = 8;
@@ -266,8 +262,7 @@ fn ocean_fmha_causal(c: &mut Criterion) {
                         out = out_local;
                     }
                     stream.synchronize().expect("Failed to synchronize.");
-                    let res = start.elapsed();
-                    res
+                    start.elapsed()
                 });
             },
         );
@@ -275,5 +270,14 @@ fn ocean_fmha_causal(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, ocean_fmha_causal);
+fn bench_config() -> Criterion {
+    if cfg!(feature = "smoke-test") {
+        Criterion::default()
+            .without_plots()
+            .save_baseline("smoke-discard".to_string())
+    } else {
+        Criterion::default()
+    }
+}
+criterion_group!(name = benches; config = bench_config(); targets = ocean_fmha_causal);
 criterion_main!(benches);

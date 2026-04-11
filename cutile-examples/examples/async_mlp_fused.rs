@@ -84,7 +84,7 @@ async fn main() -> Result<(), Error> {
         n.to_string(),
         k.to_string(),
     ];
-    let stride_args = vec![
+    let stride_args = [
         ("out", vec![1]),
         ("data", vec![n as i32, 1]),
         ("w0", vec![k as i32, 1]),
@@ -97,14 +97,15 @@ async fn main() -> Result<(), Error> {
         &generics,
         &stride_args
             .iter()
-            .map(|x| (x.0, x.1.as_slice()))
+            .map(|(x, y)| (*x, y.as_slice()))
             .collect::<Vec<_>>(),
+        &[],
         None,
         get_gpu_name(0),
         &CompileOptions::default(),
     )?;
     let module_op: ModuleOperation = compiler.compile()?;
-    println!("{}", module_op.as_operation().to_string());
+    println!("{}", module_op.as_operation());
     let _device = global_policy(0)?;
     let module_filename = compile_module(&module_op, &get_gpu_name(0));
     let module = device_context::load_module_from_file(&module_filename, 0)?;

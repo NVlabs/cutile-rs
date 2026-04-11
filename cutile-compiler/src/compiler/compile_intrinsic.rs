@@ -1103,17 +1103,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             let index_value = indexes.remove(0);
             if index_value.bounds.is_some() && is_static_shape_dim {
                 // We can do a static bounds check.
+                // Use ceil division to allow partial tiles (non-divisible shapes).
                 let bounds = index_value.bounds.unwrap();
-                if !(0 <= bounds.start
-                    && bounds.end < static_shape_dim as i64 / static_tile_dim as i64)
-                {
+                let num_partitions =
+                    (static_shape_dim as i64 + static_tile_dim as i64 - 1) / static_tile_dim as i64;
+                if !(0 <= bounds.start && bounds.end < num_partitions) {
                     return self.jit_error_result(
                         &call_expr.span(),
                         &format!(
                             "Bounds check failed: 0 <= {} && {} < {}",
-                            bounds.start,
-                            bounds.end,
-                            static_shape_dim as i64 / static_tile_dim as i64
+                            bounds.start, bounds.end, num_partitions
                         ),
                     );
                 }

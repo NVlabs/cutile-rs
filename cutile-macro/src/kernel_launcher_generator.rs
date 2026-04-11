@@ -512,6 +512,7 @@ pub fn generate_kernel_launcher(
     let param_names_tuple_str = to_tuple_string(&param_names);
     let (input_types, _output_type) = get_sig_types(&item.sig, None);
     let mut stride_args = vec![];
+    let mut spec_args: Vec<String> = vec![];
     let mut builder_statements = vec![];
     let mut launch_grid_expr_strs = vec![];
     let mut validator_statements = vec![];
@@ -528,6 +529,7 @@ pub fn generate_kernel_launcher(
                 arg_types.push(res.fn_arg.ty.as_ref().clone());
                 param_element_types.push(res.element_type_name);
                 stride_args.push(res.stride_expr_str);
+                spec_args.push(res.spec_expr_str);
                 builder_statements.extend(res.builder_statements);
                 launch_grid_expr_strs.extend(res.launch_grid_expr_strs);
                 validator_statements.extend(res.validator_statements.block.stmts);
@@ -815,6 +817,10 @@ pub fn generate_kernel_launcher(
         "let stride_args: Vec<(String, Vec<i32>)> =  vec![{}];",
         stride_args.join(",")
     )));
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let spec_args = vec![{}];",
+        spec_args.join(",")
+    )));
 
     let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
@@ -822,7 +828,7 @@ pub fn generate_kernel_launcher(
         let (function, validator) = self.compile(
             ctx, _module_asts,
             module_name, function_name, function_entry,
-            function_generics, stride_args, const_grid,
+            function_generics, stride_args, spec_args.clone(), const_grid,
             compile_options
         )?;
     }})
@@ -1143,6 +1149,7 @@ pub struct KernelInputInfo {
 struct TensorLaunchCode {
     fn_arg: PatType, // FnArg::Typed(PatType)
     stride_expr_str: String,
+    spec_expr_str: String,
     builder_statements: Vec<Stmt>,
     launch_grid_expr_strs: Vec<String>,
     validator_statements: ExprBlock,
@@ -1218,17 +1225,28 @@ fn get_tensor_code(
         )"#
         )
     } else {
-        // TODO (hme): Re-enable this for const stride?
-        // format!(r#"("{var_name}".to_string(), {var_name}.strides().to_vec())"#)
         format!(
             r#"(
         "{var_name}".to_string(),
-        {{
-            let len = {var_name}.strides().len();
-            let mut res = vec![-1; len];
-            res[len-1] = 1;
-            res
-        }}
+        {var_name}.spec().stride_one.iter()
+            .map(|&is_one| if is_one {{ 1 }} else {{ -1 }})
+            .collect::<Vec<i32>>()
+        )"#
+        )
+    };
+    // Spec expr.
+    let spec_expr_str = if ty.mutability.is_some() {
+        format!(
+            r#"(
+            "{var_name}".to_string(),
+            KernelOutputStored::spec(&{var_name}).clone()
+        )"#
+        )
+    } else {
+        format!(
+            r#"(
+        "{var_name}".to_string(),
+        {var_name}.spec().clone()
         )"#
         )
     };
@@ -1292,6 +1310,7 @@ fn get_tensor_code(
     Ok(TensorLaunchCode {
         fn_arg,
         stride_expr_str,
+        spec_expr_str,
         builder_statements,
         launch_grid_expr_strs,
         validator_statements,

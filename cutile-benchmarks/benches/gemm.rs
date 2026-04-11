@@ -20,7 +20,6 @@ mod kernels {
 
     #[cutile::entry(unchecked_accesses=true,
                        optimization_hints = (
-                         tensor_dim_factor = 16,
                          sm_120 = (num_cta_in_cga=2,),
                        )
     )]
@@ -81,22 +80,29 @@ mod kernels {
 
 fn ocean_gemm(c: &mut Criterion) {
     let mut group = c.benchmark_group("gemm");
-    group
-        .warm_up_time(Duration::from_millis(1000))
-        .sample_size(10usize.pow(2))
-        .measurement_time(Duration::from_millis(5000));
+    if cfg!(feature = "smoke-test") {
+        group
+            .warm_up_time(Duration::from_millis(1))
+            .sample_size(10)
+            .measurement_time(Duration::from_millis(1));
+    } else {
+        group
+            .warm_up_time(Duration::from_millis(500))
+            .sample_size(20)
+            .measurement_time(Duration::from_millis(2000));
+    }
 
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
 
-    let mut shapes = vec![];
-    for exponent in 0..6 {
-        // This is what the ocean benchmark uses.
-        let scale: usize = 2usize.pow(exponent);
-        let shape = (1024 * scale, 1024 * scale, 1024 * scale);
-        shapes.push(shape)
-    }
-    let hyper_params = vec![
+    // This is what the ocean benchmark uses.
+    let shapes = (0..6)
+        .map(|i| {
+            let n = 2usize.pow(10 + i);
+            (n, n, n)
+        })
+        .collect::<Vec<_>>();
+    let hyper_params = [
         ((128, 128, 64), 2),
         ((256, 256, 64), 2),
         ((256, 256, 64), 2),
@@ -104,11 +110,7 @@ fn ocean_gemm(c: &mut Criterion) {
         ((256, 256, 64), 2),
         ((256, 256, 64), 2),
     ];
-    let slice = 0..6;
-    for (shape, (tile, _group_size_m)) in zip(&shapes[slice.clone()], &hyper_params[slice.clone()])
-    {
-        let (m, n, k) = *shape;
-        let (bm, bn, bk) = *tile;
+    for (&(m, n, k), &((bm, bn, bk), _group_size_m)) in shapes.iter().zip(hyper_params.iter()) {
         let generics = vec![
             "f16".to_string(),
             bm.to_string(),
@@ -146,13 +148,21 @@ fn ocean_gemm(c: &mut Criterion) {
                     }
                 }
                 stream.synchronize().expect("Failed to synchronize.");
-                let res = start.elapsed();
-                res
+                start.elapsed()
             });
         });
     }
     group.finish();
 }
 
-criterion_group!(benches, ocean_gemm);
+fn bench_config() -> Criterion {
+    if cfg!(feature = "smoke-test") {
+        Criterion::default()
+            .without_plots()
+            .save_baseline("smoke-discard".to_string())
+    } else {
+        Criterion::default()
+    }
+}
+criterion_group!(name = benches; config = bench_config(); targets = ocean_gemm);
 criterion_main!(benches);
