@@ -379,7 +379,81 @@ fn failed_warmup_does_not_poison_cache() {
     });
 }
 
-// Multi-spec warmup does not skip subsequent specs 
+// Corrupted disk cubin self-healing
+// Verifies that if a .cubin on disk is corrupted (e.g. partial write), compile_warmup
+// deletes the bad file and falls through to JIT recompilation instead of hard-erroring.
+#[test]
+fn disk_cache_corrupted_cubin_self_heals() {
+    common::with_test_stack(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "cutile_corrupted_cubin_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileSystemJitStore::new(dir.clone()).expect("failed to create store");
+        let store_was_set =
+            cuda_async::jit_store::set_jit_store_if_unset(Some(Box::new(store)));
+
+        if !store_was_set {
+            println!("Skipping disk_cache_corrupted_cubin_self_heals: JitStore already set");
+            return;
+        }
+
+        let device_id = get_default_device();
+        let spec = WarmupSpec::new("vector_add", vec!["f32".into(), "8".into()])
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 8));
+
+        // Step 1: compile → write valid cubin to disk.
+        warmup_test_module::_compile_warmup(std::slice::from_ref(&spec))
+            .expect("initial compile_warmup failed");
+
+        // Step 2: overwrite the on-disk cubin with garbage bytes.
+        let key = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "8".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vector_add_spec_args(256, 8))
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(get_gpu_name(device_id))
+            .compiler_version(get_compiler_version())
+            .cuda_toolkit_version(get_cuda_toolkit_version())
+            .build();
+        let disk_key = key.get_disk_hash_string();
+        let cubin_path = dir.join(format!("{disk_key}.cubin"));
+        std::fs::write(&cubin_path, b"this is not a valid cubin")
+            .expect("failed to corrupt cubin");
+        assert!(cubin_path.exists(), "corrupted cubin should exist before test");
+
+        // Step 3: evict from memory so the next warmup must go to disk.
+        evict_kernel(&key.get_hash_string());
+        assert!(
+            !contains_cuda_function(device_id, &key),
+            "kernel should be evicted from memory"
+        );
+
+        // Step 4: re-warmup — should detect corruption, delete bad file, JIT recompile.
+        warmup_test_module::_compile_warmup(std::slice::from_ref(&spec))
+            .expect("compile_warmup should self-heal after corrupted cubin");
+
+        // Step 5: kernel must be back in memory cache (recompiled successfully).
+        assert!(
+            contains_cuda_function(device_id, &key),
+            "kernel should be in memory cache after self-healing recompile"
+        );
+
+        // Step 6: the corrupted file should be gone (deleted by recovery path).
+        assert!(
+            !std::fs::read(&cubin_path)
+                .ok()
+                .is_some_and(|b| b == b"this is not a valid cubin"),
+            "corrupted cubin bytes should have been replaced or deleted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+// Multi-spec warmup does not skip subsequent specs
 // Regression test for the IIFE fix in compile_warmup.  Pre-compile spec A,
 // then warmup [A, B].  Spec A should be skipped (cache hit) and spec B must
 // still be compiled.  Without the IIFE, a `return Ok(())` in the cache-hit
