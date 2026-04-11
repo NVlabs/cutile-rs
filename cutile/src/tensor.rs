@@ -872,6 +872,9 @@ impl<'a, T: DType> TensorView<'a, T> {
     }
     /// Re-view with a different shape.
     pub fn view(&self, shape: &[usize]) -> Result<TensorView<'_, T>, Error> {
+        if self.strides != contiguous_strides(&self.shape) {
+            return tensor_error_result("view: cannot reshape a non-contiguous view.");
+        }
         let current_elems: i32 = self.shape.iter().product();
         let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
         if new_elems != current_elems {
@@ -888,6 +891,41 @@ impl<'a, T: DType> TensorView<'a, T> {
         Ok(TensorView {
             base: self.base,
             offset_bytes: self.offset_bytes,
+            shape: new_shape,
+            strides: new_strides,
+            spec,
+        })
+    }
+    /// Slice this view along one or more axes, numpy-style.
+    ///
+    /// Each range corresponds to an axis. Fewer ranges than axes is
+    /// allowed: trailing axes are left unsliced. The strides are
+    /// preserved (slicing never changes strides).
+    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<TensorView<'_, T>, Error> {
+        if ranges.len() > self.shape.len() {
+            return tensor_error_result("slice: more ranges than axes.");
+        }
+        let mut offset_elems: usize = 0;
+        let mut new_shape = self.shape.clone();
+        for (axis, range) in ranges.iter().enumerate() {
+            let dim = self.shape[axis] as usize;
+            if range.start > range.end || range.end > dim {
+                return tensor_error_result("slice: range out of bounds.");
+            }
+            offset_elems += range.start * self.strides[axis] as usize;
+            new_shape[axis] = (range.end - range.start) as i32;
+        }
+        let new_strides = self.strides.clone();
+        let spec = compute_spec(
+            self.base.storage.cu_deviceptr()
+                + (self.offset_bytes + offset_elems * size_of::<T>()) as u64,
+            &new_shape,
+            &new_strides,
+            size_of::<T>() as i32,
+        );
+        Ok(TensorView {
+            base: self.base,
+            offset_bytes: self.offset_bytes + offset_elems * size_of::<T>(),
             shape: new_shape,
             strides: new_strides,
             spec,
@@ -917,6 +955,40 @@ impl<T: DType> Tensor<T> {
         Ok(TensorView {
             base: self,
             offset_bytes: 0,
+            shape: new_shape,
+            strides: new_strides,
+            spec,
+        })
+    }
+
+    /// Slice this tensor along one or more axes, numpy-style.
+    ///
+    /// Returns a `TensorView` with adjusted offset and shape. Strides
+    /// are preserved from the original tensor. No copy.
+    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<TensorView<'_, T>, Error> {
+        if ranges.len() > self.shape.len() {
+            return tensor_error_result("slice: more ranges than axes.");
+        }
+        let mut offset_elems: usize = 0;
+        let mut new_shape = self.shape.clone();
+        for (axis, range) in ranges.iter().enumerate() {
+            let dim = self.shape[axis] as usize;
+            if range.start > range.end || range.end > dim {
+                return tensor_error_result("slice: range out of bounds.");
+            }
+            offset_elems += range.start * self.strides[axis] as usize;
+            new_shape[axis] = (range.end - range.start) as i32;
+        }
+        let new_strides = self.strides.clone();
+        let spec = compute_spec(
+            self.storage.cu_deviceptr() + (offset_elems * size_of::<T>()) as u64,
+            &new_shape,
+            &new_strides,
+            size_of::<T>() as i32,
+        );
+        Ok(TensorView {
+            base: self,
+            offset_bytes: offset_elems * size_of::<T>(),
             shape: new_shape,
             strides: new_strides,
             spec,
@@ -1366,7 +1438,6 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());
         }
-        launcher.push_arg(0i32); // no offset for non-view tensors
         for dim in self.shape.iter() {
             launcher.push_arg(*dim);
         }
@@ -1393,7 +1464,6 @@ impl<'a, T: DType + Sync> KernelInputStored for &'a Tensor<T> {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());
         }
-        launcher.push_arg(0i32); // no offset for non-view tensors
         for dim in self.shape.iter() {
             launcher.push_arg(*dim);
         }
@@ -1454,13 +1524,11 @@ impl<'a, T: DType + Sync> KernelInput<T> for &'a Tensor<T> {
 
 impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
-        // Push the base tensor's device pointer with the VIEW's shape/strides.
-        // The offset is applied device-side via ptr.offset() in the entry generator.
+        // Push the already-offset device pointer. The offset is applied
+        // host-side so the kernel sees the correct base address directly.
         unsafe {
-            launcher.push_device_ptr(self.base.cu_deviceptr());
+            launcher.push_device_ptr(self.base.cu_deviceptr() + self.offset_bytes as u64);
         }
-        let offset_elements = (self.offset_bytes / std::mem::size_of::<T>()) as i32;
-        launcher.push_arg(offset_elements);
         for dim in self.shape.iter() {
             launcher.push_arg(*dim);
         }

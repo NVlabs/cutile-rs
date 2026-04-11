@@ -145,16 +145,20 @@ impl TensorInput {
         self.i_arg("partition_stride", i)
     }
 
+    #[expect(dead_code, reason = "Reserved for future device-side offset path")]
+    pub fn offset_arg(&self) -> FnArg {
+        let var_name = self.var_name.clone();
+        let dim_type = self.dim_type.clone();
+        syn::parse2::<syn::FnArg>(format!("{var_name}_offset: {dim_type}").parse().unwrap())
+            .unwrap()
+    }
+
     fn generate_args(&self) -> Punctuated<FnArg, Token![,]> {
         let mut fn_args = Punctuated::<FnArg, Token![,]>::new();
         // ptr
         fn_args.push(self.ptr_arg());
-        if !self.mutable {
-            // Immutable tensors receive an element offset from the host
-            // (for TensorView slicing). Mutable tensors compute their
-            // offset from block ID in generate_statements.
-            fn_args.push(self.i_arg("offset", 0));
-        }
+        // No offset param for immutable tensors — offset is applied
+        // host-side by pushing an already-offset device pointer.
         // dims
         for i in 0..self.rank {
             fn_args.push(self.dim_arg(i));
@@ -209,17 +213,6 @@ impl TensorInput {
         )
         .unwrap();
         stmt
-    }
-
-    /// Returns the byte size of an element type string (e.g., "f32" -> 4).
-    fn element_type_size(element_type: &str) -> i32 {
-        match element_type {
-            "bool" | "u8" | "i8" => 1,
-            "u16" | "i16" | "f16" | "bf16" => 2,
-            "u32" | "i32" | "f32" => 4,
-            "u64" | "i64" | "f64" => 8,
-            _ => 1,
-        }
     }
 
     /// Computes effective divisor: auto-inferred from spec, capped by max_divisibility.
@@ -374,22 +367,10 @@ impl TensorInput {
             statements.push(partition_ptr_stmnt);
             partition_ptr_var
         } else {
-            // Immutable tensors: apply the host-provided element offset.
-            let offset_var = format!("{var_name}_offset_0");
-            let offset_ptr_var = format!("{var_name}_offset_ptr");
-            let offset_ptr_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let {offset_ptr_var}: PointerTile<*mut {element_type}, {{[]}}> = {ptr_var}.offset({offset_var});").parse().unwrap()
-            ).unwrap();
-            statements.push(offset_ptr_stmnt);
-            // The offset is in elements, so the result pointer maintains
-            // element alignment. Emit assume_div_by with the element size
-            // unconditionally — this is always valid and must not be capped
-            // by max_divisibility.
-            let elem_size = Self::element_type_size(element_type);
-            if elem_size > 1 {
-                statements.push(Self::get_assume_div_by(offset_ptr_var.clone(), elem_size));
-            }
-            offset_ptr_var
+            // Immutable tensors: offset is applied host-side (the device
+            // pointer already points to the correct location). No
+            // ptr.offset() needed here.
+            ptr_var
         };
         let inferred_ptr_div = self.spec.as_ref().map(|s| s.base_ptr_div);
         let ptr_div = self.effective_div(inferred_ptr_div);
