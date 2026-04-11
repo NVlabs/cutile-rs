@@ -61,7 +61,7 @@ async fn main() -> Result<(), Error> {
                 vec![],
                 None,
                 CompileOptions::default(),
-                my_module::__SOURCE_HASH,
+                my_module::_SOURCE_HASH,
             );
             value(func)
         })

@@ -96,7 +96,7 @@ fn warmup_eliminates_first_call_jit() {
         // ── With warmup: pre-compile tile_size=64, then call it ──
         let spec_args_64 = vector_add_spec_args(256, 64);
         let warmup_t0 = Instant::now();
-        bench_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
+        bench_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
             .with_strides(stride_args())
             .with_spec_args(spec_args_64.clone())])
         .expect("compile_warmup failed");
@@ -145,7 +145,7 @@ fn warmup_eliminates_first_call_jit() {
             spec_args_64,
             None,
             CompileOptions::default(),
-            bench_module::__SOURCE_HASH.into(),
+            bench_module::_SOURCE_HASH.into(),
             get_gpu_name(device_id),
             get_compiler_version(),
             get_cuda_toolkit_version(),
@@ -211,7 +211,7 @@ fn full_warmup_workflow() {
         // Step 1: Pre-compile via compile_warmup.
         let spec_args_128 = vector_add_spec_args(256, 128);
         let t0 = Instant::now();
-        bench_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()])
+        bench_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()])
             .with_strides(stride_args())
             .with_spec_args(spec_args_128)])
         .expect("compile_warmup failed");
