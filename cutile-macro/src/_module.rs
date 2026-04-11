@@ -960,19 +960,25 @@ pub fn module_asts(
                 #base_col,
             );
 
-            let this_ast = #ast_path::Module::with_span_base(
+            let mut this_ast = #ast_path::Module::with_span_base(
                 #name_string,
                 parsed_mod,
                 span_base,
             );
+            this_ast.set_absolute_path(module_path!().to_string());
             let mut module_asts: Vec<#ast_path::Module> = vec![];
+            let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
             let other_module_asts_asts: Vec<Vec<#ast_path::Module>> = #vec_expr;
             for other_module_asts in other_module_asts_asts {
                 for module_ast in other_module_asts {
-                    module_asts.push(module_ast);
+                    if seen_paths.insert(module_ast.absolute_path().to_string()) {
+                        module_asts.push(module_ast);
+                    }
                 }
             }
-            module_asts.push(this_ast);
+            if seen_paths.insert(this_ast.absolute_path().to_string()) {
+                module_asts.push(this_ast);
+            }
             module_asts
         }
     };
