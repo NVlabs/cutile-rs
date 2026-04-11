@@ -10,7 +10,7 @@ use cutile::api;
 use cutile::jit_store::FileSystemJitStore;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    contains_cuda_function, execute_warmup, get_default_device, get_kernel_cache,
+    contains_cuda_function, evict_kernel, execute_warmup, get_default_device,
     load_module_from_bytes, CompileOptions, FunctionKey,
     TileFunctionKey, TileKernel, WarmupSpec,
 };
@@ -92,30 +92,26 @@ fn compile_warmup_populates_cache() {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Uses the macro-generated __compile_warmup helper — callers only pass specs.
-        warmup_test_module::__compile_warmup(&[WarmupSpec::new(
+        // Uses the macro-generated _compile_warmup helper — callers only pass specs.
+        warmup_test_module::_compile_warmup(&[WarmupSpec::new(
             "vector_add",
             vec!["f32".into(), "64".into()],
         )
         .with_strides(vector_add_stride_args())
         .with_spec_args(vector_add_spec_args(256, 64))])
-        .expect("__compile_warmup failed");
+        .expect("_compile_warmup failed");
 
         // Verify the kernel is in cache.
         let device_id = get_default_device();
-        let key = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "64".into()],
-            vector_add_stride_args(),
-            vector_add_spec_args(256, 64),
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            get_gpu_name(device_id),
-            get_compiler_version(),
-            get_cuda_toolkit_version(),
-        );
+        let key = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "64".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vector_add_spec_args(256, 64))
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(get_gpu_name(device_id))
+            .compiler_version(get_compiler_version())
+            .cuda_toolkit_version(get_cuda_toolkit_version())
+            .build();
         assert!(
             contains_cuda_function(device_id, &key),
             "kernel should be in cache after compile_warmup"
@@ -130,11 +126,11 @@ fn compile_warmup_skips_duplicate() {
             .with_strides(vector_add_stride_args())
             .with_spec_args(vector_add_spec_args(256, 128))];
         // First call compiles.
-        warmup_test_module::__compile_warmup(specs)
+        warmup_test_module::_compile_warmup(specs)
             .expect("first compile_warmup failed");
 
         // Second call should be a no-op (hits cache).
-        warmup_test_module::__compile_warmup(specs)
+        warmup_test_module::_compile_warmup(specs)
             .expect("second compile_warmup failed");
     });
 }
@@ -142,7 +138,7 @@ fn compile_warmup_skips_duplicate() {
 #[test]
 fn compile_warmup_unknown_function_errors() {
     common::with_test_stack(|| {
-        let result = warmup_test_module::__compile_warmup(
+        let result = warmup_test_module::_compile_warmup(
             &[WarmupSpec::new("nonexistent_fn", vec!["f32".into()])],
         );
         assert!(result.is_err(), "should error for unknown function");
@@ -163,7 +159,7 @@ fn compile_warmup_persists_to_disk() {
         // just skip the disk assertions.
         let store_was_set = cuda_async::jit_store::set_jit_store_if_unset(Some(Box::new(store)));
 
-        warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "256".into()])
+        warmup_test_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "256".into()])
             .with_strides(vector_add_stride_args())
             .with_spec_args(vector_add_spec_args(256, 256))])
         .expect("compile_warmup failed");
@@ -251,23 +247,19 @@ fn multi_thread_compile_dedup() {
 
         // Verify the kernel is in cache after concurrent compilation.
         let device_id = get_default_device();
-        let key = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "128".into()],
-            vector_add_stride_args(),
-            vec![
+        let key = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "128".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vec![
                 ("z".to_string(), z_spec),
                 ("x".to_string(), x_probe.spec().clone()),
                 ("y".to_string(), y_probe.spec().clone()),
-            ],
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            get_gpu_name(device_id),
-            get_compiler_version(),
-            get_cuda_toolkit_version(),
-        );
+            ])
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(get_gpu_name(device_id))
+            .compiler_version(get_compiler_version())
+            .cuda_toolkit_version(get_cuda_toolkit_version())
+            .build();
         assert!(
             contains_cuda_function(device_id, &key),
             "kernel should be in cache after concurrent compilation"
@@ -305,7 +297,7 @@ fn disk_cache_hit_after_memory_eviction() {
             .with_spec_args(vector_add_spec_args(256, 2))];
 
         // Step 1: compile → populates memory + disk.
-        warmup_test_module::__compile_warmup(specs)
+        warmup_test_module::_compile_warmup(specs)
         .expect("first compile_warmup failed");
 
         // Verify cubin was written to disk.
@@ -323,28 +315,23 @@ fn disk_cache_hit_after_memory_eviction() {
 
         // Step 2: evict from memory cache.
         let device_id = get_default_device();
-        let key = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "2".into()],
-            vector_add_stride_args(),
-            vector_add_spec_args(256, 2),
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            get_gpu_name(device_id),
-            get_compiler_version(),
-            get_cuda_toolkit_version(),
-        );
-        let key_str = key.get_hash_string();
-        get_kernel_cache().remove(&key_str);
+        let key = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "2".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vector_add_spec_args(256, 2))
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(get_gpu_name(device_id))
+            .compiler_version(get_compiler_version())
+            .cuda_toolkit_version(get_cuda_toolkit_version())
+            .build();
+        evict_kernel(&key.get_hash_string());
         assert!(
             !contains_cuda_function(device_id, &key),
             "should be evicted from memory"
         );
 
         // Step 3: re-warmup → should hit disk cache (visible with CUTILE_JIT_LOG=1).
-        warmup_test_module::__compile_warmup(specs)
+        warmup_test_module::_compile_warmup(specs)
         .expect("second compile_warmup (disk hit) failed");
 
         // Step 4: verify back in memory cache.
@@ -364,31 +351,27 @@ fn disk_cache_hit_after_memory_eviction() {
 fn failed_warmup_does_not_poison_cache() {
     common::with_test_stack(|| {
         // First call: invalid function name → should error.
-        let result = warmup_test_module::__compile_warmup(
+        let result = warmup_test_module::_compile_warmup(
             &[WarmupSpec::new("nonexistent_fn", vec!["f32".into()])],
         );
         assert!(result.is_err(), "should error for unknown function");
 
         // Second call: valid params → should succeed despite prior failure.
-        warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "4".into()])
+        warmup_test_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "4".into()])
             .with_strides(vector_add_stride_args())
             .with_spec_args(vector_add_spec_args(256, 4))])
         .expect("valid warmup should succeed after failed one");
 
         let device_id = get_default_device();
-        let key = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "4".into()],
-            vector_add_stride_args(),
-            vector_add_spec_args(256, 4),
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            get_gpu_name(device_id),
-            get_compiler_version(),
-            get_cuda_toolkit_version(),
-        );
+        let key = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "4".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vector_add_spec_args(256, 4))
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(get_gpu_name(device_id))
+            .compiler_version(get_compiler_version())
+            .cuda_toolkit_version(get_cuda_toolkit_version())
+            .build();
         assert!(
             contains_cuda_function(device_id, &key),
             "kernel should be in cache after recovery from prior failure"
@@ -405,13 +388,13 @@ fn failed_warmup_does_not_poison_cache() {
 fn multi_spec_warmup_compiles_all() {
     common::with_test_stack(|| {
         // Pre-compile spec A so it's in cache.
-        warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "32".into()])
+        warmup_test_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "32".into()])
             .with_strides(vector_add_stride_args())
             .with_spec_args(vector_add_spec_args(256, 32))])
         .expect("pre-compile spec A failed");
 
         // Now warmup [A, B] — A should skip, B should compile.
-        warmup_test_module::__compile_warmup(&[
+        warmup_test_module::_compile_warmup(&[
             WarmupSpec::new("vector_add", vec!["f32".into(), "32".into()])
                 .with_strides(vector_add_stride_args())
                 .with_spec_args(vector_add_spec_args(256, 32)),
@@ -427,32 +410,24 @@ fn multi_spec_warmup_compiles_all() {
         let compiler_version = get_compiler_version();
         let cuda_toolkit_version = get_cuda_toolkit_version();
 
-        let key_a = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "32".into()],
-            vector_add_stride_args(),
-            vector_add_spec_args(256, 32),
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            gpu_name.clone(),
-            compiler_version.clone(),
-            cuda_toolkit_version.clone(),
-        );
-        let key_b = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "16".into()],
-            vector_add_stride_args(),
-            vector_add_spec_args(256, 16),
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            gpu_name,
-            compiler_version,
-            cuda_toolkit_version,
-        );
+        let key_a = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "32".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vector_add_spec_args(256, 32))
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(gpu_name.clone())
+            .compiler_version(compiler_version.clone())
+            .cuda_toolkit_version(cuda_toolkit_version.clone())
+            .build();
+        let key_b = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "16".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vector_add_spec_args(256, 16))
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(gpu_name.clone())
+            .compiler_version(compiler_version.clone())
+            .cuda_toolkit_version(cuda_toolkit_version.clone())
+            .build();
 
         assert!(
             contains_cuda_function(device_id, &key_a),
@@ -472,7 +447,7 @@ fn multi_spec_warmup_compiles_all() {
 fn load_module_from_bytes_concurrent() {
     common::with_test_stack(|| {
         // First, compile a kernel to get valid cubin bytes.
-        warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
+        warmup_test_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
             .with_strides(vector_add_stride_args())
             .with_spec_args(vector_add_spec_args(256, 64))])
         .expect("warmup failed");
@@ -541,7 +516,7 @@ fn load_module_from_bytes_concurrent() {
 #[test]
 fn compile_warmup_empty_specs() {
     common::with_test_stack(|| {
-        let result = warmup_test_module::__compile_warmup(&[]);
+        let result = warmup_test_module::_compile_warmup(&[]);
         assert!(
             result.is_ok(),
             "compile_warmup with empty specs should return Ok(())"
@@ -620,40 +595,32 @@ fn different_keys_parallel_compile() {
         let gpu_name = get_gpu_name(device_id);
         let cv = get_compiler_version();
         let tv = get_cuda_toolkit_version();
-        let key_8 = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "128".into()],
-            vector_add_stride_args(),
-            vec![
+        let key_8 = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "128".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vec![
                 ("z".to_string(), z_spec_8),
                 ("x".to_string(), x_probe_8.spec().clone()),
                 ("y".to_string(), y_probe_8.spec().clone()),
-            ],
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            gpu_name.clone(),
-            cv.clone(),
-            tv.clone(),
-        );
-        let key_32 = TileFunctionKey::new(
-            "warmup_test_module".into(),
-            "vector_add".into(),
-            vec!["f32".into(), "256".into()],
-            vector_add_stride_args(),
-            vec![
+            ])
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(gpu_name.clone())
+            .compiler_version(cv.clone())
+            .cuda_toolkit_version(tv.clone())
+            .build();
+        let key_32 = TileFunctionKey::builder("warmup_test_module", "vector_add")
+            .generics(vec!["f32".into(), "256".into()])
+            .stride_args(vector_add_stride_args())
+            .spec_args(vec![
                 ("z".to_string(), z_spec_32),
                 ("x".to_string(), x_probe_32.spec().clone()),
                 ("y".to_string(), y_probe_32.spec().clone()),
-            ],
-            None,
-            CompileOptions::default(),
-            warmup_test_module::__SOURCE_HASH.into(),
-            gpu_name,
-            cv,
-            tv,
-        );
+            ])
+            .source_hash(warmup_test_module::_SOURCE_HASH)
+            .gpu_name(gpu_name)
+            .compiler_version(cv)
+            .cuda_toolkit_version(tv)
+            .build();
         assert!(contains_cuda_function(device_id, &key_8));
         assert!(contains_cuda_function(device_id, &key_32));
     });
@@ -667,7 +634,7 @@ fn multi_thread_dedup_timing_evidence() {
     common::with_test_stack(|| {
         // First, compile a different spec to estimate single-compile time.
         let t_single = std::time::Instant::now();
-        warmup_test_module::__compile_warmup(&[WarmupSpec::new(
+        warmup_test_module::_compile_warmup(&[WarmupSpec::new(
             "vector_add",
             vec!["f32".into(), "128".into()],
         )
@@ -859,76 +826,64 @@ fn cross_process_warmup_worker() {
 
         match role.as_str() {
             "producer" => {
-                warmup_test_module::__compile_warmup(std::slice::from_ref(&spec_a))
+                warmup_test_module::_compile_warmup(std::slice::from_ref(&spec_a))
                     .expect("producer warmup failed");
             }
             "consumer" => {
-                warmup_test_module::__compile_warmup(std::slice::from_ref(&spec_a))
+                warmup_test_module::_compile_warmup(std::slice::from_ref(&spec_a))
                     .expect("consumer warmup failed");
             }
             "multi-spec" => {
                 // Step 1: compile A and ensure it's persisted.
-                warmup_test_module::__compile_warmup(std::slice::from_ref(&spec_a))
+                warmup_test_module::_compile_warmup(std::slice::from_ref(&spec_a))
                     .expect("initial warmup for spec A failed");
 
                 // Step 2: evict A from memory so A path is forced to disk-hit.
                 let device_id = get_default_device();
-                let key_a = TileFunctionKey::new(
-                    "warmup_test_module".into(),
-                    "vector_add".into(),
-                    vec!["f32".into(), "64".into()],
-                    vector_add_stride_args(),
-                    vector_add_spec_args(256, 64),
-                    None,
-                    CompileOptions::default(),
-                    warmup_test_module::__SOURCE_HASH.into(),
-                    get_gpu_name(device_id),
-                    get_compiler_version(),
-                    get_cuda_toolkit_version(),
-                );
-                get_kernel_cache().remove(&key_a.get_hash_string());
+                let key_a = TileFunctionKey::builder("warmup_test_module", "vector_add")
+                    .generics(vec!["f32".into(), "64".into()])
+                    .stride_args(vector_add_stride_args())
+                    .spec_args(vector_add_spec_args(256, 64))
+                    .source_hash(warmup_test_module::_SOURCE_HASH)
+                    .gpu_name(get_gpu_name(device_id))
+                    .compiler_version(get_compiler_version())
+                    .cuda_toolkit_version(get_cuda_toolkit_version())
+                    .build();
+                evict_kernel(&key_a.get_hash_string());
 
                 // Step 3: A should disk-hit, B should cold-compile.
-                warmup_test_module::__compile_warmup(&[spec_a.clone(), spec_b.clone()])
+                warmup_test_module::_compile_warmup(&[spec_a.clone(), spec_b.clone()])
                     .expect("multi-spec warmup failed");
 
                 // Verify both A and B are present in memory cache.
                 let gpu_name = get_gpu_name(device_id);
                 let compiler_version = get_compiler_version();
                 let cuda_toolkit_version = get_cuda_toolkit_version();
-                let key_b = TileFunctionKey::new(
-                    "warmup_test_module".into(),
-                    "vector_add".into(),
-                    vec!["f32".into(), "32".into()],
-                    vector_add_stride_args(),
-                    vector_add_spec_args(256, 32),
-                    None,
-                    CompileOptions::default(),
-                    warmup_test_module::__SOURCE_HASH.into(),
-                    gpu_name.clone(),
-                    compiler_version.clone(),
-                    cuda_toolkit_version.clone(),
-                );
-                let key_a_after = TileFunctionKey::new(
-                    "warmup_test_module".into(),
-                    "vector_add".into(),
-                    vec!["f32".into(), "64".into()],
-                    vector_add_stride_args(),
-                    vector_add_spec_args(256, 64),
-                    None,
-                    CompileOptions::default(),
-                    warmup_test_module::__SOURCE_HASH.into(),
-                    gpu_name,
-                    compiler_version,
-                    cuda_toolkit_version,
-                );
+                let key_b = TileFunctionKey::builder("warmup_test_module", "vector_add")
+                    .generics(vec!["f32".into(), "32".into()])
+                    .stride_args(vector_add_stride_args())
+                    .spec_args(vector_add_spec_args(256, 32))
+                    .source_hash(warmup_test_module::_SOURCE_HASH)
+                    .gpu_name(gpu_name.clone())
+                    .compiler_version(compiler_version.clone())
+                    .cuda_toolkit_version(cuda_toolkit_version.clone())
+                    .build();
+                let key_a_after = TileFunctionKey::builder("warmup_test_module", "vector_add")
+                    .generics(vec!["f32".into(), "64".into()])
+                    .stride_args(vector_add_stride_args())
+                    .spec_args(vector_add_spec_args(256, 64))
+                    .source_hash(warmup_test_module::_SOURCE_HASH)
+                    .gpu_name(gpu_name)
+                    .compiler_version(compiler_version)
+                    .cuda_toolkit_version(cuda_toolkit_version)
+                    .build();
                 assert!(contains_cuda_function(device_id, &key_a_after));
                 assert!(contains_cuda_function(device_id, &key_b));
             }
             "no-disk-cache" => {
                 // Compile a kernel with CUTILE_NO_DISK_CACHE=1 (set by the parent process).
                 // The parent asserts that no .cubin files appear on disk afterward.
-                warmup_test_module::__compile_warmup(std::slice::from_ref(&spec_a))
+                warmup_test_module::_compile_warmup(std::slice::from_ref(&spec_a))
                     .expect("no-disk-cache warmup failed");
             }
             other => panic!("unknown worker role: {other}"),

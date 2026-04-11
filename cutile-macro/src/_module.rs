@@ -339,10 +339,10 @@ fn module_inner(
     let warmup_metadata = quote! {
         /// SHA-256 hash of the module source, computed at compile time.
         /// Changes whenever any kernel source in this module changes.
-        pub const __SOURCE_HASH: &str = #source_hash;
+        pub const _SOURCE_HASH: &str = #source_hash;
 
         /// Returns metadata for all entry points in this module.
-        pub fn __entries() -> Vec<#tile_rust_crate_root::tile_kernel::EntryMeta> {
+        pub fn _entries() -> Vec<#tile_rust_crate_root::tile_kernel::EntryMeta> {
             vec![#(#entry_meta_items),*]
         }
 
@@ -356,18 +356,18 @@ fn module_inner(
         /// # Example
         ///
         /// ```rust,ignore
-        /// my_module::__compile_warmup(&[
+        /// my_module::_compile_warmup(&[
         ///     WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()]),
         /// ])?;
         /// ```
-        pub fn __compile_warmup(
+        pub fn _compile_warmup(
             specs: &[#tile_rust_crate_root::tile_kernel::WarmupSpec],
         ) -> Result<(), #tile_rust_crate_root::error::Error> {
             #tile_rust_crate_root::tile_kernel::compile_warmup(
                 || _module_asts(),
-                &__entries(),
+                &_entries(),
                 #module_name_str,
-                __SOURCE_HASH,
+                _SOURCE_HASH,
                 specs,
             )
         }

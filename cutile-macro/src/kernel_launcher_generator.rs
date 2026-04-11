@@ -830,7 +830,7 @@ pub fn generate_kernel_launcher(
             module_name, function_name, function_entry,
             function_generics, stride_args, spec_args.clone(), const_grid,
             compile_options,
-            __SOURCE_HASH,
+            _SOURCE_HASH,
         )?;
     }})
     .unwrap()

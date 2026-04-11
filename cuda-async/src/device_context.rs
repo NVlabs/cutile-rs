@@ -54,8 +54,12 @@ pub trait FunctionKey: Hash {
     /// suitable for storing compiled artifacts on disk.
     ///
     /// Implementors should override this to hash a canonical string representation
-    /// of all key fields for maximum collision resistance.
-    fn get_disk_hash_string(&self) -> String;
+    /// of all key fields for maximum collision resistance. The default falls back
+    /// to [`get_hash_string`](Self::get_hash_string) so existing downstream impls
+    /// continue to compile without change.
+    fn get_disk_hash_string(&self) -> String {
+        self.get_hash_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -131,8 +135,27 @@ pub struct CompiledKernel {
 static KERNEL_CACHE: OnceLock<DashMap<String, Arc<OnceCell<CompiledKernel>>>> = OnceLock::new();
 
 /// Get the global kernel cache.
+///
+/// Prefer the named operations below (`clear_kernel_cache`, `evict_kernel`) over
+/// direct DashMap manipulation — they keep the internal representation an
+/// implementation detail.
 pub fn get_kernel_cache() -> &'static DashMap<String, Arc<OnceCell<CompiledKernel>>> {
     KERNEL_CACHE.get_or_init(DashMap::new)
+}
+
+/// Remove all compiled kernels from the in-memory cache.
+///
+/// Does not touch the disk cache (JitStore). Useful in tests that need a
+/// clean slate without restarting the process.
+pub fn clear_kernel_cache() {
+    get_kernel_cache().clear();
+}
+
+/// Evict a single compiled kernel from the in-memory cache by its hash string.
+///
+/// Returns `true` if an entry was removed, `false` if the key was not present.
+pub fn evict_kernel(key_str: &str) -> bool {
+    get_kernel_cache().remove(key_str).is_some()
 }
 
 // ── Per-thread device state (scheduling policy + deallocator stream) ────────

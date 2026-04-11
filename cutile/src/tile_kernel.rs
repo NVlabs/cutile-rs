@@ -101,6 +101,114 @@ impl TileFunctionKey {
     }
 }
 
+/// Builder for [`TileFunctionKey`].
+///
+/// With 11 positional arguments it is easy to silently transpose two `String`
+/// fields and produce a wrong-but-valid key. The builder makes each field
+/// self-documenting and keeps future additions backward-compatible.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let key = TileFunctionKey::builder("linalg", "matmul")
+///     .generics(vec!["f32".into(), "128".into()])
+///     .source_hash(linalg::_SOURCE_HASH)
+///     .gpu_name(get_gpu_name(device_id))
+///     .compiler_version(get_compiler_version())
+///     .cuda_toolkit_version(get_cuda_toolkit_version())
+///     .build();
+/// ```
+pub struct TileFunctionKeyBuilder {
+    module_name: String,
+    function_name: String,
+    function_generics: Vec<String>,
+    stride_args: Vec<(String, Vec<i32>)>,
+    spec_args: Vec<(String, SpecializationBits)>,
+    grid: Option<(u32, u32, u32)>,
+    compile_options: CompileOptions,
+    source_hash: String,
+    gpu_name: String,
+    compiler_version: String,
+    cuda_toolkit_version: String,
+}
+
+impl TileFunctionKeyBuilder {
+    pub fn generics(mut self, generics: Vec<String>) -> Self {
+        self.function_generics = generics;
+        self
+    }
+    pub fn stride_args(mut self, stride_args: Vec<(String, Vec<i32>)>) -> Self {
+        self.stride_args = stride_args;
+        self
+    }
+    pub fn spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
+        self.spec_args = spec_args;
+        self
+    }
+    pub fn grid(mut self, grid: (u32, u32, u32)) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+    pub fn compile_options(mut self, options: CompileOptions) -> Self {
+        self.compile_options = options;
+        self
+    }
+    pub fn source_hash(mut self, hash: impl Into<String>) -> Self {
+        self.source_hash = hash.into();
+        self
+    }
+    pub fn gpu_name(mut self, name: impl Into<String>) -> Self {
+        self.gpu_name = name.into();
+        self
+    }
+    pub fn compiler_version(mut self, version: impl Into<String>) -> Self {
+        self.compiler_version = version.into();
+        self
+    }
+    pub fn cuda_toolkit_version(mut self, version: impl Into<String>) -> Self {
+        self.cuda_toolkit_version = version.into();
+        self
+    }
+    pub fn build(self) -> TileFunctionKey {
+        TileFunctionKey {
+            module_name: self.module_name,
+            function_name: self.function_name,
+            function_generics: self.function_generics,
+            stride_args: self.stride_args,
+            spec_args: self.spec_args,
+            grid: self.grid,
+            compile_options: self.compile_options,
+            source_hash: self.source_hash,
+            gpu_name: self.gpu_name,
+            compiler_version: self.compiler_version,
+            cuda_toolkit_version: self.cuda_toolkit_version,
+        }
+    }
+}
+
+impl TileFunctionKey {
+    /// Start building a key with required `module_name` and `function_name`.
+    /// All other fields default to empty / `None` / `default()`.
+    pub fn builder(
+        module_name: impl Into<String>,
+        function_name: impl Into<String>,
+    ) -> TileFunctionKeyBuilder {
+        TileFunctionKeyBuilder {
+            module_name: module_name.into(),
+            function_name: function_name.into(),
+            function_generics: vec![],
+            stride_args: vec![],
+            spec_args: vec![],
+            grid: None,
+            compile_options: CompileOptions::default(),
+            source_hash: String::new(),
+            gpu_name: String::new(),
+            compiler_version: String::new(),
+            cuda_toolkit_version: String::new(),
+        }
+    }
+}
+
 impl FunctionKey for TileFunctionKey {
     fn get_disk_hash_string(&self) -> String {
         let canonical = format!(
@@ -265,7 +373,6 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     );
     let key_str = key.get_hash_string();
     let disk_key = key.get_disk_hash_string();
-    let cache_hash_str = key.get_hash_string();
 
     let cache = get_kernel_cache();
     let slot = {
@@ -303,17 +410,33 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
                 &key.compile_options,
             )?;
             let validator = Arc::new(compiler.get_validator());
-            let module = load_module_from_bytes(&cubin_bytes, device_id)?;
-            let function = Arc::new(module.load_function(function_entry).map_err(|e| {
-                Error::KernelLaunch(KernelLaunchError(format!(
-                    "failed to load '{function_entry}' from cached cubin: {e}"
-                )))
-            })?);
-            return Ok(CompiledKernel {
-                module,
-                function,
-                validator,
-            });
+            match load_module_from_bytes(&cubin_bytes, device_id) {
+                Ok(module) => {
+                    let function =
+                        Arc::new(module.load_function(function_entry).map_err(|e| {
+                            Error::KernelLaunch(KernelLaunchError(format!(
+                                "failed to load '{function_entry}' from cached cubin: {e}"
+                            )))
+                        })?);
+                    return Ok(CompiledKernel {
+                        module,
+                        function,
+                        validator,
+                    });
+                }
+                Err(e) => {
+                    // Corrupted or incompatible cubin (e.g. disk error, partial write,
+                    // architecture mismatch). Delete the bad entry and fall through to
+                    // full JIT recompilation so the caller is not permanently blocked.
+                    jit_log!(
+                        "{module_name}::{function_name} → corrupted disk cubin, \
+                         deleting and recompiling (error: {e})"
+                    );
+                    if let Some(store) = cuda_async::jit_store::get_jit_store() {
+                        let _ = store.delete(&disk_key);
+                    }
+                }
+            }
         }
 
         // Full JIT compilation.
@@ -381,7 +504,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
             write_ir(
                 module_name,
                 function_name,
-                cache_hash_str.as_str(),
+                key_str.as_str(),
                 "mlir",
                 path.as_str(),
                 mlir.as_str(),
@@ -506,9 +629,9 @@ impl WarmupSpec {
 /// ```rust,ignore
 /// compile_warmup(
 ///     || linalg::_module_asts(),
-///     &linalg::__entries(),
+///     &linalg::_entries(),
 ///     "linalg",
-///     linalg::__SOURCE_HASH,
+///     linalg::_SOURCE_HASH,
 ///     &[
 ///         WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()]),
 ///         WarmupSpec::new("vector_add", vec!["f16".into(), "256".into()]),
@@ -605,19 +728,34 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                     &key.compile_options,
                 )?;
                 let validator = Arc::new(compiler.get_validator());
-                let module = load_module_from_bytes(&cubin_bytes, device_id)?;
-                let function =
-                    Arc::new(module.load_function(entry.function_entry).map_err(|e| {
-                        Error::KernelLaunch(KernelLaunchError(format!(
-                            "failed to load '{}' from cached cubin: {e}",
-                            entry.function_entry
-                        )))
-                    })?);
-                return Ok(CompiledKernel {
-                    module,
-                    function,
-                    validator,
-                });
+                match load_module_from_bytes(&cubin_bytes, device_id) {
+                    Ok(module) => {
+                        let function = Arc::new(
+                            module.load_function(entry.function_entry).map_err(|e| {
+                                Error::KernelLaunch(KernelLaunchError(format!(
+                                    "failed to load '{}' from cached cubin: {e}",
+                                    entry.function_entry
+                                )))
+                            })?,
+                        );
+                        return Ok(CompiledKernel {
+                            module,
+                            function,
+                            validator,
+                        });
+                    }
+                    Err(e) => {
+                        // Corrupted or incompatible cubin. Delete and fall through to JIT.
+                        jit_log!(
+                            "warmup: {module_name}::{} → corrupted disk cubin, \
+                             deleting and recompiling (error: {e})",
+                            spec.function_name
+                        );
+                        if let Some(store) = cuda_async::jit_store::get_jit_store() {
+                            let _ = store.delete(&disk_key);
+                        }
+                    }
+                }
             }
 
             // Full JIT compilation.
