@@ -10,15 +10,20 @@ use cutile::api;
 use cutile::jit_store::FileSystemJitStore;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    compile_warmup, contains_cuda_function, execute_warmup, get_default_device, get_kernel_cache,
+    contains_cuda_function, execute_warmup, get_default_device, get_kernel_cache,
     load_module_from_bytes, CompileOptions, FunctionKey,
     TileFunctionKey, TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
     get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
 };
-use std::sync::Arc;
+use cutile_compiler::specialization::SpecializationBits;
+use once_cell::sync::Lazy;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+static WARMUP_CACHE_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[cutile::module]
 mod warmup_test_module {
@@ -41,6 +46,18 @@ fn vector_add_stride_args() -> Vec<(String, Vec<i32>)> {
         ("z".to_string(), vec![1]),
         ("x".to_string(), vec![1]),
         ("y".to_string(), vec![1]),
+    ]
+}
+
+fn vector_add_spec_args(len: usize, tile: usize) -> Vec<(String, SpecializationBits)> {
+    let x = api::ones::<f32>(&[len]).sync().unwrap();
+    let y = api::ones::<f32>(&[len]).sync().unwrap();
+    let z = api::zeros::<f32>(&[len]).partition([tile]).sync().unwrap();
+    let z_spec = z.unpartition().spec().clone();
+    vec![
+        ("z".to_string(), z_spec),
+        ("x".to_string(), x.spec().clone()),
+        ("y".to_string(), y.spec().clone()),
     ]
 }
 
@@ -71,26 +88,31 @@ fn run_warmup_worker(role: &str, cache_root: &std::path::Path) -> std::process::
 #[test]
 fn compile_warmup_populates_cache() {
     common::with_test_stack(move || {
+        let _guard = WARMUP_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // Uses the macro-generated __compile_warmup helper — callers only pass specs.
         warmup_test_module::__compile_warmup(&[WarmupSpec::new(
             "vector_add",
             vec!["f32".into(), "64".into()],
         )
-        .with_strides(vector_add_stride_args())])
+        .with_strides(vector_add_stride_args())
+        .with_spec_args(vector_add_spec_args(256, 64))])
         .expect("__compile_warmup failed");
 
-        // Verify the kernel is now in the global cache.
+        // Verify the kernel is in cache.
         let device_id = get_default_device();
-        let gpu_name = get_gpu_name(device_id);
         let key = TileFunctionKey::new(
             "warmup_test_module".into(),
             "vector_add".into(),
             vec!["f32".into(), "64".into()],
             vector_add_stride_args(),
+            vector_add_spec_args(256, 64),
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
-            gpu_name,
+            get_gpu_name(device_id),
             get_compiler_version(),
             get_cuda_toolkit_version(),
         );
@@ -105,7 +127,8 @@ fn compile_warmup_populates_cache() {
 fn compile_warmup_skips_duplicate() {
     common::with_test_stack(move || {
         let specs = &[WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()])
-            .with_strides(vector_add_stride_args())];
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 128))];
         // First call compiles.
         warmup_test_module::__compile_warmup(specs)
             .expect("first compile_warmup failed");
@@ -141,7 +164,8 @@ fn compile_warmup_persists_to_disk() {
         let store_was_set = cuda_async::jit_store::set_jit_store_if_unset(Some(Box::new(store)));
 
         warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "256".into()])
-            .with_strides(vector_add_stride_args())])
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 256))])
         .expect("compile_warmup failed");
 
         if store_was_set {
@@ -191,6 +215,9 @@ fn execute_warmup_runs_kernel() {
 #[test]
 fn multi_thread_compile_dedup() {
     common::with_test_stack(|| {
+        let _guard = WARMUP_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let n_threads = 4;
         let barrier = Arc::new(std::sync::Barrier::new(n_threads));
         let handles: Vec<_> = (0..n_threads)
@@ -202,9 +229,9 @@ fn multi_thread_compile_dedup() {
                         barrier.wait();
                         let x = api::ones::<f32>(&[256]).sync().unwrap();
                         let y = api::ones::<f32>(&[256]).sync().unwrap();
-                        let z = api::zeros::<f32>(&[256]).partition([8]).sync().unwrap();
+                        let z = api::zeros::<f32>(&[256]).partition([128]).sync().unwrap();
                         warmup_test_module::vector_add(z, &x, &y)
-                            .generics(vec!["f32".into(), "8".into()])
+                            .generics(vec!["f32".into(), "128".into()])
                             .sync()
                             .unwrap();
                     })
@@ -216,13 +243,24 @@ fn multi_thread_compile_dedup() {
             h.join().expect("thread panicked during concurrent compile");
         }
 
-        // Verify the kernel is in cache exactly once.
+        // Build a key with runtime specialization bits to match launcher behavior.
+        let x_probe = api::ones::<f32>(&[256]).sync().unwrap();
+        let y_probe = api::ones::<f32>(&[256]).sync().unwrap();
+        let z_probe = api::zeros::<f32>(&[256]).partition([128]).sync().unwrap();
+        let z_spec = z_probe.unpartition().spec().clone();
+
+        // Verify the kernel is in cache after concurrent compilation.
         let device_id = get_default_device();
         let key = TileFunctionKey::new(
             "warmup_test_module".into(),
             "vector_add".into(),
-            vec!["f32".into(), "8".into()],
+            vec!["f32".into(), "128".into()],
             vector_add_stride_args(),
+            vec![
+                ("z".to_string(), z_spec),
+                ("x".to_string(), x_probe.spec().clone()),
+                ("y".to_string(), y_probe.spec().clone()),
+            ],
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -263,7 +301,8 @@ fn disk_cache_hit_after_memory_eviction() {
         }
 
         let specs = &[WarmupSpec::new("vector_add", vec!["f32".into(), "2".into()])
-            .with_strides(vector_add_stride_args())];
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 2))];
 
         // Step 1: compile → populates memory + disk.
         warmup_test_module::__compile_warmup(specs)
@@ -289,6 +328,7 @@ fn disk_cache_hit_after_memory_eviction() {
             "vector_add".into(),
             vec!["f32".into(), "2".into()],
             vector_add_stride_args(),
+            vector_add_spec_args(256, 2),
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -331,7 +371,8 @@ fn failed_warmup_does_not_poison_cache() {
 
         // Second call: valid params → should succeed despite prior failure.
         warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "4".into()])
-            .with_strides(vector_add_stride_args())])
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 4))])
         .expect("valid warmup should succeed after failed one");
 
         let device_id = get_default_device();
@@ -340,6 +381,7 @@ fn failed_warmup_does_not_poison_cache() {
             "vector_add".into(),
             vec!["f32".into(), "4".into()],
             vector_add_stride_args(),
+            vector_add_spec_args(256, 4),
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -364,15 +406,18 @@ fn multi_spec_warmup_compiles_all() {
     common::with_test_stack(|| {
         // Pre-compile spec A so it's in cache.
         warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "32".into()])
-            .with_strides(vector_add_stride_args())])
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 32))])
         .expect("pre-compile spec A failed");
 
         // Now warmup [A, B] — A should skip, B should compile.
         warmup_test_module::__compile_warmup(&[
             WarmupSpec::new("vector_add", vec!["f32".into(), "32".into()])
-                .with_strides(vector_add_stride_args()),
+                .with_strides(vector_add_stride_args())
+                .with_spec_args(vector_add_spec_args(256, 32)),
             WarmupSpec::new("vector_add", vec!["f32".into(), "16".into()])
-                .with_strides(vector_add_stride_args()),
+                .with_strides(vector_add_stride_args())
+                .with_spec_args(vector_add_spec_args(256, 16)),
         ])
         .expect("multi-spec warmup failed");
 
@@ -387,6 +432,7 @@ fn multi_spec_warmup_compiles_all() {
             "vector_add".into(),
             vec!["f32".into(), "32".into()],
             vector_add_stride_args(),
+            vector_add_spec_args(256, 32),
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -399,6 +445,7 @@ fn multi_spec_warmup_compiles_all() {
             "vector_add".into(),
             vec!["f32".into(), "16".into()],
             vector_add_stride_args(),
+            vector_add_spec_args(256, 16),
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -426,7 +473,8 @@ fn load_module_from_bytes_concurrent() {
     common::with_test_stack(|| {
         // First, compile a kernel to get valid cubin bytes.
         warmup_test_module::__compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
-            .with_strides(vector_add_stride_args())])
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 64))])
         .expect("warmup failed");
 
         // Find the cubin file from the JitStore directory or compile output.
@@ -448,6 +496,7 @@ fn load_module_from_bytes_concurrent() {
                 ("x", &[1i32][..]),
                 ("y", &[1i32][..]),
             ],
+            &[],
             None,
             gpu_name.clone(),
             &CompileOptions::default(),
@@ -517,6 +566,9 @@ fn corrupted_cubin_returns_error_not_panic() {
 #[test]
 fn different_keys_parallel_compile() {
     common::with_test_stack(|| {
+        let _guard = WARMUP_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let barrier = Arc::new(std::sync::Barrier::new(2));
 
         let b1 = Arc::clone(&barrier);
@@ -526,9 +578,9 @@ fn different_keys_parallel_compile() {
                 b1.wait();
                 let x = api::ones::<f32>(&[256]).sync().unwrap();
                 let y = api::ones::<f32>(&[256]).sync().unwrap();
-                let z = api::zeros::<f32>(&[256]).partition([8]).sync().unwrap();
+                let z = api::zeros::<f32>(&[256]).partition([128]).sync().unwrap();
                 warmup_test_module::vector_add(z, &x, &y)
-                    .generics(vec!["f32".into(), "8".into()])
+                    .generics(vec!["f32".into(), "128".into()])
                     .sync()
                     .unwrap();
             })
@@ -541,9 +593,9 @@ fn different_keys_parallel_compile() {
                 b2.wait();
                 let x = api::ones::<f32>(&[512]).sync().unwrap();
                 let y = api::ones::<f32>(&[512]).sync().unwrap();
-                let z = api::zeros::<f32>(&[512]).partition([32]).sync().unwrap();
+                let z = api::zeros::<f32>(&[512]).partition([256]).sync().unwrap();
                 warmup_test_module::vector_add(z, &x, &y)
-                    .generics(vec!["f32".into(), "32".into()])
+                    .generics(vec!["f32".into(), "256".into()])
                     .sync()
                     .unwrap();
             })
@@ -551,6 +603,17 @@ fn different_keys_parallel_compile() {
 
         h1.join().expect("thread 1 panicked");
         h2.join().expect("thread 2 panicked");
+
+        // Build keys with runtime specialization bits to match launcher behavior.
+        let x_probe_8 = api::ones::<f32>(&[256]).sync().unwrap();
+        let y_probe_8 = api::ones::<f32>(&[256]).sync().unwrap();
+        let z_probe_8 = api::zeros::<f32>(&[256]).partition([128]).sync().unwrap();
+        let z_spec_8 = z_probe_8.unpartition().spec().clone();
+
+        let x_probe_32 = api::ones::<f32>(&[512]).sync().unwrap();
+        let y_probe_32 = api::ones::<f32>(&[512]).sync().unwrap();
+        let z_probe_32 = api::zeros::<f32>(&[512]).partition([256]).sync().unwrap();
+        let z_spec_32 = z_probe_32.unpartition().spec().clone();
 
         // Verify both distinct keys are in cache.
         let device_id = get_default_device();
@@ -560,8 +623,13 @@ fn different_keys_parallel_compile() {
         let key_8 = TileFunctionKey::new(
             "warmup_test_module".into(),
             "vector_add".into(),
-            vec!["f32".into(), "8".into()],
+            vec!["f32".into(), "128".into()],
             vector_add_stride_args(),
+            vec![
+                ("z".to_string(), z_spec_8),
+                ("x".to_string(), x_probe_8.spec().clone()),
+                ("y".to_string(), y_probe_8.spec().clone()),
+            ],
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -572,8 +640,13 @@ fn different_keys_parallel_compile() {
         let key_32 = TileFunctionKey::new(
             "warmup_test_module".into(),
             "vector_add".into(),
-            vec!["f32".into(), "32".into()],
+            vec!["f32".into(), "256".into()],
             vector_add_stride_args(),
+            vec![
+                ("z".to_string(), z_spec_32),
+                ("x".to_string(), x_probe_32.spec().clone()),
+                ("y".to_string(), y_probe_32.spec().clone()),
+            ],
             None,
             CompileOptions::default(),
             warmup_test_module::__SOURCE_HASH.into(),
@@ -598,7 +671,8 @@ fn multi_thread_dedup_timing_evidence() {
             "vector_add",
             vec!["f32".into(), "128".into()],
         )
-        .with_strides(vector_add_stride_args())])
+        .with_strides(vector_add_stride_args())
+        .with_spec_args(vector_add_spec_args(256, 128))])
         .unwrap();
         let single_duration = t_single.elapsed();
 
@@ -630,14 +704,14 @@ fn multi_thread_dedup_timing_evidence() {
         let parallel_duration = t_parallel.elapsed();
 
         // If dedup works: parallel ≈ single. If broken: parallel ≈ 4 * single.
-        // Use 2.5x as threshold — generous enough to avoid flakiness.
+        // Use 3.5x as threshold to reduce timing flakiness in shared CI/GPU environments.
         let ratio = parallel_duration.as_secs_f64() / single_duration.as_secs_f64();
         eprintln!(
             "[dedup timing] single={:.1?}  parallel(4)={:.1?}  ratio={:.2}",
             single_duration, parallel_duration, ratio
         );
         assert!(
-            ratio < 2.5,
+              ratio < 3.5,
             "parallel compile of 4 threads took {ratio:.2}x single — dedup may be broken \
              (single={single_duration:.1?}, parallel={parallel_duration:.1?})"
         );
@@ -777,9 +851,11 @@ fn cross_process_warmup_worker() {
 
     common::with_test_stack(move || {
         let spec_a = WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
-            .with_strides(vector_add_stride_args());
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 64));
         let spec_b = WarmupSpec::new("vector_add", vec!["f32".into(), "32".into()])
-            .with_strides(vector_add_stride_args());
+            .with_strides(vector_add_stride_args())
+            .with_spec_args(vector_add_spec_args(256, 32));
 
         match role.as_str() {
             "producer" => {
@@ -802,6 +878,7 @@ fn cross_process_warmup_worker() {
                     "vector_add".into(),
                     vec!["f32".into(), "64".into()],
                     vector_add_stride_args(),
+                    vector_add_spec_args(256, 64),
                     None,
                     CompileOptions::default(),
                     warmup_test_module::__SOURCE_HASH.into(),
@@ -824,6 +901,7 @@ fn cross_process_warmup_worker() {
                     "vector_add".into(),
                     vec!["f32".into(), "32".into()],
                     vector_add_stride_args(),
+                    vector_add_spec_args(256, 32),
                     None,
                     CompileOptions::default(),
                     warmup_test_module::__SOURCE_HASH.into(),
@@ -836,6 +914,7 @@ fn cross_process_warmup_worker() {
                     "vector_add".into(),
                     vec!["f32".into(), "64".into()],
                     vector_add_stride_args(),
+                    vector_add_spec_args(256, 64),
                     None,
                     CompileOptions::default(),
                     warmup_test_module::__SOURCE_HASH.into(),

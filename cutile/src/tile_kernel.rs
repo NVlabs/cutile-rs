@@ -104,7 +104,7 @@ impl TileFunctionKey {
 impl FunctionKey for TileFunctionKey {
     fn get_disk_hash_string(&self) -> String {
         let canonical = format!(
-            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{:?}:{:?}:{}:{}:{}:{}",
             self.module_name,
             self.function_name,
             self.function_generics.join(","),
@@ -113,7 +113,13 @@ impl FunctionKey for TileFunctionKey {
                 .map(|(k, v)| format!("{}={:?}", k, v))
                 .collect::<Vec<_>>()
                 .join(";"),
+            self.spec_args
+                .iter()
+                .map(|(k, v)| format!("{}={:?}", k, v))
+                .collect::<Vec<_>>()
+                .join(";"),
             self.grid,
+            self.compile_options,
             self.source_hash,
             self.gpu_name,
             self.compiler_version,
@@ -288,6 +294,10 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
                     .iter()
                     .map(|x| (x.0.as_str(), x.1.as_slice()))
                     .collect::<Vec<_>>(),
+                &key.spec_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
                 const_grid,
                 gpu_name.clone(),
                 &key.compile_options,
@@ -450,6 +460,7 @@ pub struct WarmupSpec {
     pub function_name: String,
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
+    pub spec_args: Vec<(String, SpecializationBits)>,
     pub const_grid: Option<(u32, u32, u32)>,
 }
 
@@ -460,6 +471,7 @@ impl WarmupSpec {
             function_name: function_name.to_string(),
             function_generics: generics,
             stride_args: vec![],
+            spec_args: vec![],
             const_grid: None,
         }
     }
@@ -467,6 +479,12 @@ impl WarmupSpec {
     /// Set stride arguments for this spec.
     pub fn with_strides(mut self, stride_args: Vec<(String, Vec<i32>)>) -> Self {
         self.stride_args = stride_args;
+        self
+    }
+
+    /// Set specialization arguments for this spec.
+    pub fn with_spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
+        self.spec_args = spec_args;
         self
     }
 
@@ -532,6 +550,7 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
             spec.function_name.clone(),
             spec.function_generics.clone(),
             spec.stride_args.clone(),
+            spec.spec_args.clone(),
             spec.const_grid,
             CompileOptions::default(),
             source_hash.to_string(),
@@ -576,6 +595,11 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                         .iter()
                         .map(|x| (x.0.as_str(), x.1.as_slice()))
                         .collect::<Vec<_>>(),
+                    &spec
+                        .spec_args
+                        .iter()
+                        .map(|x| (x.0.as_str(), &x.1))
+                        .collect::<Vec<_>>(),
                     spec.const_grid,
                     gpu_name.clone(),
                     &key.compile_options,
@@ -607,6 +631,11 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                     .stride_args
                     .iter()
                     .map(|x| (x.0.as_str(), x.1.as_slice()))
+                    .collect::<Vec<_>>(),
+                &spec
+                    .spec_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
                     .collect::<Vec<_>>(),
                 spec.const_grid,
                 gpu_name.clone(),
