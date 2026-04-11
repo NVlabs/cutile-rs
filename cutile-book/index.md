@@ -96,6 +96,7 @@ guide/data-model
 guide/execution-model
 guide/memory-hierarchy
 guide/operations
+guide/dsl-api
 guide/async-execution
 guide/deviceop-reference
 guide/performance-tuning

@@ -35,8 +35,14 @@ fn bench_execution_lock(c: &mut Criterion) {
     .unwrap();
 
     let mut group = c.benchmark_group("execution_lock");
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    if cfg!(feature = "smoke-test") {
+        group.warm_up_time(Duration::from_millis(1));
+        group.sample_size(10);
+        group.measurement_time(Duration::from_millis(1));
+    } else {
+        group.warm_up_time(Duration::from_millis(500));
+        group.measurement_time(Duration::from_secs(2));
+    }
 
     // Baseline: value(42).sync_on(&stream) — includes lock acquire/release.
     group.bench_function("sync_on_with_lock", |b| {
@@ -56,5 +62,14 @@ fn bench_execution_lock(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_execution_lock);
+fn bench_config() -> Criterion {
+    if cfg!(feature = "smoke-test") {
+        Criterion::default()
+            .without_plots()
+            .save_baseline("smoke-discard".to_string())
+    } else {
+        Criterion::default()
+    }
+}
+criterion_group!(name = benches; config = bench_config(); targets = bench_execution_lock);
 criterion_main!(benches);

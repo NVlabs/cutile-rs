@@ -31,8 +31,7 @@ The `#[cutile::entry()]` macro supports several options:
     print_ir = false,           // Print MLIR IR during compilation
     unchecked_accesses = false, // Skip bounds checking
     optimization_hints = (
-        tensor_dim_factor = 16,
-        sm_120 = (num_cta_in_cga = 1,),
+        sm_120 = (num_cta_in_cga = 1, max_divisibility = 16,),
     )
 )]
 fn my_kernel() { /* ... */ }

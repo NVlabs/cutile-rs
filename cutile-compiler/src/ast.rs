@@ -191,6 +191,10 @@ impl Default for SpanBase {
 pub struct Module {
     /// Short name of the module (e.g. `"core"`, `"my_kernels"`).
     name: &'static str,
+    /// Fully-qualified Rust module path (e.g. `"cutile::core"`, `"my_app::activations"`).
+    /// Set from `module_path!()` at the definition site. Used for deduplication
+    /// when multiple modules import the same dependency.
+    absolute_path: String,
     /// The syn AST.  When constructed via [`Module::with_span_base`] the AST
     /// was produced by `syn::parse_str` on the original source text, so every
     /// token span is string-relative and can be mapped to an absolute position
@@ -208,6 +212,7 @@ impl Module {
     pub fn new(name: &'static str, ast: ItemMod) -> Self {
         Self {
             name,
+            absolute_path: String::new(),
             ast,
             span_base: SpanBase::unknown(),
         }
@@ -218,8 +223,23 @@ impl Module {
     pub fn with_span_base(name: &'static str, ast: ItemMod, span_base: SpanBase) -> Self {
         Self {
             name,
+            absolute_path: String::new(),
             ast,
             span_base,
+        }
+    }
+
+    /// Set the fully-qualified module path (from `module_path!()` at the definition site).
+    pub fn set_absolute_path(&mut self, path: String) {
+        self.absolute_path = path;
+    }
+
+    /// Returns the fully-qualified module path, or the short name if not set.
+    pub fn absolute_path(&self) -> &str {
+        if self.absolute_path.is_empty() {
+            self.name
+        } else {
+            &self.absolute_path
         }
     }
 

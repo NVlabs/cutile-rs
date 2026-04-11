@@ -194,6 +194,56 @@ i8 < i16 < i32 < i64
 
 The `Tensor` and `Partition` types exist on both the host side (CPU) and the device side (GPU kernel), but they are different Rust types with similar semantics. Host-side types are parameterized by element type only; device-side types carry shape information in the type system for compile-time optimization.
 
+### Tensor Creation
+
+The `api` module provides functions for creating tensors on the GPU:
+
+```rust
+use cutile::api;
+
+// Constant-filled tensors
+let z = api::zeros::<f32>(&[1024]).sync_on(&stream)?;     // all zeros
+let o = api::ones::<f32>(&[256, 256]).sync_on(&stream)?;  // all ones
+let f = api::full(3.14f32, &[512]).sync_on(&stream)?;     // fill with value
+
+// Sequential and evenly spaced values
+let r = api::arange::<i32>(1024).sync_on(&stream)?;       // [0, 1, 2, ..., 1023]
+let l = api::linspace(0.0, 1.0, 256).sync_on(&stream)?;   // 256 values from 0 to 1
+
+// Identity matrices
+let I = api::eye(64).sync_on(&stream)?;                    // 64x64 identity
+let R = api::eye_rect(32, 64).sync_on(&stream)?;           // 32x64, ones on diagonal
+
+// Random tensors
+let u = api::rand::<f32, 1>(&[1024]).sync_on(&stream)?;   // uniform [0, 1)
+let n = api::randn::<f32, 1>(&[1024]).sync_on(&stream)?;  // normal (0, 1)
+```
+
+### Views and Slices
+
+`TensorView` provides zero-copy borrowed views of tensors with different
+shape or offset. Views borrow the underlying tensor — the tensor cannot be
+mutated while a view exists.
+
+```rust
+let tensor = api::arange::<f32>(1024).sync_on(&stream)?;
+
+// Reshape without copying
+let matrix = tensor.view(&[32, 32])?;
+
+// Slice: borrow a subregion (numpy-style ranges)
+let first_half = tensor.slice(&[0..512])?;           // elements 0-511
+let row_slice = matrix.slice(&[1..3])?;              // rows 1-2, all columns
+let block = matrix.slice(&[1..3, 2..6])?;            // rows 1-2, cols 2-5
+
+// Chained slices accumulate offsets
+let inner = tensor.slice(&[100..200])?.slice(&[10..20])?;  // = tensor[110..120]
+```
+
+Views and slices can be passed to kernels as `&Tensor` parameters. The
+offset is applied host-side — the kernel receives a pointer to the correct
+starting address.
+
 ### Host-Side Types
 
 On the host, you allocate tensors, partition them, and pass them to kernel launchers:

@@ -28,6 +28,7 @@ pub mod train_map;
 pub mod types;
 
 pub mod compiler;
+pub mod specialization;
 pub use compiler::utils;
 
 /// Registers all standard and CUDA Tile MLIR dialects into the given context.

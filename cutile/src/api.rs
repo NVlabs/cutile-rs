@@ -133,8 +133,8 @@
 //! - [`kernels`](crate::kernels) - Pre-built GPU kernels
 
 use crate::kernels::conversion::convert_apply;
-use crate::kernels::creation::{arange_apply, full_apply};
-use crate::tensor::{IntoPartition, Tensor, Unpartition};
+use crate::kernels::creation::{arange_apply, eye_apply, full_apply, linspace as linspace_kernel};
+use crate::tensor::{IntoPartition, Reshape, Tensor, Unpartition};
 use cuda_async::device_buffer::DeviceBuffer;
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
@@ -518,6 +518,87 @@ pub fn arange<T: DType>(len: usize) -> impl DeviceOp<Output = Tensor<T>> {
         let partition_size = min(len, 128);
         let result = unsafe { t.assume_init() }.partition([partition_size]);
         let res = value((result,)).then(arange_apply).unzip();
+        res.0.unpartition()
+    })
+}
+
+/// Creates a 1D tensor with evenly spaced values between `start` and `stop`.
+///
+/// Similar to NumPy's `linspace`. Generates `n` values such that the first
+/// is `start` and the last is `stop` (inclusive on both ends).
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// use cutile::api;
+///
+/// let x = api::linspace(0.0, 1.0, 100).await; // [0.0, 0.0101..., ..., 1.0]
+/// let angles = api::linspace(0.0, 6.283, 360).await;
+/// ```
+/// Creates a 1D tensor with evenly spaced values between `start` and `stop`.
+///
+/// Similar to NumPy's `linspace`. Generates `n` values such that the first
+/// is `start` and the last is `stop` (inclusive on both ends).
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// use cutile::api;
+///
+/// let x = api::linspace(0.0, 1.0, 100).await; // [0.0, 0.0101..., ..., 1.0]
+/// ```
+pub fn linspace(start: f32, stop: f32, n: usize) -> impl DeviceOp<Output = Tensor<f32>> {
+    let step = if n > 1 {
+        (stop - start) / (n - 1) as f32
+    } else {
+        0.0
+    };
+    Tensor::<f32>::uninitialized(n).then(move |t| {
+        let partition_size = min(n, 128);
+        let result = unsafe { t.assume_init() }.partition([partition_size]);
+        linspace_kernel(result, start, step)
+            .then(|(tensor, _, _)| value(tensor))
+            .unpartition()
+    })
+}
+
+/// Creates a 2D identity matrix of shape `[n, n]`.
+///
+/// Elements on the diagonal are 1.0, all others are 0.0.
+/// For non-square identity-like matrices, use `eye_rect`.
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// use cutile::api;
+///
+/// let I = api::eye(4).await; // 4x4 identity matrix
+/// ```
+pub fn eye(n: usize) -> impl DeviceOp<Output = Tensor<f32>> {
+    eye_rect(n, n)
+}
+
+/// Creates a 2D identity-like matrix of shape `[rows, cols]`.
+///
+/// Elements where row index == column index are 1.0, all others are 0.0.
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// use cutile::api;
+///
+/// let rect = api::eye_rect(3, 5).await; // 3x5, ones on main diagonal
+/// ```
+pub fn eye_rect(rows: usize, cols: usize) -> impl DeviceOp<Output = Tensor<f32>> {
+    let len = rows * cols;
+    let br = min(rows, 16);
+    let bc = min(cols, 16);
+    Tensor::<f32>::uninitialized(len).then(move |t| {
+        let t2d = unsafe { t.assume_init() }
+            .reshape(&[rows, cols])
+            .expect("eye: reshape failed");
+        let result = t2d.partition([br, bc]);
+        let res = value((result,)).then(eye_apply).unzip();
         res.0.unpartition()
     })
 }

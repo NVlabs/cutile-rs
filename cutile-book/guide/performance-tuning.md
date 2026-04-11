@@ -28,10 +28,10 @@ Set `occupancy` and `num_cta_in_cga` in the entry annotation. These can also be 
 ```rust
 #[cutile::entry(
     optimization_hints = (
-        tensor_dim_factor = 16,           // Memory alignment hint
-        sm_120 = (                         // Hopper-specific hints
+        sm_120 = (                         // Blackwell-specific hints
             num_cta_in_cga = 2,           // CTAs per Cooperative Group
             occupancy = 2,                 // Target occupancy
+            max_divisibility = 16,         // Cap auto-inferred alignment
         ),
         sm_90 = (                          // Ampere-specific hints
             num_cta_in_cga = 1,
@@ -75,7 +75,7 @@ let (values, token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Som
 
 | Hint | Description | Default |
 |------|-------------|---------|
-| `tensor_dim_factor` | Memory alignment factor | Auto |
+| `max_divisibility` | Cap on auto-inferred alignment divisor | 16 |
 | `num_cta_in_cga` | CTAs in Cooperative Group Array | 1 |
 | `occupancy` | Target occupancy level | Auto |
 
@@ -99,7 +99,7 @@ Tile sizes significantly impact performance. General guidelines:
 ```rust
 // Choose tile size based on workload characteristics
 #[cutile::entry(
-    optimization_hints = (tensor_dim_factor = 16,)
+    optimization_hints = (sm_120 = (max_divisibility = 16,),)
 )]
 fn matmul<const TILE_M: i32, const TILE_N: i32, const TILE_K: i32>(
     c: &mut Tensor<f32, {[TILE_M, TILE_N]}>,

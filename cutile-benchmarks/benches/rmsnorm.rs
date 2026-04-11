@@ -18,7 +18,7 @@ mod kernels {
     use cutile::core::*;
 
     #[cutile::entry(print_ir=false, unchecked_accesses=true,
-                       optimization_hints = (tensor_dim_factor = 8,))]
+        optimization_hints = (sm_120=(max_divisibility = 8,),))]
     unsafe fn rms_norm<const N: i32, const BLOCK_SIZE: i32>(
         x: &Tensor<f16, { [-1, N] }>,
         w: &Tensor<f16, { [N] }>,
@@ -67,10 +67,17 @@ mod kernels {
 
 fn ocean_rmsnorm(c: &mut Criterion) {
     let mut group = c.benchmark_group("rmsnorm");
-    group
-        .warm_up_time(Duration::from_millis(1000))
-        .sample_size(10usize.pow(2))
-        .measurement_time(Duration::from_millis(5000));
+    if cfg!(feature = "smoke-test") {
+        group
+            .warm_up_time(Duration::from_millis(1))
+            .sample_size(10)
+            .measurement_time(Duration::from_millis(1));
+    } else {
+        group
+            .warm_up_time(Duration::from_millis(500))
+            .sample_size(20)
+            .measurement_time(Duration::from_millis(2000));
+    }
 
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
@@ -122,5 +129,14 @@ fn ocean_rmsnorm(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, ocean_rmsnorm);
+fn bench_config() -> Criterion {
+    if cfg!(feature = "smoke-test") {
+        Criterion::default()
+            .without_plots()
+            .save_baseline("smoke-discard".to_string())
+    } else {
+        Criterion::default()
+    }
+}
+criterion_group!(name = benches; config = bench_config(); targets = ocean_rmsnorm);
 criterion_main!(benches);

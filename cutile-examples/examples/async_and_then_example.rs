@@ -52,6 +52,7 @@ async fn main() -> Result<(), DeviceError> {
                 "saxpy_entry",
                 function_generics,
                 stride_args,
+                vec![],
                 None,
                 CompileOptions::default(),
             );

@@ -37,7 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Extension trait renames**: `IntoDeviceOperationPartition` → `PartitionOp`, `TensorDeviceOpToHostVec` → `ToHostVecOp`.
 - **`.graph()` / `.graph_on(stream)`**: Follows `sync` / `sync_on` convention.
 
+### Added (cont.)
+- **`api::linspace(start, stop, n)`**: Evenly spaced f32 values between two endpoints.
+- **`api::eye(n)` / `api::eye_rect(rows, cols)`**: Identity and identity-like matrices.
+- **`TensorView::slice()`**: Numpy-style range slicing with offset accumulation. Chained slices compose correctly.
+- **`TensorView` contiguity check**: `view()` on a non-contiguous slice returns an error instead of producing incorrect data.
+
 ### Fixed
+- **`arange` multi-block correctness**: `arange` used `get_tile_block_id()` where it needed the partition dimension (`S[0]`), producing wrong values at block boundaries. Hidden by uniform-data tests.
 - **`sync_on` error propagation**: `stream.synchronize()` errors are now returned instead of panicking.
 - **Concurrent stream capture**: Removed `cuCtxSynchronize` call in `CudaContext::new_stream` that caused `DriverError(900)` when creating streams while another thread was capturing a CUDA graph.
 

@@ -99,6 +99,7 @@ async fn main() -> Result<(), Error> {
             .iter()
             .map(|(x, y)| (*x, y.as_slice()))
             .collect::<Vec<_>>(),
+        &[],
         None,
         get_gpu_name(0),
         &CompileOptions::default(),
