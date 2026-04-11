@@ -55,6 +55,7 @@ async fn main() -> Result<(), DeviceError> {
                 vec![],
                 None,
                 CompileOptions::default(),
+                my_module::_SOURCE_HASH,
             );
             value(func)
         })
