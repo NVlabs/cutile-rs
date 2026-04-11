@@ -610,8 +610,8 @@ pub fn get_function_validator(
 
     // Check the kernel cache first (unified path via get_or_try_init stores
     // the validator inside CompiledKernel).
-    let kcache = get_kernel_cache();
-    if let Some(slot) = kcache.get(&key) {
+    let kernel_cache = get_kernel_cache();
+    if let Some(slot) = kernel_cache.get(&key) {
         let lock: &OnceCell<CompiledKernel> = slot.value().as_ref();
         if let Some(compiled) = lock.get() {
             if !compiled.validator.params.is_empty() {
@@ -621,8 +621,8 @@ pub fn get_function_validator(
     }
 
     // Fall back to separate validator cache (backward compat with two-step insert).
-    let cache = get_validator_cache();
-    let validator = cache
+    let validator_cache = get_validator_cache();
+    let validator = validator_cache
         .get(&key)
         .ok_or_else(|| device_error(device_id, "Failed to get function validator."))?;
     Ok(Arc::clone(validator.value()))
