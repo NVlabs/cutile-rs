@@ -563,15 +563,14 @@ pub fn generate_kernel_launcher(
                 // are marked as such.
                 if !is_unsafe {
                     return ptr_type
-                        .error("Pointers can only be used in unsafe kernel entry points.")
-                        .into();
+                        .err("Pointers can only be used in unsafe kernel entry points.");
                 }
                 let ptr_str = ptr_type.to_token_stream().to_string();
                 let (is_mutable, type_name) = get_ptr_type(&ptr_str).ok_or_else(|| {
                     ptr_type.error(&format!("Unexpected pointer type: {}", ptr_str))
                 })?;
                 if !is_mutable {
-                    return ptr_type.error("Pointers must be * mut.").into();
+                    return ptr_type.err("Pointers must be * mut.");
                 }
                 arg_types.push(
                     syn::parse2::<Type>(format!("DevicePointer<{}>", type_name).parse().unwrap())
@@ -593,9 +592,7 @@ pub fn generate_kernel_launcher(
                 param_element_types.push(None);
             }
             _ => {
-                return ty
-                    .error("Unable to generate launcher: unsupported parameter type.")
-                    .into();
+                return ty.err("Unable to generate launcher: unsupported parameter type.");
             }
         }
     }
@@ -1203,16 +1200,12 @@ fn get_tensor_code(
         .ok_or_else(|| ty.error("Expected a named type identifier for tensor parameter."))?;
 
     if type_ident != "Tensor" {
-        return ty
-            .error(&format!("Expected Tensor type, got {}.", type_ident))
-            .into();
+        return ty.err(&format!("Expected Tensor type, got {}.", type_ident));
     }
     let Some(GenericArgument::Type(syn::Type::Path(element_type_path))) =
         type_generic_args.args.first()
     else {
-        return ty
-            .error("Expected generic argument type path for tensor element type.")
-            .into();
+        return ty.err("Expected generic argument type path for tensor element type.");
     };
 
     // Infer generics from type data available in this type.
@@ -1400,8 +1393,7 @@ pub fn infer_shape_params_from_tensor_type(
                     }
                     SupportedGenericType::ConstScalar => {
                         return type_path
-                            .error("Unexpected constant scalar type in tensor generic argument.")
-                            .into();
+                            .err("Unexpected constant scalar type in tensor generic argument.");
                     }
                     SupportedGenericType::Unknown => {}
                 }
@@ -1410,18 +1402,15 @@ pub fn infer_shape_params_from_tensor_type(
                 // println!("expand GenericArgument::Const? {const_param:#?}");
                 // This is something like Tensor<E, {[...]}>
                 if block_expr.block.stmts.len() != 1 {
-                    return block_expr
-                        .error(&format!(
-                            "Expected exactly 1 statement in block expression, got {}.",
-                            block_expr.block.stmts.len()
-                        ))
-                        .into();
+                    return block_expr.err(&format!(
+                        "Expected exactly 1 statement in block expression, got {}.",
+                        block_expr.block.stmts.len()
+                    ));
                 }
                 let statement = &block_expr.block.stmts[0];
                 let Stmt::Expr(statement_expr, _) = statement else {
                     return block_expr
-                        .error("Unexpected block expression: expected an expression statement.")
-                        .into();
+                        .err("Unexpected block expression: expected an expression statement.");
                 };
                 match statement_expr {
                     Expr::Array(array_expr) => {
@@ -1441,13 +1430,13 @@ pub fn infer_shape_params_from_tensor_type(
                                     match required_generics.get_ty(&ident) {
                                         SupportedGenericType::TypeParam => {
                                             // This is an element type.
-                                            return path.error(
+                                            return path.err(
                                                 "Unexpected type param in array type expression.",
-                                            ).into();
+                                            );
                                         }
                                         SupportedGenericType::ConstArray => {
                                             // This is a CGA type.
-                                            return path.error("Unexpected const generic array param in array type expression.").into();
+                                            return path.err("Unexpected const generic array param in array type expression.");
                                         }
                                         SupportedGenericType::ConstScalar => {
                                             if is_mutable {
@@ -1465,11 +1454,9 @@ pub fn infer_shape_params_from_tensor_type(
                                     }
                                 }
                                 _ => {
-                                    return elem
-                                        .error(
-                                            "Unsupported array element in tensor shape expression.",
-                                        )
-                                        .into();
+                                    return elem.err(
+                                        "Unsupported array element in tensor shape expression.",
+                                    );
                                 }
                             }
                         }
@@ -1477,13 +1464,11 @@ pub fn infer_shape_params_from_tensor_type(
                     Expr::Repeat(repeat_expr) => {
                         // TODO (hme): Unclear under what circumstance it would be beneficial to support this.
                         return repeat_expr
-                            .error("Repeat expressions in tensor shape are not yet supported.")
-                            .into();
+                            .err("Repeat expressions in tensor shape are not yet supported.");
                     }
                     _ => {
                         return block_expr
-                            .error("Unexpected block expression in tensor const generic argument.")
-                            .into();
+                            .err("Unexpected block expression in tensor const generic argument.");
                     }
                 }
             }

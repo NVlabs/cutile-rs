@@ -108,48 +108,40 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
         match ty {
             Type::Reference(_) => {
                 let Some(ident) = get_type_ident(ty) else {
-                    return ty.error("Not a supported parameter type.").into();
+                    return ty.err("Not a supported parameter type.");
                 };
                 let type_name = ident.to_string();
                 if type_name != "Tensor" {
-                    return ty
-                        .error(&format!(
-                            "References to {} as parameters are not supported.",
-                            type_name
-                        ))
-                        .into();
+                    return ty.err(&format!(
+                        "References to {} as parameters are not supported.",
+                        type_name
+                    ));
                 }
             }
             Type::Path(path_ty) => {
                 let ident = get_ident_from_path(&path_ty.path);
                 let type_name = ident.to_string();
                 if type_name == "Tensor" {
-                    return ty
-                        .error(concat!(
-                            "Tensors cannot be moved into kernel functions. ",
-                            "&mut Tensor corresponds to ",
-                            "a partitioned tensor argument (e.g. x.partition([...])), ",
-                            "and &Tensor corresponds to ",
-                            "a tensor reference argument (e.g. Arc::new(x) or x.into())."
-                        ))
-                        .into();
+                    return ty.err(concat!(
+                        "Tensors cannot be moved into kernel functions. ",
+                        "&mut Tensor corresponds to ",
+                        "a partitioned tensor argument (e.g. x.partition([...])), ",
+                        "and &Tensor corresponds to ",
+                        "a tensor reference argument (e.g. Arc::new(x) or x.into())."
+                    ));
                 }
             }
             Type::Ptr(ptr_type) => {
                 let ptr_str = ptr_type.to_token_stream().to_string();
                 let Some(_) = get_ptr_type(&ptr_str) else {
-                    return ty
-                        .error(&format!("{} is not a supported pointer type.", ptr_str))
-                        .into();
+                    return ty.err(&format!("{} is not a supported pointer type.", ptr_str));
                 };
             }
             _ => {
-                return ty
-                    .error(&format!(
-                        "{} is not a supported parameter type.",
-                        ty.to_token_stream()
-                    ))
-                    .into();
+                return ty.err(&format!(
+                    "{} is not a supported parameter type.",
+                    ty.to_token_stream()
+                ));
             }
         }
     }

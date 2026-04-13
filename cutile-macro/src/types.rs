@@ -470,11 +470,7 @@ pub fn get_variadic_method_data(
         ]),
         "Tile" => HashMap::from([("reshape", "reshape"), ("broadcast", "broadcast")]),
         "BroadcastScalar" => HashMap::from([("broadcast", "broadcast_scalar")]),
-        _ => {
-            return Span::call_site()
-                .error(&format!("Unexpected variadic type: {}", vtd.name))
-                .into()
-        }
+        _ => return Span::call_site().err(&format!("Unexpected variadic type: {}", vtd.name)),
     };
     match method2op.get(method_name) {
         Some(op_name) => Ok(Some((
@@ -1166,10 +1162,9 @@ impl Iterator for ConstGenericArrayTypeListIterator {
                         self.state.push(item);
                     }
                     None => {
-                        let error = Span::call_site().error(
+                        return Some(Span::call_site().err(
                             "ConstGenericArrayTypeListIterator: iterator was empty on first pass.",
-                        );
-                        return Some(error.into());
+                        ));
                     }
                 }
             }

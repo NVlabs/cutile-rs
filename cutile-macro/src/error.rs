@@ -25,6 +25,7 @@ impl std::fmt::Display for Error {
 }
 
 impl<T> From<Error> for Result<T, Error> {
+    #[inline]
     fn from(value: Error) -> Self {
         Err(value)
     }
@@ -34,6 +35,8 @@ impl<T> From<Error> for Result<T, Error> {
 pub trait SpannedError {
     /// Return `Error` anchored to this item's span.
     fn error(&self, message: &str) -> Error;
+    /// Return `Err(Error)` anchored to this item's span, with an arbitrary `Ok` type.
+    fn err<T>(&self, message: &str) -> Result<T, Error>;
 }
 
 impl<S> SpannedError for S
@@ -42,5 +45,9 @@ where
 {
     fn error(&self, message: &str) -> Error {
         Error::Syn(syn::Error::new(self.span(), message))
+    }
+    #[inline]
+    fn err<T>(&self, message: &str) -> Result<T, Error> {
+        self.error(message).into()
     }
 }
