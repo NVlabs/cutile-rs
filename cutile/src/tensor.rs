@@ -207,7 +207,6 @@ use anyhow::Result;
 use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
-use cuda_core::malloc_async;
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::{DType, DTypeId};
 use std::fmt::Debug;
@@ -619,7 +618,7 @@ impl<T: DType> Tensor<T> {
             let num_bytes = len * size_of::<T>();
             value(MaybeUninit::new(unsafe {
                 Self::from_raw_parts(
-                    malloc_async(num_bytes, ctx.get_cuda_stream()),
+                    ctx.alloc_async(num_bytes),
                     num_bytes,
                     ctx.get_device_id(),
                     vec![len as i32],

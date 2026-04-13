@@ -152,11 +152,11 @@ impl IntoFuture for AsyncKernelLaunch {
     type Output = Result<(), DeviceError>;
     type IntoFuture = DeviceFuture<(), AsyncKernelLaunch>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,

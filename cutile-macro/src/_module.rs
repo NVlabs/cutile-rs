@@ -773,7 +773,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
             type Output = Result<#returned_args_type, DeviceError>;
             type IntoFuture = DeviceFuture<#returned_args_type, #launcher_ident #struct_args>;
             fn into_future(self) -> Self::IntoFuture {
-                match with_default_device_policy(|policy| { let stream = policy.next_stream()?; Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream))) }) {
+                match with_default_device_policy(|policy, pool| { let stream = policy.next_stream()?; Ok(DeviceFuture::scheduled(self, ExecutionContext::with_pool(stream, pool.cloned()))) }) {
                     Ok(Ok(future)) => future,
                     Ok(Err(e)) => DeviceFuture::failed(e),
                     Err(e) => DeviceFuture::failed(e),

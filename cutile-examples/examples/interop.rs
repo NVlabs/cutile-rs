@@ -155,9 +155,9 @@ impl IntoFuture for ScaleKernel {
     type Output = Result<(Arc<Tensor<f32>>, Tensor<f32>), DeviceError>;
     type IntoFuture = DeviceFuture<(Arc<Tensor<f32>>, Tensor<f32>), ScaleKernel>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::with_pool(stream, pool.cloned())))
         }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),

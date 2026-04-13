@@ -381,6 +381,83 @@ impl CudaEvent {
     }
 }
 
+/// Owns a CUDA memory pool and its parent context reference.
+#[derive(Debug)]
+pub struct CudaMemPool {
+    pub(crate) cu_pool: cuda_bindings::CUmemoryPool,
+    pub(crate) ctx: Arc<CudaContext>,
+    /// Whether this pool was created by us (and should be destroyed on drop)
+    /// vs. obtained from the driver (e.g. the default pool).
+    pub(crate) owned: bool,
+}
+
+unsafe impl Send for CudaMemPool {}
+unsafe impl Sync for CudaMemPool {}
+
+impl Drop for CudaMemPool {
+    fn drop(&mut self) {
+        if self.owned {
+            self.ctx.record_err(self.ctx.bind_to_thread());
+            self.ctx
+                .record_err(unsafe { pool::destroy(self.cu_pool) });
+        }
+    }
+}
+
+impl CudaContext {
+    /// Creates a new memory pool on this context's device.
+    pub fn new_mem_pool(self: &Arc<Self>) -> Result<Arc<CudaMemPool>, DriverError> {
+        self.bind_to_thread()?;
+        let mut props: cuda_bindings::CUmemPoolProps = unsafe { std::mem::zeroed() };
+        props.allocType =
+            cuda_bindings::CUmemAllocationType_enum_CU_MEM_ALLOCATION_TYPE_PINNED;
+        props.handleTypes =
+            cuda_bindings::CUmemAllocationHandleType_enum_CU_MEM_HANDLE_TYPE_NONE;
+        props.location.type_ =
+            cuda_bindings::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE;
+        props.location.__bindgen_anon_1.id = self.ordinal as c_int;
+        let cu_pool = unsafe { pool::create(&props) }?;
+        Ok(Arc::new(CudaMemPool {
+            cu_pool,
+            ctx: self.clone(),
+            owned: true,
+        }))
+    }
+
+    /// Returns the default memory pool for this context's device.
+    pub fn default_mem_pool(self: &Arc<Self>) -> Result<Arc<CudaMemPool>, DriverError> {
+        self.bind_to_thread()?;
+        let cu_pool = unsafe { pool::get_default(self.cu_device) }?;
+        Ok(Arc::new(CudaMemPool {
+            cu_pool,
+            ctx: self.clone(),
+            owned: false,
+        }))
+    }
+}
+
+impl CudaMemPool {
+    /// Returns the raw `CUmemoryPool` handle.
+    pub fn cu_pool(&self) -> cuda_bindings::CUmemoryPool {
+        self.cu_pool
+    }
+
+    /// Returns a reference to the parent context.
+    pub fn context(&self) -> &Arc<CudaContext> {
+        &self.ctx
+    }
+
+    /// Sets the release threshold for this pool.
+    ///
+    /// Memory held by the pool is not returned to the OS until pool usage drops
+    /// below this threshold. Use `u64::MAX` to prevent the OS from reclaiming
+    /// pool memory (useful for inference workloads with stable memory footprints).
+    pub fn set_release_threshold(&self, threshold: u64) -> Result<(), DriverError> {
+        self.ctx.bind_to_thread()?;
+        unsafe { pool::set_release_threshold(self.cu_pool, threshold) }
+    }
+}
+
 /// Owns a loaded CUDA module (PTX/cubin) and its parent context reference.
 #[derive(Debug)]
 pub struct CudaModule {
@@ -1045,6 +1122,76 @@ pub mod event {
     /// `event` must be valid and not in use by any stream.
     pub unsafe fn destroy(event: cuda_bindings::CUevent) -> Result<(), DriverError> {
         cuda_bindings::cuEventDestroy_v2(event).result()
+    }
+}
+
+/// Low-level CUDA memory pool operations.
+pub mod pool {
+    use super::{DriverError, IntoResult};
+    use std::mem::MaybeUninit;
+
+    /// Creates a new memory pool with the given properties.
+    ///
+    /// # Safety
+    /// `props` must describe a valid pool configuration for an available device.
+    pub unsafe fn create(
+        props: &cuda_bindings::CUmemPoolProps,
+    ) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
+        let mut pool = MaybeUninit::uninit();
+        cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), props as *const _ as *mut _)
+            .result()?;
+        Ok(pool.assume_init())
+    }
+
+    /// Destroys a memory pool.
+    ///
+    /// # Safety
+    /// `pool` must be valid and all allocations from it must have been freed.
+    pub unsafe fn destroy(pool: cuda_bindings::CUmemoryPool) -> Result<(), DriverError> {
+        cuda_bindings::cuMemPoolDestroy(pool).result()
+    }
+
+    /// Returns the default memory pool for the given device.
+    ///
+    /// # Safety
+    /// `device` must be a valid device ordinal.
+    pub unsafe fn get_default(
+        device: cuda_bindings::CUdevice,
+    ) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
+        let mut pool = MaybeUninit::uninit();
+        cuda_bindings::cuDeviceGetDefaultMemPool(pool.as_mut_ptr(), device).result()?;
+        Ok(pool.assume_init())
+    }
+
+    /// Sets the release threshold for a memory pool.
+    ///
+    /// # Safety
+    /// `pool` must be a valid pool handle.
+    pub unsafe fn set_release_threshold(
+        pool: cuda_bindings::CUmemoryPool,
+        threshold: u64,
+    ) -> Result<(), DriverError> {
+        cuda_bindings::cuMemPoolSetAttribute(
+            pool,
+            cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+            &threshold as *const _ as *mut _,
+        )
+        .result()
+    }
+
+    /// Allocates device memory from a specific pool asynchronously.
+    ///
+    /// # Safety
+    /// `pool` and `stream` must be valid handles.
+    pub unsafe fn malloc_from_pool_async(
+        pool: cuda_bindings::CUmemoryPool,
+        stream: cuda_bindings::CUstream,
+        num_bytes: usize,
+    ) -> Result<cuda_bindings::CUdeviceptr, DriverError> {
+        let mut dev_ptr = MaybeUninit::uninit();
+        cuda_bindings::cuMemAllocFromPoolAsync(dev_ptr.as_mut_ptr(), num_bytes, pool, stream)
+            .result()?;
+        Ok(dev_ptr.assume_init())
     }
 }
 

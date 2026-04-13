@@ -7,7 +7,7 @@
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
-use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
+use cuda_core::{CudaContext, CudaFunction, CudaMemPool, CudaModule, CudaStream};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -88,6 +88,7 @@ pub struct AsyncDeviceContext {
     context: Arc<CudaContext>,
     deallocator_stream: Arc<CudaStream>,
     policy: Arc<dyn SchedulingPolicy>,
+    pool: Option<Arc<CudaMemPool>>,
     functions: DeviceFunctions,
     validators: DeviceFunctionValidators,
 }
@@ -163,6 +164,7 @@ pub fn new_device_context(
         context,
         deallocator_stream,
         policy,
+        pool: None,
         functions: HashMap::new(),
         validators: HashMap::new(),
     })
@@ -204,6 +206,7 @@ pub fn init_with_default_policy(
         context,
         deallocator_stream,
         policy: Arc::new(policy),
+        pool: None,
         functions: HashMap::new(),
         validators: HashMap::new(),
     };
@@ -316,17 +319,55 @@ pub fn set_default_device(default_device_id: usize) {
     })
 }
 
-/// Run a closure with the scheduling policy of the current thread's default device.
+/// Set a custom memory pool for the given device.
+///
+/// All subsequent allocations on this device will use the given pool instead of the
+/// default pool. The pool is resolved at scheduling time and carried on
+/// [`ExecutionContext`](crate::device_operation::ExecutionContext), so it applies to
+/// `.sync()`, `.await`, and explicit `.schedule()` calls.
+///
+/// # Errors
+///
+/// Returns an error if `pool` was created on a different device than `device_id`.
+pub fn set_device_pool(device_id: usize, pool: Arc<CudaMemPool>) -> Result<(), DeviceError> {
+    let pool_device = pool.context().ordinal();
+    device_assert(
+        device_id,
+        pool_device == device_id,
+        &format!("pool belongs to device {pool_device}, expected device {device_id}"),
+    )?;
+    with_global_device_context_mut(device_id, |device_context| {
+        device_context.pool = Some(pool);
+    })
+}
+
+/// Clear the custom memory pool for the given device, reverting to the default pool.
+pub fn clear_device_pool(device_id: usize) -> Result<(), DeviceError> {
+    with_global_device_context_mut(device_id, |device_context| {
+        device_context.pool = None;
+    })
+}
+
+/// Returns the custom memory pool for the given device, if set.
+pub fn get_device_pool(device_id: usize) -> Result<Option<Arc<CudaMemPool>>, DeviceError> {
+    with_global_device_context(device_id, |device_context| device_context.pool.clone())
+}
+
+/// Run a closure with the scheduling policy and optional pool  of the current thread's default device.
 ///
 /// This is the function called internally by [`DeviceOp::sync()`] and by the
 /// [`IntoFuture`] implementation to schedule operations when no explicit device is given.
 pub fn with_default_device_policy<F, R>(f: F) -> Result<R, DeviceError>
 where
-    F: FnOnce(&Arc<dyn SchedulingPolicy>) -> R,
+    F: FnOnce(&Arc<dyn SchedulingPolicy>, Option<&Arc<CudaMemPool>>) -> R,
 {
     let default_device = get_default_device();
-    with_global_device_context(default_device, |device_context| f(&device_context.policy))
+    with_global_device_context(default_device, |device_context| {
+        f(&device_context.policy, device_context.pool.as_ref())
+    })
 }
+
+
 
 // Kernel operations — compile, cache, and retrieve GPU kernels.
 
