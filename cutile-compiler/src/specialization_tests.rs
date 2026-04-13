@@ -2,6 +2,11 @@
 mod tests {
     use crate::specialization::*;
 
+    /// Helper: create a DivHint with the default max (16).
+    fn dh(divisor: i32) -> DivHint {
+        DivHint { divisor, max: 16 }
+    }
+
     #[test]
     fn max_pow2_divisor_powers_of_two() {
         assert_eq!(max_pow2_divisor(1), 1);
@@ -31,13 +36,38 @@ mod tests {
     }
 
     #[test]
+    fn divhint_from_value() {
+        assert_eq!(DivHint::from_value(1024), dh(16));
+        assert_eq!(DivHint::from_value(12), dh(4));
+        assert_eq!(DivHint::from_value(7), dh(1));
+        assert_eq!(DivHint::from_value(0), dh(16));
+    }
+
+    #[test]
+    fn divhint_with_max() {
+        let h: DivHint = DivHint::from_value(1024).with_max(8);
+        assert_eq!(h.divisor, 8);
+        assert_eq!(h.max, 8);
+
+        let h: DivHint = DivHint::from_value(3).with_max(8);
+        assert_eq!(h.divisor, 1); // 3 has divisor 1, still 1 after clamping to 8
+    }
+
+    #[test]
+    fn divhint_default() {
+        let h: DivHint = DivHint::default();
+        assert_eq!(h.divisor, 1);
+        assert_eq!(h.max, 16);
+    }
+
+    #[test]
     fn compute_spec_contiguous_aligned() {
         // 1D tensor: shape=[1024], strides=[1], dtype=f32 (4 bytes), ptr aligned to 16
         let spec = compute_spec(0x1000, &[1024], &[1], 4);
-        assert_eq!(spec.shape_div, vec![16]); // 1024 % 16 == 0
-        assert_eq!(spec.stride_div, vec![4]); // stride_bytes = 1*4 = 4
+        assert_eq!(spec.shape_div, vec![dh(16)]); // 1024 % 16 == 0
+        assert_eq!(spec.stride_div, vec![dh(4)]); // stride_bytes = 1*4 = 4
         assert_eq!(spec.stride_one, vec![true]);
-        assert_eq!(spec.base_ptr_div, 16); // 0x1000 % 16 == 0
+        assert_eq!(spec.base_ptr_div, dh(16)); // 0x1000 % 16 == 0
         assert!(spec.elements_disjoint);
     }
 
@@ -45,8 +75,8 @@ mod tests {
     fn compute_spec_2d_row_major() {
         // 2D tensor: shape=[128, 256], strides=[256, 1], dtype=f16 (2 bytes)
         let spec = compute_spec(0x1000, &[128, 256], &[256, 1], 2);
-        assert_eq!(spec.shape_div, vec![16, 16]); // both divisible by 16
-        assert_eq!(spec.stride_div, vec![16, 2]); // 256*2=512 -> 16; 1*2=2 -> 2
+        assert_eq!(spec.shape_div, vec![dh(16), dh(16)]); // both divisible by 16
+        assert_eq!(spec.stride_div, vec![dh(16), dh(2)]); // 256*2=512 -> 16; 1*2=2 -> 2
         assert_eq!(spec.stride_one, vec![false, true]);
         assert!(spec.elements_disjoint);
     }
@@ -55,8 +85,8 @@ mod tests {
     fn compute_spec_odd_shape() {
         // shape=[1023], strides=[1], dtype=f32
         let spec = compute_spec(0x1000, &[1023], &[1], 4);
-        assert_eq!(spec.shape_div, vec![1]); // 1023 is odd
-        assert_eq!(spec.stride_div, vec![4]);
+        assert_eq!(spec.shape_div, vec![dh(1)]); // 1023 is odd
+        assert_eq!(spec.stride_div, vec![dh(4)]);
         assert_eq!(spec.stride_one, vec![true]);
     }
 
@@ -64,7 +94,7 @@ mod tests {
     fn compute_spec_unaligned_ptr() {
         // ptr not aligned to 16
         let spec = compute_spec(0x1004, &[128], &[1], 4);
-        assert_eq!(spec.base_ptr_div, 4); // 0x1004 = 4100, divisible by 4
+        assert_eq!(spec.base_ptr_div, dh(4)); // 0x1004 = 4100, divisible by 4
     }
 
     #[test]
