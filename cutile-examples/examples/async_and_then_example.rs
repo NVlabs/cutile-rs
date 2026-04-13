@@ -53,6 +53,7 @@ async fn main() -> Result<(), DeviceError> {
                 function_generics,
                 stride_args,
                 vec![],
+                vec![],
                 None,
                 CompileOptions::default(),
             );

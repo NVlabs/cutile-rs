@@ -58,6 +58,7 @@ async fn main() -> Result<(), Error> {
                 function_generics,
                 stride_args,
                 vec![],
+                vec![],
                 None,
                 CompileOptions::default(),
             );

@@ -9,6 +9,57 @@
 //! and base pointer at construction time. The compiler uses these to emit
 //! targeted `assume_div_by` operations, capped by `max_divisibility` when set.
 
+/// A divisibility annotation: the max power-of-2 divisor of a value,
+/// clamped to a configurable maximum.
+///
+/// Used by the JIT compiler to emit targeted `assume_div_by` operations.
+/// Works for tensor dimensions, strides, pointers, and scalar integers.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct DivHint {
+    /// Max power-of-2 divisor of the value, clamped to `max`.
+    pub divisor: i32,
+    /// Upper bound on the divisor (default 16).
+    pub max: i32,
+}
+
+impl Default for DivHint {
+    fn default() -> Self {
+        Self {
+            divisor: 1,
+            max: 16,
+        }
+    }
+}
+
+impl DivHint {
+    /// Compute divisibility from an integer value, clamped to 16.
+    pub fn from_value(val: i32) -> Self {
+        let raw: i32 = max_pow2_divisor_unclamped(val);
+        Self {
+            divisor: raw.min(16),
+            max: 16,
+        }
+    }
+
+    /// Compute divisibility from a pointer address, clamped to 16.
+    pub fn from_ptr(ptr: u64) -> Self {
+        let raw: i32 = max_pow2_divisor_unclamped(ptr as i32);
+        Self {
+            divisor: raw.min(16),
+            max: 16,
+        }
+    }
+
+    /// Override the maximum clamp. Returns a new `DivHint` with
+    /// `divisor` re-clamped to the given `max`.
+    pub fn with_max(self, max: i32) -> Self {
+        Self {
+            divisor: self.divisor.min(max),
+            max,
+        }
+    }
+}
+
 /// Per-tensor metadata inferred from runtime shape, strides, and base pointer.
 ///
 /// Computed once at tensor construction and recomputed on reshape/view.
@@ -16,25 +67,53 @@
 /// and to determine static vs dynamic strides in generated MLIR.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SpecializationBits {
-    /// Per-dimension: max power-of-2 divisor of shape[i], clamped to 16.
-    pub shape_div: Vec<i32>,
-    /// Per-dimension: max power-of-2 divisor of stride[i] in bytes, clamped to 16.
-    pub stride_div: Vec<i32>,
+    /// Per-dimension: divisibility of shape[i].
+    pub shape_div: Vec<DivHint>,
+    /// Per-dimension: divisibility of stride[i] in bytes.
+    pub stride_div: Vec<DivHint>,
     /// Per-dimension: whether stride[i] == 1.
     pub stride_one: Vec<bool>,
-    /// Max power-of-2 divisor of the base device pointer, clamped to 16.
-    pub base_ptr_div: i32,
+    /// Divisibility of the base device pointer.
+    pub base_ptr_div: DivHint,
     /// True if elements are non-overlapping (strides are non-aliasing).
     pub elements_disjoint: bool,
+}
+
+/// Returns the largest power-of-2 that divides `val`.
+/// Zero is treated as divisible by 16 (maximum).
+/// NOT clamped — callers (typically `DivHint`) apply their own clamp.
+fn max_pow2_divisor_unclamped(val: i32) -> i32 {
+    if val == 0 {
+        return 16;
+    }
+    val & val.wrapping_neg()
 }
 
 /// Returns the largest power-of-2 that divides `val`, clamped to 16.
 /// Zero is treated as divisible by 16 (maximum).
 pub fn max_pow2_divisor(val: i32) -> i32 {
-    if val == 0 {
-        return 16;
-    }
-    (val & val.wrapping_neg()).min(16)
+    max_pow2_divisor_unclamped(val).min(16)
+}
+
+/// DSL integer scalar types that support divisibility hints.
+pub const INTEGER_SCALAR_TYPES: &[&str] = &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
+
+/// DSL float scalar types.
+pub const FLOAT_SCALAR_TYPES: &[&str] = &["f16", "bf16", "f32", "f64"];
+
+/// DSL scalar types that aren't integer or float.
+pub const OTHER_SCALAR_TYPES: &[&str] = &["bool"];
+
+/// Returns true if the type name is a DSL integer scalar type.
+pub fn is_integer_scalar(ty: &str) -> bool {
+    INTEGER_SCALAR_TYPES.contains(&ty)
+}
+
+/// Returns true if the type name is any DSL scalar type.
+pub fn is_scalar(ty: &str) -> bool {
+    INTEGER_SCALAR_TYPES.contains(&ty)
+        || FLOAT_SCALAR_TYPES.contains(&ty)
+        || OTHER_SCALAR_TYPES.contains(&ty)
 }
 
 /// Computes specialization bits from tensor metadata.
@@ -49,13 +128,13 @@ pub fn compute_spec(
         shape_div: Vec::with_capacity(ndim),
         stride_div: Vec::with_capacity(ndim),
         stride_one: Vec::with_capacity(ndim),
-        base_ptr_div: max_pow2_divisor(base_ptr as i32),
+        base_ptr_div: DivHint::from_ptr(base_ptr),
         elements_disjoint: true,
     };
     for i in 0..ndim {
-        spec.shape_div.push(max_pow2_divisor(shape[i]));
-        let stride_bytes = strides[i] * dtype_bytes;
-        spec.stride_div.push(max_pow2_divisor(stride_bytes));
+        spec.shape_div.push(DivHint::from_value(shape[i]));
+        let stride_bytes: i32 = strides[i] * dtype_bytes;
+        spec.stride_div.push(DivHint::from_value(stride_bytes));
         spec.stride_one.push(strides[i] == 1);
     }
     // Disjointness: sort by stride, check stride[i+1] >= stride[i] * shape[i].
