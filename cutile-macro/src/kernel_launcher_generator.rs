@@ -559,9 +559,9 @@ pub fn generate_kernel_launcher(
                         .err("Pointers can only be used in unsafe kernel entry points.");
                 }
                 let ptr_str = ptr_type.to_token_stream().to_string();
-                let Some((is_mutable, type_name)) = get_ptr_type(&ptr_str) else {
-                    return ptr_type.err(&format!("Unexpected pointer type: {}", ptr_str));
-                };
+                let (is_mutable, type_name) = get_ptr_type(&ptr_str).ok_or_else(|| {
+                    ptr_type.error(&format!("Unexpected pointer type: {}", ptr_str))
+                })?;
                 if !is_mutable {
                     return ptr_type.err("Pointers must be * mut.");
                 }
@@ -1182,9 +1182,9 @@ fn get_tensor_code(
 ) -> Result<TensorLaunchCode, Error> {
     // FnArg
     let (type_ident, type_generic_args) = get_ident_generic_args(&Type::Reference(ty.clone()));
-    let Some(type_ident) = type_ident else {
-        return ty.err("Expected a named type identifier for tensor parameter.");
-    };
+    let type_ident = type_ident
+        .ok_or_else(|| ty.error("Expected a named type identifier for tensor parameter."))?;
+
     if type_ident != "Tensor" {
         return ty.err(&format!("Expected Tensor type, got {}.", type_ident));
     }
