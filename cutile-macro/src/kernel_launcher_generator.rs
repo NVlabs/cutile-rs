@@ -513,6 +513,7 @@ pub fn generate_kernel_launcher(
     let (input_types, _output_type) = get_sig_types(&item.sig, None);
     let mut stride_args = vec![];
     let mut spec_args: Vec<String> = vec![];
+    let mut scalar_hint_exprs: Vec<String> = vec![];
     let mut builder_statements = vec![];
     let mut launch_grid_expr_strs = vec![];
     let mut validator_statements = vec![];
@@ -549,6 +550,12 @@ pub fn generate_kernel_launcher(
                     );
                 }
                 builder_statements.push(parse_stmt(format!("kernel_launch.push_arg({var_name});")));
+                // For integer scalar params, auto-compute DivHint at launch time.
+                if cutile_compiler::specialization::is_integer_scalar(&type_name) {
+                    scalar_hint_exprs.push(format!(
+                        r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
+                    ));
+                }
                 param_element_types.push(None);
             }
             Type::Ptr(ptr_type) => {
@@ -822,13 +829,20 @@ pub fn generate_kernel_launcher(
         spec_args.join(",")
     )));
 
+    // Emit scalar_hints (populated for integer scalar params).
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
+        scalar_hint_exprs.join(",")
+    )));
+
     let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
         let compile_options = std::mem::take(&mut self._compile_options);
         let (function, validator) = self.compile(
             ctx, _module_asts,
             module_name, function_name, function_entry,
-            function_generics, stride_args, spec_args.clone(), const_grid,
+            function_generics, stride_args, spec_args.clone(), scalar_hints,
+            const_grid,
             compile_options
         )?;
     }})
