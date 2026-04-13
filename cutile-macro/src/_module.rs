@@ -245,7 +245,7 @@ fn process_items(
 ) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
-    // Collect entry point metadata for __entries() generation.
+    // Collect entry point metadata for _entries() generation.
     let mut entry_metas: Vec<(String, String)> = vec![]; // (function_name, function_entry)
 
     for item in items {
@@ -345,7 +345,7 @@ fn module_inner(
     let source_hash = format!("{:x}", Sha256::digest(raw_item_source.as_bytes()));
     let module_name_str = name.to_string();
 
-    // Generate __entries() and __SOURCE_HASH for warmup support.
+    // Generate _entries() and _SOURCE_HASH for warmup support.
     let entry_meta_items: Vec<TokenStream2> = entry_metas
         .iter()
         .map(|(fn_name, fn_entry)| {
