@@ -613,6 +613,44 @@ pub fn collect_mutated_variables_from_block(
                     result.insert(var_name);
                 }
             }
+            // Recurse into nested control flow to find mutations.
+            Stmt::Expr(Expr::ForLoop(for_expr), _) => {
+                for var in collect_mutated_variables_from_block(&for_expr.body)? {
+                    if !local_vars.contains(&var) {
+                        result.insert(var);
+                    }
+                }
+            }
+            Stmt::Expr(Expr::While(while_expr), _) => {
+                for var in collect_mutated_variables_from_block(&while_expr.body)? {
+                    if !local_vars.contains(&var) {
+                        result.insert(var);
+                    }
+                }
+            }
+            Stmt::Expr(Expr::If(if_expr), _) => {
+                for var in collect_mutated_variables_from_block(&if_expr.then_branch)? {
+                    if !local_vars.contains(&var) {
+                        result.insert(var);
+                    }
+                }
+                if let Some((_else, else_expr)) = &if_expr.else_branch {
+                    if let Expr::Block(block_expr) = &**else_expr {
+                        for var in collect_mutated_variables_from_block(&block_expr.block)? {
+                            if !local_vars.contains(&var) {
+                                result.insert(var);
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::Expr(Expr::Loop(loop_expr), _) => {
+                for var in collect_mutated_variables_from_block(&loop_expr.body)? {
+                    if !local_vars.contains(&var) {
+                        result.insert(var);
+                    }
+                }
+            }
             _ => continue,
         }
     }

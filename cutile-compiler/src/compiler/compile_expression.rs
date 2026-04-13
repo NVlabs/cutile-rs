@@ -484,13 +484,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     Ok(None)
                 }
                 Expr::If(if_expr) => {
-                    let Some(conditional_val) = self.compile_expression(
-                        builder,
-                        &*if_expr.cond,
-                        generic_vars,
-                        ctx,
-                        return_type.clone(),
-                    )?
+                    // The condition is always bool — don't propagate the if
+                    // expression's return type into the condition.
+                    let Some(conditional_val) =
+                        self.compile_expression(builder, &*if_expr.cond, generic_vars, ctx, None)?
                     else {
                         return self.jit_error_result(
                             &if_expr.cond.span(),

@@ -376,7 +376,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: latency (Option<i32>)
+        // arg[6]: latency (Option<i32>) — literal or const generic
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         if let Some(latency_arg) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
@@ -384,12 +384,17 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             if let Expr::Lit(ExprLit {
                 lit: Lit::Int(int_lit),
                 ..
-            }) = latency_arg
+            }) = &latency_arg
             {
                 hint_params.insert(
                     "latency".to_string(),
                     int_lit.base10_parse::<i32>().unwrap(),
                 );
+            } else if let Expr::Path(path) = &latency_arg {
+                let name = path.path.segments.last().unwrap().ident.to_string();
+                if let Some(&v) = generic_args.inst_i32.get(&name) {
+                    hint_params.insert("latency".to_string(), v);
+                }
             }
         }
 
@@ -577,7 +582,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: latency (Option<i32>)
+        // arg[6]: latency (Option<i32>) — literal or const generic
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         if let Some(latency_arg) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
@@ -585,12 +590,17 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             if let Expr::Lit(ExprLit {
                 lit: Lit::Int(int_lit),
                 ..
-            }) = latency_arg
+            }) = &latency_arg
             {
                 hint_params.insert(
                     "latency".to_string(),
                     int_lit.base10_parse::<i32>().unwrap(),
                 );
+            } else if let Expr::Path(path) = &latency_arg {
+                let name = path.path.segments.last().unwrap().ident.to_string();
+                if let Some(&v) = generic_args.inst_i32.get(&name) {
+                    hint_params.insert("latency".to_string(), v);
+                }
             }
         }
 
@@ -1147,22 +1157,40 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 );
             };
             // Handle Option<i32> hint params (e.g. latency: Option<i32>).
+            // The inner value can be a literal (Some(4)) or a const generic (Some(L)).
             if let Some(inner) = crate::compiler::utils::resolve_option_arg(&call_expr.args[i], ctx)
             {
-                let Expr::Lit(lit_expr) = &inner else {
+                let value: i32 = if let Expr::Lit(lit_expr) = &inner {
+                    let Lit::Int(int_lit) = &lit_expr.lit else {
+                        return self.jit_error_result(
+                            &lit_expr.span(),
+                            "Non-integer literals not supported",
+                        );
+                    };
+                    int_lit.base10_parse::<i32>().unwrap()
+                } else if let Expr::Path(path) = &inner {
+                    let name = path.path.segments.last().unwrap().ident.to_string();
+                    if let Some(&v) = generic_args.inst_i32.get(&name) {
+                        v
+                    } else {
+                        return self.jit_error_result(
+                            &call_expr.args[i].span(),
+                            &format!(
+                                "Failed to compile hint param {hint_param}: \
+                                 '{name}' is not a literal or resolved const generic."
+                            ),
+                        );
+                    }
+                } else {
                     return self.jit_error_result(
                         &call_expr.args[i].span(),
-                        &format!("Failed to compile hint param {hint_param}, expected literal."),
+                        &format!(
+                            "Failed to compile hint param {hint_param}, \
+                             expected literal or const generic."
+                        ),
                     );
                 };
-                let Lit::Int(int_lit) = &lit_expr.lit else {
-                    return self
-                        .jit_error_result(&lit_expr.span(), "Non-integer literals not supported");
-                };
-                hint_params.insert(
-                    hint_param.to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
+                hint_params.insert(hint_param.to_string(), value);
             }
         }
         // Handle disallow_tma: bool parameter.

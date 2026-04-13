@@ -3200,6 +3200,92 @@ pub mod core {
         unreachable!()
     }
 
+    /// Element-wise floating-point addition with flush-to-zero.
+    ///
+    /// Same as `+` on tiles, but flushes denormal inputs and results to zero.
+    /// Uses `nearest_even` rounding. Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.addf", params=["lhs", "rhs"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>", "flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn addf_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise floating-point subtraction with flush-to-zero.
+    ///
+    /// Same as `-` on tiles, but flushes denormal inputs and results to zero.
+    /// Uses `nearest_even` rounding. Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.subf", params=["lhs", "rhs"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>", "flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn subf_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise floating-point multiplication with flush-to-zero.
+    ///
+    /// Same as `*` on tiles, but flushes denormal inputs and results to zero.
+    /// Uses `nearest_even` rounding. Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.mulf", params=["lhs", "rhs"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>", "flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn mulf_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise floating-point division with flush-to-zero.
+    ///
+    /// Same as `/` on tiles, but flushes denormal inputs and results to zero.
+    /// Uses `nearest_even` rounding. Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.divf", params=["lhs", "rhs"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>", "flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn divf_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Fused multiply-add with flush-to-zero: `result = lhs * rhs + acc`.
+    ///
+    /// Same as [`fma`], but flushes denormal inputs and results to zero.
+    /// Uses `nearest_even` rounding. Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.fma", params=["lhs", "rhs", "acc"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>", "flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn fma_ftz<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+        acc: Tile<E, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise reciprocal square root with flush-to-zero.
+    ///
+    /// Same as [`rsqrt`], but flushes denormal inputs and results to zero.
+    /// Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.rsqrt", params=["x"], named_attributes=["flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn rsqrt_ftz<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise square root with flush-to-zero.
+    ///
+    /// Same as [`sqrt`], but flushes denormal inputs and results to zero.
+    /// Uses `nearest_even` rounding. Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.sqrt", params=["x"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>", "flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn sqrt_ftz<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
     /// Conditional selection operation.
     ///
     /// Returns `val_if_true` where `cond` is true, otherwise returns `val_if_false`.

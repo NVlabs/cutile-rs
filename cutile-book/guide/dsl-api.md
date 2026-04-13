@@ -383,6 +383,7 @@ In addition to operator overloading (`+`, `-`, `*`, `/`), these explicit functio
 | `negi(x)` | `Tile<E, S> -> Tile<E, S>` | Negation (integer) |
 | `negf(x)` | `Tile<E, S> -> Tile<E, S>` | Negation (float) |
 | `fma(a, b, c)` | `(Tile<E, S>, Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Fused multiply-add: `a * b + c` |
+| `fma_ftz(a, b, c)` | `(Tile<E, S>, Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Fused multiply-add (flush-to-zero) |
 | `pow(base, exp)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Power |
 | `ceil_div(a, b)` | `(E, E) -> E` | Ceiling division (scalar) |
 | `true_div(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | True (floating-point) division |
@@ -414,7 +415,9 @@ let neg_i: Tile<i32, S> = negi(int_tile);
 | `log(x)` | `Tile<E, S> -> Tile<E, S>` | Natural logarithm |
 | `log2(x)` | `Tile<E, S> -> Tile<E, S>` | Base-2 logarithm |
 | `sqrt(x)` | `Tile<E, S> -> Tile<E, S>` | Square root |
+| `sqrt_ftz(x)` | `Tile<E, S> -> Tile<E, S>` | Square root with flush-to-zero |
 | `rsqrt(x)` | `Tile<E, S> -> Tile<E, S>` | Reciprocal square root (1/sqrt(x)) |
+| `rsqrt_ftz(x)` | `Tile<E, S> -> Tile<E, S>` | Reciprocal square root with flush-to-zero |
 | `sin(x)` | `Tile<E, S> -> Tile<E, S>` | Sine |
 | `cos(x)` | `Tile<E, S> -> Tile<E, S>` | Cosine |
 | `tan(x)` | `Tile<E, S> -> Tile<E, S>` | Tangent |
@@ -427,6 +430,10 @@ let neg_i: Tile<i32, S> = negi(int_tile);
 | `minf(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float min |
 | `maxf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float max (flush-to-zero) |
 | `minf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float min (flush-to-zero) |
+| `addf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float add (flush-to-zero) |
+| `subf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float sub (flush-to-zero) |
+| `mulf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float mul (flush-to-zero) |
+| `divf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float div (flush-to-zero) |
 
 ```rust
 // Softmax numerics: subtract max, exponentiate
@@ -447,8 +454,11 @@ let swish: Tile<f32, S> = x / (constant(1.0f32, x.shape()) + exp(negf(x)));
 let log2_e: f32 = 1.4426950408889634f32;
 let fast_exp: Tile<f32, S> = exp2(x * broadcast_scalar(log2_e, x.shape()));
 
-// Flush-to-zero variants: treat denormals as zero (faster on some hardware)
+// Flush-to-zero variants: treat denormals as zero (faster on some hardware, f32 only)
 let clamped: Tile<f32, S> = maxf_ftz(x, broadcast_scalar(0.0f32, x.shape()));
+let sum: Tile<f32, S> = addf_ftz(a, b);
+let product: Tile<f32, S> = mulf_ftz(a, b);
+let fma_result: Tile<f32, S> = fma_ftz(a, b, c);
 ```
 
 ### Comparison

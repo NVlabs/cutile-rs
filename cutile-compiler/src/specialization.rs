@@ -14,6 +14,9 @@
 ///
 /// Used by the JIT compiler to emit targeted `assume_div_by` operations.
 /// Works for tensor dimensions, strides, pointers, and scalar integers.
+///
+/// `DivHint` is unit-agnostic: the unit of `divisor` depends on context.
+/// See [`SpecializationBits`] for how each field's unit is defined.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct DivHint {
     /// Max power-of-2 divisor of the value, clamped to `max`.
@@ -33,6 +36,9 @@ impl Default for DivHint {
 
 impl DivHint {
     /// Compute divisibility from an integer value, clamped to 16.
+    ///
+    /// The unit of the result matches the unit of `val`: elements for
+    /// shape/stride values, bytes for pointer addresses cast to i32.
     pub fn from_value(val: i32) -> Self {
         let raw: i32 = max_pow2_divisor_unclamped(val);
         Self {
@@ -42,6 +48,10 @@ impl DivHint {
     }
 
     /// Compute divisibility from a pointer address, clamped to 16.
+    ///
+    /// The result is in **bytes**: a divisor of 16 means the pointer is
+    /// aligned to a 16-byte boundary. This matches cutile-python's
+    /// `base_addr_divisible_by` convention.
     pub fn from_ptr(ptr: u64) -> Self {
         let raw: i32 = max_pow2_divisor_unclamped(ptr as i32);
         Self {
@@ -65,15 +75,24 @@ impl DivHint {
 /// Computed once at tensor construction and recomputed on reshape/view.
 /// Used by the JIT compiler to emit targeted `assume_div_by` operations
 /// and to determine static vs dynamic strides in generated MLIR.
+///
+/// # Units
+///
+/// `shape_div` and `stride_div` are in **elements** (not bytes). This
+/// matches NVT and cutile-python, where divisibility is dtype-independent.
+/// `base_ptr_div` is in **bytes** (raw pointer alignment). This matches
+/// cutile-python's `base_addr_divisible_by` convention.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SpecializationBits {
-    /// Per-dimension: divisibility of shape[i].
+    /// Per-dimension: divisibility of shape[i], in **elements**.
     pub shape_div: Vec<DivHint>,
-    /// Per-dimension: divisibility of stride[i] in bytes.
+    /// Per-dimension: divisibility of stride[i], in **elements** (not bytes).
+    /// A stride of 1 element always has divisor 1, regardless of dtype size.
     pub stride_div: Vec<DivHint>,
     /// Per-dimension: whether stride[i] == 1.
     pub stride_one: Vec<bool>,
-    /// Divisibility of the base device pointer.
+    /// Divisibility of the base device pointer, in **bytes**.
+    /// A pointer at 0x1000 has divisor 16 (aligned to 16-byte boundary).
     pub base_ptr_div: DivHint,
     /// True if elements are non-overlapping (strides are non-aliasing).
     pub elements_disjoint: bool,
@@ -121,7 +140,7 @@ pub fn compute_spec(
     base_ptr: u64,
     shape: &[i32],
     strides: &[i32],
-    dtype_bytes: i32,
+    _dtype_bytes: i32,
 ) -> SpecializationBits {
     let ndim = shape.len();
     let mut spec = SpecializationBits {
@@ -133,8 +152,8 @@ pub fn compute_spec(
     };
     for i in 0..ndim {
         spec.shape_div.push(DivHint::from_value(shape[i]));
-        let stride_bytes: i32 = strides[i] * dtype_bytes;
-        spec.stride_div.push(DivHint::from_value(stride_bytes));
+        // Divisibility is in elements, not bytes (matches NVT and cutile-python).
+        spec.stride_div.push(DivHint::from_value(strides[i]));
         spec.stride_one.push(strides[i] == 1);
     }
     // Disjointness: sort by stride, check stride[i+1] >= stride[i] * shape[i].

@@ -110,6 +110,61 @@ mod unary_math_ops_module {
     }
 
     #[cutile::entry()]
+    fn addf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = addf_ftz(x, y);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn subf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = subf_ftz(x, y);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn mulf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = mulf_ftz(x, y);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn divf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = divf_ftz(x, y);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn fma_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let z: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = fma_ftz(x, y, z);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn rsqrt_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = rsqrt_ftz(x);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn sqrt_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = sqrt_ftz(x);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
     fn unary_math_ops_bf16_kernel<const S: [i32; 1]>(output: &mut Tensor<bf16, S>) {
         // Verifies bf16 unary math operation lowering
         let x: Tile<bf16, S> = load_tile_mut(output);
@@ -424,6 +479,78 @@ fn compile_minf_ftz() -> () {
             "Expected flush_to_zero attribute in MLIR output"
         );
     });
+}
+
+/// Helper: compile a kernel and assert it contains the expected op name and flush_to_zero.
+fn assert_ftz_in_mlir(kernel_name: &'static str, expected_op: &'static str) {
+    common::with_test_stack(move || {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            kernel_name,
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== {kernel_name} MLIR ===\n{module_op_str}");
+
+        assert!(
+            module_op_str.contains(expected_op),
+            "Expected {expected_op} operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("flush_to_zero"),
+            "Expected flush_to_zero attribute in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_addf_ftz() {
+    assert_ftz_in_mlir("addf_ftz_kernel", "addf");
+}
+
+#[test]
+fn compile_subf_ftz() {
+    assert_ftz_in_mlir("subf_ftz_kernel", "subf");
+}
+
+#[test]
+fn compile_mulf_ftz() {
+    assert_ftz_in_mlir("mulf_ftz_kernel", "mulf");
+}
+
+#[test]
+fn compile_divf_ftz() {
+    assert_ftz_in_mlir("divf_ftz_kernel", "divf");
+}
+
+#[test]
+fn compile_fma_ftz() {
+    assert_ftz_in_mlir("fma_ftz_kernel", "fma");
+}
+
+#[test]
+fn compile_rsqrt_ftz() {
+    assert_ftz_in_mlir("rsqrt_ftz_kernel", "rsqrt");
+}
+
+#[test]
+fn compile_sqrt_ftz() {
+    assert_ftz_in_mlir("sqrt_ftz_kernel", "sqrt");
 }
 
 #[test]
