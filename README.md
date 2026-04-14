@@ -4,7 +4,7 @@ The workspace combines:
 
 - a safe user-facing DSL for authoring kernels
 - a safe host-side API for asynchronously executing kernel functions
-- an MLIR-based compiler pipeline backed by the CUDA Tile compiler
+- a pure Rust compiler pipeline backed by the CUDA Tile compiler
 
 # Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
@@ -63,7 +63,6 @@ The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. O
   - `sm_8x` support was added in CUDA 13.2.
   - `sm_90` is not yet supported; it is expected in CUDA 13.3 (release date TBD).
 - **CUDA** 13.2 recommended (`sm_8x` support and `sm_100+` performance improvements over 13.1).
-- **LLVM** 21 with MLIR.
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
 
@@ -82,49 +81,15 @@ rustup default stable
 Install CUDA 13.2 for your OS by following the official instructions:
 https://developer.nvidia.com/cuda-downloads
 
-### LLVM
-
-To install LLVM-21 with MLIR (see [https://apt.llvm.org/](https://apt.llvm.org/) for details):
-```bash
-wget https://apt.llvm.org/llvm.sh
-chmod +x llvm.sh
-sudo ./llvm.sh 21
-sudo apt-get install libmlir-21-dev mlir-21-tools
-```
-
 ## Configure Environment
 
-- Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
-- Ensure `llvm-config` points to LLVM 21. This is required by `melior`.
-- Set `CUDA_TILE_USE_LLVM_INSTALL_DIR` to your LLVM 21 install directory (for example `/usr/lib/llvm-21`). This is required by `cuda-tile-rs`.
-- Initialize the CUDA Tile submodule before building:
-
-```bash
-git submodule update --init --recursive
-```
-
-The environment needs access to `llvm-config` in order to resolve llvm (and mlir)-related dependencies.
-You can configure multiple llvm builds using `update-alternatives`:
-```bash
-sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/lib/llvm-21/bin/llvm-config 1
-sudo update-alternatives --config llvm-config
-```
+Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
 
 Example `.cargo/config.toml`:
 ```toml
 [env]
 CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false }
-CUDA_TILE_USE_LLVM_INSTALL_DIR = { value = "/usr/lib/llvm-21", relative = false }
-
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/llvm-21/lib"]
 ```
-
-The `rustflags` entry embeds an rpath into compiled binaries so that MLIR shared libraries (e.g. `libMLIR.so`) can be found at runtime without needing to set `LD_LIBRARY_PATH`.
-
-### Building cuda-tile-rs
-
-This workspace depends on the `cuda-tile` submodule and the `cuda-tile-rs` crate. See [cuda-tile-rs/README.md](cuda-tile-rs/README.md) for the crate-specific setup and testing steps.
 
 ## Verifying Installation
 
@@ -153,14 +118,13 @@ Or open an interactive shell:
 nix develop
 # cutile-rs dev shell
 #  ✓ CUDA  /nix/store/...-cuda-toolkit-13.2
-#  ✓ LLVM  21.1.8
 #  ✓ Rust  1.90.0-nightly
 ```
 
 The flake automatically locates host NVIDIA driver libraries on both NixOS and non-NixOS systems.
 
 # Tests
-- CUDA Tile dialect bindings: `cargo test --package cuda-tile-rs`
+- cuTile IR: `cargo test --package cutile-ir`
 - cuTile Rust Compiler: `cargo test --package cutile-compiler`
 - cuTile Rust Library: `cargo test --package cutile`
 - Examples: run an individual example, for example `cargo run -p cutile-examples --example async_gemm`
@@ -180,17 +144,17 @@ cutile-macro           cuTile Rust proc-macro
 └── cutile-compiler
 
 cutile-compiler        Compiles cuTile Rust kernels to executables
-├── cuda-tile-rs
+├── cutile-ir
 ├── cuda-async
 └── cuda-core
+
+cutile-ir              Pure Rust Tile IR builder and bytecode writer
 
 cuda-async             Async CUDA execution via async Rust
 └── cuda-core
 
 cuda-core              Idiomatic safe CUDA API
 └── cuda-bindings
-
-cuda-tile-rs           CUDA Tile MLIR dialect builder API
 
 cuda-bindings          NVIDIA CUDA bindings
 ```

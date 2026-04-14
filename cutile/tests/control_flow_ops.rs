@@ -198,11 +198,70 @@ mod control_flow_ops_module {
         let result: Tile<f32, S> = if flag > 0i32 { ones } else { twos };
         output.store(result);
     }
+
+    /// Nested mutation: for-in-if with runtime condition.
+    /// The for loop mutates `acc` inside a dynamic if branch.
+    #[cutile::entry()]
+    fn nested_for_in_if_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, flag: i32) {
+        let mut acc: Tile<f32, S> = constant(0.0f32, output.shape());
+        if flag > 0i32 {
+            for _i in 0i32..5i32 {
+                let twos: Tile<f32, S> = constant(2.0f32, output.shape());
+                acc = acc + twos;
+            }
+        } else {
+            let ones: Tile<f32, S> = constant(1.0f32, output.shape());
+            acc = acc + ones;
+        }
+        output.store(acc);
+    }
+
+    /// Nested mutation: for-in-if with const condition (const-folded path).
+    #[cutile::entry()]
+    fn nested_for_in_if_const_kernel<const S: [i32; 1], const FLAG: i32>(
+        output: &mut Tensor<f32, S>,
+    ) {
+        let mut acc: Tile<f32, S> = constant(0.0f32, output.shape());
+        if FLAG > 0i32 {
+            for _i in 0i32..5i32 {
+                let twos: Tile<f32, S> = constant(2.0f32, output.shape());
+                acc = acc + twos;
+            }
+        } else {
+            let ones: Tile<f32, S> = constant(1.0f32, output.shape());
+            acc = acc + ones;
+        }
+        output.store(acc);
+    }
+
+    /// Deeply nested: if-in-for-in-if with const outer condition.
+    /// Outer if is const-folded, for loop runs 4 times, inner if uses runtime flag.
+    #[cutile::entry()]
+    fn nested_if_for_if_kernel<const S: [i32; 1], const OUTER: i32>(
+        output: &mut Tensor<f32, S>,
+        inner_flag: i32,
+    ) {
+        let mut acc: Tile<f32, S> = constant(0.0f32, output.shape());
+        if OUTER > 0i32 {
+            for _i in 0i32..4i32 {
+                if inner_flag > 0i32 {
+                    let threes: Tile<f32, S> = constant(3.0f32, output.shape());
+                    acc = acc + threes;
+                } else {
+                    acc = acc;
+                }
+            }
+        } else {
+            acc = acc;
+        }
+        output.store(acc);
+    }
 }
 
 use control_flow_ops_module::{
     _module_asts, break_test_kernel, if_else_tile_expr_kernel, if_for_carry_const_kernel,
-    if_for_carry_kernel, if_return_test_kernel,
+    if_for_carry_kernel, if_return_test_kernel, nested_for_in_if_const_kernel,
+    nested_for_in_if_kernel, nested_if_for_if_kernel,
 };
 
 #[test]
@@ -224,11 +283,7 @@ fn compile_control_flow_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== CONTROL FLOW TEST MLIR ===\n{}", module_op_str);
 
         let has_for = module_op_str.contains(" for ");
@@ -309,18 +364,14 @@ fn compile_break_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== BREAK TEST MLIR ===\n{}", module_op_str);
 
-        let has_loop = module_op_str.contains(" loop ");
-        let has_break = module_op_str.contains("break ");
+        let has_loop = module_op_str.contains("cuda_tile.loop");
+        let has_break = module_op_str.contains("break");
 
-        assert!(has_loop, "Expected loop operation in MLIR");
-        assert!(has_break, "Expected break operation in MLIR");
+        assert!(has_loop, "Expected loop operation in IR");
+        assert!(has_break, "Expected break operation in IR");
 
         println!("\n✓ break statement compiled successfully");
     });
@@ -345,11 +396,7 @@ fn compile_while_loop_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== WHILE LOOP TEST MLIR ===\n{}", module_op_str);
 
         let has_loop = module_op_str.contains("cuda_tile.loop") || module_op_str.contains(" loop ");
@@ -381,11 +428,7 @@ fn compile_loop_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== LOOP TEST MLIR ===\n{}", module_op_str);
 
         let has_loop = module_op_str.contains("cuda_tile.loop") || module_op_str.contains(" loop ");
@@ -417,11 +460,7 @@ fn compile_step_by_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== STEP_BY TEST MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -429,8 +468,8 @@ fn compile_step_by_test() -> () {
             "Expected for loop in MLIR output"
         );
         assert!(
-            module_op_str.contains("step %cst_10_i32"),
-            "Expected step_by(10) to compile to step %cst_10_i32"
+            module_op_str.contains(", step %"),
+            "Expected step_by(10) to compile to a for-loop with step"
         );
     });
 }
@@ -454,11 +493,7 @@ fn compile_assume_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ASSUME MLIR ===\n{}", module_op_str);
 
         // Verify assume operation appears
@@ -498,11 +533,7 @@ fn compile_assume_non_negative_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ASSUME_NON_NEGATIVE MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -537,11 +568,7 @@ fn compile_assume_div_by_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ASSUME_DIV_BY MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -576,11 +603,7 @@ fn compile_assume_same_elements_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ASSUME_SAME_ELEMENTS MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -663,6 +686,116 @@ fn if_else_tile_expr_returns_value() {
         assert!(
             (host[0] - 2.0).abs() < 1e-3,
             "flag=0: expected 2.0, got {}",
+            host[0]
+        );
+    });
+}
+
+// ---- Nested mutation tests ------------------------------------------------
+
+#[test]
+fn nested_for_in_if_dynamic() {
+    // Runtime flag=1: for loop runs 5 times, acc += 2.0 each → 10.0.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_for_in_if_kernel((&mut output).partition([128]), 1i32)
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0] - 10.0).abs() < 1e-3,
+            "flag=1: expected 10.0, got {}",
+            host[0]
+        );
+    });
+    // Runtime flag=0: else branch, acc += 1.0 → 1.0.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_for_in_if_kernel((&mut output).partition([128]), 0i32)
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0] - 1.0).abs() < 1e-3,
+            "flag=0: expected 1.0, got {}",
+            host[0]
+        );
+    });
+}
+
+#[test]
+fn nested_for_in_if_const_folded() {
+    // Const FLAG=1: then branch const-folded in, for runs 5 times → 10.0.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_for_in_if_const_kernel((&mut output).partition([128]))
+            .generics(vec!["128".into(), "1".into()])
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0] - 10.0).abs() < 1e-3,
+            "FLAG=1: expected 10.0, got {}",
+            host[0]
+        );
+    });
+    // Const FLAG=0: else branch const-folded in, acc += 1.0 → 1.0.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_for_in_if_const_kernel((&mut output).partition([128]))
+            .generics(vec!["128".into(), "0".into()])
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0] - 1.0).abs() < 1e-3,
+            "FLAG=0: expected 1.0, got {}",
+            host[0]
+        );
+    });
+}
+
+#[test]
+fn nested_if_for_if_deep() {
+    // Const OUTER=1, runtime inner_flag=1: for runs 4x, inner if adds 3.0 → 12.0.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_if_for_if_kernel((&mut output).partition([128]), 1i32)
+            .generics(vec!["128".into(), "1".into()])
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0] - 12.0).abs() < 1e-3,
+            "OUTER=1, inner=1: expected 12.0, got {}",
+            host[0]
+        );
+    });
+    // Const OUTER=1, runtime inner_flag=0: for runs 4x, inner else is no-op → 0.0.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_if_for_if_kernel((&mut output).partition([128]), 0i32)
+            .generics(vec!["128".into(), "1".into()])
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0]).abs() < 1e-3,
+            "OUTER=1, inner=0: expected 0.0, got {}",
+            host[0]
+        );
+    });
+    // Const OUTER=0: outer else is no-op → 0.0 regardless of inner_flag.
+    common::with_test_stack(|| {
+        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+        nested_if_for_if_kernel((&mut output).partition([128]), 1i32)
+            .generics(vec!["128".into(), "0".into()])
+            .sync()
+            .expect("kernel");
+        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+        assert!(
+            (host[0]).abs() < 1e-3,
+            "OUTER=0: expected 0.0, got {}",
             host[0]
         );
     });

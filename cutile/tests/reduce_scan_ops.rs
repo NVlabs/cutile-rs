@@ -114,11 +114,7 @@ fn compile_scan_sum_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== SCAN_SUM MLIR ===\n{}", module_op_str);
 
         // Verify scan operation appears
@@ -162,11 +158,7 @@ fn compile_reduce_closure_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!(
             "\n=== REDUCE WITH CLOSURE (SUM) MLIR ===\n{}",
             module_op_str
@@ -213,11 +205,7 @@ fn compile_reduce_product_closure_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!(
             "\n=== REDUCE WITH CLOSURE (PRODUCT) MLIR ===\n{}",
             module_op_str
@@ -264,11 +252,7 @@ fn compile_reduce_max_closure_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!(
             "\n=== REDUCE WITH CLOSURE (MAX) MLIR ===\n{}",
             module_op_str
@@ -315,11 +299,7 @@ fn compile_scan_closure_test() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!(
             "\n=== SCAN WITH CLOSURE (PREFIX PRODUCT) MLIR ===\n{}",
             module_op_str

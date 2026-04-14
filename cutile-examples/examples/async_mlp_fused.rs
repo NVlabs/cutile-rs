@@ -12,8 +12,7 @@ use cutile::tile_kernel::PartitionOp;
 use cutile::{api, error::Error};
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile::ModuleOperation;
-use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
+use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, get_gpu_name};
 use std::sync::Arc;
 
 #[cutile::module]
@@ -105,10 +104,10 @@ async fn main() -> Result<(), Error> {
         get_gpu_name(0),
         &CompileOptions::default(),
     )?;
-    let module_op: ModuleOperation = compiler.compile()?;
-    println!("{}", module_op.as_operation());
+    let tile_module = compiler.compile()?;
+    println!("{}", tile_module.to_mlir_text());
     let _device = global_policy(0)?;
-    let module_filename = compile_module(&module_op, &get_gpu_name(0));
+    let module_filename = compile_tile_ir_module(&tile_module, &get_gpu_name(0));
     let module = device_context::load_module_from_file(&module_filename, 0)?;
     let function = Arc::new(
         module

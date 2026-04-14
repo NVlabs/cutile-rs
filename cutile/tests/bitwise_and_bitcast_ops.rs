@@ -70,11 +70,7 @@ fn compile_bitwise_ops() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== BITWISE OPS MLIR ===\n{}", module_op_str);
 
         let expected_ops = ["andi", "ori", "xori", "shli", "shri"];
@@ -112,11 +108,7 @@ fn compile_bitcast() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== BITCAST MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -147,11 +139,7 @@ fn compile_shri_unsigned() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== SHRI UNSIGNED MLIR ===\n{}", module_op_str);
 
         assert!(

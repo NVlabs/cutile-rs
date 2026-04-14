@@ -63,11 +63,7 @@ fn compile_maxi() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MAXI MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -102,11 +98,7 @@ fn compile_mulhii() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MULHII MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -137,11 +129,7 @@ fn compile_maxi_unsigned() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MAXI UNSIGNED MLIR ===\n{}", module_op_str);
 
         assert!(

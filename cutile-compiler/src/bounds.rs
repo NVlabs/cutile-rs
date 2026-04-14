@@ -8,7 +8,85 @@
 
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
-use crate::compiler::utils::TileBinaryOp;
+use crate::ast::SourceLocation;
+use crate::error::{JITError, SpannedJITError};
+use syn::BinOp;
+
+// ---------------------------------------------------------------------------
+// TileBinaryOp — lives here so both old and new compiler can share it
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Eq, PartialEq)]
+/// Enumeration of all supported binary operations in the CUDA Tile IR.
+pub enum TileBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    CeilDiv,
+    TrueDiv,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Min,
+    Max,
+    BitAnd,
+    BitOr,
+    BitXor,
+}
+
+/// Maps a string operation name (e.g. `"add"`, `"ceil_div"`) to a [`TileBinaryOp`].
+pub fn get_binary_op_from_op_str(op_str: &str) -> Result<TileBinaryOp, JITError> {
+    match op_str {
+        "add" => Ok(TileBinaryOp::Add),
+        "sub" => Ok(TileBinaryOp::Sub),
+        "mul" => Ok(TileBinaryOp::Mul),
+        "div" => Ok(TileBinaryOp::Div),
+        "ceil_div" => Ok(TileBinaryOp::CeilDiv),
+        "true_div" => Ok(TileBinaryOp::TrueDiv),
+        "rem" => Ok(TileBinaryOp::Rem),
+        "eq" => Ok(TileBinaryOp::Eq),
+        "ne" => Ok(TileBinaryOp::Ne),
+        "lt" => Ok(TileBinaryOp::Lt),
+        "le" => Ok(TileBinaryOp::Le),
+        "gt" => Ok(TileBinaryOp::Gt),
+        "ge" => Ok(TileBinaryOp::Ge),
+        "min" | "min_tile" => Ok(TileBinaryOp::Min),
+        "max" | "max_tile" => Ok(TileBinaryOp::Max),
+        "and" => Ok(TileBinaryOp::BitAnd),
+        "or" => Ok(TileBinaryOp::BitOr),
+        "xor" => Ok(TileBinaryOp::BitXor),
+        _ => SourceLocation::unknown()
+            .jit_error_result(&format!("unrecognized arithmetic operation `{op_str}`")),
+    }
+}
+
+/// Converts a Rust `syn::BinOp` to the corresponding [`TileBinaryOp`].
+pub fn get_tile_bop_from_rust_bop(rust_bin_op: &BinOp) -> Result<TileBinaryOp, JITError> {
+    match rust_bin_op {
+        BinOp::Add(_) => Ok(TileBinaryOp::Add),
+        BinOp::Sub(_) => Ok(TileBinaryOp::Sub),
+        BinOp::Mul(_) => Ok(TileBinaryOp::Mul),
+        BinOp::Div(_) => Ok(TileBinaryOp::Div),
+        BinOp::Rem(_) => Ok(TileBinaryOp::Rem),
+        BinOp::Eq(_) => Ok(TileBinaryOp::Eq),
+        BinOp::Ne(_) => Ok(TileBinaryOp::Ne),
+        BinOp::Lt(_) => Ok(TileBinaryOp::Lt),
+        BinOp::Le(_) => Ok(TileBinaryOp::Le),
+        BinOp::Gt(_) => Ok(TileBinaryOp::Gt),
+        BinOp::Ge(_) => Ok(TileBinaryOp::Ge),
+        BinOp::BitAnd(_) => Ok(TileBinaryOp::BitAnd),
+        BinOp::BitOr(_) => Ok(TileBinaryOp::BitOr),
+        BinOp::BitXor(_) => Ok(TileBinaryOp::BitXor),
+        BinOp::And(_) => Ok(TileBinaryOp::BitAnd),
+        BinOp::Or(_) => Ok(TileBinaryOp::BitOr),
+        _ => SourceLocation::unknown().jit_error_result("this binary operator is not supported"),
+    }
+}
 
 // TODO (hme): Look into bounds for types other than i64.
 

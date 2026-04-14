@@ -3,26 +3,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Assumption compilation: translates assumption function calls (e.g. `assume_div_by`,
-//! `assume_bounds`, `assume_same_elements_*`) into MLIR `cuda_tile.assume` operations
-//! within the CUDA Tile compiler. These provide optimization hints to the compiler
-//! by asserting properties about values.
+//! Assumption compilation for compiler2.
+//!
+//! Mechanical port of `compiler/compile_assume.rs` — translates assumption
+//! function calls (e.g. `assume_div_by`, `assume_bounds`, `assume_same_elements_*`)
+//! into tile-ir `Assume` operations. Only type and IR-emission changes; the
+//! dispatch logic and validation are identical.
 
-use crate::compiler::_function::CUDATileFunctionCompiler;
-pub use crate::compiler::_type::*;
-pub use crate::compiler::_value::*;
-
-use crate::cuda_tile::AssumeOperationBuilder;
+use super::_function::CUDATileFunctionCompiler;
+use super::_value::{CompilerContext, TileRustValue};
+use super::tile_rust_type::TileRustType;
 use crate::error::JITError;
 use crate::generics::GenericVars;
 use crate::syn_utils::*;
-use melior::ir::operation::OperationLike;
-use melior::ir::{self, BlockLike, Value};
+
+use cutile_ir::builder::{append_op, OpBuilder};
+use cutile_ir::bytecode::Opcode;
+use cutile_ir::ir::{Attribute, BlockId, Bounded, DivBy, Module, SameElements};
+
 use syn::spanned::Spanned;
 use syn::{Expr, ExprCall};
 
-impl<'m, 'c> CUDATileFunctionCompiler<'m> {
-    /// Compiles an assumption function call into MLIR.
+impl<'m> CUDATileFunctionCompiler<'m> {
+    /// Compiles an assumption function call into tile-ir.
     ///
     /// Assumption functions are compiler hints that provide optimization opportunities
     /// by asserting properties about values that the compiler can exploit. These
@@ -40,12 +43,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
     /// - `assume_same_elements_3d<GROUP0, GROUP1, GROUP2>` - Elements identical within groups (3D)
     /// - `assume_same_elements_4d<GROUP0, GROUP1, GROUP2, GROUP3>` - Elements identical within groups (4D)
     pub(crate) fn compile_assumption_call(
-        &'c self,
+        &self,
         call_expr: &ExprCall,
-        builder: &'c ir::Block<'c>,
+        module: &mut Module,
+        block_id: BlockId,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-    ) -> Result<TileRustValue<'c, 'c>, JITError> {
+        ctx: &mut CompilerContext,
+    ) -> Result<TileRustValue, JITError> {
         let Expr::Path(path_expr) = &*call_expr.func else {
             return self.jit_error_result(
                 &call_expr.func.span(),
@@ -54,7 +58,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         };
         let ident = get_ident_from_path_expr(&path_expr);
         let compiler_op_function = ident.to_string();
-        let mut args = self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+        let mut args =
+            self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
         let val = args.remove(0);
         let return_type = val.ty.clone();
         let Some(generic_args) = get_call_expression_generics(call_expr) else {
@@ -71,7 +76,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             );
         };
         Ok(self.compile_value_assumption(
-            builder,
+            module,
+            block_id,
             val_value,
             compiler_op_function.as_str(),
             &predicate_args,
@@ -80,19 +86,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         )?)
     }
 
-    /// Generates MLIR assume operation with appropriate predicate attribute.
+    /// Generates tile-ir assume operation with appropriate predicate attribute.
     pub(crate) fn compile_value_assumption(
-        &'c self,
-        builder: &'c ir::Block<'c>,
-        assume_val: Value<'c, 'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        assume_val: cutile_ir::ir::Value,
         assume_op_rust_function: &str,
         predicate_args: &[i32],
-        return_type: TileRustType<'c>,
+        return_type: TileRustType,
         span: &proc_macro2::Span,
-    ) -> Result<TileRustValue<'c, 'c>, JITError> {
-        let assume = AssumeOperationBuilder::new(&self.context, self.function_location());
-        let assume = assume.value(assume_val);
-        let predicate = match assume_op_rust_function {
+    ) -> Result<TileRustValue, JITError> {
+        let predicate_attr = match assume_op_rust_function {
             "assume_div_by" => {
                 if predicate_args.len() != 1 {
                     return self.jit_error_result(
@@ -103,10 +108,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.div_by<{}>", predicate_args[0]),
-                )?
+                Attribute::DivBy(DivBy {
+                    divisor: predicate_args[0] as u64,
+                    every: None,
+                    along: None,
+                })
             }
             "assume_div_by_every_along" => {
                 if predicate_args.len() != 3 {
@@ -118,13 +124,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!(
-                        "#cuda_tile.div_by<{}, every {} along {}>",
-                        predicate_args[0], predicate_args[1], predicate_args[2]
-                    ),
-                )?
+                Attribute::DivBy(DivBy {
+                    divisor: predicate_args[0] as u64,
+                    every: Some(predicate_args[1] as i64),
+                    along: Some(predicate_args[2] as i64),
+                })
             }
             "assume_bounds_lower" => {
                 if predicate_args.len() != 1 {
@@ -136,10 +140,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.bounded<{}, ?>", predicate_args[0]),
-                )?
+                Attribute::Bounded(Bounded {
+                    lb: Some(predicate_args[0] as i64),
+                    ub: None,
+                })
             }
             "assume_bounds_upper" => {
                 if predicate_args.len() != 1 {
@@ -151,10 +155,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.bounded<?, {}>", predicate_args[0]),
-                )?
+                Attribute::Bounded(Bounded {
+                    lb: None,
+                    ub: Some(predicate_args[0] as i64),
+                })
             }
             "assume_bounds" => {
                 if predicate_args.len() != 2 {
@@ -166,13 +170,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!(
-                        "#cuda_tile.bounded<{}, {}>",
-                        predicate_args[0], predicate_args[1]
-                    ),
-                )?
+                Attribute::Bounded(Bounded {
+                    lb: Some(predicate_args[0] as i64),
+                    ub: Some(predicate_args[1] as i64),
+                })
             }
             "assume_same_elements_1d" => {
                 if predicate_args.len() != 1 {
@@ -184,10 +185,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!("#cuda_tile.same_elements<[{}]>", predicate_args[0]),
-                )?
+                Attribute::SameElements(SameElements {
+                    values: predicate_args.iter().map(|&v| v as i64).collect(),
+                })
             }
             "assume_same_elements_2d" => {
                 if predicate_args.len() != 2 {
@@ -199,13 +199,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!(
-                        "#cuda_tile.same_elements<[{}, {}]>",
-                        predicate_args[0], predicate_args[1]
-                    ),
-                )?
+                Attribute::SameElements(SameElements {
+                    values: predicate_args.iter().map(|&v| v as i64).collect(),
+                })
             }
             "assume_same_elements_3d" => {
                 if predicate_args.len() != 3 {
@@ -217,13 +213,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!(
-                        "#cuda_tile.same_elements<[{}, {}, {}]>",
-                        predicate_args[0], predicate_args[1], predicate_args[2]
-                    ),
-                )?
+                Attribute::SameElements(SameElements {
+                    values: predicate_args.iter().map(|&v| v as i64).collect(),
+                })
             }
             "assume_same_elements_4d" => {
                 if predicate_args.len() != 4 {
@@ -235,13 +227,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                self.parse_named_attr(
-                    "predicate",
-                    &format!(
-                        "#cuda_tile.same_elements<[{}, {}, {}, {}]>",
-                        predicate_args[0], predicate_args[1], predicate_args[2], predicate_args[3]
-                    ),
-                )?
+                Attribute::SameElements(SameElements {
+                    values: predicate_args.iter().map(|&v| v as i64).collect(),
+                })
             }
             _ => {
                 return self.jit_error_result(
@@ -250,21 +238,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 );
             }
         };
-        let assume = assume.predicate(predicate.1);
-        let Some(cuda_tile_ty) = return_type.cuda_tile_ty else {
-            return self.jit_error_result(span, "assume requires a compilable tile type");
-        };
-        let assume = assume.result(cuda_tile_ty);
-        let op_ref = builder.append_operation(assume.build().into());
-        if !op_ref.verify() {
-            return self.jit_error_result(
-                span,
-                &format!(
-                    "failed to compile `{assume_op_rust_function}` (MLIR verification failed)"
-                ),
-            );
-        }
-        let value: Value = op_ref.result(0).unwrap().into();
+        let result_ty = module.value_type(assume_val).clone();
+        let (op_id, results) = OpBuilder::new(Opcode::Assume, self.ir_location(span))
+            .operand(assume_val)
+            .attr("predicate", predicate_attr)
+            .result(result_ty)
+            .build(module);
+        append_op(module, block_id, op_id);
+        let value = results[0];
         Ok(TileRustValue::new_value_kind_like(value, return_type))
     }
 }

@@ -1656,17 +1656,25 @@ impl GenericArgInference {
                                                 },
                                                 Expr::Unary(_unary_expr) => {
                                                     arg_elem.to_token_stream().to_string()
-                                                    // unary_expr.to_token_stream().to_string()
                                                 },
                                                 Expr::Path(_path) => {
                                                     arg_elem.to_token_stream().to_string()
-                                                    // get_ident_from_type_path(path).to_string()
                                                 },
                                                 _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
                                             };
+                                            // Skip inference from dynamic dims (-1): they
+                                            // carry no information about the generic param.
+                                            if arg_val == "- 1" || arg_val == "-1" {
+                                                continue;
+                                            }
                                             let replaced_arg = self.param2arg.insert(param_var.to_string(), Some((GenericArgType::GenericConstExpr, arg_val.to_string())));
                                             if let Some(Some((_arg_type, arg))) = replaced_arg {
-                                                assert_eq!(arg, arg_val.to_string());
+                                                // Allow overriding a previous -1 (dynamic)
+                                                // inference with a concrete value, but
+                                                // two different concrete values conflict.
+                                                if arg != "- 1" && arg != "-1" {
+                                                    assert_eq!(arg, arg_val.to_string());
+                                                }
                                             }
                                         }
                                     }

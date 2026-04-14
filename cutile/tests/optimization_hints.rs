@@ -93,7 +93,7 @@ fn compile_kernel(name: &str, strides: &[(&str, &[i32])], options: &CompileOptio
     )
     .expect("Failed to create compiler");
     let module_op = compiler.compile().expect("Failed to compile");
-    let result = module_op.as_operation().to_string();
+    let result = module_op.to_string();
     drop(module_op);
     drop(compiler);
     result
@@ -249,7 +249,7 @@ fn load_view_const_latency_in_mlir() {
         )
         .expect("Failed to create compiler");
         let module_op = compiler.compile().expect("Failed to compile");
-        let mlir = module_op.as_operation().to_string();
+        let mlir = module_op.to_string();
         drop(module_op);
         drop(compiler);
         println!("{mlir}");

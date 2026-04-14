@@ -3,42 +3,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Block compilation: translates Rust `syn::Block` AST nodes into MLIR operations
-//! within the CUDA Tile compiler. Handles statement-level constructs including
-//! let bindings, assignments, control flow terminators (continue, break, return),
-//! and tuple destructuring.
+//! Block compilation for compiler2.
+//!
+//! Mechanical port of `compiler/compile_block.rs` — translates Rust `syn::Block`
+//! AST nodes into tile-ir operations. Only type and IR-emission changes; the
+//! control flow, dispatch logic, and variable binding are identical.
 
-use crate::compiler::_function::{CUDATileFunctionCompiler, STACK_GROW_SIZE, STACK_RED_ZONE};
-pub use crate::compiler::_type::*;
-pub use crate::compiler::_value::*;
-
-use crate::error::JITError;
-use crate::error::SpannedJITError;
+use super::_function::CUDATileFunctionCompiler;
+use super::_value::{BlockTerminator, CompilerContext, Mutability, TileRustValue};
+use super::shared_types::Kind;
+use super::shared_utils::{STACK_GROW_SIZE, STACK_RED_ZONE};
+use super::tile_rust_type::TileRustType;
+use crate::error::{JITError, SpannedJITError};
 use crate::generics::GenericVars;
 use crate::syn_utils::*;
-use crate::types::*;
-use cuda_tile_rs::cuda_tile;
-use melior::ir::operation::OperationBuilder;
-use melior::ir::{self, BlockLike, Location};
+use crate::types::{get_pat_mutability, get_type_mutability};
+
+use cutile_ir::builder::{append_op, OpBuilder};
+use cutile_ir::bytecode::Opcode;
+use cutile_ir::ir::{BlockId, Module};
+
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::{Expr, Item, Pat, Stmt};
 
-impl<'m, 'c> CUDATileFunctionCompiler<'m> {
+impl<'m> CUDATileFunctionCompiler<'m> {
     pub fn compile_block(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         block_expr: &syn::Block,
         generic_args: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
             let _block_debug_str = block_expr.to_token_stream().to_string();
             let mut terminator_encountered = None;
             let mut return_value: Option<TileRustValue> = None;
-            let location = Location::unknown(&self.context);
             let num_statements = &block_expr.stmts.len();
             for (i, statement) in block_expr.stmts.iter().enumerate() {
                 let is_last = i == num_statements - 1;
@@ -48,7 +51,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let mut ct_ty: Option<TileRustType> = None;
                         let mut mutability: bool = false;
                         match &local.pat {
-                            // If this changes, make sure changes are reflected in compileer_utils::collect_mutated_variables.
                             Pat::Type(pat_type) => {
                                 let pat_mutability = get_pat_mutability(&pat_type.pat);
                                 let ty_mutability = get_type_mutability(&pat_type.ty);
@@ -58,7 +60,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         var_name = Some(pat_ident.ident.to_string());
                                     }
                                     Pat::Tuple(pat_tuple) => {
-                                        // Handle typed tuple destructuring: let (a, b): (T1, T2) = expr;
                                         ct_ty = self.compile_type(
                                             &*pat_type.ty,
                                             generic_args,
@@ -72,7 +73,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                             );
                                         };
                                         let Some(tuple_value) = self.compile_expression(
-                                            builder,
+                                            module,
+                                            block_id,
                                             &*init.expr,
                                             generic_args,
                                             ctx,
@@ -85,21 +87,22 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                             );
                                         };
 
-                                        // Extract variable names
                                         let mut tuple_var_names = vec![];
                                         for elem in &pat_tuple.elems {
                                             match elem {
-                                            Pat::Ident(ident) => {
-                                                tuple_var_names.push(ident.ident.to_string());
-                                            },
-                                            _ => return self.jit_error_result(
-                                                &elem.span(),
-                                                "only simple variable names are supported in tuple destructuring patterns",
-                                            ),
-                                        }
+                                                Pat::Ident(ident) => {
+                                                    tuple_var_names
+                                                        .push(ident.ident.to_string());
+                                                }
+                                                _ => {
+                                                    return self.jit_error_result(
+                                                        &elem.span(),
+                                                        "only simple variable names are supported in tuple destructuring patterns",
+                                                    )
+                                                }
+                                            }
                                         }
 
-                                        // Bind each element
                                         if tuple_value.kind == Kind::Compound {
                                             let Some(elements) = &tuple_value.values else {
                                                 return self.jit_error_result(
@@ -117,7 +120,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                                     ),
                                                 );
                                             }
-                                            for (i, var_name) in tuple_var_names.iter().enumerate()
+                                            for (i, var_name) in
+                                                tuple_var_names.iter().enumerate()
                                             {
                                                 let mut elem_value = elements[i].clone();
                                                 elem_value.mutability = if mutability {
@@ -125,7 +129,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                                 } else {
                                                     Mutability::Immutable
                                                 };
-                                                ctx.vars.insert(var_name.clone(), elem_value);
+                                                ctx.vars
+                                                    .insert(var_name.clone(), elem_value);
                                             }
                                         } else {
                                             return self.jit_error_result(
@@ -149,11 +154,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 )?;
                             }
                             Pat::Ident(pat_ident) => {
-                                // Nothing to do. Try to infer.
                                 var_name = Some(pat_ident.ident.to_string());
                             }
                             Pat::Tuple(pat_tuple) => {
-                                // Handle tuple destructuring: let (a, b) = expr;
                                 let Some(init) = &local.init else {
                                     return self.jit_error_result(
                                         &local.span(),
@@ -161,9 +164,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     );
                                 };
 
-                                // Compile the RHS expression to get the tuple value
                                 let Some(tuple_value) = self.compile_expression(
-                                    builder,
+                                    module,
+                                    block_id,
                                     &*init.expr,
                                     generic_args,
                                     ctx,
@@ -176,21 +179,21 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     );
                                 };
 
-                                // Extract variable names from tuple pattern
                                 let mut tuple_var_names = vec![];
                                 for elem in &pat_tuple.elems {
                                     match elem {
                                         Pat::Ident(ident) => {
                                             tuple_var_names.push(ident.ident.to_string());
                                         }
-                                        _ => return self.jit_error_result(
-                                            &elem.span(),
-                                            "only simple variable names are supported in tuple destructuring patterns",
-                                        ),
+                                        _ => {
+                                            return self.jit_error_result(
+                                                &elem.span(),
+                                                "only simple variable names are supported in tuple destructuring patterns",
+                                            )
+                                        }
                                     }
                                 }
 
-                                // Extract each element from the tuple value and bind it
                                 if tuple_value.kind == Kind::Compound {
                                     let Some(elements) = &tuple_value.values else {
                                         return self.jit_error_result(
@@ -224,7 +227,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     );
                                 }
 
-                                // Skip the normal let binding logic below
                                 continue;
                             }
                             _ => {
@@ -244,14 +246,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         match &local.init {
                             Some(init) => {
                                 match self.compile_expression(
-                                    builder,
+                                    module,
+                                    block_id,
                                     &*init.expr,
                                     generic_args,
                                     ctx,
                                     ct_ty,
                                 )? {
                                     Some(mut value) => {
-                                        // Doesn't matter what this returns since we're overwriting the previous binding.
                                         value.mutability = if mutability {
                                             Mutability::Mutable
                                         } else {
@@ -281,8 +283,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     Stmt::Item(item) => {
                         match item {
                             Item::Const(const_item) => {
-                                // This is like a let binding.
-                                let binding_name: Option<String> = Some(const_item.ident.to_string());
+                                let binding_name: Option<String> =
+                                    Some(const_item.ident.to_string());
                                 let ct_ty: Option<TileRustType> = self.compile_type(
                                     &*const_item.ty,
                                     generic_args,
@@ -295,16 +297,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     );
                                 };
                                 match self.compile_expression(
-                                    builder,
+                                    module,
+                                    block_id,
                                     &*const_item.expr,
                                     generic_args,
                                     ctx,
                                     ct_ty,
                                 )? {
                                     Some(mut value) => {
-                                        // Doesn't matter what this returns since we're overwriting the previous binding.
                                         value.mutability = Mutability::Immutable;
-                                        // TODO (hme): Const bindings are just vars with exact bounds.
                                         ctx.vars.insert(binding_name, value);
                                     }
                                     None => {
@@ -326,47 +327,39 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             }
                         };
                     }
-                    Stmt::Expr(expr, semicolon) => {
-                        match expr {
-                            // Loop-related terminators.
-                            Expr::Continue(_continue_expr) => {
-                                let Some(loop_carry_var_names) = &ctx.carry_vars else {
-                                    return self.jit_error_result(
-                                        &expr.span(),
-                                        "`continue` cannot be used outside of a loop",
-                                    );
-                                };
-                                terminator_encountered = Some(BlockTerminator::Continue);
-                                let loop_carry_values =
-                                    ctx.unpack_some_vars(loop_carry_var_names)?;
-                                let op = OperationBuilder::new("cuda_tile.continue", location)
-                                    .add_operands(&loop_carry_values)
-                                    .build()
-                                    .unwrap();
-                                let _op_ref = builder.append_operation(op);
-                            }
-                            Expr::Break(_break_expr) => {
-                                let Some(loop_carry_var_names) = &ctx.carry_vars else {
-                                    return self.jit_error_result(
-                                        &expr.span(),
-                                        "Executing break outside of loop is not supported.",
-                                    );
-                                };
-                                // Break is a terminator, don't add continue after it
-                                // Break exits the loop with the current loop-carried values
-                                terminator_encountered = Some(BlockTerminator::Break);
-                                let loop_carry_values =
-                                    ctx.unpack_some_vars(loop_carry_var_names)?;
-                                let op = OperationBuilder::new("cuda_tile.break", location)
-                                    .add_operands(&loop_carry_values)
-                                    .build()
-                                    .unwrap();
-                                let _op_ref = builder.append_operation(op);
-                                // After break, we should not continue processing statements
-                                // break;
-                            }
-                            Expr::Assign(assign_expr) => {
-                                let var_name: String = match &*assign_expr.left {
+                    Stmt::Expr(expr, semicolon) => match expr {
+                        Expr::Continue(_continue_expr) => {
+                            let Some(loop_carry_var_names) = &ctx.carry_vars else {
+                                return self.jit_error_result(
+                                    &expr.span(),
+                                    "`continue` cannot be used outside of a loop",
+                                );
+                            };
+                            terminator_encountered = Some(BlockTerminator::Continue);
+                            let loop_carry_values = ctx.unpack_some_vars(loop_carry_var_names)?;
+                            let (op_id, _) =
+                                OpBuilder::new(Opcode::Continue, self.ir_location(&expr.span()))
+                                    .operands(loop_carry_values.iter().copied())
+                                    .build(module);
+                            append_op(module, block_id, op_id);
+                        }
+                        Expr::Break(_break_expr) => {
+                            let Some(loop_carry_var_names) = &ctx.carry_vars else {
+                                return self.jit_error_result(
+                                    &expr.span(),
+                                    "Executing break outside of loop is not supported.",
+                                );
+                            };
+                            terminator_encountered = Some(BlockTerminator::Break);
+                            let loop_carry_values = ctx.unpack_some_vars(loop_carry_var_names)?;
+                            let (op_id, _) =
+                                OpBuilder::new(Opcode::Break, self.ir_location(&expr.span()))
+                                    .operands(loop_carry_values.iter().copied())
+                                    .build(module);
+                            append_op(module, block_id, op_id);
+                        }
+                        Expr::Assign(assign_expr) => {
+                            let var_name: String = match &*assign_expr.left {
                                     Expr::Path(path_expr) => {
                                         get_ident_from_path_expr(path_expr).to_string()
                                     }
@@ -377,8 +370,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         )
                                     }
                                 };
-                                let mut ct_value: TileRustValue = match self.compile_expression(
-                                    builder,
+                            let mut ct_value: TileRustValue =
+                                match self.compile_expression(
+                                    module,
+                                    block_id,
                                     &*assign_expr.right,
                                     generic_args,
                                     ctx,
@@ -390,48 +385,51 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         "failed to compile the right-hand side of this assignment",
                                     ),
                                 };
-                                ct_value.mutability = Mutability::Mutable;
-                                ctx.vars.insert(var_name, ct_value);
-                            }
-                            Expr::Return(return_expr) => {
-                                match &return_expr.expr {
-                                    Some(expr) => {
-                                        return_value = self.compile_expression(
-                                            builder,
-                                            &*expr,
-                                            generic_args,
-                                            ctx,
-                                            return_type.clone(),
-                                        )?;
-                                    }
-                                    None => return_value = None,
-                                }
-                                break;
-                            }
-                            _ => {
-                                if is_last && semicolon.is_none() {
+                            ct_value.mutability = Mutability::Mutable;
+                            ctx.vars.insert(var_name, ct_value);
+                        }
+                        Expr::Return(return_expr) => {
+                            match &return_expr.expr {
+                                Some(expr) => {
                                     return_value = self.compile_expression(
-                                        builder,
+                                        module,
+                                        block_id,
                                         &*expr,
                                         generic_args,
                                         ctx,
                                         return_type.clone(),
                                     )?;
-                                } else {
-                                    self.compile_expression(
-                                        builder,
-                                        &*expr,
-                                        generic_args,
-                                        ctx,
-                                        None,
-                                    )?;
                                 }
+                                None => return_value = None,
+                            }
+                            break;
+                        }
+                        _ => {
+                            if is_last && semicolon.is_none() {
+                                return_value = self.compile_expression(
+                                    module,
+                                    block_id,
+                                    &*expr,
+                                    generic_args,
+                                    ctx,
+                                    return_type.clone(),
+                                )?;
+                            } else {
+                                self.compile_expression(
+                                    module,
+                                    block_id,
+                                    &*expr,
+                                    generic_args,
+                                    ctx,
+                                    None,
+                                )?;
                             }
                         }
-                    }
+                    },
                     Stmt::Macro(macro_stmt) => {
                         self.compile_cuda_tile_macro(
-                            builder,
+                            module,
+                            block_id,
                             &macro_stmt.mac,
                             generic_args,
                             ctx,
@@ -441,38 +439,37 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
             }
             if terminator_encountered.is_none() {
-                // Continue, return, and yield are required terminators for loops, functions, and if statements in TileIR,
-                // but not in Rust. If no such terminator is encountered, then inject the default for this block type.
                 let loop_carry_var_names = ctx.carry_vars.clone().unwrap_or(vec![]);
                 match ctx.default_terminator {
                     Some(BlockTerminator::Yield) => {
-                        // Include any return values here.
                         let (cuda_tile_return_values, _) = {
                             if let Some(result) = &return_value {
                                 let cuda_tile_value =
                                     result.value.expect("Failed to obtain CUDA tile value.");
-                                (
-                                    vec![cuda_tile_value],
-                                    Some(result.ty.clone_fresh(&self.context)),
-                                )
+                                (vec![cuda_tile_value], Some(result.ty.clone()))
                             } else {
                                 (vec![], None)
                             }
                         };
                         let loop_carry_values = ctx.unpack_some_vars(&loop_carry_var_names)?;
-                        let op = OperationBuilder::new("cuda_tile.yield", location)
-                            .add_operands(&[loop_carry_values, cuda_tile_return_values].concat())
-                            .build()
-                            .unwrap();
-                        let _ = builder.append_operation(op);
+                        let (op_id, _) =
+                            OpBuilder::new(Opcode::Yield, self.ir_location(&block_expr.span()))
+                                .operands(
+                                    loop_carry_values
+                                        .iter()
+                                        .chain(cuda_tile_return_values.iter())
+                                        .copied(),
+                                )
+                                .build(module);
+                        append_op(module, block_id, op_id);
                     }
                     Some(BlockTerminator::Continue) => {
                         let loop_carry_values = ctx.unpack_some_vars(&loop_carry_var_names)?;
-                        let op = OperationBuilder::new("cuda_tile.continue", location)
-                            .add_operands(&loop_carry_values)
-                            .build()
-                            .unwrap();
-                        let _ = builder.append_operation(op);
+                        let (op_id, _) =
+                            OpBuilder::new(Opcode::Continue, self.ir_location(&block_expr.span()))
+                                .operands(loop_carry_values.iter().copied())
+                                .build(module);
+                        append_op(module, block_id, op_id);
                     }
                     Some(BlockTerminator::Return) => {
                         self.resolve_span(&block_expr.span())
@@ -483,12 +480,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 "returning a value from this function is not supported",
                             );
                         }
-                        let ret_op_builder =
-                            cuda_tile::ReturnOperationBuilder::new(&self.context, location)
-                                .operands(&[])
-                                .build()
-                                .into();
-                        let _ = builder.append_operation(ret_op_builder);
+                        let (op_id, _) =
+                            OpBuilder::new(Opcode::Return, self.ir_location(&block_expr.span()))
+                                .build(module);
+                        append_op(module, block_id, op_id);
                     }
                     Some(BlockTerminator::Break) => {
                         self.resolve_span(&block_expr.span())

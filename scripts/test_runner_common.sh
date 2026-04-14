@@ -44,7 +44,18 @@ run_step() {
 run_examples() {
     local examples_dir="$1"
     shift
-    local skip_examples=("$@")
+
+    # Separate cargo flags (--features ...) from skip-list names.
+    local cargo_extra=()
+    local skip_examples=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --features) cargo_extra+=("$1" "$2"); shift 2 ;;
+            --*) cargo_extra+=("$1"); shift ;;
+            *) skip_examples+=("$1"); shift ;;
+        esac
+    done
+
     local examples_passed=0
     local examples_failed=0
     local failed_examples=()
@@ -65,7 +76,7 @@ run_examples() {
         fi
 
         echo -e "  Running example: ${example}"
-        if cargo run --example "$example" --quiet >/dev/null 2>&1; then
+        if cargo run --example "$example" "${cargo_extra[@]}" --quiet >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} ${example}"
             ((examples_passed++))
         else
@@ -88,20 +99,26 @@ run_examples() {
 
 run_benches() {
     local benches_dir="$1"
-    local extra_features="${2:-}"
+    shift
+
+    local cargo_extra=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --features) cargo_extra+=("$1" "$2"); shift 2 ;;
+            --*) cargo_extra+=("$1"); shift ;;
+            *) shift ;;
+        esac
+    done
+
     local benches_passed=0
     local benches_failed=0
     local failed_benches=()
-    local features_flag=""
-    if [[ -n "$extra_features" ]]; then
-        features_flag="--features $extra_features"
-    fi
 
     mapfile -t benches < <(find "$benches_dir" -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
 
     for bench in "${benches[@]}"; do
         echo -e "  Running benchmark: ${bench}"
-        if cargo bench --bench "$bench" $features_flag --quiet >/dev/null 2>&1; then
+        if cargo bench --bench "$bench" "${cargo_extra[@]}" --quiet >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} ${bench}"
             ((benches_passed++))
         else

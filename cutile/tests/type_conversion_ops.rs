@@ -106,11 +106,7 @@ fn compile_conversion_ops() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== CONVERSION OPS MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -149,11 +145,7 @@ fn compile_ptr_conversion() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== PTR CONVERSION MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -192,11 +184,7 @@ fn compile_exti_unsigned() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== EXTI UNSIGNED MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -231,11 +219,7 @@ fn compile_bf16_conversion() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== BF16 CONVERSION MLIR ===\n{}", module_op_str);
 
         assert!(

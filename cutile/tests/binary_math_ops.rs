@@ -72,11 +72,7 @@ fn compile_minmax() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MIN/MAX MLIR ===\n{}", module_op_str);
 
         let expected_ops = ["maxf", "minf"];
@@ -114,11 +110,7 @@ fn compile_select() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== SELECT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -149,11 +141,7 @@ fn compile_bf16_binary_arith() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== BF16 BINARY ARITH MLIR ===\n{}", module_op_str);
 
         for op in ["addf", "mulf", "divf"] {

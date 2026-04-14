@@ -258,11 +258,7 @@ fn compile_inlining() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("{module_op_str}");
     });
 }
@@ -286,11 +282,7 @@ fn compile_basics() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("{module_op_str}");
     });
 }
@@ -317,7 +309,6 @@ fn compile_negative_constant() -> () {
         let module_op_str = compiler
             .compile()
             .expect("Failed to compile negative constant kernel.")
-            .as_operation()
             .to_string();
         assert!(module_op_str.contains("-1.0"));
         println!("{module_op_str}");
@@ -343,11 +334,7 @@ fn compile_ptr_tile_reshape() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("{module_op_str}");
         assert!(
             module_op_str.contains("reshape") && module_op_str.contains("tile<ptr<f32>>"),

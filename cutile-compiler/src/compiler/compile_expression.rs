@@ -3,42 +3,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Expression compilation: translates Rust `syn::Expr` AST nodes into MLIR operations
-//! and `TileRustValue` results within the CUDA Tile compiler. This is the core dispatch
-//! for all expression kinds including loops, conditionals, literals, calls, binary ops,
-//! struct construction, tuples, arrays, indexing, macros, closures, etc.
+//! Expression compilation for compiler2.
+//!
+//! Mechanical port of `compiler/compile_expression.rs` — translates Rust `syn::Expr`
+//! AST nodes into tile-ir operations. Only type and IR-emission changes; the
+//! control flow, dispatch logic, and variable binding are identical.
 
-use crate::bounds::Bounds;
-use crate::compiler::_function::{CUDATileFunctionCompiler, STACK_GROW_SIZE, STACK_RED_ZONE};
-pub use crate::compiler::_type::*;
-pub use crate::compiler::_value::*;
-use crate::compiler::utils::{
+use super::_function::CUDATileFunctionCompiler;
+use super::_value::{BlockTerminator, CompilerContext, TileRustValue};
+use super::shared_types::Kind;
+use super::shared_utils::{
     collect_mutated_variables, collect_mutated_variables_from_block,
     collect_mutated_variables_loop, collect_mutated_variables_while, dedup,
-    update_outer_block_type_meta,
+    update_outer_block_type_meta, STACK_GROW_SIZE, STACK_RED_ZONE,
 };
+use super::tile_rust_type::TileRustType;
+use crate::bounds::Bounds;
 use crate::error::JITError;
-use crate::generics::GenericVars;
+use crate::generics::{GenericVars, TypeInstance, TypeInstanceUserType};
 use crate::syn_utils::*;
 use crate::types::*;
-use cuda_tile_rs::operation_parse;
-use melior::ir::operation::{OperationBuilder, OperationLike};
-use melior::ir::{self, Block, BlockLike, Location, Region, RegionLike, Value, ValueLike};
+
+use cutile_ir::builder::{append_op, build_block, OpBuilder};
+use cutile_ir::bytecode::Opcode;
+use cutile_ir::ir::{Attribute, BlockId, Location, Module, Region};
+
 use proc_macro2::TokenTree;
 use quote::ToTokens;
 use std::collections::{BTreeMap, HashMap};
 use syn::spanned::Spanned;
-use syn::{parse_quote, Expr, Lit, Member, Pat, Type, UnOp};
+use syn::{parse_quote, Expr, Lit, Member, Pat, UnOp};
 
-impl<'m, 'c> CUDATileFunctionCompiler<'m> {
+impl<'m> CUDATileFunctionCompiler<'m> {
     pub fn compile_expression(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         expr: &syn::Expr,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
             let _expr_debug_str = expr.to_token_stream().to_string();
             match expr {
@@ -100,7 +105,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         );
                     };
                     let Some(start_val) = self.compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         start_expr,
                         generic_vars,
                         ctx,
@@ -113,7 +119,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         );
                     };
                     let Some(end_val) = self.compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         end_expr,
                         generic_vars,
                         ctx,
@@ -131,7 +138,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let upper_bound = end_val.value.unwrap();
                     let step_value = if let Some(step_expr) = maybe_step_expr {
                         let Some(val) = self.compile_expression(
-                            builder,
+                            module,
+                            block_id,
                             step_expr,
                             generic_vars,
                             ctx,
@@ -145,9 +153,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         };
                         val
                     } else {
-                        self.compile_constant(builder, generic_vars, 1)?
+                        self.compile_constant(module, block_id, generic_vars, 1)?
                     };
-                    let step: Value = step_value.value.ok_or_else(|| {
+                    let step = step_value.value.ok_or_else(|| {
                         self.jit_error(
                             &for_expr.span(),
                             "internal: failed to produce step value for for-loop",
@@ -159,120 +167,108 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     // 2. Is a block argument.
                     // 3. Is loop-carried.
                     // 4. Is returned.
-                    let for_iterand_type = lower_bound.r#type();
+                    let for_iterand_type = module.value_type(lower_bound).clone();
                     let loop_carry_vars = collect_mutated_variables(for_expr)?
                         .into_iter()
                         .collect::<Vec<_>>();
                     let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
                     let loop_carry_arg_tys = loop_carry_args
                         .iter()
-                        .map(|val| val.r#type())
+                        .map(|val| module.value_type(*val).clone())
                         .collect::<Vec<_>>();
 
-                    let location = Location::unknown(&self.context);
-                    let for_builder = OperationBuilder::new("cuda_tile.for", location);
-                    let for_op = for_builder
-                        .add_operands(&[lower_bound, upper_bound, step])
-                        .add_operands(&loop_carry_args)
-                        .add_results(&loop_carry_arg_tys)
-                        .add_regions([{
-                            // Add iterand as argument.
-                            let loop_block_args =
-                                &[&[for_iterand_type], loop_carry_arg_tys.as_slice()].concat();
-                            let loop_block = Block::new(
-                                &loop_block_args
-                                    .iter()
-                                    .map(|ty| (ty.clone(), location))
-                                    .collect::<Vec<_>>(),
-                            );
-                            let mut for_variables = ctx.clone();
-                            // Update loop carry variables within the for loop
-                            // to the mutable variables accessed in this operation.
-                            let mut block_args = vec![];
-                            for i in 1..loop_block.argument_count() {
-                                let val: Value = loop_block.argument(i).unwrap().into();
-                                block_args.push(val);
+                    // Build the loop body block.
+                    // Add iterand as first argument.
+                    let loop_block_arg_tys =
+                        [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+                    let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
+
+                    let mut for_variables = ctx.clone();
+                    // Update loop carry variables within the for loop
+                    // to the mutable variables accessed in this operation.
+                    let block_args: Vec<cutile_ir::ir::Value> = loop_block_args[1..].to_vec();
+                    for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+                    if let Some(iterand_ident) = maybe_iterand_ident {
+                        // maybe_iterand_ident is None if it is wild.
+                        // If it's an ident, then add the iterand as a var.
+                        let iterand_name = iterand_ident.ident.to_string();
+                        let iterand_val = loop_block_args[0];
+                        // This has the same type as start/end val.
+                        let iterand_ty = start_val.ty.clone();
+                        // If the loop bounds are const, then we can put a bound on the iterand.
+                        // Subtract upper bound by 1, since it is the open end of the interval [start, end).
+                        let iterand_val = match (iterand_lower_const, iterand_upper_const) {
+                            (Some(iterand_lower_const), Some(iterand_upper_const)) => {
+                                let bounds = Bounds::new(
+                                    iterand_lower_const.start,
+                                    iterand_upper_const.end - 1,
+                                );
+                                let mut iterand_val = self.compile_value_assumption(
+                                    module,
+                                    loop_block_id,
+                                    iterand_val,
+                                    "assume_bounds",
+                                    &[bounds.start as i32, bounds.end as i32],
+                                    iterand_ty,
+                                    &for_expr.span(),
+                                )?;
+                                iterand_val.bounds = Some(bounds);
+                                iterand_val
                             }
-                            for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
-                            if let Some(iterand_ident) = maybe_iterand_ident {
-                                // maybe_iterand_ident is None if it is wild.
-                                // If it's an ident, then add the iterand as a var.
-                                let iterand_name = iterand_ident.ident.to_string();
-                                let iterand_mlir_val: Value =
-                                    loop_block.argument(0).unwrap().into();
-                                // This has the same type as start/end val.
-                                let iterand_ty = start_val.ty.clone();
-                                // If the loop bounds are const, then we can put a bound on the iterand.
-                                // Subtract upper bound by 1, since it is the open end of the interval [start, end).
-                                let iterand_val = match (iterand_lower_const, iterand_upper_const) {
-                                    (Some(iterand_lower_const), Some(iterand_upper_const)) => {
-                                        let bounds = Bounds::new(
-                                            iterand_lower_const.start,
-                                            iterand_upper_const.end - 1,
-                                        );
-                                        let mut iterand_val = self.compile_value_assumption(
-                                            &loop_block,
-                                            iterand_mlir_val.clone(),
-                                            "assume_bounds",
-                                            &[bounds.start as i32, bounds.end as i32],
-                                            iterand_ty,
-                                            &for_expr.span(),
-                                        )?;
-                                        iterand_val.bounds = Some(bounds);
-                                        iterand_val
-                                    }
-                                    (Some(iterand_lower_const), None) => self
-                                        .compile_value_assumption(
-                                            &loop_block,
-                                            iterand_mlir_val.clone(),
-                                            "assume_bounds_lower",
-                                            &[iterand_lower_const.start as i32],
-                                            iterand_ty,
-                                            &for_expr.span(),
-                                        )?,
-                                    (None, Some(iterand_upper_const)) => self
-                                        .compile_value_assumption(
-                                            &loop_block,
-                                            iterand_mlir_val.clone(),
-                                            "assume_bounds_upper",
-                                            &[iterand_upper_const.end as i32 - 1],
-                                            iterand_ty,
-                                            &for_expr.span(),
-                                        )?,
-                                    (None, None) => TileRustValue::new_value_kind_like(
-                                        iterand_mlir_val.clone(),
-                                        start_val.ty.clone(),
-                                    ),
-                                };
-                                for_variables.vars.insert(iterand_name, iterand_val);
-                            }
-                            for_variables.carry_vars = Some(loop_carry_vars.clone());
-                            for_variables.default_terminator = Some(BlockTerminator::Continue);
-                            // TODO (hme): Support returns?
-                            self.compile_block(
-                                &loop_block,
-                                &for_expr.body,
-                                &generic_vars,
-                                &mut for_variables,
-                                return_type,
-                            )?;
-                            let region = Region::new();
-                            region.append_block(loop_block);
-                            region
-                        }])
-                        .build()
-                        .unwrap();
+                            (Some(iterand_lower_const), None) => self.compile_value_assumption(
+                                module,
+                                loop_block_id,
+                                iterand_val,
+                                "assume_bounds_lower",
+                                &[iterand_lower_const.start as i32],
+                                iterand_ty,
+                                &for_expr.span(),
+                            )?,
+                            (None, Some(iterand_upper_const)) => self.compile_value_assumption(
+                                module,
+                                loop_block_id,
+                                iterand_val,
+                                "assume_bounds_upper",
+                                &[iterand_upper_const.end as i32 - 1],
+                                iterand_ty,
+                                &for_expr.span(),
+                            )?,
+                            (None, None) => TileRustValue::new_value_kind_like(
+                                iterand_val,
+                                start_val.ty.clone(),
+                            ),
+                        };
+                        for_variables.vars.insert(iterand_name, iterand_val);
+                    }
+                    for_variables.carry_vars = Some(loop_carry_vars.clone());
+                    for_variables.default_terminator = Some(BlockTerminator::Continue);
+                    // TODO (hme): Support returns?
+                    self.compile_block(
+                        module,
+                        loop_block_id,
+                        &for_expr.body,
+                        &generic_vars,
+                        &mut for_variables,
+                        return_type,
+                    )?;
+
+                    let region_id = module.alloc_region(Region {
+                        blocks: vec![loop_block_id],
+                    });
+
+                    let (for_op_id, result_values) =
+                        OpBuilder::new(Opcode::For, self.ir_location(&for_expr.span()))
+                            .operands([lower_bound, upper_bound, step].iter().copied())
+                            .operands(loop_carry_args.iter().copied())
+                            .results(loop_carry_arg_tys.iter().cloned())
+                            .region(region_id)
+                            .build(module);
+                    append_op(module, block_id, for_op_id);
+
                     // TODO (hme): This fails with "operand #0 does not dominate this use"
                     //  This may be a bug.
                     //  The compiled module in its entirety still passes verification.
                     // assert!(for_op.verify());
-                    let for_loop_ref = builder.append_operation(for_op);
-                    let num_results = for_loop_ref.result_count();
-                    let mut result_values: Vec<Value> = vec![];
-                    for i in 0..num_results {
-                        let val: Value = for_loop_ref.result(i).unwrap().into();
-                        result_values.push(val);
-                    }
                     if result_values.len() != loop_carry_args.len() {
                         return self.jit_error_result(
                             &for_expr.span(),
@@ -295,109 +291,91 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
                     let loop_carry_arg_tys = loop_carry_args
                         .iter()
-                        .map(|val| val.r#type())
+                        .map(|val| module.value_type(*val).clone())
                         .collect::<Vec<_>>();
 
-                    let location = Location::unknown(&self.context);
-                    let loop_builder = OperationBuilder::new("cuda_tile.loop", location);
-                    let loop_op = loop_builder
-                        .add_operands(&loop_carry_args)
-                        .add_results(&loop_carry_arg_tys)
-                        .add_regions([{
-                            let loop_block = Block::new(
-                                &loop_carry_arg_tys
-                                    .iter()
-                                    .map(|ty| (ty.clone(), location))
-                                    .collect::<Vec<_>>(),
-                            );
-                            let mut loop_variables = ctx.clone();
-                            let mut block_args = vec![];
-                            for i in 0..loop_block.argument_count() {
-                                let val: Value = loop_block.argument(i).unwrap().into();
-                                block_args.push(val);
-                            }
-                            loop_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
-                            loop_variables.carry_vars = Some(loop_carry_vars.clone());
-                            loop_variables.default_terminator = Some(BlockTerminator::Continue);
+                    // Build the loop body block.
+                    let (loop_block_id, loop_block_args) = build_block(module, &loop_carry_arg_tys);
 
-                            // Evaluate condition
-                            let Some(TileRustValue {
-                                value: Some(condition_val),
-                                ..
-                            }) = self.compile_expression(
-                                &loop_block,
-                                &*while_expr.cond,
-                                generic_vars,
-                                &mut loop_variables,
-                                return_type.clone(),
-                            )?
-                            else {
-                                return self.jit_error_result(
-                                    &while_expr.cond.span(),
-                                    "failed to compile while-loop condition",
-                                );
-                            };
+                    let mut loop_variables = ctx.clone();
+                    let block_args: Vec<cutile_ir::ir::Value> = loop_block_args.clone();
+                    loop_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+                    loop_variables.carry_vars = Some(loop_carry_vars.clone());
+                    loop_variables.default_terminator = Some(BlockTerminator::Continue);
 
-                            // Check condition first - if false, break immediately
-                            let condition_check = OperationBuilder::new("cuda_tile.if", location)
-                                .add_operands(&[condition_val])
-                                .add_regions([
-                                    {
-                                        // Then: continue to body (just yield, body comes next)
-                                        let then_block = Block::new(&[]);
-                                        let yield_op =
-                                            OperationBuilder::new("cuda_tile.yield", location)
-                                                .build()
-                                                .unwrap();
-                                        then_block.append_operation(yield_op);
-                                        let region = Region::new();
-                                        region.append_block(then_block);
-                                        region
-                                    },
-                                    {
-                                        // Else: break out
-                                        let else_block = Block::new(&[]);
-                                        let break_values =
-                                            loop_variables.unpack_some_vars(&loop_carry_vars)?;
-                                        let break_op =
-                                            OperationBuilder::new("cuda_tile.break", location)
-                                                .add_operands(&break_values)
-                                                .build()
-                                                .unwrap();
-                                        else_block.append_operation(break_op);
-                                        let region = Region::new();
-                                        region.append_block(else_block);
-                                        region
-                                    },
-                                ])
-                                .build()
-                                .unwrap();
-                            loop_block.append_operation(condition_check);
+                    // Evaluate condition
+                    let Some(TileRustValue {
+                        value: Some(condition_val),
+                        ..
+                    }) = self.compile_expression(
+                        module,
+                        loop_block_id,
+                        &*while_expr.cond,
+                        generic_vars,
+                        &mut loop_variables,
+                        return_type.clone(),
+                    )?
+                    else {
+                        return self.jit_error_result(
+                            &while_expr.cond.span(),
+                            "failed to compile while-loop condition",
+                        );
+                    };
 
-                            // Execute body
-                            self.compile_block(
-                                &loop_block,
-                                &while_expr.body,
-                                generic_vars,
-                                &mut loop_variables,
-                                return_type.clone(),
-                            )?;
-                            // compile_block will inject continue at the end
+                    // Check condition first - if false, break immediately
+                    // Then region: continue to body (just yield, body comes next)
+                    let (then_block_id, _then_block_args) = build_block(module, &[]);
+                    let (yield_op_id, _) =
+                        OpBuilder::new(Opcode::Yield, self.ir_location(&while_expr.span()))
+                            .build(module);
+                    append_op(module, then_block_id, yield_op_id);
+                    let then_region_id = module.alloc_region(Region {
+                        blocks: vec![then_block_id],
+                    });
 
-                            let region = Region::new();
-                            region.append_block(loop_block);
-                            region
-                        }])
-                        .build()
-                        .unwrap();
+                    // Else region: break out
+                    let (else_block_id, _else_block_args) = build_block(module, &[]);
+                    let break_values = loop_variables.unpack_some_vars(&loop_carry_vars)?;
+                    let (break_op_id, _) =
+                        OpBuilder::new(Opcode::Break, self.ir_location(&while_expr.span()))
+                            .operands(break_values.iter().copied())
+                            .build(module);
+                    append_op(module, else_block_id, break_op_id);
+                    let else_region_id = module.alloc_region(Region {
+                        blocks: vec![else_block_id],
+                    });
 
-                    let loop_ref = builder.append_operation(loop_op);
-                    let num_results = loop_ref.result_count();
-                    let mut result_values: Vec<Value> = vec![];
-                    for i in 0..num_results {
-                        let val: Value = loop_ref.result(i).unwrap().into();
-                        result_values.push(val);
-                    }
+                    let (condition_check_id, _) =
+                        OpBuilder::new(Opcode::If, self.ir_location(&while_expr.cond.span()))
+                            .operand(condition_val)
+                            .region(then_region_id)
+                            .region(else_region_id)
+                            .build(module);
+                    append_op(module, loop_block_id, condition_check_id);
+
+                    // Execute body
+                    self.compile_block(
+                        module,
+                        loop_block_id,
+                        &while_expr.body,
+                        generic_vars,
+                        &mut loop_variables,
+                        return_type.clone(),
+                    )?;
+                    // compile_block will inject continue at the end
+
+                    let region_id = module.alloc_region(Region {
+                        blocks: vec![loop_block_id],
+                    });
+
+                    let (loop_op_id, result_values) =
+                        OpBuilder::new(Opcode::Loop, self.ir_location(&while_expr.span()))
+                            .operands(loop_carry_args.iter().copied())
+                            .results(loop_carry_arg_tys.iter().cloned())
+                            .region(region_id)
+                            .build(module);
+                    append_op(module, block_id, loop_op_id);
+
                     if result_values.len() != loop_carry_args.len() {
                         return self.jit_error_result(
                             &while_expr.span(),
@@ -420,56 +398,42 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
                     let loop_carry_arg_tys = loop_carry_args
                         .iter()
-                        .map(|val| val.r#type())
+                        .map(|val| module.value_type(*val).clone())
                         .collect::<Vec<_>>();
 
-                    let location = Location::unknown(&self.context);
-                    let loop_builder = OperationBuilder::new("cuda_tile.loop", location);
-                    let loop_op = loop_builder
-                        .add_operands(&loop_carry_args)
-                        .add_results(&loop_carry_arg_tys)
-                        .add_regions([{
-                            let loop_block = Block::new(
-                                &loop_carry_arg_tys
-                                    .iter()
-                                    .map(|ty| (ty.clone(), location))
-                                    .collect::<Vec<_>>(),
-                            );
-                            let mut loop_variables = ctx.clone();
-                            let mut block_args = vec![];
-                            for i in 0..loop_block.argument_count() {
-                                let val: Value = loop_block.argument(i).unwrap().into();
-                                block_args.push(val);
-                            }
-                            loop_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
-                            loop_variables.carry_vars = Some(loop_carry_vars.clone());
-                            loop_variables.default_terminator = Some(BlockTerminator::Continue);
+                    // Build the loop body block.
+                    let (loop_block_id, loop_block_args) = build_block(module, &loop_carry_arg_tys);
 
-                            // Execute loop body (must contain break to exit)
-                            // The body should handle its own terminator (break/continue)
-                            self.compile_block(
-                                &loop_block,
-                                &loop_expr.body,
-                                generic_vars,
-                                &mut loop_variables,
-                                return_type.clone(),
-                            )?;
+                    let mut loop_variables = ctx.clone();
+                    let block_args: Vec<cutile_ir::ir::Value> = loop_block_args.clone();
+                    loop_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+                    loop_variables.carry_vars = Some(loop_carry_vars.clone());
+                    loop_variables.default_terminator = Some(BlockTerminator::Continue);
 
-                            // Note: compile_block will inject continue if not already present
-                            let region = Region::new();
-                            region.append_block(loop_block);
-                            region
-                        }])
-                        .build()
-                        .unwrap();
+                    // Execute loop body (must contain break to exit)
+                    // The body should handle its own terminator (break/continue)
+                    self.compile_block(
+                        module,
+                        loop_block_id,
+                        &loop_expr.body,
+                        generic_vars,
+                        &mut loop_variables,
+                        return_type.clone(),
+                    )?;
 
-                    let loop_ref = builder.append_operation(loop_op);
-                    let num_results = loop_ref.result_count();
-                    let mut result_values: Vec<Value> = vec![];
-                    for i in 0..num_results {
-                        let val: Value = loop_ref.result(i).unwrap().into();
-                        result_values.push(val);
-                    }
+                    // Note: compile_block will inject continue if not already present
+                    let region_id = module.alloc_region(Region {
+                        blocks: vec![loop_block_id],
+                    });
+
+                    let (loop_op_id, result_values) =
+                        OpBuilder::new(Opcode::Loop, self.ir_location(&loop_expr.span()))
+                            .operands(loop_carry_args.iter().copied())
+                            .results(loop_carry_arg_tys.iter().cloned())
+                            .region(region_id)
+                            .build(module);
+                    append_op(module, block_id, loop_op_id);
+
                     if result_values.len() != loop_carry_args.len() {
                         return self.jit_error_result(
                             &loop_expr.span(),
@@ -484,10 +448,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     Ok(None)
                 }
                 Expr::If(if_expr) => {
-                    // The condition is always bool — don't propagate the if
+                    // The condition is always bool -- don't propagate the if
                     // expression's return type into the condition.
-                    let Some(conditional_val) =
-                        self.compile_expression(builder, &*if_expr.cond, generic_vars, ctx, None)?
+                    let Some(conditional_val) = self.compile_expression(
+                        module,
+                        block_id,
+                        &*if_expr.cond,
+                        generic_vars,
+                        ctx,
+                        None,
+                    )?
                     else {
                         return self.jit_error_result(
                             &if_expr.cond.span(),
@@ -518,7 +488,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 // This is inlined, so no need to inject a terminator.
                                 block_vars.default_terminator = None;
                                 let res = self.compile_block(
-                                    builder,
+                                    module,
+                                    block_id,
                                     branch_block,
                                     generic_vars,
                                     &mut block_vars,
@@ -574,49 +545,38 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "failed to compile if-condition",
                         );
                     };
-                    let location = self.location_from_span(&if_expr.span());
-
-                    let if_builder = OperationBuilder::new("cuda_tile.if", location);
-                    let (then_region, then_return_type) = {
+                    // Build then region.
+                    let (then_region_id, then_return_type, branch_result_type) = {
                         let mut block_vars = ctx.clone();
                         block_vars.carry_vars = Some(if_captured_var_names.clone());
                         block_vars.default_terminator = Some(BlockTerminator::Yield);
-                        let then_block = Block::new(&[]);
+                        let (then_block_id, _then_block_args) = build_block(module, &[]);
                         let result = self.compile_block(
-                            &then_block,
+                            module,
+                            then_block_id,
                             &if_expr.then_branch,
                             generic_vars,
                             &mut block_vars,
                             return_type.clone(),
                         )?;
-                        let (_cuda_tile_return_values, return_type) = {
+                        let (branch_result_type, return_type) = {
                             if let Some(result) = result {
                                 let cuda_tile_value =
                                     result.value.expect("Failed to obtain CUDA tile value.");
-                                (
-                                    vec![cuda_tile_value],
-                                    Some(result.ty.clone_fresh(&self.context)),
-                                )
+                                let result_ty = module.value_type(cuda_tile_value).clone();
+                                (vec![result_ty], Some(result.ty.clone()))
                             } else {
                                 (vec![], None)
                             }
                         };
-                        let region = Region::new();
-                        region.append_block(then_block);
-                        (region, return_type)
-                    };
-
-                    let branch_result_type = {
-                        if let Some(return_type) = &then_return_type {
-                            let cuda_tile_ty = return_type.cuda_tile_ty;
-                            vec![cuda_tile_ty.expect("Failed to obtain CUDA tile type.")]
-                        } else {
-                            vec![]
-                        }
+                        let region_id = module.alloc_region(Region {
+                            blocks: vec![then_block_id],
+                        });
+                        (region_id, return_type, branch_result_type)
                     };
 
                     // We don't need to check return type. Both Rust and Tile IR compiler perform this check.
-                    let (else_region, _else_return_type) = {
+                    let (else_region_id, _else_return_type) = {
                         if let Some((_Else, else_expr)) = &if_expr.else_branch {
                             let Expr::Block(block_expr) = &**else_expr else {
                                 return self.jit_error_result(
@@ -627,9 +587,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             let mut block_vars = ctx.clone();
                             block_vars.carry_vars = Some(if_captured_var_names.clone());
                             block_vars.default_terminator = Some(BlockTerminator::Yield);
-                            let else_block = Block::new(&[]);
+                            let (else_block_id, _else_block_args) = build_block(module, &[]);
                             let result = self.compile_block(
-                                &else_block,
+                                module,
+                                else_block_id,
                                 &block_expr.block,
                                 generic_vars,
                                 &mut block_vars,
@@ -639,17 +600,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 if let Some(result) = result {
                                     let cuda_tile_value =
                                         result.value.expect("Failed to obtain CUDA tile value.");
-                                    (
-                                        vec![cuda_tile_value],
-                                        Some(result.ty.clone_fresh(&self.context)),
-                                    )
+                                    (vec![cuda_tile_value], Some(result.ty.clone()))
                                 } else {
                                     (vec![], None)
                                 }
                             };
-                            let region = Region::new();
-                            region.append_block(else_block);
-                            (region, return_type)
+                            let region_id = module.alloc_region(Region {
+                                blocks: vec![else_block_id],
+                            });
+                            (region_id, return_type)
                         } else {
                             if then_return_type.is_some() {
                                 return self.jit_error_result(
@@ -657,19 +616,19 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     "if-expression without an else branch cannot produce a return type",
                                 );
                             }
-                            let else_block = Block::new(&[]);
+                            let (else_block_id, _else_block_args) = build_block(module, &[]);
                             // If there is only a then branch, there is no return value. Yield only the captured mutable vars.
                             let captured_mutable_vars =
                                 ctx.unpack_some_vars(&if_captured_var_names)?;
-                            let _yield_val = else_block.append_operation(
-                                OperationBuilder::new("cuda_tile.yield", location)
-                                    .add_operands(&captured_mutable_vars)
-                                    .build()
-                                    .unwrap(),
-                            );
-                            let region = Region::new();
-                            region.append_block(else_block);
-                            (region, None)
+                            let (yield_op_id, _) =
+                                OpBuilder::new(Opcode::Yield, self.ir_location(&if_expr.span()))
+                                    .operands(captured_mutable_vars.iter().copied())
+                                    .build(module);
+                            append_op(module, else_block_id, yield_op_id);
+                            let region_id = module.alloc_region(Region {
+                                blocks: vec![else_block_id],
+                            });
+                            (region_id, None)
                         }
                     };
 
@@ -677,25 +636,20 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let if_captured_var_args = ctx.unpack_some_vars(&if_captured_var_names)?;
                         let if_captured_var_arg_tys = if_captured_var_args
                             .iter()
-                            .map(|val| val.r#type())
+                            .map(|val| module.value_type(*val).clone())
                             .collect::<Vec<_>>();
                         [if_captured_var_arg_tys, branch_result_type].concat()
                     };
 
-                    let if_then_op = if_builder
-                        .add_operands(&[condition_val])
-                        .add_results(&if_result_types)
-                        .add_regions([then_region, else_region])
-                        .build()
-                        .unwrap();
+                    let (if_op_id, mut result_values) =
+                        OpBuilder::new(Opcode::If, self.ir_location(&if_expr.cond.span()))
+                            .operand(condition_val)
+                            .results(if_result_types.iter().cloned())
+                            .region(then_region_id)
+                            .region(else_region_id)
+                            .build(module);
+                    append_op(module, block_id, if_op_id);
 
-                    let if_op_ref = builder.append_operation(if_then_op);
-                    let num_results = if_op_ref.result_count();
-                    let mut result_values: Vec<Value> = vec![];
-                    for i in 0..num_results {
-                        let val: Value = if_op_ref.result(i).unwrap().into();
-                        result_values.push(val);
-                    }
                     if let Some(ty) = then_return_type {
                         if result_values.len() != if_captured_var_names.len() + 1 {
                             return self.jit_error_result(
@@ -706,7 +660,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 ),
                             );
                         }
-                        let return_value: Value = result_values.pop().unwrap();
+                        let return_value = result_values.pop().unwrap();
                         ctx.repack_some_vars(&if_captured_var_names, &result_values, true)?;
                         let tr_value = TileRustValue::new_value_kind_like(return_value, ty);
                         Ok(Some(tr_value))
@@ -723,7 +677,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         .into_iter()
                         .collect::<Vec<_>>();
                     let result = self.compile_block(
-                        builder,
+                        module,
+                        block_id,
                         &block_expr.block,
                         &generic_vars,
                         &mut inner_block_vars,
@@ -747,7 +702,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         .into_iter()
                         .collect::<Vec<_>>();
                     let result = self.compile_block(
-                        builder,
+                        module,
+                        block_id,
                         &block_expr.block,
                         &generic_vars,
                         &mut inner_block_vars,
@@ -801,7 +757,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             None
                         };
                         let field_value: TileRustValue = match self.compile_expression(
-                            builder,
+                            module,
+                            block_id,
                             &field.expr,
                             generic_vars,
                             ctx,
@@ -823,7 +780,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     // TODO (hme): Check whether all expr types can be supported.
                     let return_type = match return_type {
                         Some(ty) => {
-                            if let Type::Reference(ref_type) = ty.rust_ty {
+                            if let syn::Type::Reference(ref_type) = ty.rust_ty {
                                 self.compile_type(&*ref_type.elem, generic_vars, &HashMap::new())?
                             } else {
                                 None
@@ -833,28 +790,32 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     };
                     match &*ref_expr.expr {
                         Expr::Array(_array_expr) => Ok(self.compile_expression(
-                            builder,
+                            module,
+                            block_id,
                             &ref_expr.expr,
                             generic_vars,
                             ctx,
                             return_type,
                         )?),
                         Expr::Path(_path_expr) => Ok(self.compile_expression(
-                            builder,
+                            module,
+                            block_id,
                             &ref_expr.expr,
                             generic_vars,
                             ctx,
                             return_type,
                         )?),
                         Expr::Repeat(_repeat_expr) => Ok(self.compile_expression(
-                            builder,
+                            module,
+                            block_id,
                             &ref_expr.expr,
                             generic_vars,
                             ctx,
                             return_type,
                         )?),
                         Expr::MethodCall(_method_call_expr) => Ok(self.compile_expression(
-                            builder,
+                            module,
+                            block_id,
                             &ref_expr.expr,
                             generic_vars,
                             ctx,
@@ -872,7 +833,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let mut rust_types: Vec<syn::Type> = vec![];
                     let mut values: Vec<TileRustValue> = vec![];
                     for elem in &tuple_expr.elems {
-                        match self.compile_expression(builder, &elem, generic_vars, ctx, None)? {
+                        match self.compile_expression(
+                            module,
+                            block_id,
+                            &elem,
+                            generic_vars,
+                            ctx,
+                            None,
+                        )? {
                             Some(value) => {
                                 rust_types.push(value.ty.rust_ty.clone());
                                 values.push(value);
@@ -919,12 +887,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let elem_ty = match &return_type {
                             Some(return_type) => {
                                 match &return_type.rust_ty {
-                                    Type::Array(array_type) => self.compile_type(
+                                    syn::Type::Array(array_type) => self.compile_type(
                                         &*array_type.elem,
                                         generic_vars,
                                         &HashMap::new(),
                                     )?,
-                                    Type::Slice(slice) => {
+                                    syn::Type::Slice(slice) => {
                                         // TODO (hme): Confirm this is right.
                                         self.compile_type(
                                             &*slice.elem,
@@ -945,7 +913,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             }
                             None => None,
                         };
-                        match self.compile_expression(builder, &elem, generic_vars, ctx, elem_ty)? {
+                        match self.compile_expression(
+                            module,
+                            block_id,
+                            &elem,
+                            generic_vars,
+                            ctx,
+                            elem_ty,
+                        )? {
                             Some(value) => values.push(value),
                             None => {
                                 return self.jit_error_result(
@@ -1027,7 +1002,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         }
                     };
                     let Some(value) = self.compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         &repeat_expr.expr,
                         generic_vars,
                         ctx,
@@ -1079,7 +1055,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 Expr::Path(path_expr) => {
                     // For qualified paths (e.g., `ftz::Enabled`, `rounding::NearestEven`),
                     // use the last segment as the variable name. These are ZST marker types
-                    // used by static_params — they have no MLIR representation.
+                    // used by static_params -- they have no tile-ir representation.
                     let var_name = path_expr.path.segments.last().unwrap().ident.to_string();
 
                     // Handle None specially - it's a Rust Option::None value, not a variable
@@ -1088,14 +1064,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         return Ok(None);
                     }
 
-                    // TODO (hme): Assuming this is a var.
                     let value = match ctx.vars.get(&var_name) {
                         Some(ct_value) => ct_value,
                         None => {
                             // Qualified paths like `ftz::Enabled` or `rounding::NearestEven`
-                            // are ZST marker types for static_params. They carry no MLIR
-                            // value — like string literals, they're compile-time constants
-                            // consumed by the op compilation path to emit MLIR attributes.
+                            // are ZST marker types for static_params. They carry no tile-ir
+                            // value -- like string literals, they're compile-time constants
+                            // consumed by the op compilation path to emit tile-ir attributes.
                             //
                             // Return a String-kinded placeholder so arg indexing is preserved
                             // in callers (type derivation, inline path). Validation happens
@@ -1106,12 +1081,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     qself: None,
                                     path: path_expr.path.clone(),
                                 });
-                                let type_instance = crate::generics::TypeInstance::UserType(
-                                    crate::generics::TypeInstanceUserType {
-                                        maybe_generic_ty: path_ty,
-                                    },
-                                );
-                                let ty = TileRustType::new_string(&self.context, type_instance);
+                                let type_instance = TypeInstance::UserType(TypeInstanceUserType {
+                                    maybe_generic_ty: path_ty,
+                                });
+                                let ty = TileRustType::new_string(type_instance);
                                 return Ok(Some(TileRustValue::new_string(
                                     Expr::Path(path_expr.clone()),
                                     ty,
@@ -1136,7 +1109,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 // Some is used for optional parameters - extract the inner expression and compile it
                                 if call_expr.args.len() == 1 {
                                     return Ok(self.compile_expression(
-                                        builder,
+                                        module,
+                                        block_id,
                                         &call_expr.args[0],
                                         generic_vars,
                                         ctx,
@@ -1157,7 +1131,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 .get_cuda_tile_op_attrs(ident.to_string().as_str())
                             {
                                 Ok(self.compile_cuda_tile_op_call(
-                                    builder,
+                                    module,
+                                    block_id,
                                     call_expr,
                                     generic_vars,
                                     ctx,
@@ -1171,7 +1146,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     get_meta_list("cuda_tile :: compiler_op", &fn_item.attrs)
                                 {
                                     Ok(self.compile_compiler_op_call(
-                                        builder,
+                                        module,
+                                        block_id,
                                         call_expr,
                                         path_expr,
                                         fn_item,
@@ -1182,7 +1158,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     )?)
                                 } else {
                                     Ok(self.inline_function_call(
-                                        builder,
+                                        module,
+                                        block_id,
                                         module_name,
                                         fn_item,
                                         call_expr,
@@ -1207,7 +1184,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     }
                 }
                 Expr::MethodCall(method_call_expr) => Ok(self.inline_method_call(
-                    builder,
+                    module,
+                    block_id,
                     &method_call_expr,
                     &generic_vars,
                     ctx,
@@ -1215,7 +1193,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 )?),
                 Expr::Field(field_expr) => {
                     let Some(base) = self.compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         &field_expr.base,
                         generic_vars,
                         ctx,
@@ -1331,23 +1310,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                     "unable to determine type for numeric literal; add a type annotation",
                                 );
                             };
-                            let op_str = format!("%0 = cuda_tile.constant <{cuda_tile_ty}: {lit_string}> : !cuda_tile.tile<{cuda_tile_ty}>");
-                            let op = operation_parse(&self.context, op_str.as_str(), None);
-                            if op.is_none() {
-                                return self.jit_error_result(
-                                    &lit_expr.span(),
-                                    &format!("failed to compile {}", op_str),
-                                );
-                            }
-                            let op = op.unwrap();
-                            if !op.verify() {
-                                return self.jit_error_result(
-                                    &lit_expr.span(),
-                                    &format!("failed to verify {}", op_str),
-                                );
-                            }
-                            let op_ref = builder.append_operation(op);
-                            let op_result = op_ref.result(0).unwrap();
+
+                            // Build Constant op with proper DenseElements encoding.
+                            let (op_result, _tile_ir_ty) = build_constant_op(
+                                module,
+                                block_id,
+                                &lit_string,
+                                &cuda_tile_ty,
+                                self.ir_location(&lit_expr.span()),
+                            );
 
                             let rust_ty = return_type.rust_ty;
                             let ct_type =
@@ -1369,9 +1340,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 );
                             }
                             Ok(Some(TileRustValue::new_primitive(
-                                op_result.into(),
-                                ct_type,
-                                bounds,
+                                op_result, ct_type, bounds,
                             )))
                         }
                         _ => {
@@ -1384,7 +1353,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
                 Expr::Cast(cast_expr) => {
                     let src_expr = self
-                        .compile_expression(builder, &*cast_expr.expr, generic_vars, ctx, None)?
+                        .compile_expression(
+                            module,
+                            block_id,
+                            &*cast_expr.expr,
+                            generic_vars,
+                            ctx,
+                            None,
+                        )?
                         .unwrap();
                     let src_elem_ty: String = src_expr
                         .ty
@@ -1457,23 +1433,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             "unable to determine type for numeric literal; add a type annotation",
                         );
                     };
-                    let op_str = format!("%0 = cuda_tile.constant <{cuda_tile_ty}: {lit_string}> : !cuda_tile.tile<{cuda_tile_ty}>");
-                    let op = operation_parse(&self.context, op_str.as_str(), None);
-                    if op.is_none() {
-                        return self.jit_error_result(
-                            &lit_expr.span(),
-                            &format!("failed to compile {}", op_str),
-                        );
-                    }
-                    let op = op.unwrap();
-                    if !op.verify() {
-                        return self.jit_error_result(
-                            &lit_expr.span(),
-                            &format!("failed to verify {}", op_str),
-                        );
-                    }
-                    let op_ref = builder.append_operation(op);
-                    let op_result = op_ref.result(0).unwrap();
+
+                    // Build Constant op with proper DenseElements encoding.
+                    let (op_result, _tile_ir_ty) = build_constant_op(
+                        module,
+                        block_id,
+                        &lit_string,
+                        &cuda_tile_ty,
+                        self.ir_location(&lit_expr.span()),
+                    );
 
                     let rust_ty = return_type.rust_ty;
                     let ct_type = self.compile_type(&rust_ty, generic_vars, &HashMap::new())?;
@@ -1494,15 +1462,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         );
                     }
                     Ok(Some(TileRustValue::new_primitive(
-                        op_result.into(),
-                        ct_type,
-                        bounds,
+                        op_result, ct_type, bounds,
                     )))
                 }
                 Expr::Binary(bin_expr) => {
                     // These are type-checked by Rust, so just do whatever the expression is asking.
                     Ok(self.compile_binary_op(
-                        builder,
+                        module,
+                        block_id,
                         &bin_expr,
                         generic_vars,
                         ctx,
@@ -1510,7 +1477,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     )?)
                 }
                 Expr::Paren(paren_expr) => Ok(self.compile_expression(
-                    builder,
+                    module,
+                    block_id,
                     &paren_expr.expr,
                     generic_vars,
                     ctx,
@@ -1602,13 +1570,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             let return_type = if return_type.is_none() {
                                 let shape_str = format!("{ty_str}<{cga_str}>");
                                 let shape_ty =
-                                    syn::parse2::<Type>(shape_str.parse().unwrap()).unwrap();
+                                    syn::parse2::<syn::Type>(shape_str.parse().unwrap()).unwrap();
                                 self.compile_type(&shape_ty, generic_vars, &HashMap::new())?
                             } else {
                                 return_type.clone()
                             };
                             self.compile_expression(
-                                builder,
+                                module,
+                                block_id,
                                 &shape_expr,
                                 generic_vars,
                                 ctx,
@@ -1616,7 +1585,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             )?
                         }
                         _ => self.compile_cuda_tile_macro(
-                            builder,
+                            module,
+                            block_id,
                             &mac_expr.mac,
                             generic_vars,
                             ctx,
@@ -1627,7 +1597,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 Expr::Closure(closure_expr) => {
                     // Closures cannot be used as standalone expressions in CUDA Tile.
                     // They are only supported as arguments to specific operations (e.g., reduce, scan)
-                    // that compile them into MLIR regions.
+                    // that compile them into tile-ir regions.
                     return self.jit_error_result(
                         &closure_expr.span(),
                         "closures are not supported as standalone values; \
@@ -1636,7 +1606,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
                 Expr::Index(index_expr) => {
                     let Some(expr_val) = self.compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         &*index_expr.expr,
                         generic_vars,
                         ctx,
@@ -1655,10 +1626,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         );
                     }
                     // TODO (hme): Revisit this once we have proper type inference.
-                    let i32_type: Type = parse_quote! { i32 };
+                    let i32_type: syn::Type = parse_quote! { i32 };
                     let i32_type = self.compile_type(&i32_type, generic_vars, &HashMap::new())?;
                     let Some(index_val) = self.compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         &*index_expr.index,
                         generic_vars,
                         ctx,
@@ -1705,5 +1677,111 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
             }
         }) // stacker::maybe_grow
+    }
+}
+
+/// Convert a CUDA Tile element type string (e.g. "f32", "i32") to a tile-ir scalar tile Type.
+fn cuda_tile_element_type_to_tile_ir(cuda_tile_ty: &str) -> cutile_ir::ir::Type {
+    use cutile_ir::ir::{ScalarType, TileElementType, TileType, Type};
+    let scalar = super::_type::scalar_from_name(cuda_tile_ty).unwrap_or(ScalarType::I32);
+    Type::Tile(TileType {
+        shape: vec![],
+        element_type: TileElementType::Scalar(scalar),
+    })
+}
+
+/// Build a Constant op with a proper DenseElements value attribute.
+/// `lit_string` is the numeric literal as text (e.g. "42", "-3.14", "0x3f800000").
+/// `cuda_tile_ty` is the element type name (e.g. "f32", "i32").
+fn build_constant_op(
+    module: &mut cutile_ir::ir::Module,
+    block_id: cutile_ir::ir::BlockId,
+    lit_string: &str,
+    cuda_tile_ty: &str,
+    location: Location,
+) -> (cutile_ir::ir::Value, cutile_ir::ir::Type) {
+    use cutile_ir::ir::DenseElements;
+
+    let result_ty = cuda_tile_element_type_to_tile_ir(cuda_tile_ty);
+    let data = encode_literal_bytes(lit_string, cuda_tile_ty);
+
+    let (op_id, results) = OpBuilder::new(Opcode::Constant, location)
+        .result(result_ty.clone())
+        .attr(
+            "value",
+            Attribute::DenseElements(DenseElements {
+                element_type: result_ty.clone(),
+                shape: vec![],
+                data,
+            }),
+        )
+        .build(module);
+    cutile_ir::builder::append_op(module, block_id, op_id);
+    (results[0], result_ty)
+}
+
+/// Encode a literal value string into bytes for a DenseElements attribute.
+pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
+    use cutile_ir::ir::ScalarType;
+    let scalar = super::_type::scalar_from_name(cuda_tile_ty).unwrap_or(ScalarType::I32);
+    match scalar {
+        ScalarType::I1 => vec![if lit_string != "0" { 0xFF } else { 0x00 }],
+        ScalarType::I8 => {
+            let v: i8 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::I16 => {
+            let v: i16 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::I32 => {
+            let v: i32 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::I64 => {
+            let v: i64 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::F16 => {
+            let v = parse_float_or_hex(lit_string);
+            half::f16::from_f64(v).to_le_bytes().to_vec()
+        }
+        ScalarType::BF16 => {
+            let v = parse_float_or_hex(lit_string);
+            half::bf16::from_f64(v).to_le_bytes().to_vec()
+        }
+        ScalarType::F32 => {
+            let v = parse_float_or_hex(lit_string);
+            (v as f32).to_le_bytes().to_vec()
+        }
+        ScalarType::F64 | ScalarType::TF32 => {
+            let v = parse_float_or_hex(lit_string);
+            v.to_le_bytes().to_vec()
+        }
+        _ => {
+            let v: i32 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+    }
+}
+
+/// Parse a float literal string, handling both decimal ("3.14") and hex ("0x40490fdb") forms.
+fn parse_float_or_hex(s: &str) -> f64 {
+    if s.starts_with("0x") || s.starts_with("-0x") {
+        let negative = s.starts_with('-');
+        let hex = if negative { &s[3..] } else { &s[2..] };
+        let bits = u64::from_str_radix(hex, 16).unwrap_or(0);
+        let v = match hex.len() {
+            1..=4 => half::f16::from_bits(bits as u16).to_f64(),
+            5..=8 => f32::from_bits(bits as u32) as f64,
+            _ => f64::from_bits(bits),
+        };
+        if negative {
+            -v
+        } else {
+            v
+        }
+    } else {
+        s.parse::<f64>().unwrap_or(0.0)
     }
 }

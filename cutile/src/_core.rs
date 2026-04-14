@@ -1429,7 +1429,7 @@ pub mod core {
         pub fn partition<'a, const R: [i32; N]>(&'a self, tile: Shape<R>) -> Partition<'a, E, R> {
             // TODO (hme): Bounds checks.
             let tensor_token: Token = get_tensor_token(self);
-            let p: Partition<E, R> = make_partition_view(self, tile, tensor_token);
+            let p: Partition<E, R> = make_partition_view_padded(self, tile, "zero", tensor_token);
             p
         }
         pub fn partition_permuted<'a, const R: [i32; N], const I: [i32; N]>(
@@ -1769,7 +1769,8 @@ pub mod core {
     /// - `D`: Tile shape
     // TODO (hme): Look into consolidating into a single type.
     #[cuda_tile::ty(name="!cuda_tile.partition_view",
-                    type_params=["tile", "tensor_view"],
+                    type_params=["tile"],
+                    type_params_optional=["padding_value", "tensor_view"],
                     type_meta=["token"])]
     #[cuda_tile::variadic_struct(N = 6)]
     pub struct PartitionMut<'a, E: ElementType, const D: [i32; N]> {
@@ -1831,6 +1832,26 @@ pub mod core {
     >(
         tensor_view: &Tensor<E, TENSOR_SHAPE>,
         shape: Shape<TILE_SHAPE>,
+        token: Token,
+    ) -> PartitionMut<'a, E, TILE_SHAPE> {
+        unreachable!()
+    }
+
+    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+                    params=["tensor_view"],
+                    output_type_params=["tensor_view", "padding_value"],
+                    output_type_meta=["token"]
+    )]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn make_partition_view_mut_padded<
+        'a,
+        E: ElementType,
+        const TENSOR_SHAPE: [i32; N],
+        const TILE_SHAPE: [i32; N],
+    >(
+        tensor_view: &Tensor<E, TENSOR_SHAPE>,
+        shape: Shape<TILE_SHAPE>,
+        padding_value: &str,
         token: Token,
     ) -> PartitionMut<'a, E, TILE_SHAPE> {
         unreachable!()
@@ -3712,7 +3733,8 @@ pub mod core {
         idx: [i32; N],
     ) -> Tile<E, R> {
         let tensor_token: Token = get_tensor_token(x);
-        let x_partition: Partition<E, R> = make_partition_view(x, tile_shape, tensor_token);
+        let x_partition: Partition<E, R> =
+            make_partition_view_padded(x, tile_shape, "zero", tensor_token);
         let tile_x: Tile<E, R> = load_from_view(&x_partition, idx, None, false);
         tile_x
     }
@@ -3733,7 +3755,7 @@ pub mod core {
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(y);
         let y_partition: PartitionMut<E, S> =
-            unsafe { make_partition_view_mut(y, tile_shape, tensor_token) };
+            unsafe { make_partition_view_mut_padded(y, tile_shape, "zero", tensor_token) };
         let tile_y: Tile<E, S> = unsafe { load_from_view_mut(&y_partition, [0i32; N]) };
         let new_token: Token = get_partition_token_mut(&y_partition);
         set_tensor_token(y, new_token);
@@ -3756,7 +3778,7 @@ pub mod core {
         let tile_shape: Shape<S> = y.shape();
         let tensor_token: Token = get_tensor_token(y);
         let mut y_partition: PartitionMut<E, S> =
-            unsafe { make_partition_view_mut(y, tile_shape, tensor_token) };
+            unsafe { make_partition_view_mut_padded(y, tile_shape, "zero", tensor_token) };
         unsafe { store_to_view_mut(&mut y_partition, result, [0i32; N], None, false) };
         let new_token: Token = get_partition_token_mut(&y_partition);
         set_tensor_token(y, new_token);

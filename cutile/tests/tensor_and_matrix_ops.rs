@@ -101,11 +101,7 @@ fn compile_cat() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== CAT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -140,11 +136,7 @@ fn compile_extract() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== EXTRACT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -175,11 +167,7 @@ fn compile_mmai() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MMAI MLIR ===\n{}", module_op_str);
 
         assert!(

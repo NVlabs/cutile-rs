@@ -22,8 +22,6 @@ pub enum JITError {
     /// a proc macro context, this variant carries a concrete file/line/column
     /// that can be displayed to the user even at JIT (runtime) compilation.
     Located(String, SourceLocation),
-    /// An error originating from the MLIR (Melior) layer.
-    Melior(melior::Error),
     /// A wrapped `anyhow::Error`.
     Anyhow(anyhow::Error),
 }
@@ -52,7 +50,6 @@ impl Display for JITError {
                 )
             }
             Self::Located(error, _) => write!(f, "{error}"),
-            Self::Melior(error) => write!(f, "{error}"),
             Self::Anyhow(error) => write!(f, "{error}"),
         }
     }
@@ -115,12 +112,6 @@ impl From<anyhow::Error> for JITError {
 impl From<LexError> for JITError {
     fn from(error: LexError) -> Self {
         Self::Generic(error.to_string())
-    }
-}
-
-impl From<melior::Error> for JITError {
-    fn from(error: melior::Error) -> Self {
-        Self::Melior(error)
     }
 }
 

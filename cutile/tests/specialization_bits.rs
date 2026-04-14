@@ -74,7 +74,7 @@ fn compile_with_spec_and_options(
     )
     .expect("Failed to create compiler");
     let module_op = compiler.compile().expect("Failed to compile");
-    let result = module_op.as_operation().to_string();
+    let result = module_op.to_string();
     drop(module_op);
     drop(compiler);
     result

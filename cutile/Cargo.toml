@@ -10,6 +10,9 @@ repository.workspace = true
 readme = "../README.md"
 keywords = ["mlir", "cutile", "cuda", "gpu", "async"]
 
+[features]
+default = []
+
 [dependencies]
 syn = { workspace = true }
 proc-macro2 = { workspace = true }
@@ -21,3 +24,4 @@ cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 cutile-compiler = { workspace = true }
 cutile-macro = { workspace = true }
+cutile-ir = { workspace = true }

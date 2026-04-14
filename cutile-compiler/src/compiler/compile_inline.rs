@@ -3,25 +3,57 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Inline compilation: handles inlining of function calls and method calls
-//! within the CUDA Tile compiler.
+//! Inline compilation for compiler2.
+//!
+//! Mechanical port of `compiler/compile_inline.rs` — handles inlining of
+//! function calls and method calls. Only type and IR-emission changes; the
+//! control flow, dispatch logic, and variable binding are identical.
 
 use syn::spanned::Spanned;
 use syn::visit_mut::VisitMut;
 
-use crate::compiler::_function::{CUDATileFunctionCompiler, STACK_GROW_SIZE, STACK_RED_ZONE};
-pub use crate::compiler::_type::*;
-pub use crate::compiler::_value::*;
-use crate::compiler::utils::update_type_meta;
+use super::_function::CUDATileFunctionCompiler;
+use super::_value::{CompilerContext, Mutability, TileRustValue};
+use super::shared_utils::{STACK_GROW_SIZE, STACK_RED_ZONE};
+use super::tile_rust_type::TileRustType;
 use crate::error::JITError;
 use crate::generics::{GenericArgInference, GenericVars};
 use crate::syn_utils::*;
 use crate::types::*;
-use melior::ir;
+
+use cutile_ir::ir::{BlockId, Module};
+
 use proc_macro2::Span;
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::{Expr, ExprCall, ExprMethodCall, ItemFn, Type};
+
+/// Port of `crate::compiler::utils::update_type_meta` for compiler2 value types.
+/// Copies mutable type metadata fields from inner to outer context using a variable name mapping.
+fn update_type_meta(
+    inner_block_vars: &mut CompilerContext,
+    outer_block_vars: &mut CompilerContext,
+    outer2inner_vars: &HashMap<String, String>,
+    _field_name: String,
+) {
+    let outer_keys: Vec<String> = outer_block_vars.var_keys();
+    for outer_key in &outer_keys {
+        let Some(outer_val) = outer_block_vars.vars.get(outer_key) else {
+            continue;
+        };
+        if outer_val.mutability == Mutability::Mutable {
+            if let Some(inner_key) = outer2inner_vars.get(outer_key) {
+                if let Some(inner_val) = inner_block_vars.vars.get(inner_key) {
+                    if inner_val.mutability == Mutability::Mutable {
+                        let mut new_val = outer_val.clone();
+                        new_val.type_meta = inner_val.type_meta.clone();
+                        outer_block_vars.vars.insert(outer_key.clone(), new_val);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Rewrites every span in a syn AST node to a fixed target span.
 ///
@@ -39,24 +71,25 @@ impl VisitMut for CallSiteSpanSetter {
     }
 }
 
-impl<'m, 'c> CUDATileFunctionCompiler<'m> {
+impl<'m> CUDATileFunctionCompiler<'m> {
     pub fn inline_function_call(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         module_name: &String,
         fn_item: &ItemFn,
         call_expr: &ExprCall,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
             let _inline_function_call_debug_str = call_expr.to_token_stream().to_string();
             // println!("enter_function_call: {}", call_expr.to_token_stream().to_string());
 
             // Compile caller arguments.
             let call_arg_values =
-                self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
             // Map function generic params to caller generic args.
             let mut generic_arg_inference = GenericArgInference::new_function(fn_item.sig.clone());
             let call_arg_rust_tys = call_arg_values
@@ -115,7 +148,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             };
             // Add function call const generics as variables.
             for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(&builder, &call_generic_vars, *value)?;
+                let tr_val = self.compile_constant(module, block_id, &call_generic_vars, *value)?;
                 call_variables.vars.insert(key.clone(), tr_val);
             }
             // Add function call CGAs arrays as variables.
@@ -126,7 +159,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let ty = self.compile_type(&arr_ty, &call_generic_vars, &HashMap::new())?;
                 let tr_val = self
                     .compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         &arr_expr,
                         &call_generic_vars,
                         &mut call_variables,
@@ -138,7 +172,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             // println!("inline_function_call {:#?}: generic_args={generic_args:#?} \nexpr_generic_args={expr_generic_args:#?} \ncall_generic_args={call_generic_args:#?}", fn_item.sig.ident.to_string());
             // println!("inline_function_call {:#?}: \n variables={call_variables:#?}", fn_item.sig.ident.to_string());
             let result = self.compile_block(
-                builder,
+                module,
+                block_id,
                 &fn_item.block,
                 &call_generic_vars,
                 &mut call_variables,
@@ -160,7 +195,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let type_params = res.ty.params;
                 // println!("inline call res.ty.params: {:#?}", type_params);
                 let Some(derived_ret_ty) = self.derive_type(
-                    builder,
+                    module,
+                    block_id,
                     &Expr::Call(call_expr.clone()),
                     Some(type_params),
                     generic_vars,
@@ -179,13 +215,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
     }
 
     pub fn inline_method_call(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         method_call_expr: &ExprMethodCall,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
             let _inline_method_call_debug_str = method_call_expr.to_token_stream().to_string();
             // println!("enter_method_call: {}", method_call_expr.to_token_stream().to_string());
@@ -194,7 +231,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             // args have generics from outer scope for both receiver + method call args.
             let mut args = method_call_expr.args.clone();
             args.insert(0, *method_call_expr.receiver.clone());
-            let call_arg_values = self.compile_call_args(builder, &args, generic_vars, ctx)?;
+            let call_arg_values =
+                self.compile_call_args(module, block_id, &args, generic_vars, ctx)?;
             let receiver_rust_ty = &call_arg_values[0].ty.rust_ty;
             let impl_item_fn =
                 self.modules
@@ -273,7 +311,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
             // Add method call const generics as variables.
             for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(&builder, generic_vars, *value)?;
+                let tr_val = self.compile_constant(module, block_id, generic_vars, *value)?;
                 call_variables.vars.insert(key.clone(), tr_val);
             }
             for (key, value) in &call_generic_vars.inst_array {
@@ -283,7 +321,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let ty = self.compile_type(&arr_ty, &call_generic_vars, &HashMap::new())?;
                 let tr_val = self
                     .compile_expression(
-                        builder,
+                        module,
+                        block_id,
                         &arr_expr,
                         &call_generic_vars,
                         &mut call_variables,
@@ -303,7 +342,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             };
             setter.visit_block_mut(&mut compile_block);
             let result = self.compile_block(
-                builder,
+                module,
+                block_id,
                 &compile_block,
                 &call_generic_vars,
                 &mut call_variables,
@@ -327,7 +367,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 // Reverse type inference for resulting rust type in res.
                 let type_params = res.ty.params;
                 let Some(derived_ret_ty) = self.derive_type(
-                    builder,
+                    module,
+                    block_id,
                     &Expr::MethodCall(method_call_expr.clone()),
                     Some(type_params),
                     generic_vars,

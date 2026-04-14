@@ -408,11 +408,7 @@ fn compile_join_tokens() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== JOIN_TOKENS MLIR ===\n{}", module_op_str);
 
         // Verify join_tokens operation appears
@@ -458,11 +454,7 @@ fn compile_ptr_load_store() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!(
             "\n=== LOAD_PTR_TKO / STORE_PTR_TKO MLIR ===\n{}",
             module_op_str
@@ -531,11 +523,7 @@ fn compile_load_ptr_weak() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== LOAD_PTR_WEAK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -570,11 +558,7 @@ fn compile_load_ptr_acquire() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== LOAD_PTR_ACQUIRE MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -609,11 +593,7 @@ fn compile_load_ptr_with_token() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== LOAD_PTR_WITH_TOKEN MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -653,11 +633,7 @@ fn compile_load_ptr_with_mask() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== LOAD_PTR_WITH_MASK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -697,11 +673,7 @@ fn compile_store_ptr_release() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== STORE_PTR_RELEASE MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -736,11 +708,7 @@ fn compile_store_ptr_with_mask() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== STORE_PTR_WITH_MASK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -779,11 +747,7 @@ fn compile_atomic_rmw() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_RMW MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -795,8 +759,8 @@ fn compile_atomic_rmw() -> () {
             "Expected relaxed/device memory semantics on atomic_rmw_tko"
         );
         assert!(
-            module_op_str.contains(", addf,"),
-            "Expected addf mode on atomic_rmw_tko for floating-point operands"
+            module_op_str.contains("mode = 4"),
+            "Expected mode = 4 (addf) on atomic_rmw_tko for floating-point operands"
         );
         assert!(
             module_op_str.contains("int_to_ptr"),
@@ -830,11 +794,7 @@ fn compile_atomic_cas() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_CAS MLIR ===\n{}", module_op_str);
 
         // Verify atomic_cas_tko operation appears
@@ -882,11 +842,7 @@ fn compile_atomic_cas_with_mask() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_CAS WITH MASK MLIR ===\n{}", module_op_str);
 
         // Verify atomic_cas_tko operation appears
@@ -926,11 +882,7 @@ fn compile_atomic_cas_acq_rel_sys() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_CAS ACQ_REL SYS MLIR ===\n{}", module_op_str);
 
         // Verify atomic_cas_tko operation appears
@@ -970,18 +922,17 @@ fn compile_atomic_and() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_AND MLIR ===\n{}", module_op_str);
 
         assert!(
             module_op_str.contains("atomic_rmw_tko"),
             "Expected atomic_rmw_tko operation"
         );
-        assert!(module_op_str.contains(", and,"), "Expected 'and' mode");
+        assert!(
+            module_op_str.contains("mode = 0"),
+            "Expected mode = 0 (and)"
+        );
         assert!(
             module_op_str.contains("relaxed device"),
             "Expected relaxed/device semantics"
@@ -1010,18 +961,17 @@ fn compile_atomic_add() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_ADD MLIR ===\n{}", module_op_str);
 
         assert!(
             module_op_str.contains("atomic_rmw_tko"),
             "Expected atomic_rmw_tko operation"
         );
-        assert!(module_op_str.contains(", add,"), "Expected 'add' mode");
+        assert!(
+            module_op_str.contains("mode = 3"),
+            "Expected mode = 3 (add)"
+        );
         assert!(
             module_op_str.contains("acq_rel sys"),
             "Expected acq_rel/sys semantics"
@@ -1050,18 +1000,17 @@ fn compile_atomic_max() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_MAX MLIR ===\n{}", module_op_str);
 
         assert!(
             module_op_str.contains("atomic_rmw_tko"),
             "Expected atomic_rmw_tko operation"
         );
-        assert!(module_op_str.contains(", max,"), "Expected 'max' mode");
+        assert!(
+            module_op_str.contains("mode = 5"),
+            "Expected mode = 5 (max)"
+        );
         assert!(
             module_op_str.contains("acquire device"),
             "Expected acquire/device semantics"
@@ -1090,18 +1039,17 @@ fn compile_atomic_rmw_with_mask() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_RMW_WITH_MASK MLIR ===\n{}", module_op_str);
 
         assert!(
             module_op_str.contains("atomic_rmw_tko"),
             "Expected atomic_rmw_tko operation"
         );
-        assert!(module_op_str.contains(", add,"), "Expected 'add' mode");
+        assert!(
+            module_op_str.contains("mode = 3"),
+            "Expected mode = 3 (add)"
+        );
         assert!(
             module_op_str.contains("tile<128xi1>"),
             "Expected i1 tile type for mask"
@@ -1130,18 +1078,17 @@ fn compile_atomic_rmw_with_token() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_RMW_WITH_TOKEN MLIR ===\n{}", module_op_str);
 
         assert!(
             module_op_str.contains("atomic_rmw_tko"),
             "Expected atomic_rmw_tko operation"
         );
-        assert!(module_op_str.contains(", xor,"), "Expected 'xor' mode");
+        assert!(
+            module_op_str.contains("mode = 2"),
+            "Expected mode = 2 (xor)"
+        );
         assert!(
             module_op_str.contains("release sys"),
             "Expected release/sys semantics"
@@ -1170,18 +1117,17 @@ fn compile_atomic_xchg() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== ATOMIC_XCHG MLIR ===\n{}", module_op_str);
 
         assert!(
             module_op_str.contains("atomic_rmw_tko"),
             "Expected atomic_rmw_tko operation"
         );
-        assert!(module_op_str.contains(", xchg,"), "Expected 'xchg' mode");
+        assert!(
+            module_op_str.contains("mode = 9"),
+            "Expected mode = 9 (xchg)"
+        );
         assert!(
             module_op_str.contains("acq_rel device"),
             "Expected acq_rel/device semantics"
@@ -1210,11 +1156,7 @@ fn compile_padded_partition_view() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== PADDED_PARTITION_VIEW MLIR ===\n{}", module_op_str);
 
         assert!(

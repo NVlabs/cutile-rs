@@ -11,8 +11,7 @@ use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, CudaFunction};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile::ModuleOperation;
-use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
+use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, get_gpu_name};
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use std::alloc::{alloc, Layout};
 use std::fs;
@@ -198,7 +197,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         let gpu_name = get_gpu_name(device_id);
         // A miss compiles, caches, and returns the compiled function.
         let modules = CUDATileModules::new(module_asts())?;
-        let debug_mlir_path = modules.get_entry_arg_string_by_function_name(
+        let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
             module_name,
             function_name,
             "use_debug_mlir",
@@ -230,49 +229,53 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
             .collect();
         let spec_args_refs: Vec<(&str, &SpecializationBits)> =
             key.spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
+        #[allow(unused_variables)]
         let scalar_hints_refs: Vec<(&str, &DivHint)> = key
             .scalar_hints
             .iter()
             .map(|x| (x.0.as_str(), &x.1))
             .collect();
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            module_name,
-            function_name,
-            &key.function_generics,
-            &stride_args_refs,
-            &spec_args_refs,
-            &scalar_hints_refs,
-            const_grid,
-            gpu_name.clone(),
-            &key.compile_options,
-        )?;
-        let validator: Validator = compiler.get_validator();
-        let validator = Arc::new(validator);
-        let module_op: ModuleOperation = compiler.compile()?;
-        let mlir = module_op.as_operation().to_string();
-        if modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")? {
-            if debug_mlir_path.is_some() {
-                println!("LOADED MLIR: {module_name}::{function_name}\n{}", mlir);
-            } else {
-                println!("COMPILED MLIR: {module_name}::{function_name}\n{}", mlir);
-            }
-        }
-        if let Some(path) = modules.get_entry_arg_string_by_function_name(
-            module_name,
-            function_name,
-            "dump_mlir_dir",
-        )? {
-            write_ir(
+        let (cubin_filename, validator) = {
+            let compiler = CUDATileFunctionCompiler::new(
+                &modules,
                 module_name,
                 function_name,
-                cache_hash_str.as_str(),
-                "mlir",
-                path.as_str(),
-                mlir.as_str(),
-            );
-        }
-        let cubin_filename = compile_module(&module_op, &gpu_name);
+                &key.function_generics,
+                &stride_args_refs,
+                &spec_args_refs,
+                &scalar_hints_refs,
+                const_grid,
+                gpu_name.clone(),
+                &key.compile_options,
+            )?;
+            let validator: Validator = compiler.get_validator();
+            let validator = Arc::new(validator);
+            let tile_module = compiler.compile()?;
+            let mlir = tile_module.to_mlir_text();
+            if modules.get_entry_arg_bool_by_function_name(
+                module_name,
+                function_name,
+                "print_ir",
+            )? {
+                println!("COMPILED IR: {module_name}::{function_name}\n{}", mlir);
+            }
+            if let Some(path) = modules.get_entry_arg_string_by_function_name(
+                module_name,
+                function_name,
+                "dump_mlir_dir",
+            )? {
+                write_ir(
+                    module_name,
+                    function_name,
+                    cache_hash_str.as_str(),
+                    "mlir",
+                    path.as_str(),
+                    mlir.as_str(),
+                );
+            }
+            let cubin_filename = compile_tile_ir_module(&tile_module, &gpu_name);
+            (cubin_filename, validator)
+        };
         // if let Some(path) = compiler.get_entry_arg_string_by_function_name(
         //     module_name,
         //     function_name,

@@ -601,7 +601,7 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
             output_map: ("Tile", &["D"]),
             return_type: ("Tile", &["_", "D"]),
         }),
-        "make_partition_view_mut" => Some(VariadicOpData {
+        "make_partition_view_mut" | "make_partition_view_mut_padded" => Some(VariadicOpData {
             const_length_vars: &["N"],
             cga_map: HashMap::from([("TENSOR_SHAPE", "N"), ("TILE_SHAPE", "N")]),
             input_map: vec![

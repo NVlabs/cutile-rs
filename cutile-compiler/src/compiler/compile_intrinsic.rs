@@ -3,47 +3,84 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Intrinsic compilation: handles macro execution, compiler_op calls, and check_partition_access
-//! within the CUDA Tile compiler.
+//! Intrinsic compilation for compiler2.
+//!
+//! Handles macro execution, compiler_op calls, and check_partition_access
+//! using tile-ir operations.
 
 use syn::spanned::Spanned;
 
-use crate::compiler::_function::CUDATileFunctionCompiler;
-pub use crate::compiler::_type::*;
-pub use crate::compiler::_value::*;
-use crate::compiler::utils::{
-    get_binary_op_from_op_str, get_const_hex, get_signedness_attr, named_str_attr, reduce_op,
-    TileBinaryOp,
-};
+use super::_function::CUDATileFunctionCompiler;
+use super::_type as types;
+use super::_value::{CompilerContext, Mutability, TileRustValue};
+use super::shared_types::Kind;
+use super::shared_utils::{get_binary_op_from_op_str, get_const_hex, TileBinaryOp};
+use super::tile_rust_type::TileRustType;
+use super::utils::{int_attr, rounding_mode_attr, signedness_attr};
 use crate::error::JITError;
 use crate::generics::{GenericVars, TypeInstance};
 use crate::syn_utils::*;
 use crate::types::*;
-use melior::ir::operation::{OperationBuilder, OperationLike};
-use melior::ir::{self, Block, BlockLike, Location, Region, RegionLike, Value};
+
+use cutile_ir::builder::{append_op, build_block, OpBuilder};
+use cutile_ir::bytecode::Opcode;
+use cutile_ir::ir::{Attribute, BlockId, Module, Region, Value};
+
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::{Expr, ExprCall, ExprPath, GenericArgument, ItemFn, Lit, PathArguments};
 
-impl<'m, 'c> CUDATileFunctionCompiler<'m> {
+/// Helper: determine signedness string from a Rust element type name.
+fn get_signedness_str(element_type_str: &str) -> &'static str {
+    match element_type_str {
+        "bool" | "u32" | "u64" => "unsigned",
+        _ => "signed",
+    }
+}
+
+/// Convert a `TileRustType` that the old compiler built into a
+/// `cutile_ir::ir::Type`.  Tries `types::convert_type` first (handles
+/// primitives), then falls back to building a tile type from the
+/// element-type name and shape when the type instance is structured.
+fn tile_ir_type_from_trt(
+    trt: &TileRustType,
+    primitives: &HashMap<(String, String), syn::ItemImpl>,
+) -> Option<cutile_ir::ir::Type> {
+    // Fast path: primitives and simple cases handled by convert_type.
+    if let Some(ty) = types::convert_type(trt) {
+        return Some(ty);
+    }
+    // Structured types: extract element name + shape from the TypeInstance.
+    if let TypeInstance::StructuredType(inst) = &trt.type_instance {
+        // Use the same element-type resolution path the old compiler uses.
+        let elem_name = trt.get_cuda_tile_element_type(primitives).ok()??;
+        let shape: Vec<i64> = inst.shape.iter().map(|&d| d as i64).collect();
+        return types::make_tile_type(&elem_name, &shape);
+    }
+    None
+}
+
+impl<'m> CUDATileFunctionCompiler<'m> {
     /// Compiles a `compiler_op` (intrinsic) function call.
-    /// The compiler implements Rust-related functionality, such as polymorphism, for these functions.
+    /// The compiler implements Rust-related functionality, such as polymorphism,
+    /// for these functions.
     ///
-    /// This handles the large dispatch table for calls to functions annotated with
-    /// `#[cuda_tile::compiler_op(...)]`. These are internal operations like mma, tile ops,
-    /// shape ops, reduce, arithmetic, cast, convert, return_type_meta_field, set_type_meta_field,
-    /// check, and assume.
+    /// This handles the large dispatch table for calls to functions annotated
+    /// with `#[cuda_tile::compiler_op(...)]`. These are internal operations
+    /// like mma, tile ops, shape ops, reduce, arithmetic, cast, convert,
+    /// return_type_meta_field, set_type_meta_field, check, and assume.
     pub fn compile_compiler_op_call(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         call_expr: &ExprCall,
         path_expr: &ExprPath,
         fn_item: &ItemFn,
         compiler_op_attrs: &SingleMetaList,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
         let call_expr_func_str = call_expr.func.to_token_stream().to_string();
         let ident = get_ident_from_path_expr(&path_expr);
         let Some(compiler_op_name) = compiler_op_attrs.parse_string("name") else {
@@ -55,7 +92,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         match compiler_op_name.as_str() {
             "mma" => {
                 let mut operands =
-                    self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 let lhs = operands.remove(0);
                 let rhs = operands.remove(0);
                 let out = operands.remove(0);
@@ -71,7 +108,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 };
-                let Some(out_cuda_tile_ty) = out_type.cuda_tile_ty else {
+                let Some(_out_tile_ir_ty) = &out_type.tile_ir_ty else {
                     return self.jit_error_result(
                         &call_expr.span(),
                         &format!(
@@ -91,9 +128,11 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 };
-                let (op_name, attrs) = if out_cuda_tile_element_type.starts_with("f") {
-                    ("cuda_tile.mmaf", vec![])
-                } else if out_cuda_tile_element_type.starts_with("i") {
+                let out_is_float = super::_type::scalar_from_name(&out_cuda_tile_element_type)
+                    .map_or(false, |s| s.is_float());
+                let (opcode, attrs) = if out_is_float {
+                    (Opcode::MmaF, vec![])
+                } else if !out_is_float {
                     let Some(lhs_elem_ty) = lhs
                         .ty
                         .get_instantiated_rust_element_type(&self.modules.primitives)
@@ -113,10 +152,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         );
                     };
                     (
-                        "cuda_tile.mmai",
+                        Opcode::MmaI,
                         vec![
-                            get_signedness_attr(&self.context, "signedness_lhs", &lhs_elem_ty)?,
-                            get_signedness_attr(&self.context, "signedness_rhs", &rhs_elem_ty)?,
+                            signedness_attr("signedness_lhs", get_signedness_str(&lhs_elem_ty)),
+                            signedness_attr("signedness_rhs", get_signedness_str(&rhs_elem_ty)),
                         ],
                     )
                 } else {
@@ -128,25 +167,21 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 };
-                // TODO (hme): Make it easier to compile basic ops.
-                let op = OperationBuilder::new(op_name, self.function_location())
-                    .add_operands(&[
+                // Get result type from the output value's type in the module.
+                let result_type = module
+                    .value_type(out.value.expect("Expected output to be a value."))
+                    .clone();
+                let (op_id, results) = OpBuilder::new(opcode, self.ir_location(&call_expr.span()))
+                    .operands([
                         lhs.value.expect("Expected LHS to be a value."),
                         rhs.value.expect("Expected RHS to be a value."),
                         out.value.expect("Expected output to be a value."),
                     ])
-                    .add_attributes(attrs.as_slice())
-                    .add_results(&[out_cuda_tile_ty])
-                    .build()
-                    .expect("Failed to compile mma.");
-                let op_ref = builder.append_operation(op.into());
-                if !op_ref.verify() {
-                    return self.jit_error_result(
-                        &call_expr.span(),
-                        &format!("`{}` failed MLIR verification", compiler_op_name),
-                    );
-                }
-                let value: Value = op_ref.result(0).unwrap().into();
+                    .attrs(attrs)
+                    .result(result_type)
+                    .build(module);
+                append_op(module, block_id, op_id);
+                let value: Value = results[0];
                 let tr_value = TileRustValue::new_value_kind_like(value, out_type);
                 Ok(Some(tr_value))
             }
@@ -164,11 +199,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let op = compiler_op_function.split("_").collect::<Vec<&str>>()[0];
                 let tile_binary_op = get_binary_op_from_op_str(op)?;
                 let mut operands =
-                    self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 let lhs = operands.remove(0);
                 let rhs = operands.remove(0);
                 let res = self.compile_binary_op_from_values(
-                    builder,
+                    module,
+                    block_id,
                     lhs,
                     rhs,
                     &tile_binary_op,
@@ -185,7 +221,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     "get_shape_dim" => {
                         let idx = self
                             .compile_expression(
-                                builder,
+                                module,
+                                block_id,
                                 &call_expr.args[1],
                                 generic_vars,
                                 ctx,
@@ -212,7 +249,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         let dim_index = idx_bounds.start;
                         let shape = self
                             .compile_expression(
-                                builder,
+                                module,
+                                block_id,
                                 &call_expr.args[0],
                                 generic_vars,
                                 ctx,
@@ -248,7 +286,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     "permute_array" => {
                         let src_slice = self
                             .compile_expression(
-                                builder,
+                                module,
+                                block_id,
                                 &call_expr.args[0],
                                 generic_vars,
                                 ctx,
@@ -270,7 +309,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         *val_arr = {
                             let dim_map = self
                                 .compile_expression(
-                                    builder,
+                                    module,
+                                    block_id,
                                     &call_expr.args[1],
                                     generic_vars,
                                     ctx,
@@ -329,7 +369,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     );
                 }
                 let operand = self
-                    .compile_expression(builder, &call_expr.args[0], generic_vars, ctx, None)?
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[0],
+                        generic_vars,
+                        ctx,
+                        None,
+                    )?
                     .ok_or_else(|| {
                         self.jit_error(
                             &call_expr.args[0].span(),
@@ -397,110 +444,137 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                             );
                         }
                     };
+
                 let mut shape = structured_type.shape.clone();
                 shape.remove(dim as usize);
-                let rust_result_type = syn::parse2::<syn::Type>(
-                    format!("Tile<{element_type}, {{ {shape:#?} }}>")
-                        .parse()
-                        .unwrap(),
+                // Build tile-ir types directly (no format→parse chain for the IR types).
+                let ir_result_type = types::make_tile_type(
+                    &element_type,
+                    &shape.iter().map(|&s| s as i64).collect::<Vec<_>>(),
                 )
-                .unwrap();
-                let tile_rust_result_type = self
-                    .compile_type(&rust_result_type, generic_vars, &HashMap::new())?
-                    .unwrap();
-                let Some(mlir_result_type) = tile_rust_result_type.cuda_tile_ty else {
-                    return self.jit_error_result(
+                .ok_or_else(|| {
+                    self.jit_error(
                         &call_expr.span(),
-                        "Failed to obtain CUDA tile type for reduce result.",
-                    );
-                };
-                let rust_iter_operand_type = syn::parse2::<syn::Type>(
-                    format!("Tile<{element_type}, {{ [] }}>").parse().unwrap(),
-                )
-                .unwrap();
-                let tile_rust_iter_operand_type = self
-                    .compile_type(&rust_iter_operand_type, generic_vars, &HashMap::new())?
-                    .unwrap();
-                let Some(mlir_operand_type) = tile_rust_iter_operand_type.cuda_tile_ty else {
-                    return self.jit_error_result(
-                        &call_expr.span(),
-                        "Failed to obtain CUDA tile type for reduce operand.",
-                    );
-                };
-                let location = self.function_location();
-                let op = reduce_op(
-                    &self.context,
-                    location,
-                    operand.value.ok_or_else(|| {
+                        "Failed to build tile-ir type for reduce result.",
+                    )
+                })?;
+                let ir_operand_type =
+                    types::make_scalar_tile_type(&element_type).ok_or_else(|| {
                         self.jit_error(
-                            &call_expr.args[0].span(),
-                            "Expect value for reduce op operand.",
+                            &call_expr.span(),
+                            "Failed to build tile-ir type for reduce operand.",
                         )
-                    })?,
-                    dim,
-                    &identity,
-                    element_type,
-                    mlir_result_type,
-                    {
-                        let mut local_vars = CompilerContext::empty();
-                        let local_var_names = vec!["curr", "prev"];
-                        let local_var_types = &[
-                            mlir_operand_type, // operand_i_current_iter
-                            mlir_operand_type, // operand_i_prev_iter
-                        ];
-                        let local_block = Block::new(
-                            &local_var_types
-                                .iter()
-                                .map(|ty| (ty.clone(), location))
-                                .collect::<Vec<_>>(),
-                        );
-                        for i in 0..local_block.argument_count() {
-                            let value: Value = local_block.argument(i).unwrap().into();
-                            let name = local_var_names[i];
-                            let ty = tile_rust_iter_operand_type.clone();
-                            let tile_rust_val = TileRustValue::new_value_kind_like(value, ty);
-                            local_vars.vars.insert(name.to_string(), tile_rust_val);
+                    })?;
+                // TileRustTypes needed for closure body variables and result wrapping.
+                let tile_rust_result_type = match TileRustType::from_tile(&element_type, &shape) {
+                    Some(t) => t,
+                    None => {
+                        let ty = syn::parse_str::<syn::Type>(&format!(
+                            "Tile<{element_type}, {{ {shape:#?} }}>"
+                        ))
+                        .unwrap();
+                        self.compile_type(&ty, generic_vars, &HashMap::new())?
+                            .unwrap()
+                    }
+                };
+                let tile_rust_iter_operand_type =
+                    match TileRustType::from_scalar_tile(&element_type) {
+                        Some(t) => t,
+                        None => {
+                            let ty = syn::parse_str::<syn::Type>(&format!(
+                                "Tile<{element_type}, {{ [] }}>"
+                            ))
+                            .unwrap();
+                            self.compile_type(&ty, generic_vars, &HashMap::new())?
+                                .unwrap()
                         }
-                        // This is a binary op on the Tile type.
-                        let op = self
-                            .compile_block(
-                                &local_block,
-                                &closure_block_op,
-                                generic_vars,
-                                &mut local_vars,
-                                return_type,
-                            )?
-                            .ok_or_else(|| {
-                                self.jit_error(
-                                    &call_expr.span(),
-                                    "failed to compile reduce operation",
-                                )
-                            })?;
-                        let Some(op_value) = op.value else {
-                            return self.jit_error_result(
-                                &call_expr.span(),
-                                "Failed to obtain value from reduce compilation.",
-                            );
-                        };
-                        let _yield_val = local_block.append_operation(
-                            OperationBuilder::new("cuda_tile.yield", location)
-                                .add_operands(&[op_value])
-                                .build()
-                                .unwrap(),
+                    };
+                // Build the reduce body region.
+                let region_id = {
+                    let local_var_types = &[
+                        ir_operand_type.clone(), // operand_i_current_iter
+                        ir_operand_type.clone(), // operand_i_prev_iter
+                    ];
+                    let (local_block_id, local_block_args) = build_block(module, local_var_types);
+                    let local_var_names = vec!["curr", "prev"];
+                    let mut local_vars = CompilerContext::empty();
+                    for i in 0..local_block_args.len() {
+                        let value: Value = local_block_args[i];
+                        let name = local_var_names[i];
+                        let ty = tile_rust_iter_operand_type.clone();
+                        let tile_rust_val = TileRustValue::new_value_kind_like(value, ty);
+                        local_vars.vars.insert(name.to_string(), tile_rust_val);
+                    }
+                    // This is a binary op on the Tile type.
+                    let op = self
+                        .compile_block(
+                            module,
+                            local_block_id,
+                            &closure_block_op,
+                            generic_vars,
+                            &mut local_vars,
+                            return_type,
+                        )?
+                        .ok_or_else(|| {
+                            self.jit_error(&call_expr.span(), "failed to compile reduce operation")
+                        })?;
+                    let Some(op_value) = op.value else {
+                        return self.jit_error_result(
+                            &call_expr.span(),
+                            "Failed to obtain value from reduce compilation.",
                         );
-                        let region = Region::new();
-                        region.append_block(local_block);
-                        region
-                    },
-                );
-                let op_ref = builder.append_operation(op?.into());
-                if !op_ref.verify() {
-                    return self.jit_error_result(
-                        &call_expr.span(),
-                        &format!("Failed to compile {compiler_op_name}"),
-                    );
-                }
-                let value: Value = op_ref.result(0).unwrap().into();
+                    };
+                    let (yield_op_id, _) =
+                        OpBuilder::new(Opcode::Yield, self.ir_location(&call_expr.span()))
+                            .operand(op_value)
+                            .build(module);
+                    append_op(module, local_block_id, yield_op_id);
+                    module.alloc_region(Region {
+                        blocks: vec![local_block_id],
+                    })
+                };
+
+                // Build the reduce op itself.
+                // Build a properly typed identities attribute from the hex identity.
+                let identity_attr = {
+                    let scalar_ty = super::_type::scalar_from_name(&element_type)
+                        .unwrap_or(cutile_ir::ir::ScalarType::I32);
+                    let ir_ty = cutile_ir::ir::Type::Scalar(scalar_ty);
+                    let hex_str = identity.trim_start_matches("0x").trim_start_matches("0X");
+                    let bits = u64::from_str_radix(hex_str, 16).unwrap_or(0);
+                    if scalar_ty.is_float() {
+                        let float_val = match element_type.as_str() {
+                            "f32" => f32::from_bits(bits as u32) as f64,
+                            "f64" => f64::from_bits(bits),
+                            "f16" => half::f16::from_bits(bits as u16).to_f64(),
+                            "bf16" => half::bf16::from_bits(bits as u16).to_f64(),
+                            _ => bits as f64,
+                        };
+                        Attribute::Float(float_val, ir_ty)
+                    } else {
+                        Attribute::Integer(bits as i64, ir_ty)
+                    }
+                };
+                let (op_id, results) =
+                    OpBuilder::new(Opcode::Reduce, self.ir_location(&call_expr.span()))
+                        .attrs([
+                            int_attr("dim", dim as i64),
+                            (
+                                "identities".to_string(),
+                                Attribute::Array(vec![identity_attr]),
+                            ),
+                        ])
+                        .operand(operand.value.ok_or_else(|| {
+                            self.jit_error(
+                                &call_expr.args[0].span(),
+                                "Expect value for reduce op operand.",
+                            )
+                        })?)
+                        .result(ir_result_type)
+                        .region(region_id)
+                        .build(module);
+                append_op(module, block_id, op_id);
+                let value: Value = results[0];
                 let tr_value = TileRustValue::new_value_kind_like(value, tile_rust_result_type);
                 Ok(Some(tr_value))
             }
@@ -510,12 +584,18 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     2 => {
                         let binary_op = get_binary_op_from_op_str(&ident.to_string())?;
                         // Binary arithmetic operation.
-                        let mut args =
-                            self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                        let mut args = self.compile_call_args(
+                            module,
+                            block_id,
+                            &call_expr.args,
+                            generic_vars,
+                            ctx,
+                        )?;
                         let lhs = args.remove(0);
                         let rhs = args.remove(0);
                         Ok(Some(self.compile_binary_op_from_values(
-                            builder,
+                            module,
+                            block_id,
                             lhs,
                             rhs,
                             &binary_op,
@@ -537,7 +617,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let compiler_op_function = ident.to_string();
                 // For casts, we require the rust types compiles to the same value.
                 // We therefore only need to update the rust type.
-                let args = self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                let args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 if args.len() != 1 {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -549,10 +630,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 match compiler_op_function.as_str() {
                     "scalar_to_tile" => {
                         let element_type = get_rust_element_type_primitive(&old_type);
-                        new_value.ty.rust_ty = syn::parse2::<syn::Type>(
-                            format!("Tile<{element_type}, {{[]}}>").parse().unwrap(),
-                        )
-                        .unwrap();
+                        if let Some(t) = TileRustType::from_scalar_tile(&element_type) {
+                            new_value.ty = t;
+                        } else {
+                            new_value.ty.rust_ty = syn::parse_str::<syn::Type>(&format!(
+                                "Tile<{element_type}, {{[]}}>"
+                            ))
+                            .unwrap();
+                        }
                     }
                     "tile_to_scalar" => {
                         let Some(element_type) =
@@ -575,12 +660,14 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     }
                     "pointer_to_tile" => {
                         let element_type = get_rust_element_type_primitive(&old_type);
-                        new_value.ty.rust_ty = syn::parse2::<syn::Type>(
-                            format!("PointerTile<* mut {element_type}, {{[]}}>")
-                                .parse()
-                                .unwrap(),
-                        )
-                        .unwrap();
+                        if let Some(t) = TileRustType::from_scalar_ptr(&element_type) {
+                            new_value.ty = t;
+                        } else {
+                            new_value.ty.rust_ty = syn::parse_str::<syn::Type>(&format!(
+                                "PointerTile<* mut {element_type}, {{[]}}>"
+                            ))
+                            .unwrap();
+                        }
                     }
                     "tile_to_pointer" => {
                         let Some(element_type) =
@@ -615,15 +702,20 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let compiler_op_function = ident.to_string();
                 match compiler_op_function.as_str() {
                     "convert_scalar" | "convert_tile" => {
-                        let mut args =
-                            self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                        let mut args = self.compile_call_args(
+                            module,
+                            block_id,
+                            &call_expr.args,
+                            generic_vars,
+                            ctx,
+                        )?;
                         if args.len() != 1 {
                             return self.jit_error_result(
                                 &call_expr.span(),
                                 &format!("convert expects 1 argument, got {}", args.len()),
                             );
                         }
-                        let arg = args.pop().unwrap();
+                        let mut arg = args.pop().unwrap();
                         let new_type_compiled = if return_type.is_some() {
                             return_type.unwrap()
                         } else {
@@ -689,15 +781,26 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                 )
                             })?;
                         if old_element_type_str == new_element_type_str {
-                            // Identity conversion (e.g. f32→f32 when E=f32).
-                            // Update the type to match the declared return type so
-                            // subsequent ops see the resolved type (Tile<f32> not Tile<E>).
-                            let mut result = arg;
-                            result.ty = new_type_compiled;
-                            return Ok(Some(result));
+                            // Identity conversion — update to the resolved type.
+                            arg.ty = new_type_compiled;
+                            return Ok(Some(arg));
                         }
+                        let output_type =
+                            tile_ir_type_from_trt(&new_type_compiled, &self.modules.primitives)
+                                .ok_or_else(|| {
+                                    self.jit_error(
+                                        &call_expr.span(),
+                                        &format!(
+                                            "Failed to obtain tile-ir type for convert {}",
+                                            call_expr.to_token_stream().to_string()
+                                        ),
+                                    )
+                                })?;
                         // These aren't required for all ops.
-                        let op_builder = match (old_element_type_str.as_str(), new_element_type_str.as_str()) {
+                        let (op_id, results) = match (
+                            old_element_type_str.as_str(),
+                            new_element_type_str.as_str(),
+                        ) {
                             // TODO (hme): There are some more like this that make sense, but no time to implement.
                             ("i64", "i32") => {
                                 // cuda_tile.trunci %from %overflow
@@ -707,7 +810,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         "Conversion {old_element_type_str:#?} -> {new_element_type_str:#?} not yet implemented"
                                     ),
                                 );
-                            },
+                            }
                             ("i32", "i64") => {
                                 // cuda_tile.exti %from %signedness
                                 return self.jit_error_result(
@@ -716,85 +819,130 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                                         "Conversion {old_element_type_str:#?} -> {new_element_type_str:#?} not yet implemented"
                                     ),
                                 );
-                            },
-                            ("i32", "bf16") | ("u32", "bf16") | ("i64", "bf16") | ("u64", "bf16") |
-                            ("i32", "f16") | ("u32", "f16") | ("i64", "f16") | ("u64", "f16") |
-                            ("i32", "f32") | ("u32", "f32") | ("i64", "f32") | ("u64", "f32") |
-                            ("i32", "f64") | ("u32", "f64") | ("i64", "f64") | ("u64", "f64") => {
-                                let signedness_attr = get_signedness_attr(&self.context, "signedness", &old_element_type_str)?;
-                                // This is apparently all that is supported by this op.
-                                let rounding_mode_attr =self.parse_named_attr("rounding_mode", "#cuda_tile.rounding<nearest_even>")?;
-                                let Some(input_value) = arg.value else {
-                                    return self.jit_error_result(&call_expr.span(), &format!("Failed to compile arg {}", call_expr.args.to_token_stream().to_string()));
-                                };
-                                let Some(output_value) = new_type_compiled.cuda_tile_ty else {
-                                    return self.jit_error_result(&call_expr.span(), &format!("Failed to obtain CUDA tile type for convert {}", call_expr.to_token_stream().to_string()));
-                                };
-                                OperationBuilder::new("cuda_tile.itof", self.function_location())
-                                    .add_attributes(&[signedness_attr, rounding_mode_attr])
-                                    .add_operands(&[input_value])
-                                    .add_results(&[output_value])
-                            },
-                            ("bf16", "i32") | ("bf16", "u32") | ("bf16", "i64") | ("bf16", "u64") |
-                            ("f16", "i32") | ("f16", "u32") | ("f16", "i64") | ("f16", "u64") |
-                            ("f32", "i32") | ("f32", "u32") | ("f32", "i64") | ("f32", "u64") |
-                            ("f64", "i32") | ("f64", "u32") | ("f64", "i64") | ("f64", "u64") => {
-                                let signedness_attr = get_signedness_attr(&self.context, "signedness", &new_element_type_str)?;
-                                let Some(input_value) = arg.value else {
-                                    return self.jit_error_result(&call_expr.span(), &format!("Failed to compile arg {}", call_expr.args.to_token_stream().to_string()));
-                                };
-                                let Some(output_value) = new_type_compiled.cuda_tile_ty else {
-                                    return self.jit_error_result(&call_expr.span(), &format!("Failed to obtain CUDA tile type for convert {}", call_expr.to_token_stream().to_string()));
-                                };
-                                let rounding_mode_attr =self.parse_named_attr("rounding_mode", "#cuda_tile.rounding<nearest_int_to_zero>")?;
-                                OperationBuilder::new("cuda_tile.ftoi", self.function_location())
-                                    .add_attributes(&[signedness_attr, rounding_mode_attr])
-                                    .add_operands(&[input_value])
-                                    .add_results(&[output_value])
-                            },
-                            ("bf16", "f16") | ("bf16", "f32") | ("bf16", "f64") |
-                            ("f16", "bf16") | ("f16", "f32") | ("f16", "f64") |
-                            ("f32", "bf16") | ("f32", "f16") | ("f32", "f64") |
-                            ("f64", "bf16") | ("f64", "f16") | ("f64", "f32") |
-                            ("f32", "tf32") | ("tf32", "f32")  => {
-                                let rounding_mode_attr =self.parse_named_attr("rounding_mode", "#cuda_tile.rounding<nearest_even>")?;
-                                let Some(input_value) = arg.value else {
-                                    return self.jit_error_result(&call_expr.span(), &format!("Failed to compile arg {}", call_expr.args.to_token_stream().to_string()));
-                                };
-                                let Some(output_value) = new_type_compiled.cuda_tile_ty else {
-                                    return self.jit_error_result(&call_expr.span(), &format!("Failed to obtain CUDA tile type for convert {}", call_expr.to_token_stream().to_string()));
-                                };
-                                OperationBuilder::new("cuda_tile.ftof", self.function_location())
-                                    .add_attributes(&[rounding_mode_attr])
-                                    .add_operands(&[input_value])
-                                    .add_results(&[output_value])
                             }
-                            _ => return self.jit_error_result(
-                                &call_expr.span(),
-                                &format!("Unsupported conversion {old_element_type_str:#?} -> {new_element_type_str:#?}"),
-                            )
+                            ("i32", "bf16")
+                            | ("u32", "bf16")
+                            | ("i64", "bf16")
+                            | ("u64", "bf16")
+                            | ("i32", "f16")
+                            | ("u32", "f16")
+                            | ("i64", "f16")
+                            | ("u64", "f16")
+                            | ("i32", "f32")
+                            | ("u32", "f32")
+                            | ("i64", "f32")
+                            | ("u64", "f32")
+                            | ("i32", "f64")
+                            | ("u32", "f64")
+                            | ("i64", "f64")
+                            | ("u64", "f64") => {
+                                let signedness = signedness_attr(
+                                    "signedness",
+                                    get_signedness_str(&old_element_type_str),
+                                );
+                                let rounding = rounding_mode_attr("nearest_even");
+                                let Some(input_value) = arg.value else {
+                                    return self.jit_error_result(
+                                        &call_expr.span(),
+                                        &format!(
+                                            "Failed to compile arg {}",
+                                            call_expr
+                                                .args
+                                                .to_token_stream()
+                                                .to_string()
+                                        ),
+                                    );
+                                };
+                                OpBuilder::new(Opcode::IToF, self.ir_location(&call_expr.span()))
+                                    .attrs([signedness, rounding])
+                                    .operand(input_value)
+                                    .result(output_type)
+                                    .build(module)
+                            }
+                            ("bf16", "i32")
+                            | ("bf16", "u32")
+                            | ("bf16", "i64")
+                            | ("bf16", "u64")
+                            | ("f16", "i32")
+                            | ("f16", "u32")
+                            | ("f16", "i64")
+                            | ("f16", "u64")
+                            | ("f32", "i32")
+                            | ("f32", "u32")
+                            | ("f32", "i64")
+                            | ("f32", "u64")
+                            | ("f64", "i32")
+                            | ("f64", "u32")
+                            | ("f64", "i64")
+                            | ("f64", "u64") => {
+                                let signedness = signedness_attr(
+                                    "signedness",
+                                    get_signedness_str(&new_element_type_str),
+                                );
+                                let Some(input_value) = arg.value else {
+                                    return self.jit_error_result(
+                                        &call_expr.span(),
+                                        &format!(
+                                            "Failed to compile arg {}",
+                                            call_expr
+                                                .args
+                                                .to_token_stream()
+                                                .to_string()
+                                        ),
+                                    );
+                                };
+                                let rounding =
+                                    rounding_mode_attr("nearest_int_to_zero");
+                                OpBuilder::new(Opcode::FToI, self.ir_location(&call_expr.span()))
+                                    .attrs([signedness, rounding])
+                                    .operand(input_value)
+                                    .result(output_type)
+                                    .build(module)
+                            }
+                            ("bf16", "f16")
+                            | ("bf16", "f32")
+                            | ("bf16", "f64")
+                            | ("f16", "bf16")
+                            | ("f16", "f32")
+                            | ("f16", "f64")
+                            | ("f32", "bf16")
+                            | ("f32", "f16")
+                            | ("f32", "f64")
+                            | ("f64", "bf16")
+                            | ("f64", "f16")
+                            | ("f64", "f32")
+                            | ("f32", "tf32")
+                            | ("tf32", "f32") => {
+                                let rounding = rounding_mode_attr("nearest_even");
+                                let Some(input_value) = arg.value else {
+                                    return self.jit_error_result(
+                                        &call_expr.span(),
+                                        &format!(
+                                            "Failed to compile arg {}",
+                                            call_expr
+                                                .args
+                                                .to_token_stream()
+                                                .to_string()
+                                        ),
+                                    );
+                                };
+                                OpBuilder::new(Opcode::FToF, self.ir_location(&call_expr.span()))
+                                    .attr("rounding_mode", rounding.1)
+                                    .operand(input_value)
+                                    .result(output_type)
+                                    .build(module)
+                            }
+                            _ => {
+                                return self.jit_error_result(
+                                    &call_expr.span(),
+                                    &format!(
+                                        "Unsupported conversion {old_element_type_str:#?} -> {new_element_type_str:#?}"
+                                    ),
+                                )
+                            }
                         };
-                        let op = op_builder.build();
-                        if op.is_err() {
-                            return self.jit_error_result(
-                                &call_expr.span(),
-                                &format!(
-                                    "Failed to compile {}",
-                                    call_expr.to_token_stream().to_string()
-                                ),
-                            );
-                        }
-                        let op_ref = builder.append_operation(op.unwrap().into());
-                        if !op_ref.verify() {
-                            return self.jit_error_result(
-                                &call_expr.span(),
-                                &format!(
-                                    "Failed to verify {}",
-                                    call_expr.to_token_stream().to_string()
-                                ),
-                            );
-                        }
-                        let value: Value = op_ref.result(0).unwrap().into();
+                        append_op(module, block_id, op_id);
+                        let value: Value = results[0];
                         Ok(Some(TileRustValue::new_value_kind_like(
                             value,
                             new_type_compiled,
@@ -816,7 +964,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                         &format!("Unexpected return_type_meta_field {compiler_op_attrs:#?}"),
                     );
                 };
-                let args = self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                let args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 if args.len() != 1 {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -830,7 +979,9 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let Some(ref type_meta) = value.type_meta else {
                     return self.jit_error_result(
                         &call_expr.span(),
-                        &format!("Undefined type_meta for value {value:#?} \n compiler_op_attrs = {compiler_op_attrs:#?}"),
+                        &format!(
+                            "Undefined type_meta for value {value:#?} \n compiler_op_attrs = {compiler_op_attrs:#?}"
+                        ),
                     );
                 };
                 let Some(return_value) = type_meta.fields.get(&type_meta_field) else {
@@ -880,13 +1031,15 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     );
                 }
                 let mut args =
-                    self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 let type_meta_value = args[1].clone();
                 let type_value = &mut args[0];
                 let Some(ref mut type_meta) = type_value.type_meta else {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
-                        &format!("Undefined type_meta for value {type_value:#?} \n compiler_op_attrs = {compiler_op_attrs:#?}"),
+                        &format!(
+                            "Undefined type_meta for value {type_value:#?} \n compiler_op_attrs = {compiler_op_attrs:#?}"
+                        ),
                     );
                 };
                 let old_val = type_meta
@@ -921,7 +1074,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 let compiler_op_function = ident.to_string();
                 match compiler_op_function.as_str() {
                     "check_partition_access" => Ok(self.compile_check_partition_access(
-                        builder,
+                        module,
+                        block_id,
                         call_expr,
                         &call_expr_func_str,
                         generic_vars,
@@ -937,7 +1091,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
             "assume" => {
                 let tr_value =
-                    self.compile_assumption_call(call_expr, builder, generic_vars, ctx)?;
+                    self.compile_assumption_call(call_expr, module, block_id, generic_vars, ctx)?;
                 Ok(Some(tr_value))
             }
             _ => {
@@ -951,14 +1105,16 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
 
     /// Compiles a check_partition_access compiler_op call.
     fn compile_check_partition_access(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         call_expr: &ExprCall,
         call_expr_func_str: &str,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
-        let mut args = self.compile_call_args(builder, &call_expr.args, generic_vars, ctx)?;
+        ctx: &mut CompilerContext,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        let mut args =
+            self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
         let partition_value = args.remove(0);
         let index_value = args.remove(0);
         if partition_value.kind != Kind::StructuredType {
@@ -1004,52 +1160,69 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let static_tile = tile_param_inst.shape.clone(); // This is const.
 
         // Get static shape values.
-        let TypeParam::TensorView(partition_tensor) = &partition_value.ty.params[1] else {
-            return self.jit_error_result(
-                &call_expr.span(),
-                "Tensor type param should be a TensorView.",
-            );
-        };
+        // Search for the TensorView param by variant (not by index), since
+        // optional params like padding_value may shift the positions.
+        let partition_tensor = partition_value
+            .ty
+            .params
+            .iter()
+            .find_map(|p| match p {
+                TypeParam::TensorView(tv) => Some(tv),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.span(),
+                    &format!(
+                        "partition type is missing a TensorView param; found: {:?}",
+                        partition_value
+                            .ty
+                            .params
+                            .iter()
+                            .map(|p| p.name().unwrap_or_else(|| "?".to_string()))
+                            .collect::<Vec<_>>()
+                    ),
+                )
+            })?;
         let Some(TypeInstance::StructuredType(tensor_param_inst)) =
             partition_tensor.type_instance.as_ref()
         else {
             return self.jit_error_result(
                 &call_expr.span(),
                 &format!(
-                    "expected a structured type instance for tile parameter, got {:?}",
+                    "expected a structured type instance for tensor_view parameter, got {:?}",
                     &partition_tensor.type_instance
                 ),
             );
         };
         let static_shape = tensor_param_inst.shape.clone(); // This *may* be const. Any field that is not const is -1.
 
-        // Get optional dim_map.
-        // If there's a dim map, the number of type parameters is 3.
-        let dim_map = if partition_value.ty.params.len() == 3 {
-            let TypeParam::DimMap(dim_map) = &partition_value.ty.params[2] else {
-                return self.jit_error_result(
-                    &call_expr.span(),
-                    "the type parameter must be a DimMap type",
-                );
-            };
-            let Some(TypeInstance::StructuredType(dim_map_param_inst)) =
-                dim_map.type_instance.as_ref()
-            else {
-                return self.jit_error_result(
-                    &call_expr.span(),
-                    &format!(
-                        "expected a structured type instance for dimension map, got `{}`",
-                        dim_map.rust_ty.to_token_stream().to_string()
-                    ),
-                );
-            };
-            dim_map_param_inst.shape.clone()
-        } else {
-            let mut r = vec![];
-            for i in 0..static_shape.len() {
-                r.push(i as i32);
+        // Get optional dim_map by searching for the DimMap variant.
+        let dim_map = match partition_value.ty.params.iter().find_map(|p| match p {
+            TypeParam::DimMap(dm) => Some(dm),
+            _ => None,
+        }) {
+            Some(dim_map) => {
+                let Some(TypeInstance::StructuredType(dim_map_param_inst)) =
+                    dim_map.type_instance.as_ref()
+                else {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "expected a structured type instance for dimension map, got `{}`",
+                            dim_map.rust_ty.to_token_stream().to_string()
+                        ),
+                    );
+                };
+                dim_map_param_inst.shape.clone()
             }
-            r
+            None => {
+                let mut r = vec![];
+                for i in 0..static_shape.len() {
+                    r.push(i as i32);
+                }
+                r
+            }
         };
 
         // Get dynamic shape values.
@@ -1094,8 +1267,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             );
         }
         for i in 0..len {
-            // Because the indices may be remapped via a permutation of the tile dimensions,
-            // we need to remap the tensor's shape as well.
+            // Because the indices may be remapped via a permutation of the tile
+            // dimensions, we need to remap the tensor's shape as well.
             let remapped_i = dim_map[i] as usize;
             let static_tile_dim = static_tile[i];
             let static_shape_dim = static_shape[remapped_i];
@@ -1103,7 +1276,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             let index_value = indexes.remove(0);
             if index_value.bounds.is_some() && is_static_shape_dim {
                 // We can do a static bounds check.
-                // Use ceil division to allow partial tiles (non-divisible shapes).
                 let bounds = index_value.bounds.unwrap();
                 let num_partitions =
                     (static_shape_dim as i64 + static_tile_dim as i64 - 1) / static_tile_dim as i64;
@@ -1118,32 +1290,50 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 }
                 return Ok(None);
             }
-            // In the rest of the cases, we need to generate a bounds check.
-            let tile_dim_value = self.compile_constant(builder, generic_vars, static_tile_dim)?;
+            // In the rest of the cases, we need to generate a dynamic bounds check.
+            let tile_dim_value =
+                self.compile_constant(module, block_id, generic_vars, static_tile_dim)?;
             let index_value = if let Some(bounds) = index_value.bounds {
                 let index_upper_bound = bounds.end;
-                self.compile_constant(builder, generic_vars, index_upper_bound as i32)?
+                self.compile_constant(module, block_id, generic_vars, index_upper_bound as i32)?
             } else {
                 index_value
             };
             let shape_dim_value = if is_static_shape_dim {
-                self.compile_constant(builder, generic_vars, static_shape_dim)?
+                self.compile_constant(module, block_id, generic_vars, static_shape_dim)?
             } else {
                 dynamic_shape[remapped_i].clone()
             };
-            // shape_dim / tile_dim uses ceil_div:
-            let div_result_value = self.compile_binary_op_from_values(
-                builder,
+            // Compute ceil_div(shape, tile) as (shape + tile - 1) / tile
+            // using floor division. This avoids positive_inf rounding which
+            // can be misoptimized when the dividend carries assume hints.
+            let tile_minus_one =
+                self.compile_constant(module, block_id, generic_vars, static_tile_dim - 1)?;
+            let shape_plus_tile_minus_one = self.compile_binary_op_from_values(
+                module,
+                block_id,
                 shape_dim_value.clone(),
+                tile_minus_one,
+                &TileBinaryOp::Add,
+                generic_vars,
+                ctx,
+                None,
+                &call_expr.span(),
+            )?;
+            let div_result_value = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                shape_plus_tile_minus_one,
                 tile_dim_value,
-                &TileBinaryOp::CeilDiv,
+                &TileBinaryOp::Div,
                 generic_vars,
                 ctx,
                 None,
                 &call_expr.span(),
             )?;
             let ineq_result_value = self.compile_binary_op_from_values(
-                builder,
+                module,
+                block_id,
                 index_value,
                 div_result_value,
                 &TileBinaryOp::Lt,
@@ -1158,20 +1348,20 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     "failed to compile a binary expression operand",
                 )
             })?;
+            let shape_desc = if is_static_shape_dim {
+                format!("{}", static_shape_dim)
+            } else {
+                "?".to_string()
+            };
             let message = format!(
-                "Detected out of bounds access during {}: index pos {}, tile dim={}",
-                call_expr.to_token_stream().to_string(),
-                i,
-                static_tile_dim
+                "partition access out of bounds: dim {i}, block index >= ceil({shape_desc}/{static_tile_dim})"
             );
-            let assert_builder =
-                OperationBuilder::new("cuda_tile.assert", Location::unknown(&self.context));
-            let assert_op = assert_builder
-                .add_attributes(&[named_str_attr(&self.context, "message", &message)])
-                .add_operands(&[result_value])
-                .build()
-                .unwrap();
-            builder.append_operation(assert_op);
+            let (assert_op_id, _) =
+                OpBuilder::new(Opcode::Assert, self.ir_location(&call_expr.span()))
+                    .attr("message", cutile_ir::ir::Attribute::String(message))
+                    .operand(result_value)
+                    .build(module);
+            append_op(module, block_id, assert_op_id);
         }
         return Ok(None);
     }

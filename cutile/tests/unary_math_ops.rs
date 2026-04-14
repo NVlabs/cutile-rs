@@ -197,11 +197,7 @@ fn compile_unary_math_ops() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== UNARY MATH OPS MLIR ===\n{}", module_op_str);
 
         let expected_ops = [
@@ -242,11 +238,7 @@ fn compile_integer_unary_ops() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== INTEGER UNARY OPS MLIR ===\n{}", module_op_str);
 
         let expected_ops = ["absi", "negi"];
@@ -284,11 +276,7 @@ fn compile_sqrt() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== SQRT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -319,11 +307,7 @@ fn compile_fma() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== FMA MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -354,11 +338,7 @@ fn compile_pow() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== POW MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -389,11 +369,7 @@ fn compile_exp2_ftz() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== EXP2 FTZ MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -426,11 +402,7 @@ fn compile_maxf_ftz() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MAXF FTZ MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -463,11 +435,7 @@ fn compile_minf_ftz() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MINF FTZ MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -500,11 +468,7 @@ fn assert_ftz_in_mlir(kernel_name: &'static str, expected_op: &'static str) {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== {kernel_name} MLIR ===\n{module_op_str}");
 
         assert!(
@@ -572,11 +536,7 @@ fn compile_unary_math_ops_bf16() -> () {
             &CompileOptions::default(),
         )
         .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed.")
-            .as_operation()
-            .to_string();
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== BF16 UNARY MATH OPS MLIR ===\n{}", module_op_str);
 
         for op in ["absf", "negf", "exp", "floor"] {

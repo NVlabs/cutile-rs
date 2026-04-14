@@ -3,39 +3,78 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Binary operation compilation: handles `compile_binary_op` and `compile_binary_op_from_values`
-//! within the CUDA Tile compiler. This module covers the translation of binary arithmetic,
-//! comparison, and bitwise operations into MLIR operations.
+//! Binary operation compilation for compiler2.
+//!
+//! Mechanical port of `compiler/compile_binary_op.rs` — translates binary
+//! arithmetic, comparison, and bitwise operations into tile-ir operations.
+//! Only type and IR-emission changes; the dispatch logic and bounds
+//! propagation are identical.
 
 use quote::ToTokens;
 use syn::spanned::Spanned;
 
-use crate::bounds::bounds_from_bop;
-use crate::compiler::_function::CUDATileFunctionCompiler;
-pub use crate::compiler::_type::*;
-pub use crate::compiler::_value::*;
-use crate::compiler::utils::{
-    cuda_tile_tile_ty_from_type_instance, get_cmp_predicate_attr, get_tile_bop_from_rust_bop,
-    TileBinaryOp,
+use super::_function::CUDATileFunctionCompiler;
+use super::_value::{CompilerContext, TileRustValue};
+use super::shared_types::Kind;
+use super::shared_utils::{get_tile_bop_from_rust_bop, TileBinaryOp};
+use super::tile_rust_type::TileRustType;
+use super::utils::{
+    cmp_ordering_attr, cmp_pred_attr, flag_attr, rounding_mode_attr, signedness_attr, NamedAttr,
 };
+use crate::bounds::bounds_from_bop;
 use crate::error::JITError;
 use crate::generics::GenericVars;
-use melior::ir::operation::{OperationBuilder, OperationLike};
-use melior::ir::{self, BlockLike, Value};
+
+use cutile_ir::builder::{append_op, OpBuilder};
+use cutile_ir::bytecode::Opcode;
+use cutile_ir::ir::{Attribute, BlockId, Module, ScalarType, TileElementType, TileType, Type};
+
 use std::collections::HashMap;
 use syn::ExprBinary;
 
-impl<'m, 'c> CUDATileFunctionCompiler<'m> {
+/// Port of `get_cmp_predicate_attr` from `compiler/utils.rs`.
+///
+/// Returns a comparison-predicate named attribute for comparison binary ops,
+/// or `None` for non-comparison ops.
+fn get_cmp_predicate_attr_ir(expr: &TileBinaryOp) -> Result<Option<NamedAttr>, JITError> {
+    match expr {
+        TileBinaryOp::Eq => Ok(Some(cmp_pred_attr("equal"))),
+        TileBinaryOp::Ne => Ok(Some(cmp_pred_attr("not_equal"))),
+        TileBinaryOp::Lt => Ok(Some(cmp_pred_attr("less_than"))),
+        TileBinaryOp::Le => Ok(Some(cmp_pred_attr("less_than_or_equal"))),
+        TileBinaryOp::Gt => Ok(Some(cmp_pred_attr("greater_than"))),
+        TileBinaryOp::Ge => Ok(Some(cmp_pred_attr("greater_than_or_equal"))),
+        _ => Ok(None),
+    }
+}
+
+/// Construct a tile-ir bool (i1) result type that mirrors the shape of `lhs_type`.
+///
+/// If `lhs_type` is a `Tile`, the result is a tile with the same shape but `I1`
+/// element type. If it's a scalar, the result is `Scalar(I1)`.
+fn make_bool_result_type(lhs_type: &Type) -> Type {
+    match lhs_type {
+        Type::Tile(tile_ty) => Type::Tile(TileType {
+            shape: tile_ty.shape.clone(),
+            element_type: TileElementType::Scalar(ScalarType::I1),
+        }),
+        _ => Type::Scalar(ScalarType::I1),
+    }
+}
+
+impl<'m> CUDATileFunctionCompiler<'m> {
     pub fn compile_binary_op(
-        &'c self,
-        builder: &'c ir::Block<'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
         bin_expr: &ExprBinary,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
-    ) -> Result<Option<TileRustValue<'c, 'c>>, JITError> {
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
         let lhs = self.compile_expression(
-            builder,
+            module,
+            block_id,
             &bin_expr.left,
             generic_vars,
             ctx,
@@ -49,7 +88,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
         let lhs = lhs.unwrap();
         let rhs = self.compile_expression(
-            builder,
+            module,
+            block_id,
             &bin_expr.right,
             generic_vars,
             ctx,
@@ -63,7 +103,8 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         }
         let rhs = rhs.unwrap();
         Ok(Some(self.compile_binary_op_from_values(
-            builder,
+            module,
+            block_id,
             lhs,
             rhs,
             &get_tile_bop_from_rust_bop(&bin_expr.op)?,
@@ -75,16 +116,17 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
     }
 
     pub fn compile_binary_op_from_values(
-        &'c self,
-        builder: &'c ir::Block<'c>,
-        lhs: TileRustValue<'c, 'c>,
-        rhs: TileRustValue<'c, 'c>,
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        lhs: TileRustValue,
+        rhs: TileRustValue,
         tile_rust_arithmetic_op: &TileBinaryOp,
         generic_vars: &GenericVars,
-        _ctx: &mut CompilerContext<'c, 'c>,
-        return_type: Option<TileRustType<'c>>,
+        _ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
         span: &proc_macro2::Span,
-    ) -> Result<TileRustValue<'c, 'c>, JITError> {
+    ) -> Result<TileRustValue, JITError> {
         if lhs.ty.rust_ty != rhs.ty.rust_ty {
             return self.jit_error_result(
                 span,
@@ -126,7 +168,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 ),
             );
         };
-        let Some(operand_cuda_tile_ty) = operand_type.cuda_tile_ty else {
+        let Some(_operand_tile_ir_ty) = &operand_type.tile_ir_ty else {
             return self.jit_error_result(
                 span,
                 &format!(
@@ -136,6 +178,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 ),
             );
         };
+        // For tile-ir, the result type for same-type operations comes from the
+        // lhs value's type in the module (preserves tile shape).
+        let operand_result_ty = module.value_type(lhs_value).clone();
+
         let Some(operand_cuda_tile_element_type) =
             operand_type.get_cuda_tile_element_type(&self.modules.primitives)?
         else {
@@ -152,98 +198,103 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             "bool" | "u32" | "u64" => "unsigned",
             _ => "signed",
         };
-        let signedness_attr = self.parse_named_attr(
-            "signedness",
-            format!("#cuda_tile.signedness<{signedness_str}>").as_str(),
-        )?;
-
-        let op_builder = match operand_cuda_tile_element_type.as_ref() {
+        let sign_attr = signedness_attr("signedness", signedness_str);
+        // Build the operation (allocates in module) but do NOT append to the
+        // block yet. The old compiler defers `.build()` + `append_operation`
+        // until after the exact-bounds early-return check, so we replicate that:
+        // build now, check bounds, append only if we actually need the op.
+        let (op_id, results) = match operand_cuda_tile_element_type.as_ref() {
             "i1" | "i4" | "i8" | "i32" | "i64" => {
                 // TODO (hme): Add i4, i8, i16 support, as needed.
                 if let Some(comparison_predicate) =
-                    get_cmp_predicate_attr(&self.context, tile_rust_arithmetic_op)?
+                    get_cmp_predicate_attr_ir(tile_rust_arithmetic_op)?
                 {
                     is_cmp = true;
-                    let cuda_tile_bool_ty = cuda_tile_tile_ty_from_type_instance(
-                        &self.context,
-                        &lhs.ty.type_instance,
-                        &self.modules.primitives,
-                        Some("i1"),
-                    )?;
-                    OperationBuilder::new("cuda_tile.cmpi", self.function_location())
-                        .add_attributes(&[comparison_predicate, signedness_attr])
-                        .add_operands(&[lhs_value, rhs_value])
-                        .add_results(&[cuda_tile_bool_ty])
+                    let bool_result_ty = make_bool_result_type(&operand_result_ty);
+                    OpBuilder::new(Opcode::CmpI, self.ir_location(span))
+                        .attr(comparison_predicate.0, comparison_predicate.1)
+                        .attr(sign_attr.0, sign_attr.1)
+                        .operand(lhs_value)
+                        .operand(rhs_value)
+                        .result(bool_result_ty)
+                        .build(module)
                 } else {
                     // If both operands have bounds, we can generate bounds on the output.
                     match tile_rust_arithmetic_op {
-                        TileBinaryOp::Min => {
-                            OperationBuilder::new("cuda_tile.mini", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_attributes(&[signedness_attr])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Max => {
-                            OperationBuilder::new("cuda_tile.maxi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_attributes(&[signedness_attr])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Add => {
-                            OperationBuilder::new("cuda_tile.addi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Sub => {
-                            OperationBuilder::new("cuda_tile.subi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Mul => {
-                            OperationBuilder::new("cuda_tile.muli", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Rem => {
-                            OperationBuilder::new("cuda_tile.remi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_attributes(&[signedness_attr])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
+                        TileBinaryOp::Min => OpBuilder::new(Opcode::MinI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr(sign_attr.0, sign_attr.1)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Max => OpBuilder::new(Opcode::MaxI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr(sign_attr.0, sign_attr.1)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Add => OpBuilder::new(Opcode::AddI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr("overflow", Attribute::i32(0))
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Sub => OpBuilder::new(Opcode::SubI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr("overflow", Attribute::i32(0))
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Mul => OpBuilder::new(Opcode::MulI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr("overflow", Attribute::i32(0))
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Rem => OpBuilder::new(Opcode::RemI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr(sign_attr.0, sign_attr.1)
+                            .result(operand_result_ty.clone())
+                            .build(module),
                         TileBinaryOp::Div => {
-                            let rounding_mode_attr = self.parse_named_attr(
-                                "rounding_mode",
-                                "#cuda_tile.rounding<negative_inf>",
-                            )?;
-                            OperationBuilder::new("cuda_tile.divi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                                .add_attributes(&[signedness_attr, rounding_mode_attr])
+                            // DivI uses "rounding" (not "rounding_mode") in bytecode
+                            OpBuilder::new(Opcode::DivI, self.ir_location(span))
+                                .operand(lhs_value)
+                                .operand(rhs_value)
+                                .result(operand_result_ty.clone())
+                                .attr(sign_attr.0, sign_attr.1)
+                                .attr("rounding", Attribute::i32(2)) // negative_inf
+                                .build(module)
                         }
                         TileBinaryOp::CeilDiv => {
-                            let rounding_mode_attr = self.parse_named_attr(
-                                "rounding_mode",
-                                "#cuda_tile.rounding<positive_inf>",
-                            )?;
-                            OperationBuilder::new("cuda_tile.divi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                                .add_attributes(&[signedness_attr, rounding_mode_attr])
+                            // DivI uses "rounding" (not "rounding_mode") in bytecode
+                            OpBuilder::new(Opcode::DivI, self.ir_location(span))
+                                .operand(lhs_value)
+                                .operand(rhs_value)
+                                .result(operand_result_ty.clone())
+                                .attr(sign_attr.0, sign_attr.1)
+                                .attr("rounding", Attribute::i32(3)) // positive_inf
+                                .build(module)
                         }
                         TileBinaryOp::BitAnd => {
-                            OperationBuilder::new("cuda_tile.andi", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
+                            OpBuilder::new(Opcode::AndI, self.ir_location(span))
+                                .operand(lhs_value)
+                                .operand(rhs_value)
+                                .result(operand_result_ty.clone())
+                                .build(module)
                         }
-                        TileBinaryOp::BitOr => {
-                            OperationBuilder::new("cuda_tile.ori", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
+                        TileBinaryOp::BitOr => OpBuilder::new(Opcode::OrI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
                         TileBinaryOp::BitXor => {
-                            OperationBuilder::new("cuda_tile.xori", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
+                            OpBuilder::new(Opcode::XOrI, self.ir_location(span))
+                                .operand(lhs_value)
+                                .operand(rhs_value)
+                                .result(operand_result_ty.clone())
+                                .build(module)
                         }
                         _ => {
                             return self.jit_error_result(
@@ -256,86 +307,75 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
             "bf16" | "f16" | "f32" | "f64" => {
                 if let Some(comparison_predicate) =
-                    get_cmp_predicate_attr(&self.context, tile_rust_arithmetic_op)?
+                    get_cmp_predicate_attr_ir(tile_rust_arithmetic_op)?
                 {
-                    let comparison_ordering = self.parse_named_attr(
-                        "comparison_ordering",
-                        format!("#cuda_tile.comparison_ordering<ordered>").as_str(),
-                    )?;
+                    let comparison_ordering = cmp_ordering_attr("ordered");
                     is_cmp = true;
-                    let cuda_tile_bool_ty = cuda_tile_tile_ty_from_type_instance(
-                        &self.context,
-                        &lhs.ty.type_instance,
-                        &self.modules.primitives,
-                        Some("i1"),
-                    )?;
-                    OperationBuilder::new("cuda_tile.cmpf", self.function_location())
-                        .add_attributes(&[comparison_predicate, comparison_ordering])
-                        .add_operands(&[lhs_value, rhs_value])
-                        .add_results(&[cuda_tile_bool_ty])
+                    let bool_result_ty = make_bool_result_type(&operand_result_ty);
+                    OpBuilder::new(Opcode::CmpF, self.ir_location(span))
+                        .attr(comparison_predicate.0, comparison_predicate.1)
+                        .attr(comparison_ordering.0, comparison_ordering.1)
+                        .operand(lhs_value)
+                        .operand(rhs_value)
+                        .result(bool_result_ty)
+                        .build(module)
                 } else {
-                    let default_rounding_mode_attr = self
-                        .parse_named_attr("rounding_mode", "#cuda_tile.rounding<nearest_even>")?;
-                    let attrs = vec![default_rounding_mode_attr];
+                    let default_rm_attr = rounding_mode_attr("nearest_even");
                     match tile_rust_arithmetic_op {
-                        TileBinaryOp::Min => {
-                            OperationBuilder::new("cuda_tile.minf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Max => {
-                            OperationBuilder::new("cuda_tile.maxf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Add => {
-                            OperationBuilder::new("cuda_tile.addf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Sub => {
-                            OperationBuilder::new("cuda_tile.subf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Mul => {
-                            OperationBuilder::new("cuda_tile.mulf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Rem => {
-                            OperationBuilder::new("cuda_tile.remf", self.function_location())
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
-                        TileBinaryOp::Div => {
-                            OperationBuilder::new("cuda_tile.divf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
-                        }
+                        TileBinaryOp::Min => OpBuilder::new(Opcode::MinF, self.ir_location(span))
+                            .attr(default_rm_attr.0, default_rm_attr.1)
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Max => OpBuilder::new(Opcode::MaxF, self.ir_location(span))
+                            .attr(default_rm_attr.0, default_rm_attr.1)
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Add => OpBuilder::new(Opcode::AddF, self.ir_location(span))
+                            .attr(default_rm_attr.0, default_rm_attr.1)
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Sub => OpBuilder::new(Opcode::SubF, self.ir_location(span))
+                            .attr(default_rm_attr.0, default_rm_attr.1)
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Mul => OpBuilder::new(Opcode::MulF, self.ir_location(span))
+                            .attr(default_rm_attr.0, default_rm_attr.1)
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Rem => OpBuilder::new(Opcode::RemF, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Div => OpBuilder::new(Opcode::DivF, self.ir_location(span))
+                            .attr(default_rm_attr.0, default_rm_attr.1)
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .result(operand_result_ty.clone())
+                            .build(module),
                         TileBinaryOp::TrueDiv => {
-                            let rounding_mode_attr = self
-                                .parse_named_attr("rounding_mode", "#cuda_tile.rounding<approx>")?;
-                            let attrs = match operand_cuda_tile_element_type.as_ref() {
-                                "f32" => {
-                                    let flush_to_zero = self.flag_attr("flush_to_zero");
-                                    vec![rounding_mode_attr, flush_to_zero]
-                                }
-                                "bf16" | "f16" | "f64" => {
-                                    vec![rounding_mode_attr]
-                                }
-                                _ => unreachable!("Impossible"),
-                            };
-                            OperationBuilder::new("cuda_tile.divf", self.function_location())
-                                .add_attributes(&attrs)
-                                .add_operands(&[lhs_value, rhs_value])
-                                .add_results(&[operand_cuda_tile_ty])
+                            let approx_rm_attr = rounding_mode_attr("approx");
+                            let mut builder = OpBuilder::new(Opcode::DivF, self.ir_location(span))
+                                .attr(approx_rm_attr.0, approx_rm_attr.1);
+                            if operand_cuda_tile_element_type.as_str() == "f32" {
+                                let ftz = flag_attr("flush_to_zero");
+                                builder = builder.attr(ftz.0, ftz.1);
+                            }
+                            builder
+                                .operand(lhs_value)
+                                .operand(rhs_value)
+                                .result(operand_result_ty.clone())
+                                .build(module)
                         }
                         _ => {
                             return self.jit_error_result(
@@ -387,30 +427,23 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         };
         if let Some(bounds) = &op_bounds {
             if bounds.is_exact() {
-                // The lower/upper bounds are equivalent.
+                // The lower/upper bounds are equivalent — emit a constant
+                // instead. The op allocated above becomes dead (not appended
+                // to any block).
                 return Ok(self.compile_constant_from_exact_bounds(
-                    builder,
+                    module,
+                    block_id,
                     bounds.clone(),
                     return_type,
                 )?);
             }
         }
 
-        let op = op_builder.build();
-        if op.is_err() {
-            return self.jit_error_result(
-                span,
-                &format!("Failed to compile {tile_rust_arithmetic_op:#?}"),
-            );
-        }
-        let op_ref = builder.append_operation(op.unwrap().into());
-        if !op_ref.verify() {
-            return self.jit_error_result(
-                span,
-                &format!("Failed to compile {tile_rust_arithmetic_op:#?}"),
-            );
-        }
-        let value: Value = op_ref.result(0).unwrap().into();
+        // Only now append the binary op to the block (mirrors the old
+        // compiler which only calls `builder.append_operation` after the
+        // bounds check).
+        append_op(module, block_id, op_id);
+        let value = results[0];
         let mut tr_value = TileRustValue::new_value_kind_like(value, return_type.clone());
         tr_value.bounds = op_bounds;
         Ok(tr_value)

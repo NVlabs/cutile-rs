@@ -146,7 +146,6 @@ use cuda_core::DType;
 use cuda_core::{malloc_async, memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
 use half::f16;
 use std::alloc::{alloc, Layout};
-use std::cmp::min;
 use std::future::IntoFuture;
 use std::sync::Arc;
 
@@ -483,7 +482,7 @@ pub fn full<T: DType>(val: T, shape: &[usize]) -> impl DeviceOp<Output = Tensor<
     let len = shape.iter().product::<usize>();
     Tensor::<T>::uninitialized(len).then(move |t| {
         // TODO (hme): It's awkward to assume_init this before actually initializing it.
-        let partition_size = min(len, 128);
+        let partition_size = 128;
         let result = unsafe { t.assume_init() }.partition([partition_size]);
         let (_, res) = value((val, result)).then(full_apply).unzip();
         res.unpartition().reshape(&shape)
@@ -492,8 +491,7 @@ pub fn full<T: DType>(val: T, shape: &[usize]) -> impl DeviceOp<Output = Tensor<
 
 pub fn fill<T: DType>(tensor: Tensor<T>, val: T) -> impl DeviceOp<Output = Tensor<T>> {
     value(tensor).then(move |t| {
-        let len = t.shape.iter().product::<i32>() as usize;
-        let partition_size = min(len, 128);
+        let partition_size = 128;
         let result = t.partition([partition_size]);
         let (_, res) = value((val, result)).then(full_apply).unzip();
         res.unpartition()
@@ -515,7 +513,7 @@ pub fn fill<T: DType>(tensor: Tensor<T>, val: T) -> impl DeviceOp<Output = Tenso
 /// ```
 pub fn arange<T: DType>(len: usize) -> impl DeviceOp<Output = Tensor<T>> {
     Tensor::<T>::uninitialized(len).then(move |t| {
-        let partition_size = min(len, 128);
+        let partition_size = 128;
         let result = unsafe { t.assume_init() }.partition([partition_size]);
         let res = value((result,)).then(arange_apply).unzip();
         res.0.unpartition()
@@ -554,7 +552,7 @@ pub fn linspace(start: f32, stop: f32, n: usize) -> impl DeviceOp<Output = Tenso
         0.0
     };
     Tensor::<f32>::uninitialized(n).then(move |t| {
-        let partition_size = min(n, 128);
+        let partition_size = 128;
         let result = unsafe { t.assume_init() }.partition([partition_size]);
         linspace_kernel(result, start, step)
             .then(|(tensor, _, _)| value(tensor))
@@ -591,8 +589,8 @@ pub fn eye(n: usize) -> impl DeviceOp<Output = Tensor<f32>> {
 /// ```
 pub fn eye_rect(rows: usize, cols: usize) -> impl DeviceOp<Output = Tensor<f32>> {
     let len = rows * cols;
-    let br = min(rows, 16);
-    let bc = min(cols, 16);
+    let br = 16;
+    let bc = 16;
     Tensor::<f32>::uninitialized(len).then(move |t| {
         let t2d = unsafe { t.assume_init() }
             .reshape(&[rows, cols])
@@ -620,7 +618,7 @@ pub fn convert<FromType: DType, ToType: DType>(
 ) -> impl DeviceOp<Output = Tensor<ToType>> {
     let len = src.shape.clone().iter().product::<i32>() as usize;
     Tensor::<ToType>::uninitialized(len).then(move |t| {
-        let partition_size = min(len, 128);
+        let partition_size = 128;
         let dst = unsafe { t.assume_init() }.partition([partition_size]);
         let res = value((src.clone(), dst)).then(convert_apply).unzip();
         res.1
@@ -672,7 +670,7 @@ pub fn randn_f16<const RANK: usize>(
     randn(mean.to_f32(), std.to_f32(), [len], seed).then(move |src_tensor| {
         let dst = Tensor::<f16>::uninitialized(len);
         dst.then(move |dst_tensor| {
-            let partition_size = min(len, 128);
+            let partition_size = 128;
             let dst = unsafe { dst_tensor.assume_init() }.partition([partition_size]);
             let res = value((Arc::new(src_tensor), dst))
                 .then(convert_apply)

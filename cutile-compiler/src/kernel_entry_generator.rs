@@ -7,9 +7,9 @@
 //! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
 
 use crate::ast::SourceLocation;
-use crate::compiler::utils::OptimizationHints;
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
+use crate::hints::OptimizationHints;
 use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::{get_fn_arg_var_name, get_ident_from_path_expr, get_ident_generic_args};
 use crate::types::{get_primitives_attrs, get_type_mutability};
@@ -383,8 +383,58 @@ impl TensorInput {
             statements.push(Self::get_assume_div_by(final_ptr_var.clone(), ptr_div));
         }
 
+        // For mutable (partitioned) tensors, compute the actual remaining
+        // elements per dimension for this block:
+        //   remaining_i = min(partition_dim_i, dim_i - pid.i * partition_dim_i)
+        // Pass these as a dynamic shape to make_tensor_view so the MLIR
+        // tensor_view has dynamic dims (?x?xf32). This lets partition views
+        // mask out-of-bounds stores with padding at tile boundaries.
+        // The Rust type annotation keeps the static shape_param for generic
+        // inference — the generic inference skips -1 (dynamic) values.
+        let final_shape_var = if self.mutable {
+            let mut remaining_dim_vars = vec![];
+            for i in 0..self.rank {
+                let remaining_var = format!("{var_name}_remaining_dim_{i}");
+                let dim_var = format!("{var_name}_dim_{i}");
+                let partition_dim_var = format!("{var_name}_partition_dim_{i}");
+                let pid_field = format!("pid.{i}");
+                let remaining_stmnt = syn::parse2::<syn::Stmt>(
+                    format!("let {remaining_var}: {i_type} = min({partition_dim_var}, {dim_var} - {pid_field} * {partition_dim_var});")
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap();
+                statements.push(remaining_stmnt);
+                remaining_dim_vars.push(remaining_var);
+            }
+            let remaining_dims_var = format!("{var_name}_remaining_dims");
+            let remaining_dims_stmnt = syn::parse2::<syn::Stmt>(
+                format!(
+                    "let {remaining_dims_var}: &[{i_type}] = &[{}];",
+                    remaining_dim_vars.join(",")
+                )
+                .parse()
+                .unwrap(),
+            )
+            .unwrap();
+            statements.push(remaining_dims_stmnt);
+
+            let dynamic_shape_param = format!("{{[{}]}}", vec!["-1"; self.rank as usize].join(","));
+            let remaining_shape_var = format!("{remaining_dims_var}_shape");
+            let remaining_shape_stmnt = syn::parse2::<syn::Stmt>(
+                format!("let {remaining_shape_var}: Shape<{dynamic_shape_param}> = Shape::<{dynamic_shape_param}>{{ dims: {remaining_dims_var} }};")
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap();
+            statements.push(remaining_shape_stmnt);
+            remaining_shape_var
+        } else {
+            shape_var.clone()
+        };
+
         let tensor_stmnt = syn::parse2::<syn::Stmt>(
-            format!("let {var_name}: Tensor<{element_type}, {shape_param}> = unsafe {{ make_tensor_view({final_ptr_var}, {shape_var}, {strides_array_var}, {token_var}) }};").parse().unwrap()
+            format!("let {var_name}: Tensor<{element_type}, {shape_param}> = unsafe {{ make_tensor_view({final_ptr_var}, {final_shape_var}, {strides_array_var}, {token_var}) }};").parse().unwrap()
         ).unwrap();
         statements.push(tensor_stmnt);
         statements

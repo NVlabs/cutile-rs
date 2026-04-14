@@ -8,10 +8,12 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"
-keywords = ["mlir", "cutile", "compiler"]
+keywords = ["cutile", "compiler", "gpu"]
+
+[features]
+default = []
 
 [dependencies]
-melior = { workspace = true }
 syn = { workspace = true }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
@@ -19,9 +21,8 @@ regex = { workspace = true }
 uuid = { workspace = true }
 prettyplease = { workspace = true }
 half = { workspace = true }
-mlir-sys = { workspace = true }
 anyhow = { workspace = true }
 stacker = { workspace = true }
-cuda-tile-rs = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
+cutile-ir = { workspace = true }
