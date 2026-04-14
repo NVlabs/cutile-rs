@@ -11,9 +11,7 @@
 use cutile::tile_kernel::{CompileOptions, EntryMeta, FunctionKey, TileFunctionKey, WarmupSpec};
 use cutile_compiler::specialization::SpecializationBits;
 
-/// Returns a builder pre-loaded with the standard test defaults:
-/// module="m", function="f", source_hash="hash", gpu_name="sm_90",
-/// compiler_version="0.0.1", cuda_toolkit_version="12.4".
+
 fn default_key() -> cutile::tile_kernel::TileFunctionKeyBuilder {
     TileFunctionKey::builder("m", "f")
         .source_hash("hash")
@@ -87,10 +85,10 @@ fn cache_key_disk_hash_is_sha256_length() {
     );
 }
 
-/// When `nvcc` is unavailable, `get_cuda_toolkit_version()` returns `"unknown"`.
-/// Verify that `"unknown"` still produces a distinct key from any real version,
-/// so kernels compiled without a known toolkit version are never falsely reused
-/// when a real version becomes available (or vice versa).
+// When `nvcc` is unavailable, `get_cuda_toolkit_version()` returns `"unknown"`.
+// Verify that `"unknown"` still produces a distinct key from any real version,
+// so kernels compiled without a known toolkit version are never falsely reused
+// when a real version becomes available (or vice versa).
 #[test]
 fn cache_key_toolkit_unknown_is_distinct() {
     let key_unknown = default_key().cuda_toolkit_version("unknown").build();
@@ -107,9 +105,7 @@ fn cache_key_toolkit_unknown_is_distinct() {
     );
 }
 
-/// Two keys that differ only in source_hash must be distinct.
-/// This validates that changing a dependency (which changes the module source hash
-/// at compile time) invalidates the cache — the "no false hit" guarantee.
+
 #[test]
 fn cache_key_source_hash_change_invalidates() {
     let make_key = |source_hash: &str| -> TileFunctionKey {
@@ -129,11 +125,7 @@ fn cache_key_source_hash_change_invalidates() {
     assert_ne!(key_v1.get_disk_hash_string(), key_v2.get_disk_hash_string());
 }
 
-/// Two tensors with the same shape/stride layout but different alignment
-/// (e.g. a 16-byte-aligned base pointer vs a 4-byte-aligned one) trigger
-/// different `assume_div_by` operations in the generated MLIR, and therefore
-/// produce different cubins. The cache key must reflect this so a kernel
-/// compiled for aligned data is never falsely reused for misaligned data.
+// Cache keys must distinguish  data alignments to prevent incorrect kernel reuse.
 #[test]
 fn cache_key_different_spec_args() {
     let spec_aligned = SpecializationBits {
@@ -168,11 +160,7 @@ fn cache_key_different_spec_args() {
     );
 }
 
-/// `CompileOptions` (`occupancy`, `num_cta_in_cga`, `max_divisibility`) are
-/// kernel-level hints that change codegen. Two launches with different hints
-/// must land on different cache entries — otherwise a kernel compiled with
-/// `max_divisibility=16` could be silently reused for a launch that expected
-/// `max_divisibility=4`, producing incorrect assumptions about alignment.
+
 #[test]
 fn cache_key_different_compile_options() {
     let key_a = default_key()
@@ -192,7 +180,6 @@ fn cache_key_different_compile_options() {
         "different CompileOptions must produce distinct disk keys"
     );
 
-    // Also check that a different field (occupancy) flips the key.
     let key_c = default_key()
         .compile_options(CompileOptions::default().occupancy(2))
         .build();

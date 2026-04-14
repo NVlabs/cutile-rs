@@ -10,8 +10,8 @@ use cuda_async::jit_store::{FileSystemJitStore, JitStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Monotonically increasing counter so each test gets its own directory,
-/// even when tests run in parallel within the same process.
+// Monotonically increasing counter so each test gets its own directory,
+// even when tests run in parallel within the same process.
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn tmp_store() -> (FileSystemJitStore, PathBuf) {
@@ -121,7 +121,6 @@ fn concurrent_put_get() {
 #[test]
 fn clear_on_empty_dir() {
     let (store, dir) = tmp_store();
-    // Clear on an empty store should succeed.
     store.clear().unwrap();
     store.clear().unwrap();
     cleanup(&dir);
