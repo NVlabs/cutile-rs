@@ -8,7 +8,7 @@
 //! with byte offsets.
 
 use cutile::api;
-use cutile::tensor::{IntoPartition, PartitionMut, Tensor, ToHostVec};
+use cutile::tensor::{IntoPartition, PartitionMut, Reshape, Tensor, ToHostVec};
 use cutile::tile_kernel::{DeviceOp, TileKernel, ToHostVecOp};
 use std::sync::Arc;
 
@@ -38,6 +38,17 @@ mod test_kernels {
         out.store(tile_a * tile_s);
     }
 
+    /// 2D copy: out[pid_m, pid_n] = a[pid_m, pid_n].
+    #[cutile::entry()]
+    fn copy_2d<const BM: i32, const BN: i32>(
+        out: &mut Tensor<f32, { [BM, BN] }>,
+        a: &Tensor<f32, { [-1, -1] }>,
+    ) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_a = a.load_tile(const_shape![BM, BN], [pid.0, pid.1]);
+        out.store(tile_a);
+    }
+
     /// GEMM: z = x @ y. M and N can be non-divisible by BM/BN.
     /// K must be divisible by BK (loop bound).
     #[cutile::entry(print_ir = true)]
@@ -59,7 +70,7 @@ mod test_kernels {
     }
 }
 
-use test_kernels::{add, gemm, scale};
+use test_kernels::{add, copy_2d, gemm, scale};
 
 // ── Non-divisible sizes (no slicing) ────────────────────────────────────────
 
@@ -90,6 +101,84 @@ fn add_non_divisible_size() {
 }
 
 #[test]
+fn add_non_divisible_just_over() {
+    // 129 elements, block=128. 129 % 128 = 1. Just over one tile.
+    common::with_test_stack(|| {
+        let n = 129;
+        let block = 128;
+
+        let a = api::ones::<f32>(&[n]).sync().expect("alloc a");
+        let b = api::ones::<f32>(&[n]).sync().expect("alloc b");
+        let mut out = api::zeros::<f32>(&[n]).sync().expect("alloc out");
+
+        add((&mut out).partition([block]), &a, &b)
+            .sync()
+            .expect("add failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), n);
+        for (i, &v) in host.iter().enumerate() {
+            assert!(
+                (v - 2.0f32).abs() < 1e-5,
+                "add n={n}: element {i} = {v}, expected 2.0"
+            );
+        }
+    });
+}
+
+#[test]
+fn add_non_divisible_just_under() {
+    // 127 elements, block=128. Tensor smaller than one tile.
+    common::with_test_stack(|| {
+        let n = 127;
+        let block = 128;
+
+        let a = api::ones::<f32>(&[n]).sync().expect("alloc a");
+        let b = api::ones::<f32>(&[n]).sync().expect("alloc b");
+        let mut out = api::zeros::<f32>(&[n]).sync().expect("alloc out");
+
+        add((&mut out).partition([block]), &a, &b)
+            .sync()
+            .expect("add failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), n);
+        for (i, &v) in host.iter().enumerate() {
+            assert!(
+                (v - 2.0f32).abs() < 1e-5,
+                "add n={n}: element {i} = {v}, expected 2.0"
+            );
+        }
+    });
+}
+
+#[test]
+fn add_non_divisible_prime() {
+    // 251 elements (prime), block=128. 251 % 128 = 123.
+    common::with_test_stack(|| {
+        let n = 251;
+        let block = 128;
+
+        let a = api::ones::<f32>(&[n]).sync().expect("alloc a");
+        let b = api::ones::<f32>(&[n]).sync().expect("alloc b");
+        let mut out = api::zeros::<f32>(&[n]).sync().expect("alloc out");
+
+        add((&mut out).partition([block]), &a, &b)
+            .sync()
+            .expect("add failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), n);
+        for (i, &v) in host.iter().enumerate() {
+            assert!(
+                (v - 2.0f32).abs() < 1e-5,
+                "add n={n}: element {i} = {v}, expected 2.0"
+            );
+        }
+    });
+}
+
+#[test]
 fn scale_non_divisible_size() {
     // 500 elements, block=128. 500 % 128 != 0.
     common::with_test_stack(|| {
@@ -113,6 +202,129 @@ fn scale_non_divisible_size() {
         }
     });
 }
+
+// ── 2D non-divisible sizes ──────────────────────────────────────────────────
+//
+// Isolates whether 2D partition handling works with non-divisible dimensions,
+// without involving MMA. Mirrors cutile-python test_tiled_view_copy_2d with
+// shapes like (192, 134) and tile (128, 128).
+
+#[test]
+#[ignore = "2D non-divisible partition produces wrong results — same root cause as GEMM OOB"]
+fn copy_2d_non_divisible_both_dims() {
+    // Shape (192, 134), tile (128, 128).
+    // 192 % 128 = 64, 134 % 128 = 6. Both dimensions non-divisible.
+    common::with_test_stack(|| {
+        let (m, n) = (192, 134);
+        let (bm, bn) = (128, 128);
+
+        let input_host = Arc::new((0..m * n).map(|i| i as f32).collect::<Vec<_>>());
+        let a: Arc<Tensor<f32>> = api::copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("alloc a")
+            .reshape(&[m, n])
+            .expect("reshape a")
+            .into();
+        let mut out = api::zeros::<f32>(&[m, n])
+            .sync()
+            .expect("alloc out")
+            .reshape(&[m, n])
+            .expect("reshape out");
+
+        copy_2d((&mut out).partition([bm, bn]), &*a)
+            .sync()
+            .expect("copy_2d failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), m * n);
+        for (i, &v) in host.iter().enumerate() {
+            assert!(
+                (v - i as f32).abs() < 1e-5,
+                "copy_2d (192,134): element {i} = {v}, expected {}",
+                i as f32
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "2D non-divisible partition produces wrong results — same root cause as GEMM OOB"]
+fn copy_2d_non_divisible_one_dim() {
+    // Shape (128, 100), tile (64, 64).
+    // 128 % 64 = 0 (divisible), 100 % 64 = 36 (non-divisible).
+    common::with_test_stack(|| {
+        let (m, n) = (128, 100);
+        let (bm, bn) = (64, 64);
+
+        let input_host = Arc::new((0..m * n).map(|i| i as f32).collect::<Vec<_>>());
+        let a: Arc<Tensor<f32>> = api::copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("alloc a")
+            .reshape(&[m, n])
+            .expect("reshape a")
+            .into();
+        let mut out = api::zeros::<f32>(&[m, n])
+            .sync()
+            .expect("alloc out")
+            .reshape(&[m, n])
+            .expect("reshape out");
+
+        copy_2d((&mut out).partition([bm, bn]), &*a)
+            .sync()
+            .expect("copy_2d failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), m * n);
+        for (i, &v) in host.iter().enumerate() {
+            assert!(
+                (v - i as f32).abs() < 1e-5,
+                "copy_2d (128,100): element {i} = {v}, expected {}",
+                i as f32
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "2D non-divisible partition produces wrong results — same root cause as GEMM OOB"]
+fn copy_2d_one_short_of_tile() {
+    // Shape (63, 63), tile (64, 64).
+    // Mirrors cutile-python test_array_copy_2d_with_padding shape.
+    // Tests the "one element short" boundary in both dimensions.
+    common::with_test_stack(|| {
+        let (m, n) = (63, 63);
+        let (bm, bn) = (64, 64);
+
+        let input_host = Arc::new((0..m * n).map(|i| i as f32).collect::<Vec<_>>());
+        let a: Arc<Tensor<f32>> = api::copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("alloc a")
+            .reshape(&[m, n])
+            .expect("reshape a")
+            .into();
+        let mut out = api::zeros::<f32>(&[m, n])
+            .sync()
+            .expect("alloc out")
+            .reshape(&[m, n])
+            .expect("reshape out");
+
+        copy_2d((&mut out).partition([bm, bn]), &*a)
+            .sync()
+            .expect("copy_2d failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), m * n);
+        for (i, &v) in host.iter().enumerate() {
+            assert!(
+                (v - i as f32).abs() < 1e-5,
+                "copy_2d (63,63): element {i} = {v}, expected {}",
+                i as f32
+            );
+        }
+    });
+}
+
+// ── GEMM non-divisible ──────────────────────────────────────────────────────
 
 #[test]
 #[ignore = "GEMM with non-divisible M/N triggers OOB on partition access — separate issue"]
@@ -244,6 +456,40 @@ fn scale_sliced_non_divisible() {
         assert_eq!(host.len(), 500);
         for (i, &v) in host.iter().enumerate() {
             let expected = (i + 12) as f32 * 2.0;
+            assert!(
+                (v - expected).abs() < 1e-3,
+                "element {i} = {v}, expected {expected}"
+            );
+        }
+    });
+}
+
+// ── Sliced views with non-divisible offset alignment ────────────────────────
+
+#[test]
+fn add_sliced_odd_offset() {
+    // arange(300), slice [1..300] → length 299, offset 1.
+    // Offset 1 is not aligned to any power-of-2. 299 % 128 = 43.
+    // Tests both unaligned offset and non-divisible length.
+    common::with_test_stack(|| {
+        let block = 128;
+
+        let a = api::arange::<f32>(300).sync().expect("alloc a");
+        let b = api::ones::<f32>(&[300]).sync().expect("alloc b");
+
+        let a_slice = a.slice(&[1..300]).expect("slice a");
+        let b_slice = b.slice(&[1..300]).expect("slice b");
+
+        let mut out = api::zeros::<f32>(&[299]).sync().expect("alloc out");
+
+        add((&mut out).partition([block]), &a_slice, &b_slice)
+            .sync()
+            .expect("add failed");
+
+        let host: Vec<f32> = out.dup().to_host_vec().sync().expect("to_host");
+        assert_eq!(host.len(), 299);
+        for (i, &v) in host.iter().enumerate() {
+            let expected = (i + 1) as f32 + 1.0;
             assert!(
                 (v - expected).abs() < 1e-3,
                 "element {i} = {v}, expected {expected}"
