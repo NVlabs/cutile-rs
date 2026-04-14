@@ -69,7 +69,7 @@ mod reduce_scan_ops_module {
         // Use closure for max reduction with NEG_INFINITY as identity
         // f32::NEG_INFINITY works as identity because max(NEG_INFINITY, x) = x for any x
         //
-        // TODO (np): Using maxf(acc, x) here gives "cannot find function" error even though
+        // TODO (np): Using maxf(acc, x, nan::Disabled, ftz::Disabled) here gives "cannot find function" error even though
         // it's imported via `use cutile::core::{*}`. This appears to be a scoping bug
         // where some functions aren't visible inside reduce/scan closures. Using max()
         // (scalar version) works correctly and is the right function for this context anyway.

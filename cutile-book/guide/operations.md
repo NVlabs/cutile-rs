@@ -79,7 +79,7 @@ let result = fma(a, x, y, rounding_mode);
 
 ```rust
 let y = exp(x);              // e^x
-let y = exp2(x);             // 2^x (faster on GPU)
+let y = exp2(x, ftz::Disabled);             // 2^x (faster on GPU)
 let y = log(x);              // Natural log (ln)
 let y = log2(x);             // Log base 2
 let y = sqrt(x, "rn");       // Square root (requires rounding mode)

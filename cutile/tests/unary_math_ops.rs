@@ -22,11 +22,11 @@ mod unary_math_ops_module {
         // Arithmetic operations
         let t1: Tile<f32, S> = absf(x); // absolute value (float)
         let t2: Tile<f32, S> = negf(t1); // negation (float)
-        let t3: Tile<f32, S> = rsqrt(t2); // reciprocal square root
+        let t3: Tile<f32, S> = rsqrt(t2, ftz::Disabled); // reciprocal square root
 
         // Exponential and logarithmic
         let t4: Tile<f32, S> = exp(t3); // exponential (e^x)
-        let t5: Tile<f32, S> = exp2(t4); // base-2 exponential (2^x)
+        let t5: Tile<f32, S> = exp2(t4, ftz::Disabled); // base-2 exponential (2^x)
         let t6: Tile<f32, S> = log(t5); // natural log
         let t7: Tile<f32, S> = log2(t6); // base-2 log
 
@@ -41,7 +41,7 @@ mod unary_math_ops_module {
         let t13: Tile<f32, S> = tanh(t12); // hyperbolic tangent
 
         // Rounding
-        let t14: Tile<f32, S> = ceil(t13, "nearest_even"); // ceiling
+        let t14: Tile<f32, S> = ceil(t13, rounding::NearestEven); // ceiling
         let result: Tile<f32, S> = floor(t14); // floor
 
         output.store(result);
@@ -63,7 +63,7 @@ mod unary_math_ops_module {
     fn sqrt_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         // Test sqrt operation
         let x: Tile<f32, S> = load_tile_mut(output);
-        let result: Tile<f32, S> = sqrt(x, "negative_inf"); // square root
+        let result: Tile<f32, S> = sqrt(x, rounding::NegativeInf, ftz::Disabled); // square root
         output.store(result);
     }
 
@@ -73,7 +73,7 @@ mod unary_math_ops_module {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
         let z: Tile<f32, S> = load_tile_mut(output);
-        let result: Tile<f32, S> = fma_op(x, y, z, "nearest_even"); // x * y + z
+        let result: Tile<f32, S> = fma(x, y, z, rounding::NearestEven, ftz::Disabled); // x * y + z
         output.store(result);
     }
 
@@ -89,7 +89,7 @@ mod unary_math_ops_module {
     #[cutile::entry()]
     fn exp2_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let x: Tile<f32, S> = load_tile_mut(output);
-        let result: Tile<f32, S> = exp2_ftz(x);
+        let result: Tile<f32, S> = exp2(x, ftz::Enabled);
         output.store(result);
     }
 
@@ -97,7 +97,7 @@ mod unary_math_ops_module {
     fn maxf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
-        let result: Tile<f32, S> = maxf_ftz(x, y);
+        let result: Tile<f32, S> = maxf(x, y, nan::Disabled, ftz::Enabled);
         output.store(result);
     }
 
@@ -105,7 +105,62 @@ mod unary_math_ops_module {
     fn minf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
-        let result: Tile<f32, S> = minf_ftz(x, y);
+        let result: Tile<f32, S> = minf(x, y, nan::Disabled, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn addf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = addf(x, y, rounding::NearestEven, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn subf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = subf(x, y, rounding::NearestEven, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn mulf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = mulf(x, y, rounding::NearestEven, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn divf_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = divf(x, y, rounding::NearestEven, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn fma_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let z: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = fma(x, y, z, rounding::NearestEven, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn rsqrt_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = rsqrt(x, ftz::Enabled);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn sqrt_ftz_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = sqrt(x, rounding::NearestEven, ftz::Enabled);
         output.store(result);
     }
 
@@ -424,6 +479,78 @@ fn compile_minf_ftz() -> () {
             "Expected flush_to_zero attribute in MLIR output"
         );
     });
+}
+
+/// Helper: compile a kernel and assert it contains the expected op name and flush_to_zero.
+fn assert_ftz_in_mlir(kernel_name: &'static str, expected_op: &'static str) {
+    common::with_test_stack(move || {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            kernel_name,
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler
+            .compile()
+            .expect("Failed.")
+            .as_operation()
+            .to_string();
+        println!("\n=== {kernel_name} MLIR ===\n{module_op_str}");
+
+        assert!(
+            module_op_str.contains(expected_op),
+            "Expected {expected_op} operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("flush_to_zero"),
+            "Expected flush_to_zero attribute in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_addf_ftz() {
+    assert_ftz_in_mlir("addf_ftz_kernel", "addf");
+}
+
+#[test]
+fn compile_subf_ftz() {
+    assert_ftz_in_mlir("subf_ftz_kernel", "subf");
+}
+
+#[test]
+fn compile_mulf_ftz() {
+    assert_ftz_in_mlir("mulf_ftz_kernel", "mulf");
+}
+
+#[test]
+fn compile_divf_ftz() {
+    assert_ftz_in_mlir("divf_ftz_kernel", "divf");
+}
+
+#[test]
+fn compile_fma_ftz() {
+    assert_ftz_in_mlir("fma_ftz_kernel", "fma");
+}
+
+#[test]
+fn compile_rsqrt_ftz() {
+    assert_ftz_in_mlir("rsqrt_ftz_kernel", "rsqrt");
+}
+
+#[test]
+fn compile_sqrt_ftz() {
+    assert_ftz_in_mlir("sqrt_ftz_kernel", "sqrt");
 }
 
 #[test]

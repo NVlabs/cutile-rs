@@ -281,7 +281,7 @@ let result = fma(x, y, z, "nearest_even");
 
 ```rust
 let y = exp(x);       // e^x
-let y = exp2(x);      // 2^x (faster on GPU)
+let y = exp2(x, ftz::Disabled);      // 2^x (faster on GPU)
 let y = log(x);       // Natural log (ln)
 let y = log2(x);      // Log base 2
 let y = sqrt(x, "negative_inf");   // Square root
@@ -791,9 +791,9 @@ for j in 0i32..num_tiles {
     let qk_max = reduce_max(qk, 1).reshape(const_shape![BM, 1]);
     let m_ij = max_tile(m_i, qk_max);
     let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
-    let p = exp2(qk);
+    let p = exp2(qk, ftz::Disabled);
     let l_ij = reduce_sum(p, 1).reshape(const_shape![BM, 1]);
-    let alpha = exp2(m_i - m_ij);
+    let alpha = exp2(m_i - m_ij, ftz::Disabled);
     l_i = l_i * alpha + l_ij;
     acc = acc * alpha.broadcast(const_shape![BM, D]);
     
@@ -896,7 +896,7 @@ let z_host: Vec<f32> = z.unpartition().await?.to_host_vec().await?;
 | Float | Integer | Description |
 |-------|---------|-------------|
 | `exp(x)` | — | e^x |
-| `exp2(x)` | — | 2^x |
+| `exp2(x, ftz::Disabled)` | — | 2^x |
 | `log(x)` | — | ln(x) |
 | `log2(x)` | — | log₂(x) |
 | `sqrt(x, mode)` | — | √x |

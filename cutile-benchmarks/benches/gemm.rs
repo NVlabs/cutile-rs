@@ -9,7 +9,6 @@ use cutile::api;
 use cutile::core::f16;
 use cutile::tile_kernel::{PartitionOp, TileKernel};
 use kernels::*;
-use std::iter::zip;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

@@ -19,8 +19,8 @@ mod binary_math_ops_module {
         // Test min and max operations
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
-        let max_result: Tile<f32, S> = maxf(x, y);
-        let min_result: Tile<f32, S> = minf(max_result, y);
+        let max_result: Tile<f32, S> = maxf(x, y, nan::Disabled, ftz::Disabled);
+        let min_result: Tile<f32, S> = minf(max_result, y, nan::Disabled, ftz::Disabled);
         output.store(min_result);
     }
 
@@ -34,7 +34,7 @@ mod binary_math_ops_module {
         let _one: Tile<f32, S> = constant(1.0, output.shape());
 
         // Simplified to avoid bool literal issue
-        let result: Tile<f32, S> = maxf(x, y);
+        let result: Tile<f32, S> = maxf(x, y, nan::Disabled, ftz::Disabled);
         output.store(result);
     }
 

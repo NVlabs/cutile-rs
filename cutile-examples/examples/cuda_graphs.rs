@@ -46,7 +46,8 @@ mod kernels {
         let s: f32 = tile_to_scalar(s.reshape(const_shape![]));
         let n: f32 = convert_scalar(D);
         let inv: f32 = 1.0f32 / (s / n + eps);
-        let inv_tile: Tile<f32, { [] }> = sqrt(scalar_to_tile(inv), "negative_inf");
+        let inv_tile: Tile<f32, { [] }> =
+            sqrt(scalar_to_tile(inv), rounding::NegativeInf, ftz::Disabled);
         let inv: f32 = tile_to_scalar(inv_tile);
         let scale: Tile<f32, { [1, BS] }> = inv.broadcast(shape);
         let w_part: Partition<f32, { [BS] }> = w.partition(const_shape![BS]);

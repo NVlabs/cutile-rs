@@ -36,7 +36,7 @@ mod spec_test_module {
 
     /// Kernel with a scalar integer param — used to test DivHint on scalars.
     #[cutile::entry(print_ir = true)]
-    fn scalar_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, n: i32) {
+    fn scalar_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, _n: i32) {
         let tile: Tile<f32, S> = constant(1.0f32, output.shape());
         output.store(tile);
     }

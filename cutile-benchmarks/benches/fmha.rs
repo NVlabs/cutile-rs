@@ -116,11 +116,11 @@ mod kernels {
             let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
 
             // Apply softmax(mask(scale(q @ k^T))).
-            let p: Tile<f16, { [BM, BN] }> = exp2(qk);
+            let p: Tile<f16, { [BM, BN] }> = exp2(qk, ftz::Disabled);
             let l_ij: Tile<f16, { [BM] }> = reduce_sum(p, 1);
             let l_ij: Tile<f16, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f16, { [BM, 1] }> = exp2(m_i - m_ij);
-            l_i = fma(l_i, alpha, l_ij);
+            let alpha: Tile<f16, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+            l_i = fma(l_i, alpha, l_ij, rounding::NearestEven, ftz::Disabled);
             let alpha: Tile<f16, { [BM, D] }> = alpha.broadcast(const_shape![BM, D]);
             acc = acc * alpha;
 

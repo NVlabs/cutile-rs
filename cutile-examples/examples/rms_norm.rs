@@ -42,7 +42,8 @@ mod my_module {
         let rms: f32 = tile_to_scalar(rms);
         let n: f32 = convert_scalar(N);
         let rms: f32 = 1.0f32 / (rms / n + eps);
-        let rms: Tile<f32, { [] }> = sqrt(scalar_to_tile(rms), "negative_inf");
+        let rms: Tile<f32, { [] }> =
+            sqrt(scalar_to_tile(rms), rounding::NegativeInf, ftz::Disabled);
         let rms: f32 = tile_to_scalar(rms);
         let rms: Tile<f32, { [1, BLOCK_SIZE] }> = rms.broadcast(tile_shape);
 

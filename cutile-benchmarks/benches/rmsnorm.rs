@@ -47,7 +47,8 @@ mod kernels {
         let n: f16 = convert_scalar(N);
         let one: f16 = convert_scalar(1.0f32);
         let rms: f16 = one / (rms / n + eps);
-        let rms: Tile<f16, { [] }> = sqrt(scalar_to_tile(rms), "negative_inf");
+        let rms: Tile<f16, { [] }> =
+            sqrt(scalar_to_tile(rms), rounding::NegativeInf, ftz::Disabled);
         let rms: f16 = tile_to_scalar(rms);
         let rms: Tile<f16, { [1, BLOCK_SIZE] }> = broadcast_scalar(rms, tile_shape);
 

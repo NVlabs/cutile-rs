@@ -113,7 +113,7 @@ For each Q tile (row block of the output):
 
 > **Implementation note:** The code below uses `exp2` instead of `exp` as a performance
 > optimization — `exp2` is faster on GPU hardware. To compensate, the scale factor is
-> divided by `ln(2)` so that `exp2(x / ln(2)) = exp(x)`. The correction factor `α` and
+> divided by `ln(2)` so that `exp2(x / ln(2, ftz::Disabled)) = exp(x)`. The correction factor `α` and
 > softmax numerator `P` are both computed with `exp2` using this adjusted scale.
 
 ---
@@ -193,10 +193,10 @@ mod fmha_module {
             let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
 
             // Softmax numerator and correction factor
-            let p: Tile<f32, { [BM, BN] }> = exp2(qk);
+            let p: Tile<f32, { [BM, BN] }> = exp2(qk, ftz::Disabled);
             let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1);
             let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij);
+            let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
 
             // Update running sum and rescale accumulator
             l_i = l_i * alpha + l_ij;
