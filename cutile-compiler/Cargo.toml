@@ -10,6 +10,10 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["mlir", "cutile", "compiler"]
 
+[features]
+default = []
+mlir = []
+
 [dependencies]
 melior = { workspace = true }
 syn = { workspace = true }
@@ -25,3 +29,4 @@ stacker = { workspace = true }
 cuda-tile-rs = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
+tile-ir = { workspace = true }

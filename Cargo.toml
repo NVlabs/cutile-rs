@@ -20,6 +20,9 @@ members = [
     # cuTile Rust macros. Requires cutile-compiler.
     "cutile-macro",
 
+    # Pure Rust Tile IR representation and bytecode writer.
+    "tile-ir",
+
     # Main package (cuTile Rust). Requires cuda-async + cutile-compiler + cutile-macro
     "cutile",
 
@@ -70,4 +73,5 @@ cutile-compiler = { path = "cutile-compiler", version = "0.0.1" }
 cutile-macro = { path = "cutile-macro", version = "0.0.1" }
 cutile = { path = "cutile", version = "0.0.1" }
 cutile-examples = { path = "cutile-examples", version = "0.0.1" }
+tile-ir = { path = "tile-ir", version = "0.0.1" }
 cutile-benchmarks = { path = "cutile-benchmarks", version = "0.0.1" }

@@ -491,6 +491,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "tile-ir",
 ]
 
 [[package]]
@@ -522,6 +523,7 @@ dependencies = [
  "regex",
  "stacker",
  "syn",
+ "tile-ir",
  "uuid",
 ]
 
@@ -1853,6 +1855,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tile-ir"
+version = "0.0.1"
+dependencies = [
+ "half",
+ "indexmap",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

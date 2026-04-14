@@ -62,16 +62,6 @@ mod opt_hints_module {
         let tile: Tile<f32, S> = constant(1.0f32, output.shape());
         output.store(tile);
     }
-
-    /// Latency as a const generic — specialized at launch time.
-    #[cutile::entry()]
-    fn load_view_const_latency_kernel<const S: [i32; 1], const L: i32>(input: &Tensor<f32, S>) {
-        let token: Token = new_token_unordered();
-        let shape = input.shape();
-        let partition: Partition<f32, S> = make_partition_view(input, shape, token);
-        let idx: [i32; 1] = [0i32];
-        let _tile: Tile<f32, S> = load_from_view(&partition, idx, Some(L), false);
-    }
 }
 
 use opt_hints_module::_module_asts;
@@ -85,7 +75,6 @@ fn compile_kernel(name: &str, strides: &[(&str, &[i32])], options: &CompileOptio
         name,
         &[128.to_string()],
         strides,
-        &[],
         &[],
         None,
         gpu_name,
@@ -224,38 +213,6 @@ fn different_compile_options_produce_different_mlir() {
         assert_ne!(
             mlir_a, mlir_b,
             "Different CompileOptions should produce different MLIR"
-        );
-    });
-}
-
-#[test]
-fn load_view_const_latency_in_mlir() {
-    // Latency as a const generic: L=5 should appear as `latency = 5` in MLIR.
-    common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "opt_hints_module",
-            "load_view_const_latency_kernel",
-            &[128.to_string(), 5.to_string()], // S=128, L=5
-            &[("input", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed to create compiler");
-        let module_op = compiler.compile().expect("Failed to compile");
-        let mlir = module_op.as_operation().to_string();
-        drop(module_op);
-        drop(compiler);
-        println!("{mlir}");
-        assert!(
-            mlir.contains("latency = 5"),
-            "Expected latency=5 from const generic L=5.\nMLIR:\n{mlir}"
         );
     });
 }

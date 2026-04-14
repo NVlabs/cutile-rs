@@ -47,6 +47,48 @@ pub fn parse_tile_entry<'c>(
     return module_op;
 }
 
+/// Compiles a `tile_ir::Module` to a `.cubin` file via bytecode serialization and `tileiras`.
+pub fn compile_tile_ir_module(module: &tile_ir::Module, gpu_name: &str) -> String {
+    let tmp_dir = env::temp_dir();
+    let base_filename = tmp_dir.join(Uuid::new_v4().to_string());
+    let bc_filename = format!("{}.bc", base_filename.to_str().unwrap());
+    let cubin_filename = format!("{}.cubin", base_filename.to_str().unwrap());
+
+    module
+        .verify_dominance()
+        .expect("tile-ir dominance verification failed");
+
+    module
+        .verify_bytecode_indices()
+        .expect("tile-ir bytecode value-index verification failed");
+
+    if std::env::var("TILE_IR_DUMP").is_ok() {
+        eprintln!("{}", module.to_mlir_text());
+    }
+
+    tile_ir::write_bytecode_to_file(module, bc_filename.as_str())
+        .expect(&format!("Failed to write bytecode for {bc_filename}"));
+    let output = Command::new("tileiras")
+        .arg("--gpu-name")
+        .arg(gpu_name)
+        .arg("--opt-level")
+        .arg("3")
+        .arg("-o")
+        .arg(&cubin_filename)
+        .arg(&bc_filename)
+        .output()
+        .expect(format!("Failed to launch tileiras for {bc_filename}").as_str());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        panic!(
+            "tileiras failed (exit {}) for gpu {gpu_name}:\nstderr: {stderr}\nstdout: {stdout}",
+            output.status
+        );
+    }
+    cubin_filename
+}
+
 /// Compiles a CUDA Tile module operation to a `.cubin` file via `tileiras`, returning the path.
 pub fn compile_module(module_op: &ModuleOperation, gpu_name: &str) -> String {
     let tmp_dir = env::temp_dir();

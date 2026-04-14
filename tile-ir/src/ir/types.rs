@@ -1,0 +1,766 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! Tile IR type system.
+//!
+//! Mirrors the CUDA Tile dialect types defined in `Types.td`.
+
+use crate::bytecode::TypeTag;
+
+/// Value used to represent dynamic shape/stride dimensions.
+pub const DYNAMIC: i64 = i64::MIN;
+
+// ---------------------------------------------------------------------------
+// Scalar types
+// ---------------------------------------------------------------------------
+
+/// Scalar (element) types — integers and floats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScalarType {
+    I1,
+    I8,
+    I16,
+    I32,
+    I64,
+    F16,
+    BF16,
+    F32,
+    TF32,
+    F64,
+    F8E4M3FN,
+    F8E5M2,
+}
+
+impl ScalarType {
+    /// Byte width of this scalar type (I1 rounds up to 1 byte).
+    pub fn byte_width(self) -> usize {
+        match self {
+            Self::I1 | Self::I8 | Self::F8E4M3FN | Self::F8E5M2 => 1,
+            Self::I16 | Self::F16 | Self::BF16 => 2,
+            Self::I32 | Self::F32 | Self::TF32 => 4,
+            Self::I64 | Self::F64 => 8,
+        }
+    }
+
+    pub fn type_tag(self) -> TypeTag {
+        match self {
+            Self::I1 => TypeTag::I1,
+            Self::I8 => TypeTag::I8,
+            Self::I16 => TypeTag::I16,
+            Self::I32 => TypeTag::I32,
+            Self::I64 => TypeTag::I64,
+            Self::F16 => TypeTag::F16,
+            Self::BF16 => TypeTag::BF16,
+            Self::F32 => TypeTag::F32,
+            Self::TF32 => TypeTag::TF32,
+            Self::F64 => TypeTag::F64,
+            Self::F8E4M3FN => TypeTag::F8E4M3FN,
+            Self::F8E5M2 => TypeTag::F8E5M2,
+        }
+    }
+
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            Self::I1 | Self::I8 | Self::I16 | Self::I32 | Self::I64
+        )
+    }
+
+    pub fn is_float(self) -> bool {
+        !self.is_integer()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compound types
+// ---------------------------------------------------------------------------
+
+/// An element type that can appear inside a Tile (scalar or pointer).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TileElementType {
+    Scalar(ScalarType),
+    Pointer(Box<PointerType>),
+}
+
+/// Pointer to a scalar value in global device memory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PointerType {
+    pub pointee: ScalarType,
+}
+
+/// A statically-shaped tile of elements.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TileType {
+    pub shape: Vec<i64>,
+    pub element_type: TileElementType,
+}
+
+/// A reference to a tensor in global memory with shape and strides.
+/// Use [`DYNAMIC`] for dimensions/strides that are not statically known.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TensorViewType {
+    pub element_type: ScalarType,
+    pub shape: Vec<i64>,
+    pub strides: Vec<i64>,
+}
+
+/// A view into a tensor where tiles are laid out in a grid pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PartitionViewType {
+    pub tile_shape: Vec<i32>,
+    pub tensor_view: TensorViewType,
+    pub dim_map: Vec<i32>,
+    pub padding_value: Option<PaddingValue>,
+}
+
+/// Padding value for out-of-bounds accesses in a partition view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PaddingValue {
+    Zero = 0,
+    NegZero = 1,
+    Nan = 2,
+    PosInf = 3,
+    NegInf = 4,
+}
+
+/// Function signature type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FuncType {
+    pub inputs: Vec<Type>,
+    pub results: Vec<Type>,
+}
+
+/// The unified type enum — every value in the IR has one of these types.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    Scalar(ScalarType),
+    Pointer(PointerType),
+    Tile(TileType),
+    TensorView(TensorViewType),
+    PartitionView(PartitionViewType),
+    Func(FuncType),
+    Token,
+}
+
+impl From<ScalarType> for Type {
+    fn from(s: ScalarType) -> Self {
+        Self::Scalar(s)
+    }
+}
+
+impl From<PointerType> for Type {
+    fn from(p: PointerType) -> Self {
+        Self::Pointer(p)
+    }
+}
+
+impl From<TileType> for Type {
+    fn from(t: TileType) -> Self {
+        Self::Tile(t)
+    }
+}
+
+impl From<TensorViewType> for Type {
+    fn from(t: TensorViewType) -> Self {
+        Self::TensorView(t)
+    }
+}
+
+impl From<PartitionViewType> for Type {
+    fn from(p: PartitionViewType) -> Self {
+        Self::PartitionView(p)
+    }
+}
+
+impl From<FuncType> for Type {
+    fn from(f: FuncType) -> Self {
+        Self::Func(f)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type parser — equivalent of melior::ir::Type::parse(ctx, s)
+// ---------------------------------------------------------------------------
+
+impl Type {
+    /// Parse a CUDA Tile MLIR type string into a `Type`.
+    ///
+    /// This is the tile-ir equivalent of `melior::ir::Type::parse(ctx, s)`.
+    /// It handles the full grammar of CUDA Tile dialect types:
+    ///
+    /// - `!cuda_tile.tile<[shape x]elem>` where elem is scalar or `!cuda_tile.ptr<scalar>`
+    /// - `!cuda_tile.tensor_view<[shape x]scalar, strides=[strides]>`
+    /// - `!cuda_tile.partition_view<tile=(dims), [padding_value=X,] tensor_view<...>[, dim_map=[...]]>`
+    /// - `!cuda_tile.token`
+    /// - Bare scalar names (e.g. `f32`, `i32`)
+    ///
+    /// Returns `None` if the string doesn't match any known type.
+    pub fn parse(s: &str) -> Option<Type> {
+        let s = s.trim();
+        // Accept both `!cuda_tile.token` and shorthand `token`.
+        if s == "!cuda_tile.token" || s == "token" {
+            return Some(Type::Token);
+        }
+        // Prefixed forms.
+        if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.tile<", ">") {
+            return parse_tile(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.tensor_view<", ">") {
+            return parse_tensor_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.partition_view<", ">") {
+            return parse_partition_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.ptr<", ">") {
+            let pointee = parse_scalar(inner)?;
+            return Some(Type::Pointer(PointerType { pointee }));
+        }
+        // Shorthand forms (no `!cuda_tile.` prefix).
+        if let Some(inner) = strip_prefix_suffix(s, "tile<", ">") {
+            return parse_tile(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "tensor_view<", ">") {
+            return parse_tensor_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "partition_view<", ">") {
+            return parse_partition_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "ptr<", ">") {
+            let pointee = parse_scalar(inner)?;
+            return Some(Type::Pointer(PointerType { pointee }));
+        }
+        // Bare scalar name.
+        parse_scalar(s).map(Type::Scalar)
+    }
+}
+
+impl ScalarType {
+    /// Parse a scalar type name string.
+    pub fn parse(s: &str) -> Option<ScalarType> {
+        parse_scalar(s)
+    }
+}
+
+/// Strip a known prefix and the matching closing `>`, handling nested `<>`.
+fn strip_prefix_suffix<'a>(s: &'a str, prefix: &str, _suffix: &str) -> Option<&'a str> {
+    if !s.starts_with(prefix) {
+        return None;
+    }
+    let after_prefix = &s[prefix.len()..];
+    // Find the matching closing '>' by counting nesting depth.
+    let mut depth = 1;
+    for (i, c) in after_prefix.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&after_prefix[..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    // No matching close — try without nesting (just strip last char if it's '>').
+    if after_prefix.ends_with('>') {
+        Some(&after_prefix[..after_prefix.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn parse_scalar(s: &str) -> Option<ScalarType> {
+    match s.trim() {
+        "i1" => Some(ScalarType::I1),
+        "i8" => Some(ScalarType::I8),
+        "i16" => Some(ScalarType::I16),
+        "i32" => Some(ScalarType::I32),
+        "i64" => Some(ScalarType::I64),
+        "f16" => Some(ScalarType::F16),
+        "bf16" => Some(ScalarType::BF16),
+        "f32" => Some(ScalarType::F32),
+        "tf32" => Some(ScalarType::TF32),
+        "f64" => Some(ScalarType::F64),
+        "f8E4M3FN" | "f8e4m3fn" => Some(ScalarType::F8E4M3FN),
+        "f8E5M2" | "f8e5m2" => Some(ScalarType::F8E5M2),
+        // Rust-facing names used by the compiler.
+        "bool" => Some(ScalarType::I1),
+        _ => None,
+    }
+}
+
+/// Parse a dim string: integer or `?` for DYNAMIC.
+fn parse_dim(s: &str) -> i64 {
+    let s = s.trim();
+    if s == "?" {
+        DYNAMIC
+    } else {
+        s.parse::<i64>().unwrap_or(DYNAMIC)
+    }
+}
+
+/// Parse `[shape x]elem` where shape is `dim[xdim]*` and elem is a scalar or `!cuda_tile.ptr<scalar>`.
+fn parse_tile(inner: &str) -> Option<Type> {
+    // Check for pointer element: `!cuda_tile.ptr<scalar>` or `ptr<scalar>`
+    if let Some(ptr_start) = inner.find("ptr<") {
+        let before = inner[..ptr_start].trim().trim_end_matches("!cuda_tile.");
+        let shape: Vec<i64> = if before.is_empty() {
+            vec![]
+        } else {
+            before
+                .trim_end_matches('x')
+                .split('x')
+                .map(|d| parse_dim(d))
+                .collect()
+        };
+        let ptr_inner_start = ptr_start + "ptr<".len();
+        let ptr_inner_end = inner[ptr_inner_start..].find('>')?;
+        let pointee = parse_scalar(&inner[ptr_inner_start..ptr_inner_start + ptr_inner_end])?;
+        return Some(Type::Tile(TileType {
+            shape,
+            element_type: TileElementType::Pointer(Box::new(PointerType { pointee })),
+        }));
+    }
+
+    // Split on 'x' to get shape dims and trailing element type.
+    // e.g. "128xf32" → ["128", "f32"], "f32" → ["f32"], "4x128xf32" → ["4", "128", "f32"]
+    let parts: Vec<&str> = inner.split('x').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let elem_str = parts.last()?;
+    let scalar = parse_scalar(elem_str)?;
+    let shape: Vec<i64> = parts[..parts.len() - 1]
+        .iter()
+        .map(|p| parse_dim(p))
+        .collect();
+    Some(Type::Tile(TileType {
+        shape,
+        element_type: TileElementType::Scalar(scalar),
+    }))
+}
+
+/// Parse `[shape x]scalar, strides=[strides]`.
+fn parse_tensor_view(inner: &str) -> Option<Type> {
+    // Split at ", strides=" to separate shape+elem from strides.
+    let (shape_elem, strides_part) = if let Some(pos) = inner.find(", strides=") {
+        (&inner[..pos], Some(&inner[pos + ", strides=".len()..]))
+    } else if let Some(pos) = inner.find(",strides=") {
+        (&inner[..pos], Some(&inner[pos + ",strides=".len()..]))
+    } else {
+        (inner, None)
+    };
+
+    let parts: Vec<&str> = shape_elem.split('x').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let elem_str = parts.last()?;
+    let scalar = parse_scalar(elem_str)?;
+    let shape: Vec<i64> = parts[..parts.len() - 1]
+        .iter()
+        .map(|p| parse_dim(p))
+        .collect();
+
+    let strides = if let Some(sp) = strides_part {
+        let sp = sp.trim_start_matches('[').trim_end_matches(']');
+        sp.split(',').map(|s| parse_dim(s)).collect()
+    } else {
+        vec![DYNAMIC; shape.len()]
+    };
+
+    Some(Type::TensorView(TensorViewType {
+        element_type: scalar,
+        shape,
+        strides,
+    }))
+}
+
+/// Parse `tile=(dims), [padding_value=X,] tensor_view<...>[, dim_map=[...]]`.
+fn parse_partition_view(inner: &str) -> Option<Type> {
+    // Extract tile shape from "tile=(d1xd2)" or "tile=(d1, d2)" or "tile=(d1)".
+    let tile_start = inner.find("tile=(")?;
+    let dims_start = tile_start + "tile=(".len();
+    let dims_end = inner[dims_start..].find(')')? + dims_start;
+    let dims_str = &inner[dims_start..dims_end];
+    let tile_shape: Vec<i32> = if dims_str.contains('x') {
+        dims_str
+            .split('x')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(1))
+            .collect()
+    } else {
+        dims_str
+            .split(',')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(1))
+            .collect()
+    };
+
+    // Extract padding_value if present.
+    let padding_value = if inner.contains("padding_value") {
+        if inner.contains("zero") && !inner.contains("neg_zero") {
+            Some(PaddingValue::Zero)
+        } else if inner.contains("neg_zero") {
+            Some(PaddingValue::NegZero)
+        } else if inner.contains("nan") {
+            Some(PaddingValue::Nan)
+        } else if inner.contains("pos_inf") {
+            Some(PaddingValue::PosInf)
+        } else if inner.contains("neg_inf") {
+            Some(PaddingValue::NegInf)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Extract the tensor_view — may be "tensor_view=!cuda_tile.tensor_view<...>"
+    // or just "tensor_view<...>" or "!cuda_tile.tensor_view<...>".
+    let tv_search = inner;
+    let tv_prefix_start = tv_search
+        .find("tensor_view=!cuda_tile.tensor_view<")
+        .map(|p| (p, "tensor_view=!cuda_tile.tensor_view<"))
+        .or_else(|| {
+            tv_search
+                .find("!cuda_tile.tensor_view<")
+                .map(|p| (p, "!cuda_tile.tensor_view<"))
+        })
+        .or_else(|| {
+            // "tensor_view<" without the "tensor_view=" or "!cuda_tile." prefix
+            // but NOT matching the "tile=" prefix that also appears
+            let remaining = &tv_search[dims_end + 1..]; // after the tile=(...) part
+            remaining
+                .find("tensor_view<")
+                .map(|p| (p + dims_end + 1, "tensor_view<"))
+        })?;
+    let (tv_pos, tv_prefix) = tv_prefix_start;
+    let tv_inner_start = tv_pos + tv_prefix.len();
+
+    // Find matching closing '>' for the tensor_view.
+    let mut depth = 1;
+    let mut tv_inner_end = tv_inner_start;
+    for (i, c) in inner[tv_inner_start..].char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    tv_inner_end = tv_inner_start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let tv_inner = &inner[tv_inner_start..tv_inner_end];
+    let tv_type = parse_tensor_view(tv_inner)?;
+    let Type::TensorView(tv) = tv_type else {
+        return None;
+    };
+
+    // Extract dim_map if present.
+    let dim_map = if let Some(dm_start) = inner.find("dim_map=[") {
+        let dm_inner_start = dm_start + "dim_map=[".len();
+        let dm_end = inner[dm_inner_start..].find(']')? + dm_inner_start;
+        inner[dm_inner_start..dm_end]
+            .split(',')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(0))
+            .collect()
+    } else {
+        (0..tile_shape.len() as i32).collect()
+    };
+
+    Some(Type::PartitionView(PartitionViewType {
+        tile_shape,
+        tensor_view: tv,
+        dim_map,
+        padding_value,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Scalars --
+
+    #[test]
+    fn parse_scalar_f32() {
+        assert_eq!(Type::parse("f32"), Some(Type::Scalar(ScalarType::F32)));
+    }
+
+    #[test]
+    fn parse_scalar_i32() {
+        assert_eq!(Type::parse("i32"), Some(Type::Scalar(ScalarType::I32)));
+    }
+
+    #[test]
+    fn parse_scalar_bf16() {
+        assert_eq!(Type::parse("bf16"), Some(Type::Scalar(ScalarType::BF16)));
+    }
+
+    #[test]
+    fn parse_unknown_returns_none() {
+        assert_eq!(Type::parse("not_a_type"), None);
+    }
+
+    // -- Token --
+
+    #[test]
+    fn parse_token() {
+        assert_eq!(Type::parse("!cuda_tile.token"), Some(Type::Token));
+    }
+
+    // -- Tile (scalar element) --
+
+    #[test]
+    fn parse_tile_scalar() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<f32>"),
+            Some(Type::Tile(TileType {
+                shape: vec![],
+                element_type: TileElementType::Scalar(ScalarType::F32),
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_tile_1d() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<128xf32>"),
+            Some(Type::Tile(TileType {
+                shape: vec![128],
+                element_type: TileElementType::Scalar(ScalarType::F32),
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_tile_2d() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<16x8xf32>"),
+            Some(Type::Tile(TileType {
+                shape: vec![16, 8],
+                element_type: TileElementType::Scalar(ScalarType::F32),
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_tile_i32() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<i32>"),
+            Some(Type::Tile(TileType {
+                shape: vec![],
+                element_type: TileElementType::Scalar(ScalarType::I32),
+            }))
+        );
+    }
+
+    // -- Tile (pointer element) --
+
+    #[test]
+    fn parse_tile_ptr() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<!cuda_tile.ptr<f32>>"),
+            Some(Type::Tile(TileType {
+                shape: vec![],
+                element_type: TileElementType::Pointer(Box::new(PointerType {
+                    pointee: ScalarType::F32
+                })),
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_tile_ptr_i64() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<!cuda_tile.ptr<i64>>"),
+            Some(Type::Tile(TileType {
+                shape: vec![],
+                element_type: TileElementType::Pointer(Box::new(PointerType {
+                    pointee: ScalarType::I64
+                })),
+            }))
+        );
+    }
+
+    // -- TensorView --
+
+    #[test]
+    fn parse_tensor_view_static() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tensor_view<128xf32, strides=[1]>"),
+            Some(Type::TensorView(TensorViewType {
+                element_type: ScalarType::F32,
+                shape: vec![128],
+                strides: vec![1],
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_tensor_view_dynamic() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tensor_view<?xf32, strides=[?]>"),
+            Some(Type::TensorView(TensorViewType {
+                element_type: ScalarType::F32,
+                shape: vec![DYNAMIC],
+                strides: vec![DYNAMIC],
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_tensor_view_2d() {
+        assert_eq!(
+            Type::parse("!cuda_tile.tensor_view<?x8192xf32, strides=[?,1]>"),
+            Some(Type::TensorView(TensorViewType {
+                element_type: ScalarType::F32,
+                shape: vec![DYNAMIC, 8192],
+                strides: vec![DYNAMIC, 1],
+            }))
+        );
+    }
+
+    // -- PartitionView --
+
+    #[test]
+    fn parse_partition_view_1d_melior() {
+        // Melior format: tensor_view<...> without = prefix.
+        assert_eq!(
+            Type::parse("!cuda_tile.partition_view<tile=(128), tensor_view<128xf32, strides=[1]>>"),
+            Some(Type::PartitionView(PartitionViewType {
+                tile_shape: vec![128],
+                tensor_view: TensorViewType {
+                    element_type: ScalarType::F32,
+                    shape: vec![128],
+                    strides: vec![1],
+                },
+                dim_map: vec![0],
+                padding_value: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_partition_view_1d_formatted() {
+        // tile-ir formatter format: tensor_view=!cuda_tile.tensor_view<...>.
+        assert_eq!(
+            Type::parse("!cuda_tile.partition_view<tile=(128), tensor_view=!cuda_tile.tensor_view<128xf32, strides=[1]>>"),
+            Some(Type::PartitionView(PartitionViewType {
+                tile_shape: vec![128],
+                tensor_view: TensorViewType {
+                    element_type: ScalarType::F32,
+                    shape: vec![128],
+                    strides: vec![1],
+                },
+                dim_map: vec![0],
+                padding_value: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_partition_view_2d() {
+        assert_eq!(
+            Type::parse(
+                "!cuda_tile.partition_view<tile=(16x8), tensor_view<?x8192xf32, strides=[?,1]>>"
+            ),
+            Some(Type::PartitionView(PartitionViewType {
+                tile_shape: vec![16, 8],
+                tensor_view: TensorViewType {
+                    element_type: ScalarType::F32,
+                    shape: vec![DYNAMIC, 8192],
+                    strides: vec![DYNAMIC, 1],
+                },
+                dim_map: vec![0, 1],
+                padding_value: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_partition_view_dynamic() {
+        assert_eq!(
+            Type::parse("!cuda_tile.partition_view<tile=(16), tensor_view<?xf32, strides=[?]>>"),
+            Some(Type::PartitionView(PartitionViewType {
+                tile_shape: vec![16],
+                tensor_view: TensorViewType {
+                    element_type: ScalarType::F32,
+                    shape: vec![DYNAMIC],
+                    strides: vec![DYNAMIC],
+                },
+                dim_map: vec![0],
+                padding_value: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_partition_view_with_padding() {
+        let ty = Type::parse(
+            "!cuda_tile.partition_view<tile=(8), padding_value = zero, tensor_view<128xf32, strides=[1]>>"
+        );
+        let Some(Type::PartitionView(pv)) = ty else {
+            panic!("expected PartitionView");
+        };
+        assert_eq!(pv.tile_shape, vec![8]);
+        assert_eq!(pv.padding_value, Some(PaddingValue::Zero));
+    }
+
+    // -- Round-trip: format → parse --
+
+    #[test]
+    fn roundtrip_tile_scalar() {
+        let ty = Type::Tile(TileType {
+            shape: vec![],
+            element_type: TileElementType::Scalar(ScalarType::F32),
+        });
+        let formatted = crate::ir::fmt::format_type(&ty);
+        assert_eq!(Type::parse(&formatted), Some(ty));
+    }
+
+    #[test]
+    fn roundtrip_tile_2d() {
+        let ty = Type::Tile(TileType {
+            shape: vec![16, 8],
+            element_type: TileElementType::Scalar(ScalarType::I32),
+        });
+        let formatted = crate::ir::fmt::format_type(&ty);
+        assert_eq!(Type::parse(&formatted), Some(ty));
+    }
+
+    #[test]
+    fn roundtrip_tile_ptr() {
+        let ty = Type::Tile(TileType {
+            shape: vec![],
+            element_type: TileElementType::Pointer(Box::new(PointerType {
+                pointee: ScalarType::F32,
+            })),
+        });
+        let formatted = crate::ir::fmt::format_type(&ty);
+        assert_eq!(Type::parse(&formatted), Some(ty));
+    }
+
+    #[test]
+    fn roundtrip_tensor_view() {
+        let ty = Type::TensorView(TensorViewType {
+            element_type: ScalarType::F32,
+            shape: vec![DYNAMIC, 8192],
+            strides: vec![DYNAMIC, 1],
+        });
+        let formatted = crate::ir::fmt::format_type(&ty);
+        assert_eq!(Type::parse(&formatted), Some(ty));
+    }
+
+    #[test]
+    fn roundtrip_token() {
+        let ty = Type::Token;
+        let formatted = crate::ir::fmt::format_type(&ty);
+        assert_eq!(Type::parse(&formatted), Some(ty));
+    }
+}

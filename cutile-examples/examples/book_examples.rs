@@ -329,10 +329,10 @@ mod fmha_module {
             let m_ij: Tile<f32, { [BM, 1] }> = max_tile(m_i, qk_max);
             let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
 
-            let p: Tile<f32, { [BM, BN] }> = exp2(qk, ftz::Disabled);
+            let p: Tile<f32, { [BM, BN] }> = exp2(qk);
             let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1);
             let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+            let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij);
 
             l_i = l_i * alpha + l_ij;
             let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(const_shape![BM, D]);

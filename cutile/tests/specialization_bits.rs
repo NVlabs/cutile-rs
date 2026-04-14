@@ -3,18 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
-use cutile::api;
-use cutile::tensor::PartitionMut;
-use cutile::tile_kernel::DeviceOp;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
-use cutile_compiler::specialization::{DivHint, SpecializationBits};
-
-/// Helper: create a DivHint with the default max (16).
-fn dh(divisor: i32) -> DivHint {
-    DivHint { divisor, max: 16 }
-}
+use cutile_compiler::specialization::SpecializationBits;
 
 mod common;
 
@@ -33,16 +25,9 @@ mod spec_test_module {
         let tile: Tile<f32, S> = constant(1.0f32, output.shape());
         output.store(tile);
     }
-
-    /// Kernel with a scalar integer param — used to test DivHint on scalars.
-    #[cutile::entry(print_ir = true)]
-    fn scalar_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, _n: i32) {
-        let tile: Tile<f32, S> = constant(1.0f32, output.shape());
-        output.store(tile);
-    }
 }
 
-use spec_test_module::{_module_asts, scalar_kernel};
+use spec_test_module::_module_asts;
 
 fn compile_with_spec(
     name: &str,
@@ -67,7 +52,6 @@ fn compile_with_spec_and_options(
         &[128.to_string()],
         strides,
         specs,
-        &[],
         None,
         gpu_name,
         options,
@@ -86,10 +70,10 @@ fn compile_with_spec_and_options(
 fn spec_bits_div_16_produces_div_by_16() {
     common::with_test_stack(|| {
         let spec = SpecializationBits {
-            shape_div: vec![dh(16)],
-            stride_div: vec![dh(4)],
+            shape_div: vec![16],
+            stride_div: vec![4],
             stride_one: vec![true],
-            base_ptr_div: dh(16),
+            base_ptr_div: 16,
             elements_disjoint: true,
         };
         let mlir = compile_with_spec("simple_kernel", &[("output", &[1])], &[("output", &spec)]);
@@ -105,10 +89,10 @@ fn spec_bits_div_16_produces_div_by_16() {
 fn spec_bits_div_8_produces_div_by_8() {
     common::with_test_stack(|| {
         let spec = SpecializationBits {
-            shape_div: vec![dh(8)],
-            stride_div: vec![dh(4)],
+            shape_div: vec![8],
+            stride_div: vec![4],
             stride_one: vec![true],
-            base_ptr_div: dh(8),
+            base_ptr_div: 8,
             elements_disjoint: true,
         };
         let mlir = compile_with_spec("simple_kernel", &[("output", &[1])], &[("output", &spec)]);
@@ -136,10 +120,10 @@ fn no_spec_bits_no_div_by() {
 fn spec_bits_div_1_no_div_by() {
     common::with_test_stack(|| {
         let spec = SpecializationBits {
-            shape_div: vec![dh(1)],
-            stride_div: vec![dh(1)],
+            shape_div: vec![1],
+            stride_div: vec![1],
             stride_one: vec![true],
-            base_ptr_div: dh(1),
+            base_ptr_div: 1,
             elements_disjoint: true,
         };
         let mlir = compile_with_spec("simple_kernel", &[("output", &[1])], &[("output", &spec)]);
@@ -158,17 +142,17 @@ fn different_spec_bits_different_cache_keys() {
     use cutile::tile_kernel::TileFunctionKey;
 
     let spec_a = SpecializationBits {
-        shape_div: vec![dh(16)],
-        stride_div: vec![dh(16)],
+        shape_div: vec![16],
+        stride_div: vec![16],
         stride_one: vec![true],
-        base_ptr_div: dh(16),
+        base_ptr_div: 16,
         elements_disjoint: true,
     };
     let spec_b = SpecializationBits {
-        shape_div: vec![dh(8)],
-        stride_div: vec![dh(8)],
+        shape_div: vec![8],
+        stride_div: vec![8],
         stride_one: vec![true],
-        base_ptr_div: dh(8),
+        base_ptr_div: 8,
         elements_disjoint: true,
     };
 
@@ -178,7 +162,6 @@ fn different_spec_bits_different_cache_keys() {
         vec![],
         vec![],
         vec![("output".into(), spec_a.clone())],
-        vec![],
         None,
         CompileOptions::default(),
     );
@@ -188,7 +171,6 @@ fn different_spec_bits_different_cache_keys() {
         vec![],
         vec![],
         vec![("output".into(), spec_b.clone())],
-        vec![],
         None,
         CompileOptions::default(),
     );
@@ -198,7 +180,6 @@ fn different_spec_bits_different_cache_keys() {
         vec![],
         vec![],
         vec![("output".into(), spec_a)],
-        vec![],
         None,
         CompileOptions::default(),
     );
@@ -221,10 +202,10 @@ fn entry_max_divisibility_caps_inferred_div() {
     // Spec says shape is div by 16, but the hint should cap it to 8.
     common::with_test_stack(|| {
         let spec = SpecializationBits {
-            shape_div: vec![dh(16)],
-            stride_div: vec![dh(16)],
+            shape_div: vec![16],
+            stride_div: vec![16],
             stride_one: vec![true],
-            base_ptr_div: dh(16),
+            base_ptr_div: 16,
             elements_disjoint: true,
         };
         let mlir = compile_with_spec("capped_kernel", &[("output", &[1])], &[("output", &spec)]);
@@ -246,10 +227,10 @@ fn entry_max_divisibility_does_not_inflate() {
     // Spec says shape is div by 4 — should stay 4 (not inflated to 8).
     common::with_test_stack(|| {
         let spec = SpecializationBits {
-            shape_div: vec![dh(4)],
-            stride_div: vec![dh(4)],
+            shape_div: vec![4],
+            stride_div: vec![4],
             stride_one: vec![true],
-            base_ptr_div: dh(4),
+            base_ptr_div: 4,
             elements_disjoint: true,
         };
         let mlir = compile_with_spec("capped_kernel", &[("output", &[1])], &[("output", &spec)]);
@@ -271,10 +252,10 @@ fn runtime_max_divisibility_overrides_entry_hint() {
     // Runtime CompileOptions sets max_divisibility=4, capping spec div=16 to 4.
     common::with_test_stack(|| {
         let spec = SpecializationBits {
-            shape_div: vec![dh(16)],
-            stride_div: vec![dh(16)],
+            shape_div: vec![16],
+            stride_div: vec![16],
             stride_one: vec![true],
-            base_ptr_div: dh(16),
+            base_ptr_div: 16,
             elements_disjoint: true,
         };
         let options = CompileOptions::default().max_divisibility(4);
@@ -293,19 +274,5 @@ fn runtime_max_divisibility_overrides_entry_hint() {
             !mlir.contains("div_by<16>"),
             "Should not contain div_by<16> when runtime max_divisibility=4.\nMLIR:\n{mlir}"
         );
-    });
-}
-
-// -- Scalar integer DivHint --
-
-#[test]
-fn scalar_int_param_gets_div_hint() {
-    // Launch scalar_kernel with n=1024 (divisible by 16).
-    // The MLIR should contain assume_div_by on the scalar param.
-    common::with_test_stack(|| {
-        let mut output = api::zeros::<f32>(&[128]).sync().expect("alloc");
-        scalar_kernel((&mut output).partition([128]), 1024i32)
-            .sync()
-            .expect("kernel launch");
     });
 }

@@ -24,10 +24,10 @@ use mlir_sys::{
 };
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, LowerHex};
 use std::hash::Hash;
-use syn::{BinOp, Expr, ItemImpl, Lit, Pat, Stmt};
+use syn::{Expr, ItemImpl, Pat, Stmt};
 
 /// Creates a unit (flag) MLIR named attribute.
 pub fn named_flag_attr<'c>(context: &'c Context, name: &str) -> (Identifier<'c>, Attribute<'c>) {
@@ -247,78 +247,8 @@ impl AtomicMode {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-/// Enumeration of all supported binary operations in the CUDA Tile IR.
-pub enum TileBinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    CeilDiv,
-    TrueDiv,
-    Rem,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    Min,
-    Max,
-    BitAnd,
-    BitOr,
-    BitXor,
-}
-
-/// Maps a string operation name (e.g. `"add"`, `"ceil_div"`) to a [`TileBinaryOp`].
-pub fn get_binary_op_from_op_str(op_str: &str) -> Result<TileBinaryOp, JITError> {
-    match op_str {
-        "add" => Ok(TileBinaryOp::Add),
-        "sub" => Ok(TileBinaryOp::Sub),
-        "mul" => Ok(TileBinaryOp::Mul),
-        "div" => Ok(TileBinaryOp::Div),
-        "ceil_div" => Ok(TileBinaryOp::CeilDiv),
-        "true_div" => Ok(TileBinaryOp::TrueDiv),
-        "rem" => Ok(TileBinaryOp::Rem),
-        "eq" => Ok(TileBinaryOp::Eq),
-        "ne" => Ok(TileBinaryOp::Ne),
-        "lt" => Ok(TileBinaryOp::Lt),
-        "le" => Ok(TileBinaryOp::Le),
-        "gt" => Ok(TileBinaryOp::Gt),
-        "ge" => Ok(TileBinaryOp::Ge),
-        "min" | "min_tile" => Ok(TileBinaryOp::Min),
-        "max" | "max_tile" => Ok(TileBinaryOp::Max),
-        "and" => Ok(TileBinaryOp::BitAnd),
-        "or" => Ok(TileBinaryOp::BitOr),
-        "xor" => Ok(TileBinaryOp::BitXor),
-        _ => SourceLocation::unknown()
-            .jit_error_result(&format!("unrecognized arithmetic operation `{op_str}`")),
-    }
-}
-
-/// Converts a Rust `syn::BinOp` to the corresponding [`TileBinaryOp`].
-pub fn get_tile_bop_from_rust_bop(rust_bin_op: &BinOp) -> Result<TileBinaryOp, JITError> {
-    match rust_bin_op {
-        BinOp::Add(_) => Ok(TileBinaryOp::Add),
-        BinOp::Sub(_) => Ok(TileBinaryOp::Sub),
-        BinOp::Mul(_) => Ok(TileBinaryOp::Mul),
-        BinOp::Div(_) => Ok(TileBinaryOp::Div),
-        BinOp::Rem(_) => Ok(TileBinaryOp::Rem),
-        BinOp::Eq(_) => Ok(TileBinaryOp::Eq),
-        BinOp::Ne(_) => Ok(TileBinaryOp::Ne),
-        BinOp::Lt(_) => Ok(TileBinaryOp::Lt),
-        BinOp::Le(_) => Ok(TileBinaryOp::Le),
-        BinOp::Gt(_) => Ok(TileBinaryOp::Gt),
-        BinOp::Ge(_) => Ok(TileBinaryOp::Ge),
-        BinOp::BitAnd(_) => Ok(TileBinaryOp::BitAnd),
-        BinOp::BitOr(_) => Ok(TileBinaryOp::BitOr),
-        BinOp::BitXor(_) => Ok(TileBinaryOp::BitXor),
-        // Booleans lower to i1, so this is the correct choice.
-        BinOp::And(_) => Ok(TileBinaryOp::BitAnd),
-        BinOp::Or(_) => Ok(TileBinaryOp::BitOr),
-        _ => SourceLocation::unknown().jit_error_result("this binary operator is not supported"),
-    }
-}
+// Re-export from bounds.rs (canonical location).
+pub use crate::bounds::{get_binary_op_from_op_str, get_tile_bop_from_rust_bop, TileBinaryOp};
 
 /// Returns a comparison predicate MLIR attribute for comparison binary ops, or `None` for others.
 pub fn get_cmp_predicate_attr<'c>(
@@ -613,44 +543,6 @@ pub fn collect_mutated_variables_from_block(
                     result.insert(var_name);
                 }
             }
-            // Recurse into nested control flow to find mutations.
-            Stmt::Expr(Expr::ForLoop(for_expr), _) => {
-                for var in collect_mutated_variables_from_block(&for_expr.body)? {
-                    if !local_vars.contains(&var) {
-                        result.insert(var);
-                    }
-                }
-            }
-            Stmt::Expr(Expr::While(while_expr), _) => {
-                for var in collect_mutated_variables_from_block(&while_expr.body)? {
-                    if !local_vars.contains(&var) {
-                        result.insert(var);
-                    }
-                }
-            }
-            Stmt::Expr(Expr::If(if_expr), _) => {
-                for var in collect_mutated_variables_from_block(&if_expr.then_branch)? {
-                    if !local_vars.contains(&var) {
-                        result.insert(var);
-                    }
-                }
-                if let Some((_else, else_expr)) = &if_expr.else_branch {
-                    if let Expr::Block(block_expr) = &**else_expr {
-                        for var in collect_mutated_variables_from_block(&block_expr.block)? {
-                            if !local_vars.contains(&var) {
-                                result.insert(var);
-                            }
-                        }
-                    }
-                }
-            }
-            Stmt::Expr(Expr::Loop(loop_expr), _) => {
-                for var in collect_mutated_variables_from_block(&loop_expr.body)? {
-                    if !local_vars.contains(&var) {
-                        result.insert(var);
-                    }
-                }
-            }
             _ => continue,
         }
     }
@@ -701,237 +593,14 @@ pub unsafe fn verify_statements_raw(cuda_tile_module: MlirOperation) -> Result<(
     Ok(())
 }
 
-/// Runtime compile options for kernel JIT compilation.
-///
-/// These options control kernel-level compilation hints that can vary between
-/// launches. Different values trigger separate JIT compilations (they are part
-/// of the cache key).
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Default)]
-pub struct CompileOptions {
-    pub occupancy: Option<i32>,
-    pub num_cta_in_cga: Option<i32>,
-    pub max_divisibility: Option<i32>,
-}
+// Re-export from hints.rs (canonical location).
+pub use crate::hints::{OptimizationHints, SMHints};
 
-impl CompileOptions {
-    pub fn new() -> Self {
-        Self::default()
-    }
+// Re-export from hints.rs (canonical, melior-free location).
+pub use crate::hints::CompileOptions;
 
-    pub fn occupancy(mut self, occupancy: i32) -> Self {
-        self.occupancy = Some(occupancy);
-        self
-    }
-
-    pub fn num_cta_in_cga(mut self, num_cta_in_cga: i32) -> Self {
-        self.num_cta_in_cga = Some(num_cta_in_cga);
-        self
-    }
-
-    pub fn max_divisibility(mut self, max_divisibility: i32) -> Self {
-        self.max_divisibility = Some(max_divisibility);
-        self
-    }
-}
-
-fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
-    let Expr::Lit(lit) = expr else {
-        return SourceLocation::unknown()
-            .jit_error_result("expected a literal value for optimization hint");
-    };
-    let Lit::Int(int_expr) = &lit.lit else {
-        return SourceLocation::unknown()
-            .jit_error_result("expected an integer literal for optimization hint");
-    };
-    int_expr
-        .base10_parse()
-        .map_err(|e| JITError::Generic(format!("Failed to parse int hint: {e}")))
-}
-
-/// Per-architecture (SM) optimization hints for kernel compilation.
-pub struct SMHints {
-    pub gpu_name: String,
-    pub num_cta_in_cga: Option<i32>,
-    pub occupancy: Option<i32>,
-    pub max_divisibility: Option<i32>,
-}
-
-impl SMHints {
-    /// Creates a new `SMHints` with no hints set for the given GPU architecture.
-    pub fn new(gpu_name: String) -> Self {
-        Self {
-            gpu_name,
-            num_cta_in_cga: None,
-            occupancy: None,
-            max_divisibility: None,
-        }
-    }
-
-    /// Sets the number of CTAs in a CGA (Cooperative Grid Array) hint.
-    pub fn set_num_cta_in_cga(&mut self, hint: &Expr) -> Result<(), JITError> {
-        if self.num_cta_in_cga.is_some() {
-            return SourceLocation::unknown()
-                .jit_error_result("num_cta_in_cga hint has already been set");
-        }
-        self.num_cta_in_cga = Some(get_int_hint(hint)?);
-        Ok(())
-    }
-
-    /// Sets the target occupancy hint.
-    pub fn set_occupancy(&mut self, hint: &Expr) -> Result<(), JITError> {
-        if self.occupancy.is_some() {
-            return SourceLocation::unknown()
-                .jit_error_result("occupancy hint has already been set");
-        }
-        self.occupancy = Some(get_int_hint(hint)?);
-        Ok(())
-    }
-
-    /// Sets the max divisibility ceiling hint.
-    pub fn set_max_divisibility(&mut self, hint: &Expr) -> Result<(), JITError> {
-        if self.max_divisibility.is_some() {
-            return SourceLocation::unknown()
-                .jit_error_result("max_divisibility hint has already been set");
-        }
-        self.max_divisibility = Some(get_int_hint(hint)?);
-        Ok(())
-    }
-}
-
-/// Collection of optimization hints for kernel compilation, keyed by SM architecture.
-pub struct OptimizationHints {
-    pub target_gpu_name: Option<String>,
-    pub tile_as_hints: BTreeMap<String, SMHints>,
-}
-
+// Melior-specific extension methods on the shared OptimizationHints type.
 impl OptimizationHints {
-    /// Creates an empty set of optimization hints.
-    pub fn empty() -> OptimizationHints {
-        Self {
-            target_gpu_name: None,
-            tile_as_hints: BTreeMap::new(),
-        }
-    }
-
-    fn parse_key_value(expr: &Expr) -> Result<(String, Expr), JITError> {
-        let Expr::Assign(key_val) = expr else {
-            return SourceLocation::unknown()
-                .jit_error_result("expected an assignment expression in optimization hints");
-        };
-        let Expr::Path(key_path) = &*key_val.left else {
-            return SourceLocation::unknown().jit_error_result(
-                "Expected path expression on LHS of optimization hints assignment.",
-            );
-        };
-        if key_path.path.segments.len() != 1 {
-            return SourceLocation::unknown().jit_error_result(&format!(
-                "Expected single-segment path in optimization hints key, got {} segments.",
-                key_path.path.segments.len()
-            ));
-        }
-        let key = key_path.path.segments.last().unwrap().ident.to_string();
-        let value = *key_val.right.clone();
-        Ok((key, value))
-    }
-
-    /// Parses optimization hints from a tuple expression in the entry annotation.
-    pub fn parse(expr: &Expr, target_gpu_name: String) -> Result<OptimizationHints, JITError> {
-        let Expr::Tuple(opt_hints) = expr else {
-            return SourceLocation::unknown()
-                .jit_error_result("expected a tuple expression for optimization hints");
-        };
-        let mut result = OptimizationHints::empty();
-        result.target_gpu_name = Some(target_gpu_name);
-        for sm_key_val in &opt_hints.elems {
-            // println!("key: {gpu_name}, values: {hints_tuple:?}");
-
-            let (opt_key, opt_value) = Self::parse_key_value(sm_key_val)?;
-            match opt_key.as_str() {
-                _ => {
-                    if !opt_key.starts_with("sm_") {
-                        return SourceLocation::unknown().jit_error_result(&format!(
-                            "Unexpected optimization hint {}.",
-                            sm_key_val.to_token_stream().to_string()
-                        ));
-                    }
-                    // This is an architecture specific hint.
-                    let Expr::Tuple(hints_tuple) = opt_value else {
-                        return SourceLocation::unknown()
-                            .jit_error_result("expected a tuple expression for architecture-specific optimization hints");
-                    };
-                    let mut sm_hints_result = SMHints::new(opt_key.clone());
-                    for hint_key_val in hints_tuple.elems.iter() {
-                        let (key, hints) = Self::parse_key_value(hint_key_val)?;
-                        match key.as_str() {
-                            "num_cta_in_cga" => {
-                                sm_hints_result.set_num_cta_in_cga(&hints)?;
-                            }
-                            "occupancy" => {
-                                sm_hints_result.set_occupancy(&hints)?;
-                            }
-                            "max_divisibility" => {
-                                sm_hints_result.set_max_divisibility(&hints)?;
-                            }
-                            "allow_tma" | "latency" => {
-                                return SourceLocation::unknown().jit_error_result(&format!(
-                                    "'{key}' is a per-op hint and cannot be set at the entry level. \
-                                     Use it as a parameter on individual load/store operations instead."
-                                ));
-                            }
-                            _ => {
-                                return SourceLocation::unknown().jit_error_result(&format!(
-                                    "Unexpected optimization hint key '{key}'."
-                                ));
-                            }
-                        }
-                    }
-                    if result
-                        .tile_as_hints
-                        .insert(opt_key.clone(), sm_hints_result)
-                        .is_some()
-                    {
-                        return SourceLocation::unknown().jit_error_result(&format!(
-                            "Duplicate optimization hint key '{opt_key}'."
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    /// Returns the SM-specific hints for the given architecture key.
-    pub fn get_sm_hints(&self, key: &str) -> Option<&SMHints> {
-        self.tile_as_hints.get(key)
-    }
-
-    /// Applies runtime compile options, overriding entry-level hints.
-    pub fn apply_compile_options(&mut self, options: &CompileOptions) {
-        if options.occupancy.is_none()
-            && options.num_cta_in_cga.is_none()
-            && options.max_divisibility.is_none()
-        {
-            return;
-        }
-        let target_arch = self
-            .target_gpu_name
-            .clone()
-            .unwrap_or_else(|| "sm_100".to_string());
-        let sm_hints = self
-            .tile_as_hints
-            .entry(target_arch.clone())
-            .or_insert_with(|| SMHints::new(target_arch));
-        if let Some(occupancy) = options.occupancy {
-            sm_hints.occupancy = Some(occupancy);
-        }
-        if let Some(num_cta_in_cga) = options.num_cta_in_cga {
-            sm_hints.num_cta_in_cga = Some(num_cta_in_cga);
-        }
-        if let Some(max_divisibility) = options.max_divisibility {
-            sm_hints.max_divisibility = Some(max_divisibility);
-        }
-    }
-
     /// Builds the MLIR `optimization_hints` attribute for the entry function.
     pub fn get_entry_opt_hints<'c>(
         &self,

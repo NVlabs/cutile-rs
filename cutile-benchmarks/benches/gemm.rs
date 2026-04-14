@@ -9,6 +9,7 @@ use cutile::api;
 use cutile::core::f16;
 use cutile::tile_kernel::{PartitionOp, TileKernel};
 use kernels::*;
+use std::iter::zip;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -94,14 +95,14 @@ fn ocean_gemm(c: &mut Criterion) {
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
 
-    // This is what the ocean benchmark uses.
-    let shapes = (0..6)
-        .map(|i| {
-            let n = 2usize.pow(10 + i);
-            (n, n, n)
-        })
-        .collect::<Vec<_>>();
-    let hyper_params = [
+    let mut shapes = vec![];
+    for exponent in 0..6 {
+        // This is what the ocean benchmark uses.
+        let scale: usize = 2usize.pow(exponent);
+        let shape = (1024 * scale, 1024 * scale, 1024 * scale);
+        shapes.push(shape)
+    }
+    let hyper_params = vec![
         ((128, 128, 64), 2),
         ((256, 256, 64), 2),
         ((256, 256, 64), 2),
@@ -109,7 +110,11 @@ fn ocean_gemm(c: &mut Criterion) {
         ((256, 256, 64), 2),
         ((256, 256, 64), 2),
     ];
-    for (&(m, n, k), &((bm, bn, bk), _group_size_m)) in shapes.iter().zip(hyper_params.iter()) {
+    let slice = 0..6;
+    for (shape, (tile, _group_size_m)) in zip(&shapes[slice.clone()], &hyper_params[slice.clone()])
+    {
+        let (m, n, k) = *shape;
+        let (bm, bn, bk) = *tile;
         let generics = vec![
             "f16".to_string(),
             bm.to_string(),
@@ -147,7 +152,8 @@ fn ocean_gemm(c: &mut Criterion) {
                     }
                 }
                 stream.synchronize().expect("Failed to synchronize.");
-                start.elapsed()
+                let res = start.elapsed();
+                res
             });
         });
     }

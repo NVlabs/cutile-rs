@@ -10,6 +10,7 @@ use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
 use cutile::tile_kernel::TileKernel;
 use kernels::*;
+use std::iter::zip;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -119,10 +120,10 @@ mod kernels {
             let m_ij: Tile<f16, { [BM, 1] }> = max_tile(m_i, qk_max);
             let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
 
-            let p: Tile<f16, { [BM, BN] }> = exp2(qk, ftz::Disabled);
+            let p: Tile<f16, { [BM, BN] }> = exp2(qk);
             let l_ij: Tile<f16, { [BM] }> = reduce_sum(p, 1);
             let l_ij: Tile<f16, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f16, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+            let alpha: Tile<f16, { [BM, 1] }> = exp2(m_i - m_ij);
             l_i = l_i * alpha + l_ij;
             acc = acc * alpha.broadcast(const_shape![BM, D]);
 
@@ -155,25 +156,34 @@ fn ocean_fmha_causal(c: &mut Criterion) {
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
 
-    // This is what the ocean benchmark uses.
-    let context_lengths = (0..6).map(|i| (2usize.pow(10 + i),)).collect::<Vec<_>>();
+    let mut context_lengths = vec![];
+    for exponent in 0..7 {
+        // This is what the ocean benchmark uses.
+        let scale: usize = 2usize.pow(exponent);
+        let m = (1024 * scale,);
+        context_lengths.push(m)
+    }
     const TILE_SHAPE: (usize, usize) = (128, 64);
-    let hyper_params = [
-        [TILE_SHAPE],
-        [TILE_SHAPE],
-        [TILE_SHAPE],
-        [TILE_SHAPE],
-        [TILE_SHAPE],
-        [TILE_SHAPE],
-        [TILE_SHAPE],
+    let hyper_params = vec![
+        [TILE_SHAPE].as_slice(),
+        [TILE_SHAPE].as_slice(),
+        [TILE_SHAPE].as_slice(),
+        [TILE_SHAPE].as_slice(),
+        [TILE_SHAPE].as_slice(),
+        [TILE_SHAPE].as_slice(),
+        [TILE_SHAPE].as_slice(),
     ];
-    for (ctx_len, tile) in context_lengths.iter().zip(hyper_params.iter()) {
+    let slice = 0..6;
+    for (ctx_len, tile) in zip(
+        &context_lengths[slice.clone()],
+        &hyper_params[slice.clone()],
+    ) {
         // Using calculation from https://tridao.me/publications/flash3/flash3.pdf
         // 1. Seq len from 512-16k.
         // 2. Batch size set so total tokens is 16k (e.g. @ 16k seq len batch size is 1).
         // 3. "Hidden dim" is fixed to 2048, head dim is 64, 128 or 256.
         // With causal masking the FLOPs are halved: 2 * seqlen^2 * head_dim * num_heads * batch.
-        let (max_ctx_len,) = context_lengths.last().unwrap();
+        let (max_ctx_len,) = context_lengths[slice.clone().into_iter().last().unwrap()];
         let (seq_len,) = *ctx_len;
         let batch_size = max_ctx_len / seq_len;
         let num_heads = 8;
@@ -262,7 +272,8 @@ fn ocean_fmha_causal(c: &mut Criterion) {
                         out = out_local;
                     }
                     stream.synchronize().expect("Failed to synchronize.");
-                    start.elapsed()
+                    let res = start.elapsed();
+                    res
                 });
             },
         );

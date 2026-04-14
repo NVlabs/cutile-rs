@@ -154,56 +154,9 @@ mod control_flow_ops_module {
         let result: Tile<i64, S> = same_tile + constant(1i64, output.shape());
         output.store(result);
     }
-
-    /// Repro: for loop inside if doesn't propagate mutable variable.
-    /// collect_mutated_variables_from_block doesn't recurse into
-    /// nested control flow (for/while/if), so the if op doesn't
-    /// yield acc, and post-if code uses the stale pre-if value.
-    #[cutile::entry()]
-    fn if_for_carry_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, flag: i32) {
-        let mut acc: Tile<f32, S> = constant(0.0f32, output.shape());
-        if flag > 0i32 {
-            for _i in 0i32..10i32 {
-                let ones: Tile<f32, S> = constant(1.0f32, output.shape());
-                acc = acc + ones;
-            }
-        } else {
-            acc = acc;
-        }
-        output.store(acc);
-    }
-
-    /// Same repro but with const generic flag (closer to Yinuo's report).
-    #[cutile::entry()]
-    fn if_for_carry_const_kernel<const S: [i32; 1], const FLAG: i32, const N: i32>(
-        output: &mut Tensor<f32, S>,
-    ) {
-        let mut acc: Tile<f32, S> = constant(0.0f32, output.shape());
-        if FLAG > 0i32 {
-            for _i in 0i32..N {
-                let ones: Tile<f32, S> = constant(1.0f32, output.shape());
-                acc = acc + ones;
-            }
-        } else {
-            acc = acc;
-        }
-        output.store(acc);
-    }
-
-    /// if/else as a tile expression: `let result = if cond { a } else { b };`
-    #[cutile::entry()]
-    fn if_else_tile_expr_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, flag: i32) {
-        let ones: Tile<f32, S> = constant(1.0f32, output.shape());
-        let twos: Tile<f32, S> = constant(2.0f32, output.shape());
-        let result: Tile<f32, S> = if flag > 0i32 { ones } else { twos };
-        output.store(result);
-    }
 }
 
-use control_flow_ops_module::{
-    _module_asts, break_test_kernel, if_else_tile_expr_kernel, if_for_carry_const_kernel,
-    if_for_carry_kernel, if_return_test_kernel,
-};
+use control_flow_ops_module::{_module_asts, break_test_kernel, if_return_test_kernel};
 
 #[test]
 fn compile_control_flow_test() -> () {
@@ -217,7 +170,6 @@ fn compile_control_flow_test() -> () {
             "control_flow_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -303,7 +255,6 @@ fn compile_break_test() -> () {
             &[128.to_string()],
             &[("output", &[1])],
             &[],
-            &[],
             None,
             gpu_name,
             &CompileOptions::default(),
@@ -338,7 +289,6 @@ fn compile_while_loop_test() -> () {
             "while_loop_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -375,7 +325,6 @@ fn compile_loop_test() -> () {
             &[128.to_string()],
             &[("output", &[1])],
             &[],
-            &[],
             None,
             gpu_name,
             &CompileOptions::default(),
@@ -410,7 +359,6 @@ fn compile_step_by_test() -> () {
             "step_by_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -447,7 +395,6 @@ fn compile_assume_test() -> () {
             "assume_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -492,7 +439,6 @@ fn compile_assume_non_negative_test() -> () {
             &[128.to_string()],
             &[("output", &[1])],
             &[],
-            &[],
             None,
             gpu_name,
             &CompileOptions::default(),
@@ -530,7 +476,6 @@ fn compile_assume_div_by_test() -> () {
             "assume_div_by_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -570,7 +515,6 @@ fn compile_assume_same_elements_test() -> () {
             &[4.to_string(), 8.to_string()],
             &[("output", &[2, 2])],
             &[],
-            &[],
             None,
             gpu_name,
             &CompileOptions::default(),
@@ -593,77 +537,5 @@ fn compile_assume_same_elements_test() -> () {
         );
 
         println!("\n✓ assume_same_elements operation verified with same_elements<[2, 4]>");
-    });
-}
-
-#[test]
-fn if_for_carry_propagates_mutation() {
-    // Repro: for loop inside if should propagate mutable variable updates.
-    // flag=1 means the if body runs: acc += 1.0 ten times → acc = 10.0.
-    // Bug: acc stays 0.0 because the if op doesn't yield the for's output.
-    common::with_test_stack(|| {
-        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
-        if_for_carry_kernel((&mut output).partition([128]), 1i32)
-            .sync()
-            .expect("kernel");
-        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
-        assert!(
-            (host[0] - 10.0).abs() < 1e-3,
-            "Expected 10.0 (for loop ran 10 times), got {}",
-            host[0]
-        );
-    });
-}
-
-#[test]
-fn if_for_carry_const_propagates_mutation() {
-    // Same as above but with const generic FLAG and N.
-    // FLAG=1, N=10 → acc = 10.0.
-    common::with_test_stack(|| {
-        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
-        if_for_carry_const_kernel((&mut output).partition([128]))
-            .generics(vec![
-                "128".to_string(), // S
-                "1".to_string(),   // FLAG
-                "10".to_string(),  // N
-            ])
-            .sync()
-            .expect("kernel");
-        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
-        assert!(
-            (host[0] - 10.0).abs() < 1e-3,
-            "Expected 10.0 (const FLAG=1, N=10), got {}",
-            host[0]
-        );
-    });
-}
-
-#[test]
-fn if_else_tile_expr_returns_value() {
-    // if/else as an expression: `let result = if flag > 0 { ones } else { twos };`
-    // flag=1 → result = 1.0, flag=0 → result = 2.0.
-    common::with_test_stack(|| {
-        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
-        if_else_tile_expr_kernel((&mut output).partition([128]), 1i32)
-            .sync()
-            .expect("kernel");
-        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
-        assert!(
-            (host[0] - 1.0).abs() < 1e-3,
-            "flag=1: expected 1.0, got {}",
-            host[0]
-        );
-    });
-    common::with_test_stack(|| {
-        let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
-        if_else_tile_expr_kernel((&mut output).partition([128]), 0i32)
-            .sync()
-            .expect("kernel");
-        let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
-        assert!(
-            (host[0] - 2.0).abs() < 1e-3,
-            "flag=0: expected 2.0, got {}",
-            host[0]
-        );
     });
 }

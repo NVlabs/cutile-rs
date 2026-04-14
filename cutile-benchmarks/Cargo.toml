@@ -11,6 +11,7 @@ readme = "README.md"
 publish = false
 
 [features]
+mlir = ["cutile/mlir"]
 # Run each benchmark once to verify execution without measuring performance.
 # Usage: cargo bench -p cutile-benchmarks --features smoke-test
 smoke-test = []

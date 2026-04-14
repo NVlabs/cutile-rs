@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .add_results(&[tensor_view_type])
                         .build()?;
 
-                    let make_tensor_view_op_ref = func_block.append_operation(make_tensor_view_op);
+                    let make_tensor_view_op_ref = func_block.append_operation(make_tensor_view_op.into());
                     let tensor_view_value: Value = make_tensor_view_op_ref.result(0)?.into();
 
                     let make_partition_view_builder = OperationBuilder::new("cuda_tile.make_partition_view", Location::unknown(&context));
@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .add_results(&[partition_view_type])
                         .build()?;
 
-                    let make_partition_view_op_ref = func_block.append_operation(make_partition_view_op);
+                    let make_partition_view_op_ref = func_block.append_operation(make_partition_view_op.into());
                     let _partition_view_value: Value = make_partition_view_op_ref.result(0)?.into();
 
                     let add_op_builder = OperationBuilder::new("cuda_tile.addi", Location::unknown(&context));
@@ -108,14 +108,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .add_operands(&[dim1, dim2])
                         .add_results(&[dim1.r#type()])
                         .build()?;
-                    let add_op_ref = func_block.append_operation(add_op);
+                    let add_op_ref = func_block.append_operation(add_op.into());
                     let add_op_result: Value = add_op_ref.result(0)?.into();
                     let add_ptr_op_builder = OperationBuilder::new("cuda_tile.offset", Location::unknown(&context));
                     let add_ptr_op = add_ptr_op_builder
                         .add_operands(&[base, add_op_result])
                         .add_results(&[base.r#type()])
                         .build()?;
-                    let add_ptr_op_ref = func_block.append_operation(add_ptr_op);
+                    let add_ptr_op_ref = func_block.append_operation(add_ptr_op.into());
                     let _add_ptr_op_result: Value = add_ptr_op_ref.result(0)?.into();
 
                     let add_float_op_builder = OperationBuilder::new("cuda_tile.addf", Location::unknown(&context));
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .add_operands(&[float1, float1])
                         .add_results(&[float1.r#type()])
                         .build()?;
-                    let add_float_op_ref = func_block.append_operation(add_float_op);
+                    let add_float_op_ref = func_block.append_operation(add_float_op.into());
                     let _add_float_op_result: Value = add_float_op_ref.result(0)?.into();
 
                     let permute_op_builder = OperationBuilder::new("cuda_tile.permute", Location::unknown(&context));
@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
 
                     let matrix_op = operation_parse(&context, "%0 = cuda_tile.constant <f32: 0.0> : !cuda_tile.tile<128x256xf32>", None).unwrap();
-                    let matrix_op_ref = func_block.append_operation(matrix_op);
+                    let matrix_op_ref = func_block.append_operation(matrix_op.into());
                     let matrix_zeros_value: Value = matrix_op_ref.result(0)?.into();
 
                     let permute_op = permute_op_builder
@@ -144,7 +144,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .add_operands(&[matrix_zeros_value])
                         .add_results(&[Type::parse(&context, "!cuda_tile.tile<256x128xf32>").unwrap()])
                         .build()?;
-                    let permute_op_ref = func_block.append_operation(permute_op);
+                    let permute_op_ref = func_block.append_operation(permute_op.into());
                     let _permute_op_result: Value = permute_op_ref.result(0)?.into();
 
                     let lower_bound = operation_parse(&context, "%lowerBound = cuda_tile.constant <i32: 0> : !cuda_tile.tile<i32>", None).unwrap();
@@ -182,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             // Can we have block arguments that aren't specified here?
                             let loop_block_args = &[&[for_iterand_type], for_arg_tys.as_slice()].concat();
                             let loop_block = Block::new(
-                                &loop_block_args.iter().map(|&ty| (ty, location)).collect::<Vec<_>>()
+                                &loop_block_args.iter().map(|ty| (ty.clone(), location)).collect::<Vec<_>>()
                             );
                             let mut vars = vec![];
                             for i in 0..loop_block.argument_count() {
@@ -202,7 +202,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .add_operands(&[some_val_1, some_val_2])
                                 .add_results(&[some_val_1.r#type()])
                                 .build()?;
-                            let add_float_op_ref = loop_block.append_operation(add_float_op);
+                            let add_float_op_ref = loop_block.append_operation(add_float_op.into());
                             let some_val: Value = add_float_op_ref.result(0)?.into();
                             vars[1] = some_val;
 
@@ -227,7 +227,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .add_results(&[Type::parse(&context, "!cuda_tile.tile<f32>").unwrap()])
                         .add_regions([{
                             let loop_block = Block::new(
-                                &loop_init_types.iter().map(|&ty| (ty, location)).collect::<Vec<_>>()
+                                &loop_init_types.iter().map(|ty| (ty.clone(), location)).collect::<Vec<_>>()
                             );
                             let some_val: Value = loop_block.append_operation(operation_parse(&context,
                                                                                                "%finalReturnValue = cuda_tile.constant <f32: 0.0> : !cuda_tile.tile<f32>",
@@ -273,7 +273,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .add_operands(&[some_val_1, some_val_2])
                                 .add_results(&[some_val_1.r#type()])
                                 .build()?;
-                            let add_float_op_ref = block.append_operation(add_float_op);
+                            let add_float_op_ref = block.append_operation(add_float_op.into());
                             let x_val: Value = add_float_op_ref.result(0)?.into();
 
                             let _yield_val = block.append_operation(
@@ -321,7 +321,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     // Sum (Reduce Example)
                     let matrix_op = operation_parse(&context, "%0 = cuda_tile.constant <f32: 1.0> : !cuda_tile.tile<128x256xf32>", None).unwrap();
-                    let matrix_op_ref = func_block.append_operation(matrix_op);
+                    let matrix_op_ref = func_block.append_operation(matrix_op.into());
                     let matrix_ones_value: Value = matrix_op_ref.result(0)?.into();
 
                     let result_type = Type::parse(&context, "!cuda_tile.tile<128xf32>").unwrap();
@@ -340,7 +340,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 iter_operand_types // operand_i_prev_iter
                             ];
                             let block = Block::new(
-                                &block_arg_types.iter().map(|&ty| (ty, location)).collect::<Vec<_>>()
+                                &block_arg_types.iter().map(|ty| (ty.clone(), location)).collect::<Vec<_>>()
                             );
                             let mut block_vars = vec![];
                             for i in 0..block.argument_count() {
@@ -377,7 +377,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 iter_operand_types // elem
                             ];
                             let block = Block::new(
-                                &block_arg_types.iter().map(|&ty| (ty, location)).collect::<Vec<_>>()
+                                &block_arg_types.iter().map(|ty| (ty.clone(), location)).collect::<Vec<_>>()
                             );
                             let mut block_vars = vec![];
                             for i in 0..block.argument_count() {
@@ -398,11 +398,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     assert!(scan_op_ref.verify());
 
                     let matrix_op = operation_parse(&context, "%0 = cuda_tile.constant <f32: 1.0> : !cuda_tile.tile<128x256xf32>", None).unwrap();
-                    let matrix_op_ref = func_block.append_operation(matrix_op);
+                    let matrix_op_ref = func_block.append_operation(matrix_op.into());
                     let matrix_left: Value = matrix_op_ref.result(0)?.into();
 
                     let matrix_op = operation_parse(&context, "%0 = cuda_tile.constant <f32: 1.0> : !cuda_tile.tile<128x256xf32>", None).unwrap();
-                    let matrix_op_ref = func_block.append_operation(matrix_op);
+                    let matrix_op_ref = func_block.append_operation(matrix_op.into());
                     let matrix_right: Value = matrix_op_ref.result(0)?.into();
 
                     // Select

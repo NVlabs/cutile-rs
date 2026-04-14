@@ -34,109 +34,6 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprCall, ExprLit, ItemFn, Lit, Token, Type, UnOp};
 
-/// Resolves `static_params` from a `#[cuda_tile::op]` attribute against call-site arguments.
-///
-/// Each `static_params` entry has the format:
-///   `"param_name={TypeA: attr_name=attr_val, TypeB: attr_name=attr_val}"`
-///
-/// For each entry, this function:
-/// 1. Finds the argument index by matching `param_name` to the function signature
-/// 2. Reads the concrete ZST type name from the call-site expression (e.g., `ftz::Enabled`)
-/// 3. Looks up the type name in the mapping and returns `(attr_name, attr_val)` pairs
-///
-/// Returns a list of `"attr_name=attr_val"` strings to be emitted as MLIR named attributes.
-fn resolve_static_params(
-    static_params: &[String],
-    call_expr: &ExprCall,
-    fn_item: &ItemFn,
-) -> Result<Vec<String>, String> {
-    if static_params.is_empty() {
-        return Ok(vec![]);
-    }
-    let fn_params = get_sig_param_names(&fn_item.sig);
-    let mut attrs = vec![];
-
-    for spec in static_params {
-        // Parse: "param_name={TypeA: attr=val, TypeB: attr=val}"
-        let eq_pos = spec
-            .find('=')
-            .ok_or_else(|| format!("Invalid static_params entry (missing '='): {spec}"))?;
-        let param_name = spec[..eq_pos].trim();
-        let mapping_str = spec[eq_pos + 1..].trim();
-
-        // Find argument index by param name.
-        let Some(arg_idx) = fn_params.iter().position(|s| s == param_name) else {
-            return Err(format!(
-                "static_params: param '{param_name}' not found in function signature"
-            ));
-        };
-        if arg_idx >= call_expr.args.len() {
-            return Err(format!(
-                "static_params: param '{param_name}' at index {arg_idx} but only {} args in call",
-                call_expr.args.len()
-            ));
-        }
-
-        // Extract the ZST type name from the call-site argument.
-        // Expected forms: `ftz::Enabled`, `Enabled`, `Latency::<3>`
-        let arg_expr = &call_expr.args[arg_idx];
-        let type_name = match arg_expr {
-            Expr::Path(path) => {
-                // e.g., `ftz::Enabled` → "Enabled", or just `Enabled` → "Enabled"
-                path.path
-                    .segments
-                    .last()
-                    .map(|s| s.ident.to_string())
-                    .unwrap_or_default()
-            }
-            _ => {
-                return Err(format!(
-                    "static_params: expected path expression for param '{param_name}', got: {}",
-                    arg_expr.to_token_stream()
-                ));
-            }
-        };
-
-        // Look up the type name in the mapping.
-        // Format: "{TypeA: attr=val, TypeB: attr=val}"
-        if !mapping_str.starts_with('{') || !mapping_str.ends_with('}') {
-            return Err(format!(
-                "Invalid static_params mapping (expected {{...}}): {mapping_str}"
-            ));
-        }
-        let inner = &mapping_str[1..mapping_str.len() - 1];
-        // Split on ',' to get individual type mappings.
-        let mut matched = false;
-        for entry in inner.split(',') {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            // Format: "TypeName: attr_name=attr_val" or "TypeName:" (empty = no attribute)
-            let colon_pos = entry
-                .find(':')
-                .ok_or_else(|| format!("Invalid static_params entry (missing ':'): {entry}"))?;
-            let entry_type = entry[..colon_pos].trim();
-            let entry_attr = entry[colon_pos + 1..].trim();
-
-            if entry_type == type_name {
-                if !entry_attr.is_empty() {
-                    attrs.push(entry_attr.to_string());
-                }
-                matched = true;
-                break;
-            }
-        }
-        // Types with no mapping entry (e.g., ftz::Disabled) emit nothing — that's valid.
-        if !matched {
-            // No mapping found — this is the "omit" case (e.g., Disabled).
-            // This is not an error.
-        }
-    }
-
-    Ok(attrs)
-}
-
 impl<'m, 'c> CUDATileFunctionCompiler<'m> {
     pub fn compile_cuda_tile_op_call(
         &'c self,
@@ -197,9 +94,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         let cuda_tile_op_named_attributes = op_attrs
             .parse_string_arr("named_attributes")
             .unwrap_or_else(|| vec![]);
-        let cuda_tile_op_static_params = op_attrs
-            .parse_string_arr("static_params")
-            .unwrap_or_else(|| vec![]);
         if call_expr.args.len() < cuda_tile_op_params.len() {
             return self.jit_error_result(
                 &call_expr.span(),
@@ -236,7 +130,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             &cuda_tile_op_attribute_params,
             &cuda_tile_op_hint_params,
             &cuda_tile_op_named_attributes,
-            &cuda_tile_op_static_params,
             generic_args,
             ctx,
             return_type,
@@ -483,7 +376,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: latency (Option<i32>) — literal or const generic
+        // arg[6]: latency (Option<i32>)
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         if let Some(latency_arg) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
@@ -491,17 +384,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             if let Expr::Lit(ExprLit {
                 lit: Lit::Int(int_lit),
                 ..
-            }) = &latency_arg
+            }) = latency_arg
             {
                 hint_params.insert(
                     "latency".to_string(),
                     int_lit.base10_parse::<i32>().unwrap(),
                 );
-            } else if let Expr::Path(path) = &latency_arg {
-                let name = path.path.segments.last().unwrap().ident.to_string();
-                if let Some(&v) = generic_args.inst_i32.get(&name) {
-                    hint_params.insert("latency".to_string(), v);
-                }
             }
         }
 
@@ -689,7 +577,7 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: latency (Option<i32>) — literal or const generic
+        // arg[6]: latency (Option<i32>)
         let mut hint_params: HashMap<String, i32> = HashMap::new();
         if let Some(latency_arg) =
             crate::compiler::utils::resolve_option_arg(&call_expr.args[6], ctx)
@@ -697,17 +585,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             if let Expr::Lit(ExprLit {
                 lit: Lit::Int(int_lit),
                 ..
-            }) = &latency_arg
+            }) = latency_arg
             {
                 hint_params.insert(
                     "latency".to_string(),
                     int_lit.base10_parse::<i32>().unwrap(),
                 );
-            } else if let Expr::Path(path) = &latency_arg {
-                let name = path.path.segments.last().unwrap().ident.to_string();
-                if let Some(&v) = generic_args.inst_i32.get(&name) {
-                    hint_params.insert("latency".to_string(), v);
-                }
             }
         }
 
@@ -1264,40 +1147,22 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                 );
             };
             // Handle Option<i32> hint params (e.g. latency: Option<i32>).
-            // The inner value can be a literal (Some(4)) or a const generic (Some(L)).
             if let Some(inner) = crate::compiler::utils::resolve_option_arg(&call_expr.args[i], ctx)
             {
-                let value: i32 = if let Expr::Lit(lit_expr) = &inner {
-                    let Lit::Int(int_lit) = &lit_expr.lit else {
-                        return self.jit_error_result(
-                            &lit_expr.span(),
-                            "Non-integer literals not supported",
-                        );
-                    };
-                    int_lit.base10_parse::<i32>().unwrap()
-                } else if let Expr::Path(path) = &inner {
-                    let name = path.path.segments.last().unwrap().ident.to_string();
-                    if let Some(&v) = generic_args.inst_i32.get(&name) {
-                        v
-                    } else {
-                        return self.jit_error_result(
-                            &call_expr.args[i].span(),
-                            &format!(
-                                "Failed to compile hint param {hint_param}: \
-                                 '{name}' is not a literal or resolved const generic."
-                            ),
-                        );
-                    }
-                } else {
+                let Expr::Lit(lit_expr) = &inner else {
                     return self.jit_error_result(
                         &call_expr.args[i].span(),
-                        &format!(
-                            "Failed to compile hint param {hint_param}, \
-                             expected literal or const generic."
-                        ),
+                        &format!("Failed to compile hint param {hint_param}, expected literal."),
                     );
                 };
-                hint_params.insert(hint_param.to_string(), value);
+                let Lit::Int(int_lit) = &lit_expr.lit else {
+                    return self
+                        .jit_error_result(&lit_expr.span(), "Non-integer literals not supported");
+                };
+                hint_params.insert(
+                    hint_param.to_string(),
+                    int_lit.base10_parse::<i32>().unwrap(),
+                );
             }
         }
         // Handle disallow_tma: bool parameter.
@@ -1880,7 +1745,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         cuda_tile_op_attribute_params: &[String],
         _cuda_tile_op_hint_params: &[String],
         cuda_tile_op_named_attributes: &[String],
-        cuda_tile_op_static_params: &[String],
         generic_args: &GenericVars,
         ctx: &mut CompilerContext<'c, 'c>,
         return_type: Option<TileRustType<'c>>,
@@ -2083,18 +1947,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             } else {
                 op_builder =
                     op_builder.add_attributes(&[self.parse_named_attr(attr_name, attr_value)?]);
-            }
-        }
-
-        // Resolve static_params: ZST marker types → MLIR attributes.
-        let resolved_static_attrs =
-            resolve_static_params(cuda_tile_op_static_params, call_expr, fn_item)
-                .map_err(|e| JITError::Generic(e))?;
-        for attr_str in &resolved_static_attrs {
-            let parts = attr_str.splitn(2, '=').collect::<Vec<&str>>();
-            if parts.len() == 2 {
-                op_builder = op_builder
-                    .add_attributes(&[self.parse_named_attr(parts[0].trim(), parts[1].trim())?]);
             }
         }
 

@@ -1,0 +1,17 @@
+[package]
+name = "tile-ir"
+description = "Pure Rust Tile IR representation and bytecode writer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+half = { workspace = true }
+indexmap = "2"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+half = { workspace = true }

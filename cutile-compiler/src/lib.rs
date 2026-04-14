@@ -21,6 +21,7 @@ mod bounds;
 pub mod cuda_tile_runtime_utils;
 pub mod error;
 pub mod generics;
+pub mod hints;
 mod kernel_entry_generator;
 pub mod kernel_naming;
 pub mod syn_utils;
@@ -28,6 +29,7 @@ pub mod train_map;
 pub mod types;
 
 pub mod compiler;
+pub mod compiler2;
 pub mod specialization;
 pub use compiler::utils;
 

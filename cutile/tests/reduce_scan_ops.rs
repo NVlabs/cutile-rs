@@ -69,7 +69,7 @@ mod reduce_scan_ops_module {
         // Use closure for max reduction with NEG_INFINITY as identity
         // f32::NEG_INFINITY works as identity because max(NEG_INFINITY, x) = x for any x
         //
-        // TODO (np): Using maxf(acc, x, nan::Disabled, ftz::Disabled) here gives "cannot find function" error even though
+        // TODO (np): Using maxf(acc, x) here gives "cannot find function" error even though
         // it's imported via `use cutile::core::{*}`. This appears to be a scoping bug
         // where some functions aren't visible inside reduce/scan closures. Using max()
         // (scalar version) works correctly and is the right function for this context anyway.
@@ -107,7 +107,6 @@ fn compile_scan_sum_test() -> () {
             "scan_sum_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -155,7 +154,6 @@ fn compile_reduce_closure_test() -> () {
             "reduce_closure_test_kernel",
             &[128.to_string()],
             &[("input", &[1]), ("result", &[1])],
-            &[],
             &[],
             None,
             gpu_name,
@@ -207,7 +205,6 @@ fn compile_reduce_product_closure_test() -> () {
             &[128.to_string()],
             &[("input", &[1]), ("result", &[1])],
             &[],
-            &[],
             None,
             gpu_name,
             &CompileOptions::default(),
@@ -258,7 +255,6 @@ fn compile_reduce_max_closure_test() -> () {
             &[128.to_string()],
             &[("input", &[1]), ("result", &[1])],
             &[],
-            &[],
             None,
             gpu_name,
             &CompileOptions::default(),
@@ -308,7 +304,6 @@ fn compile_scan_closure_test() -> () {
             "scan_closure_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
             &[],
             None,
             gpu_name,

@@ -7,9 +7,9 @@
 //! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
 
 use crate::ast::SourceLocation;
-use crate::compiler::utils::OptimizationHints;
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
+use crate::hints::OptimizationHints;
 use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::{get_fn_arg_var_name, get_ident_from_path_expr, get_ident_generic_args};
 use crate::types::{get_primitives_attrs, get_type_mutability};
@@ -205,7 +205,7 @@ impl TensorInput {
         stmt
     }
 
-    pub(crate) fn get_assume_div_by(var_name: String, div_by: i32) -> Stmt {
+    fn get_assume_div_by(var_name: String, div_by: i32) -> Stmt {
         let stmt = syn::parse2::<syn::Stmt>(
             format!("let {var_name} = unsafe {{ assume_div_by::<_, {div_by}>({var_name}) }};")
                 .parse()
@@ -256,11 +256,7 @@ impl TensorInput {
         let dims_var = format!("{var_name}_{dims_arg_name}");
         for (i, dynamic_dim_var) in dynamic_dims.iter().enumerate() {
             statements.push(Self::get_assume_non_negative_stmt(dynamic_dim_var.clone()));
-            let inferred = self
-                .spec
-                .as_ref()
-                .and_then(|s| s.shape_div.get(i))
-                .map(|h| h.divisor);
+            let inferred = self.spec.as_ref().and_then(|s| s.shape_div.get(i).copied());
             let div = self.effective_div(inferred);
             if div > 1 {
                 statements.push(Self::get_assume_div_by(dynamic_dim_var.clone(), div));
@@ -300,8 +296,7 @@ impl TensorInput {
             let inferred = self
                 .spec
                 .as_ref()
-                .and_then(|s| s.stride_div.get(i))
-                .map(|h| h.divisor);
+                .and_then(|s| s.stride_div.get(i).copied());
             let div = self.effective_div(inferred);
             if div > 1 {
                 statements.push(Self::get_assume_div_by(dynamic_stride_var.clone(), div));
@@ -377,7 +372,7 @@ impl TensorInput {
             // ptr.offset() needed here.
             ptr_var
         };
-        let inferred_ptr_div = self.spec.as_ref().map(|s| s.base_ptr_div.divisor);
+        let inferred_ptr_div = self.spec.as_ref().map(|s| s.base_ptr_div);
         let ptr_div = self.effective_div(inferred_ptr_div);
         if ptr_div > 1 {
             statements.push(Self::get_assume_div_by(final_ptr_var.clone(), ptr_div));
@@ -402,7 +397,6 @@ pub fn generate_entry_point(
     generic_vars: &GenericVars,
     stride_args: &HashMap<String, Vec<i32>>,
     spec_args: &HashMap<String, crate::specialization::SpecializationBits>,
-    scalar_hints: &HashMap<String, crate::specialization::DivHint>,
     primitives: &HashMap<(String, String), ItemImpl>,
     opt_hints: &OptimizationHints,
 ) -> Result<(ItemFn, Validator), JITError> {
@@ -477,15 +471,6 @@ pub fn generate_entry_point(
                         )
                         .unwrap();
                         fn_entry.sig.inputs.push(var_arg);
-                        // Emit assume_div_by for scalar integer params with DivHints.
-                        if let Some(hint) = scalar_hints.get(&var_name) {
-                            if hint.divisor > 1 {
-                                statements.push(TensorInput::get_assume_div_by(
-                                    var_name.clone(),
-                                    hint.divisor,
-                                ));
-                            }
-                        }
                         fn_params_concrete_types.push(ValidParamType::Scalar(ScalarParamType {
                             element_type: var_type,
                         }));

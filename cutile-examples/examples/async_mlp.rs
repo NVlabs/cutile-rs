@@ -98,12 +98,12 @@ async fn main() -> Result<(), Error> {
     let w0 = api::randn(0.0f32, 1.0, [dim, dim], None); // impl DeviceOp
     let w1 = api::randn(0.0f32, 1.0, [dim], None); // impl DeviceOp
     let w: (Arc<Tensor<f32>>, Arc<Tensor<f32>>) = zip!(w0.map(Into::into), w1.map(Into::into))
-        .schedule(devices.first().unwrap())?
+        .schedule(&devices[0])?
         .await?;
     let mut joins = vec![];
-    for device in devices.iter().skip(1) {
+    for i in 1..num_devices {
         let w_copy = tokio::spawn(
-            zip!(dup(&w.0).map(Into::into), dup(&w.1).map(Into::into)).schedule(device)?,
+            zip!(dup(&w.0).map(Into::into), dup(&w.1).map(Into::into)).schedule(&devices[i])?,
         );
         joins.push(w_copy);
     }

@@ -10,6 +10,7 @@
 use cuda_async::device_operation::{value, with_context, DeviceOp};
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_core::LaunchConfig;
+use cutile;
 use cutile::api::arange;
 use cutile::api::DeviceOpReshape;
 use cutile::error::Error;
@@ -57,7 +58,6 @@ async fn main() -> Result<(), Error> {
                 "saxpy_entry",
                 function_generics,
                 stride_args,
-                vec![],
                 vec![],
                 None,
                 CompileOptions::default(),
@@ -107,12 +107,12 @@ async fn main() -> Result<(), Error> {
     let y_host = y.to_host_vec().await?;
     let input_host: Vec<f32> = arange(num_elements).await?.to_host_vec().await?;
     println!("{:?}", y_host);
-    for (&input_host, &y_host) in input_host.iter().zip(y_host.iter()) {
-        let x_i = input_host;
-        let y_i = input_host;
+    for i in 0..num_elements {
+        let x_i = input_host[i];
+        let y_i = input_host[i];
         let answer = a * x_i + y_i;
-        println!("{} * {} + {} = {}", a, x_i, y_i, y_host);
-        assert_eq!(answer, y_host, "{} != {} ?", answer, y_host);
+        println!("{} * {} + {} = {}", a, x_i, y_i, y_host[i]);
+        assert_eq!(answer, y_host[i], "{} != {} ?", answer, y_host[i]);
     }
     Ok(())
 }

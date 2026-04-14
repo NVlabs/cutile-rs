@@ -10,10 +10,19 @@ use cuda_async::error::DeviceError;
 use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, CudaFunction};
 use cutile_compiler::ast::Module;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
+#[cfg(feature = "mlir")]
+use cutile_compiler::compiler::CUDATileFunctionCompiler;
+use cutile_compiler::compiler::CUDATileModules;
+#[cfg(not(feature = "mlir"))]
+use cutile_compiler::compiler2::Compiler2;
+#[cfg(feature = "mlir")]
 use cutile_compiler::cuda_tile::ModuleOperation;
-use cutile_compiler::cuda_tile_runtime_utils::{compile_module, get_gpu_name};
-use cutile_compiler::specialization::{DivHint, SpecializationBits};
+#[cfg(feature = "mlir")]
+use cutile_compiler::cuda_tile_runtime_utils::compile_module;
+#[cfg(not(feature = "mlir"))]
+use cutile_compiler::cuda_tile_runtime_utils::compile_tile_ir_module;
+use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
+use cutile_compiler::specialization::SpecializationBits;
 use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
@@ -43,7 +52,6 @@ pub struct TileFunctionKey {
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
     pub spec_args: Vec<(String, SpecializationBits)>,
-    pub scalar_hints: Vec<(String, DivHint)>,
     pub grid: Option<(u32, u32, u32)>,
     pub compile_options: CompileOptions,
 }
@@ -55,7 +63,6 @@ impl TileFunctionKey {
         function_generics: Vec<String>,
         stride_args: Vec<(String, Vec<i32>)>,
         spec_args: Vec<(String, SpecializationBits)>,
-        scalar_hints: Vec<(String, DivHint)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
     ) -> Self {
@@ -65,7 +72,6 @@ impl TileFunctionKey {
             function_generics,
             stride_args,
             spec_args,
-            scalar_hints,
             grid,
             compile_options,
         }
@@ -162,7 +168,6 @@ fn write_ir(
 ///     None
 /// );
 /// ```
-#[allow(clippy::too_many_arguments)]
 pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     ctx: &ExecutionContext,
     module_asts: F,
@@ -172,7 +177,6 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     function_generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
     spec_args: Vec<(String, SpecializationBits)>,
-    scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
 ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
@@ -184,7 +188,6 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         function_generics,
         stride_args,
         spec_args,
-        scalar_hints,
         const_grid,
         compile_options,
     );
@@ -198,7 +201,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         let gpu_name = get_gpu_name(device_id);
         // A miss compiles, caches, and returns the compiled function.
         let modules = CUDATileModules::new(module_asts())?;
-        let debug_mlir_path = modules.get_entry_arg_string_by_function_name(
+        let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
             module_name,
             function_name,
             "use_debug_mlir",
@@ -230,49 +233,99 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
             .collect();
         let spec_args_refs: Vec<(&str, &SpecializationBits)> =
             key.spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
-        let scalar_hints_refs: Vec<(&str, &DivHint)> = key
-            .scalar_hints
-            .iter()
-            .map(|x| (x.0.as_str(), &x.1))
-            .collect();
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            module_name,
-            function_name,
-            &key.function_generics,
-            &stride_args_refs,
-            &spec_args_refs,
-            &scalar_hints_refs,
-            const_grid,
-            gpu_name.clone(),
-            &key.compile_options,
-        )?;
-        let validator: Validator = compiler.get_validator();
-        let validator = Arc::new(validator);
-        let module_op: ModuleOperation = compiler.compile()?;
-        let mlir = module_op.as_operation().to_string();
-        if modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")? {
-            if debug_mlir_path.is_some() {
-                println!("LOADED MLIR: {module_name}::{function_name}\n{}", mlir);
-            } else {
-                println!("COMPILED MLIR: {module_name}::{function_name}\n{}", mlir);
+        let (cubin_filename, validator) = {
+            #[cfg(not(feature = "mlir"))]
+            {
+                // ---- compiler2 path: tile-ir bytecode (default) ----
+                let compiler2 = Compiler2::new(
+                    &modules,
+                    module_name,
+                    function_name,
+                    &key.function_generics,
+                    &stride_args_refs,
+                    &spec_args_refs,
+                    const_grid,
+                    gpu_name.clone(),
+                    &key.compile_options,
+                )?;
+                let validator: Validator = compiler2.get_validator();
+                let validator = Arc::new(validator);
+                let tile_module = compiler2.compile()?;
+                let mlir = tile_module.to_mlir_text();
+                if modules.get_entry_arg_bool_by_function_name(
+                    module_name,
+                    function_name,
+                    "print_ir",
+                )? {
+                    println!(
+                        "COMPILED IR (tile-ir): {module_name}::{function_name}\n{}",
+                        mlir
+                    );
+                }
+                if let Some(path) = modules.get_entry_arg_string_by_function_name(
+                    module_name,
+                    function_name,
+                    "dump_mlir_dir",
+                )? {
+                    write_ir(
+                        module_name,
+                        function_name,
+                        cache_hash_str.as_str(),
+                        "mlir",
+                        path.as_str(),
+                        mlir.as_str(),
+                    );
+                }
+                let cubin_filename = compile_tile_ir_module(&tile_module, &gpu_name);
+                (cubin_filename, validator)
             }
-        }
-        if let Some(path) = modules.get_entry_arg_string_by_function_name(
-            module_name,
-            function_name,
-            "dump_mlir_dir",
-        )? {
-            write_ir(
-                module_name,
-                function_name,
-                cache_hash_str.as_str(),
-                "mlir",
-                path.as_str(),
-                mlir.as_str(),
-            );
-        }
-        let cubin_filename = compile_module(&module_op, &gpu_name);
+            #[cfg(feature = "mlir")]
+            {
+                // ---- original path: melior/MLIR bytecode (--features mlir) ----
+                let compiler = CUDATileFunctionCompiler::new(
+                    &modules,
+                    module_name,
+                    function_name,
+                    &key.function_generics,
+                    &stride_args_refs,
+                    &spec_args_refs,
+                    const_grid,
+                    gpu_name.clone(),
+                    &key.compile_options,
+                )?;
+                let validator: Validator = compiler.get_validator();
+                let validator = Arc::new(validator);
+                let module_op: ModuleOperation = compiler.compile()?;
+                let mlir = module_op.as_operation().to_string();
+                if modules.get_entry_arg_bool_by_function_name(
+                    module_name,
+                    function_name,
+                    "print_ir",
+                )? {
+                    if debug_mlir_path.is_some() {
+                        println!("LOADED MLIR: {module_name}::{function_name}\n{}", mlir);
+                    } else {
+                        println!("COMPILED MLIR: {module_name}::{function_name}\n{}", mlir);
+                    }
+                }
+                if let Some(path) = modules.get_entry_arg_string_by_function_name(
+                    module_name,
+                    function_name,
+                    "dump_mlir_dir",
+                )? {
+                    write_ir(
+                        module_name,
+                        function_name,
+                        cache_hash_str.as_str(),
+                        "mlir",
+                        path.as_str(),
+                        mlir.as_str(),
+                    );
+                }
+                let cubin_filename = compile_module(&module_op, &gpu_name);
+                (cubin_filename, validator)
+            }
+        };
         // if let Some(path) = compiler.get_entry_arg_string_by_function_name(
         //     module_name,
         //     function_name,
@@ -310,14 +363,15 @@ pub fn validate_grids(
     partition_grids: &[(u32, u32, u32)],
 ) -> Result<(), Error> {
     // Make sure we're not trying to map mutable references to incorrect launch grid.
-    if let Some(partition_grid) = partition_grids.iter().find(|&&i| i != grid) {
-        Err(Error::KernelLaunch(KernelLaunchError(format!(
-            "{:?} != {:?}",
-            grid, partition_grid
-        ))))
-    } else {
-        Ok(())
+    for i in 0..partition_grids.len() {
+        if grid != partition_grids[i] {
+            return Err(Error::KernelLaunch(KernelLaunchError(format!(
+                "{:?} != {:?}",
+                grid, partition_grids[i]
+            ))));
+        }
     }
+    Ok(())
 }
 
 /// Infers the launch grid for a kernel from partitioned tensor inputs.
@@ -407,16 +461,16 @@ pub fn infer_launch_grid(
 /// ```rust,ignore
 /// async fn pipeline() -> impl DeviceOp<Output=Tensor<f32>> {
 ///     let x = api::randn(0.0, 1.0, [128, 128]).await;
-///
+///     
 ///     // Chain kernel operations
 ///     let y = my_kernel_1(x.clone())
 ///         .grid((8, 8, 1))
 ///         .await;
-///
+///     
 ///     let z = my_kernel_2(y)
 ///         .grid((4, 4, 1))
 ///         .await;
-///
+///     
 ///     z
 /// }
 /// ```
@@ -425,7 +479,6 @@ where
     DI: DeviceOp<Output = STORED>,
 {
     /// Compiles the kernel from module ASTs, returning the CUDA function and validator.
-    #[allow(clippy::too_many_arguments)]
     fn compile<F: Fn() -> Vec<Module>>(
         &mut self,
         ctx: &ExecutionContext,
@@ -436,7 +489,6 @@ where
         function_generics: Vec<String>,
         stride_args: Vec<(String, Vec<i32>)>,
         spec_args: Vec<(String, SpecializationBits)>,
-        scalar_hints: Vec<(String, DivHint)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
     ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
@@ -449,7 +501,6 @@ where
             function_generics,
             stride_args,
             spec_args,
-            scalar_hints,
             grid,
             compile_options,
         )
@@ -789,7 +840,7 @@ where
 /// async fn process_data() -> Tensor<f32> {
 ///     let x = api::randn(0.0, 1.0, [1024]).partition([128]);
 ///     let processed = my_tiled_kernel(x);  // Returns Partition<Tensor<f32>>
-///
+///     
 ///     // Unwrap to get a regular tensor
 ///     unwrap_partition(processed).await
 /// }

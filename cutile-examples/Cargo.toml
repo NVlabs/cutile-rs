@@ -10,6 +10,9 @@ repository.workspace = true
 readme = "README.md"
 publish = false
 
+[features]
+mlir = ["cutile/mlir"]
+
 [dependencies]
 cutile-compiler = { workspace = true }
 cutile = { workspace = true }

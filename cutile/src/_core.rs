@@ -178,58 +178,9 @@
 ///
 /// - [`tile_async`](crate::tile_async) - Async execution and kernel compilation
 /// - [`kernels`](crate::kernels) - Pre-built kernel examples
-// ---------------------------------------------------------------
-// Static operation parameter modules
-//
-// Defined outside the proc-macro-processed `core` module because the
-// module macro doesn't support nested `mod` items. Re-exported from
-// `core` via `pub use`.
-//
-// Each module defines a trait (`Mode`) and zero-sized marker structs.
-// Binary switches use Enabled/Disabled. Multi-valued parameters use
-// descriptive names.
-// ---------------------------------------------------------------
-
-/// Flush-to-zero modifier. Flushes denormal inputs and results to
-/// sign-preserving zero. Only supported for f32.
-pub mod ftz {
-    pub trait Mode {}
-    pub struct Enabled;
-    pub struct Disabled;
-    impl Mode for Enabled {}
-    impl Mode for Disabled {}
-}
-
-/// Rounding mode for floating-point operations.
-pub mod rounding {
-    pub trait Mode {}
-    pub struct NearestEven;
-    pub struct PositiveInf;
-    pub struct NegativeInf;
-    pub struct Zero;
-    pub struct Approx;
-    impl Mode for NearestEven {}
-    impl Mode for PositiveInf {}
-    impl Mode for NegativeInf {}
-    impl Mode for Zero {}
-    impl Mode for Approx {}
-}
-
-/// NaN propagation for maxf/minf operations.
-pub mod nan {
-    pub trait Mode {}
-    pub struct Enabled;
-    pub struct Disabled;
-    impl Mode for Enabled {}
-    impl Mode for Disabled {}
-}
-
 #[cutile_macro::module(core = true, tile_rust_crate = true)]
 pub mod core {
 
-    pub use super::ftz;
-    pub use super::nan;
-    pub use super::rounding;
     pub use half::{bf16, f16};
     use std::marker::PhantomData;
     use std::ops;
@@ -2391,11 +2342,11 @@ pub mod core {
     /// let x: Tile<f32, {[128]}> = ...; // [1.2, 2.7, -1.5, ...]
     /// let result = ceil(x, "nearest_even"); // [2.0, 3.0, -1.0, ...]
     /// ```
-    #[cuda_tile::op(name="cuda_tile.ceil", params=["x"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}"])]
+    #[cuda_tile::op(name="cuda_tile.ceil", params=["x"], attribute_params=["rounding_mode:rounding"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn ceil<E: ElementType, const S: [i32; N], R: rounding::Mode>(
+    pub fn ceil<E: ElementType, const S: [i32; N]>(
         x: Tile<E, S>,
-        rounding: R,
+        rounding_mode: &str,
     ) -> Tile<E, S> {
         unreachable!()
     }
@@ -2458,12 +2409,9 @@ pub mod core {
     /// let x: Tile<f32, {[128]}> = ...; // [4.0, 9.0, 16.0, ...]
     /// let result = rsqrt(x); // [0.5, 0.333..., 0.25, ...]
     /// ```
-    #[cuda_tile::op(name="cuda_tile.rsqrt", params=["x"], static_params=["ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.rsqrt", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn rsqrt<E: ElementType, const S: [i32; N], F: ftz::Mode>(
-        x: Tile<E, S>,
-        ftz: F,
-    ) -> Tile<E, S> {
+    pub fn rsqrt<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
     /// Computes element-wise sine of floating-point tiles.
@@ -2498,12 +2446,11 @@ pub mod core {
     /// let x: Tile<f32, {[128]}> = ...; // [4.0, 9.0, 16.0, ...]
     /// let result = sqrt(x, "negative_inf"); // [2.0, 3.0, 4.0, ...]
     /// ```
-    #[cuda_tile::op(name="cuda_tile.sqrt", params=["x"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.sqrt", params=["x"], attribute_params=["rounding_mode:rounding"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn sqrt<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
+    pub fn sqrt<E: ElementType, const S: [i32; N]>(
         x: Tile<E, S>,
-        rounding: R,
-        ftz: F,
+        rounding_mode: &str,
     ) -> Tile<E, S> {
         unreachable!()
     }
@@ -3086,14 +3033,28 @@ pub mod core {
     ///
     /// ```rust,ignore
     /// let x: Tile<f32, {[128]}> = ...; // [0.0, 1.0, 2.0, ...]
-    /// let result = exp2(x, ftz::Disabled); // [1.0, 2.0, 4.0, ...]
+    /// let result = exp2(x); // [1.0, 2.0, 4.0, ...]
     /// ```
-    #[cuda_tile::op(name="cuda_tile.exp2", params=["x"], static_params=["ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.exp2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn exp2<E: ElementType, const S: [i32; N], F: ftz::Mode>(
-        x: Tile<E, S>,
-        ftz: F,
-    ) -> Tile<E, S> {
+    pub fn exp2<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Computes element-wise base-2 exponential (2^x) with flush-to-zero.
+    ///
+    /// Same as [`exp2`], but flushes denormal results to zero. This can
+    /// improve performance on GPU hardware. Only supported for f32.
+    ///
+    /// ## Examples
+    ///
+    /// ```rust,ignore
+    /// let x: Tile<f32, {[128]}> = ...; // [0.0, 1.0, 2.0, ...]
+    /// let result = exp2_ftz(x); // [1.0, 2.0, 4.0, ...]
+    /// ```
+    #[cuda_tile::op(name="cuda_tile.exp2", params=["x"], named_attributes=["flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn exp2_ftz<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
@@ -3134,14 +3095,23 @@ pub mod core {
     /// let c: Tile<f32, {[128]}> = ...; // [1.0, 1.0, 1.0, ...]
     /// let result = fma_op(a, b, c, "nearest_even"); // [3.0, 7.0, 13.0, ...]
     /// ```
-    #[cuda_tile::op(name="cuda_tile.fma", params=["lhs", "rhs", "acc"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.fma", params=["lhs", "rhs", "acc"], attribute_params=["rounding_mode:rounding"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn fma<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
+    pub fn fma_op<E: ElementType, const S: [i32; N]>(
         lhs: Tile<E, S>,
         rhs: Tile<E, S>,
         acc: Tile<E, S>,
-        rounding: R,
-        ftz: F,
+        rounding_mode: &str,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    #[cuda_tile::op(name="cuda_tile.fma", params=["lhs", "rhs", "acc"], named_attributes=["rounding_mode=#cuda_tile.rounding<nearest_even>"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn fma<E: ElementType, const S: [i32; N]>(
+        lhs: Tile<E, S>,
+        rhs: Tile<E, S>,
+        acc: Tile<E, S>,
     ) -> Tile<E, S> {
         unreachable!()
     }
@@ -3180,13 +3150,21 @@ pub mod core {
     /// let result = maxf(a, b); // [2.0, 5.0, 6.0, ...]
     /// ```
     ///
-    #[cuda_tile::op(name="cuda_tile.maxf", params=["lhs", "rhs"], static_params=["nan={Enabled: propagate_nan=unit}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.maxf", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn maxf<E: ElementType, const S: [i32; N], P: nan::Mode, F: ftz::Mode>(
+    pub fn maxf<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Element-wise floating-point maximum with flush-to-zero.
+    ///
+    /// Same as [`maxf`], but flushes denormal inputs and results to zero.
+    /// Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.maxf", params=["lhs", "rhs"], named_attributes=["flush_to_zero=unit"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn maxf_ftz<E: ElementType, const S: [i32; N]>(
         lhs: Tile<E, S>,
         rhs: Tile<E, S>,
-        nan: P,
-        ftz: F,
     ) -> Tile<E, S> {
         unreachable!()
     }
@@ -3201,63 +3179,23 @@ pub mod core {
     /// ```rust,ignore
     /// let a: Tile<f32, {[128]}> = ...; // [1.0, 5.0, 3.0, ...]
     /// let b: Tile<f32, {[128]}> = ...; // [2.0, 4.0, 6.0, ...]
-    /// let result = minf(a, b, nan::Disabled, ftz::Disabled); // [1.0, 4.0, 3.0, ...]
+    /// let result = minf(a, b); // [1.0, 4.0, 3.0, ...]
     /// ```
-    #[cuda_tile::op(name="cuda_tile.minf", params=["lhs", "rhs"], static_params=["nan={Enabled: propagate_nan=unit}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.minf", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn minf<E: ElementType, const S: [i32; N], P: nan::Mode, F: ftz::Mode>(
-        lhs: Tile<E, S>,
-        rhs: Tile<E, S>,
-        nan: P,
-        ftz: F,
-    ) -> Tile<E, S> {
+    pub fn minf<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
-    /// Element-wise floating-point addition with explicit rounding and FTZ control.
-    #[cuda_tile::op(name="cuda_tile.addf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    /// Element-wise floating-point minimum with flush-to-zero.
+    ///
+    /// Same as [`minf`], but flushes denormal inputs and results to zero.
+    /// Only supported for f32.
+    #[cuda_tile::op(name="cuda_tile.minf", params=["lhs", "rhs"], named_attributes=["flush_to_zero=unit"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn addf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
+    pub fn minf_ftz<E: ElementType, const S: [i32; N]>(
         lhs: Tile<E, S>,
         rhs: Tile<E, S>,
-        rounding: R,
-        ftz: F,
-    ) -> Tile<E, S> {
-        unreachable!()
-    }
-
-    /// Element-wise floating-point subtraction with explicit rounding and FTZ control.
-    #[cuda_tile::op(name="cuda_tile.subf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn subf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
-        lhs: Tile<E, S>,
-        rhs: Tile<E, S>,
-        rounding: R,
-        ftz: F,
-    ) -> Tile<E, S> {
-        unreachable!()
-    }
-
-    /// Element-wise floating-point multiplication with explicit rounding and FTZ control.
-    #[cuda_tile::op(name="cuda_tile.mulf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn mulf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
-        lhs: Tile<E, S>,
-        rhs: Tile<E, S>,
-        rounding: R,
-        ftz: F,
-    ) -> Tile<E, S> {
-        unreachable!()
-    }
-
-    /// Element-wise floating-point division with explicit rounding and FTZ control.
-    #[cuda_tile::op(name="cuda_tile.divf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn divf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
-        lhs: Tile<E, S>,
-        rhs: Tile<E, S>,
-        rounding: R,
-        ftz: F,
     ) -> Tile<E, S> {
         unreachable!()
     }

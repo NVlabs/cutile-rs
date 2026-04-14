@@ -47,8 +47,7 @@ mod kernels {
         let n: f16 = convert_scalar(N);
         let one: f16 = convert_scalar(1.0f32);
         let rms: f16 = one / (rms / n + eps);
-        let rms: Tile<f16, { [] }> =
-            sqrt(scalar_to_tile(rms), rounding::NegativeInf, ftz::Disabled);
+        let rms: Tile<f16, { [] }> = sqrt(scalar_to_tile(rms), "negative_inf");
         let rms: f16 = tile_to_scalar(rms);
         let rms: Tile<f16, { [1, BLOCK_SIZE] }> = broadcast_scalar(rms, tile_shape);
 
@@ -83,14 +82,22 @@ fn ocean_rmsnorm(c: &mut Criterion) {
     let ctx = CudaContext::new(0).expect("Failed to get context.");
     let stream = ctx.new_stream().expect("Failed to get stream.");
 
-    let shapes = (0..6)
-        .map(|i| (4096, 2usize.pow(10 + i)))
-        .collect::<Vec<_>>();
-    const TILE_SIZE: i32 = 512;
-    let tile_sizes = [
-        TILE_SIZE, TILE_SIZE, TILE_SIZE, TILE_SIZE, TILE_SIZE, TILE_SIZE,
+    let base_tile_size = 512;
+    let tile_sizes = vec![
+        base_tile_size,
+        base_tile_size,
+        base_tile_size,
+        base_tile_size,
+        base_tile_size,
+        base_tile_size,
     ];
-    for (&(m, n), &tile_size) in shapes.iter().zip(tile_sizes.iter()) {
+    let mut params = vec![];
+    for i in 0..6 {
+        let n = 2usize.pow(10 + i);
+        params.push((4096, n, tile_sizes[i as usize]));
+    }
+    for i in 0..6 {
+        let (m, n, tile_size) = params[i];
         let eps = f16::from_f32(1e-5);
         let generics = vec![n.to_string(), tile_size.to_string()];
         let x: Arc<Tensor<f16>> = randn_f16(f16::ZERO, f16::ONE, [m, n], None)
@@ -123,7 +130,8 @@ fn ocean_rmsnorm(c: &mut Criterion) {
                     }
                 }
                 stream.synchronize().expect("Failed to synchronize.");
-                start.elapsed()
+                let res = start.elapsed();
+                res
             });
         });
     }

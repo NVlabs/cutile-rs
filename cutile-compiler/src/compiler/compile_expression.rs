@@ -484,10 +484,13 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     Ok(None)
                 }
                 Expr::If(if_expr) => {
-                    // The condition is always bool — don't propagate the if
-                    // expression's return type into the condition.
-                    let Some(conditional_val) =
-                        self.compile_expression(builder, &*if_expr.cond, generic_vars, ctx, None)?
+                    let Some(conditional_val) = self.compile_expression(
+                        builder,
+                        &*if_expr.cond,
+                        generic_vars,
+                        ctx,
+                        return_type.clone(),
+                    )?
                     else {
                         return self.jit_error_result(
                             &if_expr.cond.span(),
@@ -1077,9 +1080,12 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     Ok(Some(TileRustValue::new_compound(values, return_type)))
                 }
                 Expr::Path(path_expr) => {
-                    // For qualified paths (e.g., `ftz::Enabled`, `rounding::NearestEven`),
-                    // use the last segment as the variable name. These are ZST marker types
-                    // used by static_params — they have no MLIR representation.
+                    if path_expr.path.segments.len() != 1 {
+                        return self.jit_error_result(
+                            &path_expr.span(),
+                            "qualified paths (e.g. `module::name`) are not supported here; use a simple variable name",
+                        );
+                    }
                     let var_name = path_expr.path.segments.last().unwrap().ident.to_string();
 
                     // Handle None specially - it's a Rust Option::None value, not a variable
@@ -1092,35 +1098,10 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
                     let value = match ctx.vars.get(&var_name) {
                         Some(ct_value) => ct_value,
                         None => {
-                            // Qualified paths like `ftz::Enabled` or `rounding::NearestEven`
-                            // are ZST marker types for static_params. They carry no MLIR
-                            // value — like string literals, they're compile-time constants
-                            // consumed by the op compilation path to emit MLIR attributes.
-                            //
-                            // Return a String-kinded placeholder so arg indexing is preserved
-                            // in callers (type derivation, inline path). Validation happens
-                            // in resolve_static_params, which checks the type name against
-                            // the function's static_params mapping.
-                            if path_expr.path.segments.len() > 1 {
-                                let path_ty: syn::Type = syn::Type::Path(syn::TypePath {
-                                    qself: None,
-                                    path: path_expr.path.clone(),
-                                });
-                                let type_instance = crate::generics::TypeInstance::UserType(
-                                    crate::generics::TypeInstanceUserType {
-                                        maybe_generic_ty: path_ty,
-                                    },
-                                );
-                                let ty = TileRustType::new_string(&self.context, type_instance);
-                                return Ok(Some(TileRustValue::new_string(
-                                    Expr::Path(path_expr.clone()),
-                                    ty,
-                                )));
-                            }
                             return self.jit_error_result(
                                 &path_expr.span(),
                                 &format!("undefined variable `{}`", var_name),
-                            );
+                            )
                         }
                     };
                     Ok(Some(value.clone()))

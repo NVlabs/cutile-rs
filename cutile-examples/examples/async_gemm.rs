@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_operation::*;
+use cutile;
 use cutile::api;
 use cutile::half::f16;
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
@@ -70,19 +71,19 @@ use cutile_examples::to_candle_tensor;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), cuda_async::error::DeviceError> {
-    type In = f16;
-    type Out = f32;
+    type IN = f16;
+    type OUT = f32;
     let (m, n, k) = (64, 64, 16);
-    let x: Arc<Tensor<In>> = api::randn_f16(In::zero(), In::one(), [m, k], None)
+    let x: Arc<Tensor<IN>> = api::randn_f16(IN::zero(), IN::one(), [m, k], None)
         .await?
         .into();
-    let y: Arc<Tensor<In>> = api::randn_f16(In::zero(), In::one(), [k, n], None)
+    let y: Arc<Tensor<IN>> = api::randn_f16(IN::zero(), IN::one(), [k, n], None)
         .await?
         .into();
-    let z = gemm::<Out, In>(x.clone(), y.clone()).await?;
-    let z_host: Vec<Out> = z.to_host_vec().await?;
-    let x_host: Vec<In> = x.to_host_vec().await?;
-    let y_host: Vec<In> = y.to_host_vec().await?;
+    let z = gemm::<OUT, IN>(x.clone(), y.clone()).await?;
+    let z_host: Vec<OUT> = z.to_host_vec().await?;
+    let x_host: Vec<IN> = x.to_host_vec().await?;
+    let y_host: Vec<IN> = y.to_host_vec().await?;
     let x_candle = to_candle_tensor(&x_host, &[m, k]);
     let y_candle = to_candle_tensor(&y_host, &[k, n]);
     let answer_host: Vec<f16> = x_candle
@@ -92,7 +93,7 @@ async fn main() -> Result<(), cuda_async::error::DeviceError> {
         .unwrap()
         .to_vec1()
         .unwrap();
-    for i in 0..(m * n) {
+    for i in 0..(m * n) as usize {
         println!(
             "z_host[{i}] == answer_host[{i}]? {} == {}",
             z_host[i], answer_host[i]

@@ -74,7 +74,7 @@ pub struct CUDATileFunctionCompiler<'m> {
 
 /// Parsed attributes from the `#[cuda_tile::entry(...)]` annotation on a kernel function.
 pub struct EntryAttrs {
-    entry_attrs: SingleMetaList,
+    pub(crate) entry_attrs: SingleMetaList,
 }
 
 impl EntryAttrs {
@@ -94,7 +94,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
         function_generic_args: &[String],
         stride_args: &[(&str, &[i32])],
         spec_args: &[(&str, &crate::specialization::SpecializationBits)],
-        scalar_hints: &[(&str, &crate::specialization::DivHint)],
         const_grid: Option<(u32, u32, u32)>,
         gpu_name: String,
         compile_options: &CompileOptions,
@@ -150,11 +149,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             .map(|(k, v)| (k.to_string(), (*v).clone()))
             .collect();
 
-        let scalar_hints_map: HashMap<String, crate::specialization::DivHint> = scalar_hints
-            .iter()
-            .map(|(k, v)| (k.to_string(), **v))
-            .collect();
-
         let generic_vars = GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
 
         let (entry, validator) = generate_entry_point(
@@ -162,7 +156,6 @@ impl<'m, 'c> CUDATileFunctionCompiler<'m> {
             &generic_vars,
             &stride_args,
             &spec_args_map,
-            &scalar_hints_map,
             &modules.primitives,
             &optimization_hints,
         )?;

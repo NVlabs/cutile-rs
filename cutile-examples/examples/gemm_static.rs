@@ -4,6 +4,7 @@
  */
 use cuda_async::device_operation::*;
 use cuda_core::CudaContext;
+use cutile;
 use cutile::api;
 use cutile::error::Error;
 use cutile::tensor::*;
@@ -80,8 +81,8 @@ fn gemm<T: DType + std::fmt::Display>() -> Result<(), Error> {
         .sync_on(&stream)?;
     println!("CUDA_GEMM Done.");
     let z_host: Vec<T> = z.unpartition().to_host_vec().sync_on(&stream)?;
-    for (i, z) in z_host.iter().enumerate().take(10) {
-        println!("z_host[{i}] = {} answer = {}", z, k);
+    for i in 0..10 {
+        println!("z_host[{i}] = {} answer = {}", z_host[i], k);
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ extern crate core;
 
 use cuda_async::device_operation::DeviceOp;
 use cuda_core::CudaContext;
+use cutile;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
@@ -117,10 +118,10 @@ mod my_module {
             let m_ij: Tile<f32, { [BM, 1] }> = max_tile(m_i, qk_max);
             let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
 
-            let p: Tile<f32, { [BM, BN] }> = exp2(qk, ftz::Disabled);
+            let p: Tile<f32, { [BM, BN] }> = exp2(qk);
             let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1);
             let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+            let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij);
             l_i = l_i * alpha + l_ij;
             acc = acc * alpha.broadcast(const_shape![BM, D]);
 
@@ -139,7 +140,6 @@ mod my_module {
 
 use my_module::fmha;
 
-#[allow(clippy::too_many_arguments)]
 fn idx4(
     a: usize,
     b: usize,
@@ -153,7 +153,6 @@ fn idx4(
     (((a * hsz + b) * m + c) * dsz) + d
 }
 
-#[allow(clippy::too_many_arguments)]
 fn fmha_ref_cpu(
     q: &[f32],
     k: &[f32],
