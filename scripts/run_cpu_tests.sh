@@ -26,11 +26,9 @@ run_step \
     cargo test -p cutile --lib
 
 run_step \
-    "cutile warmup/cache-key CPU tests" \
     cargo test -p cutile --test warmup
 
 run_step \
-    "cuda-async JitStore CPU tests" \
     cargo test -p cuda-async --test jit_store
 
 print_summary_and_exit \
