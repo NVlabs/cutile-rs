@@ -281,13 +281,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 None,
                 Some(TypeInstance::ElementType(element_instance.clone())),
             )];
-            return Ok(Some(TileRustType::new_primitive_type(
+            Ok(Some(TileRustType::new_primitive_type(
                 type_name,
                 generic_vars,
                 &self.modules.primitives(),
                 args,
                 TypeInstance::ElementType(element_instance),
-            )?));
+            )?))
         } else if let Some(TypeInstance::PtrType(ptr_instance)) = type_instance {
             let Some(pointer_attrs) = self.modules.get_primitives_attrs("Pointer", "* mut E")
             else {
@@ -311,13 +311,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 None,
                 Some(TypeInstance::PtrType(ptr_instance.clone())),
             )];
-            return Ok(Some(TileRustType::new_primitive_type(
+            Ok(Some(TileRustType::new_primitive_type(
                 type_name,
                 generic_vars,
                 &self.modules.primitives(),
                 args,
                 TypeInstance::PtrType(ptr_instance),
-            )?));
+            )?))
         } else {
             self.jit_error_result(
                 &ty.span(),
