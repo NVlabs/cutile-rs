@@ -36,6 +36,23 @@ use syn::spanned::Spanned;
 use syn::{parse_quote, Expr, Lit, Member, Pat, UnOp};
 
 impl<'m> CUDATileFunctionCompiler<'m> {
+    /// Construct a ZST marker type placeholder from a path expression.
+    ///
+    /// Used for static_params like `ftz::Enabled`, `rounding::NearestEven`.
+    /// These carry no tile-ir value — they're compile-time constants
+    /// consumed by `resolve_static_params` during op compilation.
+    fn make_zst_marker(path_expr: &syn::ExprPath) -> TileRustValue {
+        let path_ty: syn::Type = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: path_expr.path.clone(),
+        });
+        let type_instance = TypeInstance::UserType(TypeInstanceUserType {
+            maybe_generic_ty: path_ty,
+        });
+        let ty = TileRustType::new_string(type_instance);
+        TileRustValue::new_string(Expr::Path(path_expr.clone()), ty)
+    }
+
     pub fn compile_expression(
         &self,
         module: &mut Module,
@@ -1075,34 +1092,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         .resolve_path(&path_expr.path, &self.module_name);
                     match res {
                         Res::Def(DefKind::Struct, _) => {
-                            // ZST marker type (ftz::Enabled, rounding::NearestEven, etc.).
-                            // Return a String-kinded placeholder for static_params —
-                            // consumed by resolve_static_params during op compilation.
-                            let path_ty: syn::Type = syn::Type::Path(syn::TypePath {
-                                qself: None,
-                                path: path_expr.path.clone(),
-                            });
-                            let type_instance = TypeInstance::UserType(TypeInstanceUserType {
-                                maybe_generic_ty: path_ty,
-                            });
-                            let ty = TileRustType::new_string(type_instance);
-                            return Ok(Some(TileRustValue::new_string(
-                                Expr::Path(path_expr.clone()),
-                                ty,
-                            )));
+                            // Known DSL struct — return as ZST marker placeholder.
+                            return Ok(Some(Self::make_zst_marker(path_expr)));
                         }
                         _ => {}
                     }
 
-                    // 3. Single-segment fallback: might be a local variable we missed
-                    //    (e.g. function params not yet in ctx.vars during type derivation).
-                    if path_expr.path.segments.len() == 1 {
-                        if let Some(value) = ctx.vars.get(&var_name) {
-                            return Ok(Some(value.clone()));
-                        }
+                    // 3. Multi-segment path not in the resolver — treat as a ZST
+                    //    marker type from a nested Rust module (ftz::Enabled,
+                    //    rounding::NearestEven, nan::Disabled, etc.). These modules
+                    //    are defined outside the #[cutile::module] block and aren't
+                    //    in the DSL AST the resolver indexes. They're valid Rust
+                    //    type paths consumed by resolve_static_params.
+                    if path_expr.path.segments.len() > 1 {
+                        return Ok(Some(Self::make_zst_marker(path_expr)));
                     }
 
-                    // 4. Not found anywhere.
+                    // 4. Single-segment, not a local, not in resolver — error.
                     let suggestion = self.modules.name_resolver.find_all_definitions(&var_name);
                     if suggestion.is_empty() {
                         return self.jit_error_result(
