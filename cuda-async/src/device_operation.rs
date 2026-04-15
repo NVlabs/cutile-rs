@@ -387,7 +387,8 @@ pub trait DeviceOp:
         self,
         stream: &Arc<CudaStream>,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let pool = get_device_pool(stream.context().ordinal()).ok().flatten();
+        let ctx = ExecutionContext::with_pool(stream.clone(), pool);
         unsafe { self.execute(&ctx) }
     }
     /// Execute on an **explicit stream** and block until the GPU finishes.
@@ -397,7 +398,8 @@ pub trait DeviceOp:
     /// ordering or are debugging concurrency issues.
     fn sync_on(self, stream: &Arc<CudaStream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         acquire_execution_lock()?;
-        let ctx = ExecutionContext::new(stream.clone());
+        let pool = get_device_pool(stream.context().ordinal()).ok().flatten();
+        let ctx = ExecutionContext::with_pool(stream.clone(), pool);
         let res = unsafe { self.execute(&ctx) };
         let sync_res = stream.synchronize();
         release_execution_lock();

@@ -17,6 +17,7 @@ use cuda_async::device_context::{
 };
 use cuda_async::device_operation::{value, DeviceOp};
 use cuda_async::prelude::*;
+use cuda_async::scheduling_policies::SchedulingPolicy;
 
 fn on_fresh_thread<F: FnOnce() + Send + 'static>(f: F) {
     std::thread::spawn(f).join().expect("test thread panicked");
@@ -218,6 +219,37 @@ fn schedule_applies_device_pool() {
         .expect("schedule failed");
 
         let dptr = futures::executor::block_on(future).expect("future failed");
+        assert!(dptr != 0);
+    });
+}
+
+#[test]
+fn sync_on_applies_device_pool() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_cuda_context(0, |ctx| ctx.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        pool.set_release_threshold(u64::MAX)
+            .expect("set threshold failed");
+        let pool_ptr = pool.cu_pool() as usize;
+        set_device_pool(0, pool).expect("set pool failed");
+
+        let stream = global_policy(0)
+            .expect("get policy failed")
+            .next_stream()
+            .expect("get stream failed");
+
+        let dptr = with_context(move |ctx| {
+            let p = ctx.get_pool().expect("pool should be present via sync_on");
+            assert_eq!(p.cu_pool() as usize, pool_ptr, "sync_on must pick up device pool");
+            let dptr = unsafe { ctx.alloc_async(512) };
+            assert!(dptr != 0, "allocation returned null pointer");
+            value(dptr)
+        })
+        .sync_on(&stream)
+        .expect("sync_on failed");
         assert!(dptr != 0);
     });
 }
