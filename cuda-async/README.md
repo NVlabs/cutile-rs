@@ -106,13 +106,14 @@ let buffers = graph.take_output().unwrap();
 // Replay loop — single driver call per iteration.
 for token in tokens {
     graph.update(api::memcpy(&mut input_buf, &token))?;
-    graph.launch()?;
+    graph.launch().sync_on(&stream)?;
 }
 ```
 
 All device pointers are baked in at capture time. To vary inputs, copy
 new data into pre-allocated buffers via `graph.update(op)` before each
-`graph.launch()`.
+`graph.launch()`. `launch()` returns a [`DeviceOp`] — use `.sync_on()`,
+`.sync()`, or `.await` to control when and where the graph executes.
 
 ## API Argument Conventions
 

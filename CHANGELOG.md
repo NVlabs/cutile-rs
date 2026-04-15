@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Unified kernel launcher**: Single function per kernel via `IntoDeviceOp`. Accepts `Tensor<T>`, `Arc<Tensor<T>>`, `&Tensor<T>`, `DeviceOp`s, and scalars interchangeably.
 - **KernelInput trait**: `&Tensor` params accept `Tensor<T>`, `Arc<Tensor<T>>`, or `&Tensor<T>`. Same type in, same type out. `&Tensor<T>` inputs prevent `tokio::spawn` at compile time via Rust's lifetime system.
 - **KernelOutput trait**: `&mut Tensor` params accept `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>`. Borrowed partitions write in place: No `unpartition()` needed.
-- **CUDA graph capture**: `.graph()` / `.graph_on(stream)` captures any `DeviceOp` into a replayable `CudaGraph<T>`. `graph.update()` + `graph.launch()` for efficient replay.
+- **CUDA graph capture**: `.graph()` / `.graph_on(stream)` captures any `DeviceOp` into a replayable `CudaGraph<T>`. `graph.update()` + `graph.launch().sync_on(&stream)` for efficient replay. `launch()` returns a `DeviceOp`, composable with `.then()`, `.map()`, etc.
 - **`CudaGraph::scope`**: Scoped graph capture with `&mut` borrows. `s.record(op)` records `GraphNode` ops as graph nodes, releasing borrows between calls.
 - **`GraphNode` trait**: Marker trait for operations safe to record in a CUDA graph (kernel launches, `memcpy`). Allocation ops are excluded at compile time.
 - **Thread-local execution lock**: Enforces "only one DeviceOp may be executing at a time per thread." Prevents cross-stream data races from nested execution (e.g., `sync_on` inside a `then` closure). `unsafe then_unchecked` opts out.

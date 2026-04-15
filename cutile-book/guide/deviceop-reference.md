@@ -353,7 +353,7 @@ let output = graph.take_output().unwrap();
 // Replay loop — no graph rebuilding, no kernel re-compilation.
 for token in tokens {
     graph.update(api::memcpy(&mut input_buf, &token))?;
-    graph.launch()?;
+    graph.launch().sync_on(&stream)?;
 }
 ```
 
@@ -376,7 +376,7 @@ let graph = CudaGraph::scope(&stream, |s| {
     Ok(())
 })?;
 
-graph.launch()?;
+graph.launch().sync_on(&stream)?;
 ```
 
 `record` only accepts operations that implement `GraphNode` — kernel
@@ -404,7 +404,7 @@ implement it:
 | `s.record(op: impl GraphNode)` | Record a graph node inside a scope |
 | `graph.take_output()` | Retrieve the output from the capture execution |
 | `graph.update(op)` | Run a `DeviceOp` on the graph's stream (e.g., copy new input) |
-| `graph.launch()` | Replay the captured graph and synchronize |
+| `graph.launch()` | Returns a `DeviceOp` that replays the captured graph |
 
 All device pointers are baked in at capture time. To vary inputs, pre-allocate
 a buffer, pass it into the operation, and `memcpy` new data before each

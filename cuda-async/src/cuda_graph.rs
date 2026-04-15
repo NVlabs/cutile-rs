@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::device_context::with_default_device_policy;
+use crate::device_future::DeviceFuture;
 use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
 use crate::error::DeviceError;
 use cuda_core::{stream, sys, CudaStream, IntoResult};
+use std::future::IntoFuture;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
@@ -36,7 +39,7 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 /// // Replay loop.
 /// for _ in 0..n_tokens {
 ///     // Optionally: copy new input into a pre-allocated buffer here.
-///     graph.launch()?;
+///     graph.launch().sync_on(&stream)?;
 /// }
 /// ```
 pub struct CudaGraph<T> {
@@ -146,38 +149,80 @@ impl<T: Send> CudaGraph<T> {
     /// Use this to update graph inputs before [`launch`](CudaGraph::launch).
     /// The operation is issued on the same stream the graph will run on, so
     /// stream ordering guarantees it completes before the graph's kernels
-    /// begin. Synchronization happens when `launch()` returns.
+    /// begin.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // Copy a new embedding into the graph's pre-allocated input buffer.
     /// graph.update(api::memcpy(&mut h_input, &new_embedding))?;
-    /// graph.launch()?;
+    /// graph.launch().sync_on(&stream)?;
     /// ```
     pub fn update<O: Send>(&self, op: impl DeviceOp<Output = O>) -> Result<O, DeviceError> {
         let ctx = ExecutionContext::new(self.stream.clone());
         unsafe { op.execute(&ctx) }
     }
 
-    /// Replay the captured graph and synchronize.
+    /// Return a [`DeviceOp`] that replays the captured graph.
     ///
-    /// Launches the graph on the capture stream and blocks until the GPU
-    /// finishes. Any operations issued via [`update`](CudaGraph::update)
-    /// on the same stream are guaranteed to complete before the graph runs.
-    // TODO: Add `launch_on(&stream)` to support launching on a different
-    // stream than the capture stream (requested by Isaac Gelado).
-    pub fn launch(&self) -> Result<(), DeviceError> {
-        unsafe {
-            sys::cuGraphLaunch(self.cu_graph_exec, self.stream.cu_stream()).result()?;
+    /// The graph launches on whichever stream the returned op is executed
+    /// on. Use the standard [`DeviceOp`] methods to control execution:
+    ///
+    /// ```rust,ignore
+    /// graph.launch().sync_on(&stream)?;          // explicit stream, blocking
+    /// graph.launch().sync()?;                    // default policy, blocking
+    /// graph.launch().then(next_op).sync()?;      // compose with other ops
+    /// ```
+    ///
+    /// Any operations issued via [`update`](CudaGraph::update) on the same
+    /// stream are guaranteed to complete before the graph runs.
+    pub fn launch(&self) -> GraphLaunch {
+        GraphLaunch {
+            cu_graph_exec: self.cu_graph_exec,
         }
-        self.stream.synchronize()?;
-        Ok(())
     }
 
     /// Returns a reference to the stream this graph was captured on.
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+}
+
+/// A [`DeviceOp`] that replays a captured CUDA graph.
+///
+/// Created by [`CudaGraph::launch`]. The graph executes on whichever stream
+/// the op is scheduled on (via `.sync_on(&stream)`, `.sync()`, or `.await`).
+pub struct GraphLaunch {
+    cu_graph_exec: sys::CUgraphExec,
+}
+
+// CUgraphExec is an opaque CUDA driver handle, safe to send across threads.
+unsafe impl Send for GraphLaunch {}
+
+impl DeviceOp for GraphLaunch {
+    type Output = ();
+
+    unsafe fn execute(self, context: &ExecutionContext) -> Result<(), DeviceError> {
+        sys::cuGraphLaunch(self.cu_graph_exec, context.get_cuda_stream().cu_stream()).result()?;
+        Ok(())
+    }
+}
+
+impl IntoFuture for GraphLaunch {
+    type Output = Result<(), DeviceError>;
+    type IntoFuture = DeviceFuture<(), GraphLaunch>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            let mut f = DeviceFuture::new();
+            f.device_operation = Some(self);
+            f.execution_context = Some(ExecutionContext::new(stream));
+            Ok(f)
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
     }
 }
 
@@ -214,7 +259,7 @@ impl<T> Drop for CudaGraph<T> {
 ///     Ok(())
 /// })?;
 ///
-/// graph.launch()?;
+/// graph.launch().sync_on(&stream)?;
 /// ```
 ///
 /// # Safety proof: why `record` is safe
@@ -351,7 +396,7 @@ impl CudaGraph<()> {
     ///     Ok(())
     /// })?;
     ///
-    /// graph.launch()?;
+    /// graph.launch().sync_on(&stream)?;
     /// ```
     ///
     /// See [`Scope`] for the safety proof and edge-case behavior.
@@ -502,7 +547,7 @@ impl CudaGraph<()> {
 ///         self.graph.update(
 ///             api::memcpy(&mut self.h_input, &input)
 ///         )?;
-///         self.graph.launch()?;
+///         self.graph.launch().sync_on(self.graph.stream())?;
 ///         Ok(self.output.clone())
 ///     }
 /// }

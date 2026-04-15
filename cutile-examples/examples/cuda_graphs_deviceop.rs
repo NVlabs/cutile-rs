@@ -208,7 +208,7 @@ impl GraphModel {
     /// Copy a new embedding into the input buffer and replay the graph.
     fn forward(&mut self, embedding: &Tensor<f32>) -> Result<(), DeviceError> {
         self.graph.update(api::memcpy(&mut self.input, embedding))?;
-        self.graph.launch()?;
+        self.graph.launch().sync_on(self.graph.stream())?;
         Ok(())
     }
 

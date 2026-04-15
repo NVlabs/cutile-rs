@@ -40,7 +40,7 @@ pub use crate::device_operation::SharedDeviceOp;
 pub use crate::device_operation::Value;
 
 // CUDA graph capture
-pub use crate::cuda_graph::{CudaGraph, Scope};
+pub use crate::cuda_graph::{CudaGraph, GraphLaunch, Scope};
 
 // Error type
 pub use crate::error::DeviceError;

@@ -250,7 +250,7 @@ impl Module for GraphModel {
         // Copy new embedding into the baked-in input buffer.
         self.graph.update(api::memcpy(&mut self.input, &input))?;
         // Replay the entire forward pass with a single driver call.
-        self.graph.launch()?;
+        self.graph.launch().sync_on(self.graph.stream())?;
         Ok(self.output.clone())
     }
 }
@@ -261,7 +261,7 @@ Each `forward` call:
 1. **`graph.update(memcpy(…))`** — Copies new input data into the
    pre-allocated input buffer. This runs on the graph's stream, so it
    completes before the graph launches.
-2. **`graph.launch()`** — Replays all captured kernels. The GPU sees the
+2. **`graph.launch().sync_on(…)`** — Replays all captured kernels. The GPU sees the
    full operation sequence and can schedule aggressively.
 3. **Returns `output.clone()`** — The output `Arc` points to the same
    device memory the graph wrote into. No copy needed.
@@ -347,7 +347,7 @@ let graph = CudaGraph::scope(&stream, |s| {
     Ok(())
 })?;
 
-graph.launch()?;
+graph.launch().sync_on(&stream)?;
 ```
 
 Key differences from the combinator approach:
@@ -384,7 +384,7 @@ at compile time because their addresses may change on graph replay.
 | **`DeviceOp` graph** | Lazy composition of GPU work — no execution until driven |
 | **`.graph_on(stream)`** | Capture the entire operation into a replayable `CudaGraph` |
 | **`CudaGraph::scope`** | Imperative graph capture with `&mut` borrows |
-| **`graph.launch()`** | Replay all captured work with a single driver call |
+| **`graph.launch()`** | Returns a `DeviceOp` that replays all captured work — execute with `.sync_on()`, `.sync()`, or `.await` |
 | **`graph.update(op)`** | Run a DeviceOp on the graph's stream before replay (e.g., memcpy new input) |
 | **Pre-allocated buffers** | Graph writes into fixed memory; vary inputs via `memcpy` |
 | **`.shared()` in graphs** | Each intermediate executes once during capture; clones share the result |

@@ -29,7 +29,7 @@ fn scope_empty_closure() {
         let stream = ctx.new_stream().unwrap();
 
         let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
-        graph.launch().unwrap();
+        graph.launch().sync_on(&stream).unwrap();
     });
 }
 
@@ -53,7 +53,7 @@ fn scope_records_value_ops() {
         .unwrap();
 
         assert_eq!(recorded, vec![42, 5]);
-        graph.launch().unwrap();
+        graph.launch().sync_on(&stream).unwrap();
     });
 }
 
@@ -122,7 +122,7 @@ fn scope_multiple_launches() {
         let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
 
         for _ in 0..10 {
-            graph.launch().unwrap();
+            graph.launch().sync_on(&stream).unwrap();
         }
     });
 }
