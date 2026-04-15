@@ -473,18 +473,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         // arg[6]: latency (Option<i32>)
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
+        if let Some(Expr::Lit(ExprLit {
+            lit: Lit::Int(int_lit),
+            ..
+        })) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
         {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
+            hint_params.insert(
+                "latency".to_string(),
+                int_lit.base10_parse::<i32>().unwrap(),
+            );
         }
 
         let operand_segments: Vec<i64> = vec![1, mask_count, padding_count, token_count];
@@ -517,17 +514,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let (op_id, results) = op_builder.build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -628,18 +618,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         // arg[6]: latency (Option<i32>)
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
+        if let Some(Expr::Lit(ExprLit {
+            lit: Lit::Int(int_lit),
+            ..
+        })) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
         {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
+            hint_params.insert(
+                "latency".to_string(),
+                int_lit.base10_parse::<i32>().unwrap(),
+            );
         }
 
         let operand_segments: Vec<i64> = vec![1, 1, mask_count, token_count];
@@ -827,17 +814,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 )
                 .build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -998,17 +978,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 )
                 .build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -1165,7 +1138,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .result(tile_result_ir_ty)
             .result(token_result_ir_ty)
             .operands(all_operands.iter().copied())
-            .attrs(opt_hint_attrs.into_iter())
+            .attrs(opt_hint_attrs)
             .attr("memory_ordering_semantics", Attribute::i32(0))
             .attr(
                 "operandSegmentSizes",
@@ -1186,6 +1159,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_store_view_tko(
         &self,
         module: &mut Module,
@@ -1333,7 +1307,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let op_builder = OpBuilder::new(Opcode::StoreViewTko, self.ir_location(&call_expr.span()))
             .result(token_result_ir_ty)
             .operands(all_operands.iter().copied())
-            .attrs(opt_hint_attrs.into_iter())
+            .attrs(opt_hint_attrs)
             .attr("memory_ordering_semantics", Attribute::i32(0))
             .attr(
                 "operandSegmentSizes",
@@ -1462,7 +1436,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             result_value.value.unwrap()
         } else {
             let is_float =
-                super::_type::scalar_from_name(&elem_ty_str).map_or(false, |s| s.is_float());
+                super::_type::scalar_from_name(&elem_ty_str).is_some_and(|s| s.is_float());
             let add_opcode = if is_float { Opcode::AddF } else { Opcode::AddI };
             let mut add_op_builder =
                 OpBuilder::new(add_opcode, self.ir_location(&call_expr.span()))
@@ -1609,7 +1583,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             result_value.value.unwrap()
         } else {
             let is_float =
-                super::_type::scalar_from_name(&elem_ty_str).map_or(false, |s| s.is_float());
+                super::_type::scalar_from_name(&elem_ty_str).is_some_and(|s| s.is_float());
             let add_opcode = if is_float { Opcode::AddF } else { Opcode::AddI };
             let mut add_op_builder =
                 OpBuilder::new(add_opcode, self.ir_location(&call_expr.span()))
@@ -1819,9 +1793,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         )
                     }
                 }
-            } else if op_arg.values.is_some() {
-                for value in op_arg.values.as_ref().unwrap().iter() {
-                    let Some(v) = value.value.clone() else {
+            } else if let Some(values) = op_arg.values.as_ref() {
+                for value in values {
+                    let Some(v) = value.value else {
                         return self.jit_error_result(
                             &call_expr_arg.span(),
                             &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"),
@@ -1869,7 +1843,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // Resolve static_params: ZST marker types -> tile-ir attributes.
         let resolved_static_attrs =
             resolve_static_params(cuda_tile_op_static_params, call_expr, fn_item)
-                .map_err(|e| JITError::Generic(e))?;
+                .map_err(JITError::Generic)?;
         for attr_str in &resolved_static_attrs {
             if let Some((name, val_str)) = attr_str.split_once('=') {
                 let name = name.trim();
@@ -1960,12 +1934,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                         "Failed to build attribute",
                                     );
                                 };
-                                attrs.push((
-                                    attr_id.to_string(),
-                                    Attribute::DenseI32Array(
-                                        cga.iter().map(|&x| x as i32).collect(),
-                                    ),
-                                ));
+                                attrs.push((attr_id.to_string(), Attribute::DenseI32Array(cga)));
                             }
                             _ => {
                                 return self.jit_error_result(
@@ -2144,7 +2113,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let op_arg = self.compile_expression(
                         module,
                         block_id,
-                        &call_expr_arg,
+                        call_expr_arg,
                         generic_args,
                         ctx,
                         None,
@@ -2164,7 +2133,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     if let Some(bounds) = op_arg.bounds {
                         if bounds.is_exact() {
-                            attrs.push(int_attr(attr_id, bounds.start as i64));
+                            attrs.push(int_attr(attr_id, bounds.start));
                         } else {
                             return self.jit_error_result(&call_expr_arg.span(), &format!("Integer attribute {attr_id} must be a constant value, got bounds: {bounds:?}"));
                         }
@@ -2198,7 +2167,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let mut op_builder = OpBuilder::new(opcode, self.ir_location(&call_expr.span()))
             .operands(op_operands.iter().copied())
-            .attrs(attrs.into_iter());
+            .attrs(attrs);
 
         if function_returns(fn_item) {
             match return_type.kind {
@@ -2255,7 +2224,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             }
                         }
                         Ok(Some(TileRustValue::new_compound(values, return_type)))
-                    } else { self.jit_error_result(&call_expr.span(), &format!("operations that return multiple values must use a tuple return type, got `{}`", return_type.rust_ty.to_token_stream().to_string())) }
+                    } else { self.jit_error_result(&call_expr.span(), &format!("operations that return multiple values must use a tuple return type, got `{}`", return_type.rust_ty.to_token_stream())) }
                 }
                 Kind::Struct => self.jit_error_result(&call_expr.span(), "this operation cannot return a struct; only scalar and structured (tile) types are supported as return types"),
                 Kind::String => self.jit_error_result(&call_expr.span(), "this operation cannot return a string; only scalar and structured (tile) types are supported as return types"),
@@ -2296,7 +2265,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let Some(val) = self.compile_expression(
                                 module,
                                 block_id,
-                                &expr,
+                                expr,
                                 generic_vars,
                                 ctx,
                                 None,

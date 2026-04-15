@@ -41,7 +41,7 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
     );
 
     cutile_ir::write_bytecode_to_file(module, bc_filename.as_str())
-        .expect(&format!("Failed to write bytecode for {bc_filename}"));
+        .unwrap_or_else(|_| panic!("Failed to write bytecode for {bc_filename}"));
     let output = Command::new("tileiras")
         .arg("--gpu-name")
         .arg(gpu_name)

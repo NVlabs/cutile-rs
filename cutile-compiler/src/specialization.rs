@@ -163,7 +163,7 @@ pub fn compute_spec(
         .map(|(&s, &d)| (s, d))
         .collect();
     sorted.sort();
-    spec.elements_disjoint = sorted.first().map_or(true, |(s, _)| *s > 0);
+    spec.elements_disjoint = sorted.first().is_none_or(|(s, _)| *s > 0);
     for w in sorted.windows(2) {
         if w[1].0 <= 0 || w[1].0 < w[0].0 * w[0].1 {
             spec.elements_disjoint = false;

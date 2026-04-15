@@ -431,12 +431,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // The lower/upper bounds are equivalent — emit a constant
                 // instead. The op allocated above becomes dead (not appended
                 // to any block).
-                return Ok(self.compile_constant_from_exact_bounds(
+                return self.compile_constant_from_exact_bounds(
                     module,
                     block_id,
-                    bounds.clone(),
+                    bounds,
                     return_type,
-                )?);
+                );
             }
         }
 

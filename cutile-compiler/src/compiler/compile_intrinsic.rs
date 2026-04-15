@@ -130,7 +130,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 };
                 let out_is_float = super::_type::scalar_from_name(&out_cuda_tile_element_type)
-                    .map_or(false, |s| s.is_float());
+                    .is_some_and(|s| s.is_float());
                 let (opcode, attrs) = if out_is_float {
                     (Opcode::MmaF, vec![])
                 } else if !out_is_float {
@@ -495,7 +495,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ir_operand_type.clone(), // operand_i_prev_iter
                     ];
                     let (local_block_id, local_block_args) = build_block(module, local_var_types);
-                    let local_var_names = vec!["curr", "prev"];
+                    let local_var_names = ["curr", "prev"];
                     let mut local_vars = CompilerContext::empty();
                     for i in 0..local_block_args.len() {
                         let value: Value = local_block_args[i];
@@ -784,7 +784,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     &call_expr.span(),
                                     &format!(
                                         "Failed to obtain tile-ir type for convert {}",
-                                        call_expr.to_token_stream().to_string()
+                                        call_expr.to_token_stream()
                                     ),
                                 )
                             })?;
@@ -832,7 +832,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             call_expr
                                                 .args
                                                 .to_token_stream()
-                                                .to_string()
                                         ),
                                     );
                                 };
@@ -861,7 +860,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             call_expr
                                                 .args
                                                 .to_token_stream()
-                                                .to_string()
                                         ),
                                     );
                                 };
@@ -892,7 +890,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             call_expr
                                                 .args
                                                 .to_token_stream()
-                                                .to_string()
                                         ),
                                     );
                                 };
