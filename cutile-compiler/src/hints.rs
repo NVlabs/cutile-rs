@@ -153,47 +153,46 @@ impl OptimizationHints {
         result.target_gpu_name = Some(target_gpu_name);
         for sm_key_val in &opt_hints.elems {
             let (opt_key, opt_value) = Self::parse_key_value(sm_key_val)?;
-            match opt_key.as_str() {
-                _ => {
-                    if !opt_key.starts_with("sm_") {
-                        return SourceLocation::unknown().jit_error_result(&format!(
-                            "Unexpected optimization hint {}.",
-                            sm_key_val.to_token_stream().to_string()
-                        ));
-                    }
-                    let Expr::Tuple(hints_tuple) = opt_value else {
-                        return SourceLocation::unknown()
-                            .jit_error_result("expected a tuple expression for architecture-specific optimization hints");
-                    };
-                    let mut sm_hints_result = SMHints::new(opt_key.clone());
-                    for hint_key_val in hints_tuple.elems.iter() {
-                        let (key, hints) = Self::parse_key_value(hint_key_val)?;
-                        match key.as_str() {
-                            "num_cta_in_cga" => sm_hints_result.set_num_cta_in_cga(&hints)?,
-                            "occupancy" => sm_hints_result.set_occupancy(&hints)?,
-                            "max_divisibility" => sm_hints_result.set_max_divisibility(&hints)?,
-                            "allow_tma" | "latency" => {
-                                return SourceLocation::unknown().jit_error_result(&format!(
-                                    "'{key}' is a per-op hint and cannot be set at the entry level. \
-                                     Use it as a parameter on individual load/store operations instead."
-                                ));
-                            }
-                            _ => {
-                                return SourceLocation::unknown().jit_error_result(&format!(
-                                    "Unexpected optimization hint key '{key}'."
-                                ));
-                            }
+            {
+                if !opt_key.starts_with("sm_") {
+                    return SourceLocation::unknown().jit_error_result(&format!(
+                        "Unexpected optimization hint {}.",
+                        sm_key_val.to_token_stream()
+                    ));
+                }
+                let Expr::Tuple(hints_tuple) = opt_value else {
+                    return SourceLocation::unknown().jit_error_result(
+                        "expected a tuple expression for architecture-specific optimization hints",
+                    );
+                };
+                let mut sm_hints_result = SMHints::new(opt_key.clone());
+                for hint_key_val in hints_tuple.elems.iter() {
+                    let (key, hints) = Self::parse_key_value(hint_key_val)?;
+                    match key.as_str() {
+                        "num_cta_in_cga" => sm_hints_result.set_num_cta_in_cga(&hints)?,
+                        "occupancy" => sm_hints_result.set_occupancy(&hints)?,
+                        "max_divisibility" => sm_hints_result.set_max_divisibility(&hints)?,
+                        "allow_tma" | "latency" => {
+                            return SourceLocation::unknown().jit_error_result(&format!(
+                                "'{key}' is a per-op hint and cannot be set at the entry level. \
+                                 Use it as a parameter on individual load/store operations instead."
+                            ));
+                        }
+                        _ => {
+                            return SourceLocation::unknown().jit_error_result(&format!(
+                                "Unexpected optimization hint key '{key}'."
+                            ));
                         }
                     }
-                    if result
-                        .tile_as_hints
-                        .insert(opt_key.clone(), sm_hints_result)
-                        .is_some()
-                    {
-                        return SourceLocation::unknown().jit_error_result(&format!(
-                            "Duplicate optimization hint key '{opt_key}'."
-                        ));
-                    }
+                }
+                if result
+                    .tile_as_hints
+                    .insert(opt_key.clone(), sm_hints_result)
+                    .is_some()
+                {
+                    return SourceLocation::unknown().jit_error_result(&format!(
+                        "Duplicate optimization hint key '{opt_key}'."
+                    ));
                 }
             }
         }
