@@ -21,5 +21,7 @@ pub mod train_map;
 pub mod types;
 
 pub mod compiler;
+pub mod dump;
+pub mod passes;
 pub mod specialization;
 pub use compiler::utils;

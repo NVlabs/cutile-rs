@@ -157,7 +157,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let operand_type = lhs.ty.clone();
         let operand_rust_ty = &operand_type.rust_ty;
         let Some(operand_rust_element_type) =
-            operand_type.get_instantiated_rust_element_type(&self.modules.primitives)
+            operand_type.get_instantiated_rust_element_type(&self.modules.primitives())
         else {
             return self.jit_error_result(
                 span,
@@ -183,7 +183,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let operand_result_ty = module.value_type(lhs_value).clone();
 
         let Some(operand_cuda_tile_element_type) =
-            operand_type.get_cuda_tile_element_type(&self.modules.primitives)?
+            operand_type.get_cuda_tile_element_type(&self.modules.primitives())?
         else {
             return self.jit_error_result(
                 span,

@@ -3,212 +3,118 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Module registry: collects and indexes all parsed DSL modules, structs, trait impls,
-//! and functions for lookup during compilation.
+//! Module registry: thin wrapper around [`NameResolver`] that preserves
+//! the compiler's existing lookup API.
+//!
+//! All item storage and name resolution lives in the [`NameResolver`]
+//! (Pass 1 output). This struct provides backward-compatible accessors
+//! so the rest of the compiler doesn't need to change yet.
 
 use crate::ast::{Module, SourceLocation, SpanBase};
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
 use crate::kernel_naming::KernelNaming;
+use crate::passes::name_resolution::NameResolver;
 use crate::syn_utils::*;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
-use syn::{
-    ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, Type,
-};
+use syn::{ExprMethodCall, ImplItem, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemStruct, Type};
 
-/// Aggregated index of all DSL modules, types, impls, and functions available to the compiler.
+/// Aggregated index of all DSL modules, types, impls, and functions.
+///
+/// Internally delegates to [`NameResolver`] for all item storage and
+/// name resolution. The flat accessors (`primitives`, `structs`, etc.)
+/// are backward-compatible shims that will be removed as the compiler
+/// migrates to path-based resolution.
 pub struct CUDATileModules {
-    pub(crate) modules: HashMap<String, ItemMod>,
-    // Rust primitives marked as cuda tile types.
-    // These are trait impls with the "cuda_tile::ty" annotation.
-    pub(crate) primitives: HashMap<(String, String), ItemImpl>,
-    // User-defined structs.
-    // This also contains structs for cuda tile types.
-    // They are structs with the "cuda_tile::ty" annotation.
-    pub(crate) structs: HashMap<String, ItemStruct>,
-    // User-defined struct impls.
-    // This also contains impls for cuda tile types.
-    pub(crate) struct_impls: HashMap<String, Vec<(String, ItemImpl)>>,
-    // Internal trait impls. User-defined traits are not supported.
-    pub(crate) trait_impls: HashMap<(String, String), (String, ItemImpl)>,
-    // User-defined functions.
-    // This also contains functions for cuda tile ops.
-    // These are functions with the "cuda_tile::op" annotation.
-    pub(crate) functions: HashMap<String, (String, ItemFn)>,
-    // Span bases captured at proc macro expansion time.
-    // Keyed by module name → SpanBase, which stores the (file, base_line,
-    // base_col) anchor needed to convert any runtime syn span in that
-    // module's AST into an absolute source location.
+    /// The name resolver (Pass 1 output). Owns all items and resolves paths.
+    pub(crate) name_resolver: NameResolver,
+
+    /// Span bases for source location mapping.
     pub(crate) span_bases: HashMap<String, SpanBase>,
 }
 
+// ---------------------------------------------------------------------------
+// Backward-compatible field-like accessors
+// ---------------------------------------------------------------------------
+
+impl CUDATileModules {
+    /// Flat map of all modules: name → ItemMod.
+    /// Compatibility shim — prefer `name_resolver.module(name)`.
+    pub fn modules(&self) -> &HashMap<String, ItemMod> {
+        self.name_resolver.all_modules()
+    }
+
+    /// Flat map of all primitives: (trait, type) → ItemImpl.
+    /// Compatibility shim — passed to generics/types functions.
+    pub fn primitives(&self) -> &HashMap<(String, String), ItemImpl> {
+        self.name_resolver.primitives()
+    }
+
+    /// Flat map of all structs: name → ItemStruct.
+    /// Compatibility shim.
+    pub fn structs(&self) -> &HashMap<String, ItemStruct> {
+        self.name_resolver.structs()
+    }
+
+    /// Flat map of all struct impls: struct_name → [(module, ItemImpl)].
+    /// Compatibility shim.
+    pub fn struct_impls(&self) -> &HashMap<String, Vec<(String, ItemImpl)>> {
+        self.name_resolver.struct_impls()
+    }
+
+    /// Flat map of all functions: name → (module, ItemFn).
+    /// Compatibility shim.
+    pub fn functions(&self) -> &HashMap<String, (String, ItemFn)> {
+        self.name_resolver.functions()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
+
 impl CUDATileModules {
     pub fn new(modules_vec: Vec<Module>) -> Result<Self, JITError> {
-        let mut modules: HashMap<String, ItemMod> = HashMap::new();
-        let mut structs: HashMap<String, ItemStruct> = HashMap::new();
-        let mut struct_impls: HashMap<String, Vec<(String, ItemImpl)>> = HashMap::new();
-        let mut trait_impls: HashMap<(String, String), (String, ItemImpl)> = HashMap::new();
-        let mut primitives: HashMap<(String, String), ItemImpl> = HashMap::new();
-        let mut functions: HashMap<String, (String, ItemFn)> = HashMap::new();
+        // Collect module ASTs and span bases.
+        let mut module_asts: Vec<(String, ItemMod)> = Vec::new();
         let mut span_bases: HashMap<String, SpanBase> = HashMap::new();
 
         for module in &modules_vec {
-            let module_ast = module.ast();
-            // println!("module_ast: {:#?}", module_ast);
             let module_name = module.name().to_string();
-            match &module_ast.content {
-                Some(content) => {
-                    for item in &content.1 {
-                        match item {
-                            Item::Struct(struct_item) => {
-                                let struct_name = struct_item.ident.to_string();
-                                structs.insert(struct_name.clone(), struct_item.clone());
-                            }
-                            Item::Fn(function_item) => {
-                                let fn_name = function_item.sig.ident.to_string();
-                                if functions
-                                    .insert(
-                                        fn_name.clone(),
-                                        (module_name.clone(), function_item.clone()),
-                                    )
-                                    .is_some()
-                                {
-                                    return Err(JITError::generic_err(
-                                        format!("duplicate functions are not supported; try renaming your function: {fn_name}").as_str()
-                                    ));
-                                };
-                            }
-                            Item::Trait(_trait_item) => {
-                                // TODO (hme): Do we need to collect variadic traits?
-                                //  The impl contains all the information we need.
-                            }
-                            Item::Impl(impl_item) => {
-                                let self_ident_str = get_type_str(&*impl_item.self_ty);
-                                let trait_ident_str = match &impl_item.trait_ {
-                                    Some((_, trait_path, _)) => {
-                                        let last_seg = trait_path.segments.last().unwrap();
-                                        Some(last_seg.ident.to_string())
-                                    }
-                                    None => None,
-                                };
-                                // This may be an impl for types with trait bound ElementType.
-                                match (self_ident_str, trait_ident_str) {
-                                    (Some(self_ident_str), Some(trait_ident_str)) => {
-                                        if let Some(_attribute_list) =
-                                            get_meta_list("cuda_tile :: ty", &impl_item.attrs)
-                                        {
-                                            // println!("primitive type trait impl: {trait_ident_str} for {}", self_ident_str);
-                                            // An impl with a type annotation and self ident is a Rust type tagged for compilation to cuda tile.
-                                            if primitives
-                                                .insert(
-                                                    (
-                                                        trait_ident_str.clone(),
-                                                        self_ident_str.clone(),
-                                                    ),
-                                                    impl_item.clone(),
-                                                )
-                                                .is_some()
-                                            {
-                                                return module.resolve_span(&impl_item.span())
-                                                    .jit_error_result(&format!(
-                                                        "duplicate primitive type trait impl: `{trait_ident_str}` for `{self_ident_str}`"
-                                                    ));
-                                            }
-                                        } else if let Some(_attribute_list) = get_meta_list(
-                                            "cuda_tile :: variadic_trait_impl",
-                                            &impl_item.attrs,
-                                        ) {
-                                            if trait_impls
-                                                .insert(
-                                                    (
-                                                        trait_ident_str.clone(),
-                                                        self_ident_str.clone(),
-                                                    ),
-                                                    (module_name.clone(), impl_item.clone()),
-                                                )
-                                                .is_some()
-                                            {
-                                                return module.resolve_span(&impl_item.span())
-                                                    .jit_error_result(&format!(
-                                                        "duplicate trait impl: `{trait_ident_str}` for `{self_ident_str}`"
-                                                    ));
-                                            }
-                                        }
-                                    }
-                                    (Some(self_ident_str), None) => {
-                                        // println!("struct impl: {self_ident_str}");
-                                        if !struct_impls.contains_key(self_ident_str.as_str()) {
-                                            struct_impls.insert(
-                                                self_ident_str.clone(),
-                                                vec![(module_name.clone(), impl_item.clone())],
-                                            );
-                                        } else {
-                                            struct_impls
-                                                .get_mut(&self_ident_str)
-                                                .unwrap()
-                                                .push((module_name.clone(), impl_item.clone()));
-                                        }
-                                    }
-                                    (None, Some(trait_ident_str)) => {
-                                        return module
-                                            .resolve_span(&impl_item.span())
-                                            .jit_error_result(&format!(
-                                            "impl block for trait `{trait_ident_str}` is missing a Self type"
-                                        ));
-                                    }
-                                    (None, None) => {
-                                        return module
-                                            .resolve_span(&impl_item.span())
-                                            .jit_error_result(
-                                            "impl block is missing both a Self type and a trait",
-                                        );
-                                    }
-                                }
-                            }
-                            // Unsupported items for user-defined modules are rejected by the macro.
-                            _ => continue,
-                        }
-                    }
-                }
-                None => {
-                    return module
-                        .resolve_span(&module_ast.span())
-                        .jit_error_result(&format!(
-                            "module `{module_name}` must have a body (non-empty content)"
-                        ));
-                }
+            let module_ast = module.ast();
+
+            if module_ast.content.is_none() {
+                return module
+                    .resolve_span(&module_ast.span())
+                    .jit_error_result(&format!(
+                        "module `{module_name}` must have a body (non-empty content)"
+                    ));
             }
-            modules.insert(module_name.clone(), module_ast.clone());
+
+            module_asts.push((module_name.clone(), module_ast.clone()));
             span_bases.insert(module_name, module.span_base().clone());
         }
+
+        // Pass 1: Build the name resolver (indexes all items, processes imports).
+        let name_resolver = NameResolver::build(&module_asts)?;
+
         Ok(CUDATileModules {
-            modules,
-            primitives,
-            structs,
-            struct_impls,
-            trait_impls,
-            functions,
+            name_resolver,
             span_bases,
         })
     }
+}
 
-    /// Get the [`SpanBase`] for a module, if one was captured.
+// ---------------------------------------------------------------------------
+// Span / location utilities
+// ---------------------------------------------------------------------------
+
+impl CUDATileModules {
     pub fn get_span_base(&self, module_name: &str) -> Option<&SpanBase> {
         self.span_bases.get(module_name)
     }
 
-    /// Resolve any `proc_macro2::Span` from the given module's AST to an
-    /// absolute [`SourceLocation`].
-    ///
-    /// The span's line/column are string-relative (produced by
-    /// `syn::parse_str` on the verbatim source text).  The module's
-    /// [`SpanBase`] supplies the file path and base offset so that:
-    ///
-    /// ```text
-    /// abs_line = base_line + (span_line - 1)
-    /// abs_col  = if span_line == 1 { base_col + span_col } else { span_col }
-    /// ```
     pub fn resolve_span(&self, module_name: &str, span: &proc_macro2::Span) -> SourceLocation {
         match self.span_bases.get(module_name) {
             Some(base) => base.resolve_span(span),
@@ -216,7 +122,6 @@ impl CUDATileModules {
         }
     }
 
-    /// Get the source file path for a module, if available.
     pub fn get_source_file(&self, module_name: &str) -> Option<&str> {
         self.span_bases.get(module_name).and_then(|sb| {
             if sb.file.is_empty() {
@@ -226,40 +131,33 @@ impl CUDATileModules {
             }
         })
     }
+}
 
+// ---------------------------------------------------------------------------
+// Item lookup (backward-compatible methods)
+// ---------------------------------------------------------------------------
+
+impl CUDATileModules {
     pub fn get_primitives_attrs(
         &self,
         trait_name: &str,
         rust_type_name: &str,
     ) -> Option<SingleMetaList> {
-        match self
-            .primitives
-            .get(&(trait_name.to_string(), rust_type_name.to_string()))
-        {
-            Some(item_impl) => get_meta_list("cuda_tile :: ty", &item_impl.attrs),
-            None => None,
-        }
+        self.name_resolver
+            .get_primitive_attrs(trait_name, rust_type_name)
     }
 
     pub fn get_cuda_tile_type_attrs(&self, ident: &str) -> Option<SingleMetaList> {
-        // TODO (hme): This is slow but flexible.
-        match self.structs.get(ident) {
-            Some(item_struct) => get_meta_list("cuda_tile :: ty", &item_struct.attrs),
-            None => None,
-        }
+        self.name_resolver.get_type_attrs(ident)
     }
 
     pub fn get_function_by_name(&self, function_name: &str) -> Option<&(String, ItemFn)> {
         let canonical_name = KernelNaming::canonical_public_name(function_name);
-        self.functions.get(canonical_name.as_str())
+        self.name_resolver.functions().get(canonical_name.as_str())
     }
 
     pub fn get_cuda_tile_op_attrs(&self, ident: &str) -> Option<SingleMetaList> {
-        // TODO (hme): This is slow but flexible.
-        match self.get_function_by_name(ident) {
-            Some((_, item_fn)) => get_meta_list("cuda_tile :: op", &item_fn.attrs),
-            None => None,
-        }
+        self.name_resolver.get_op_attrs(ident)
     }
 
     pub fn get_fn_item(
@@ -267,7 +165,7 @@ impl CUDATileModules {
         module_name: &str,
         function_name: &str,
     ) -> Result<&(String, ItemFn), JITError> {
-        if !self.modules.contains_key(module_name) {
+        if !self.name_resolver.has_module(module_name) {
             return JITError::generic(&format!("undefined module: `{module_name}`"));
         }
         match self.get_function_by_name(function_name) {
@@ -311,13 +209,13 @@ impl CUDATileModules {
         receiver_rust_ty: &syn::Type,
         method_call_expr: &ExprMethodCall,
         generic_vars: &GenericVars,
-        // String is module_name.
-    ) -> Result<Option<(String, ItemImpl, ImplItemFn)>, crate::error::JITError> {
+    ) -> Result<Option<(String, ItemImpl, ImplItemFn)>, JITError> {
         // Check if we're calling a method on a primitive type trait impl.
-        let impls = match generic_vars.instantiate_type(receiver_rust_ty, &self.primitives)? {
+        let impls = match generic_vars.instantiate_type(receiver_rust_ty, self.primitives())? {
             TypeInstance::ElementType(_elem_ty) => {
                 match self
-                    .trait_impls
+                    .name_resolver
+                    .trait_impls()
                     .get(&("BroadcastScalar".to_string(), "E".to_string()))
                 {
                     Some(trait_impl) => Some(&vec![trait_impl.clone()]),
@@ -325,12 +223,12 @@ impl CUDATileModules {
                 }
             }
             _ => {
-                let ident = get_type_ident(&receiver_rust_ty);
+                let ident = get_type_ident(receiver_rust_ty);
                 if ident.is_none() {
                     return Ok(None);
                 }
                 let receiver_type_str = ident.unwrap().to_string();
-                self.struct_impls.get(&receiver_type_str)
+                self.name_resolver.struct_impls().get(&receiver_type_str)
             }
         };
         let impls_vec = impls.unwrap();
@@ -356,18 +254,7 @@ impl CUDATileModules {
     }
 
     pub fn get_struct_field_type(&self, struct_name: &str, field_name: &str) -> Option<Type> {
-        let s = self
-            .structs
-            .get(struct_name)
-            .expect(format!("{struct_name} doesn't exist.").as_str());
-        for field in &s.fields {
-            let Some(curr_field_ident) = &field.ident else {
-                continue;
-            };
-            if field_name == curr_field_ident.to_string().as_str() {
-                return Some(field.ty.clone());
-            }
-        }
-        None
+        self.name_resolver
+            .get_struct_field_type(struct_name, field_name)
     }
 }

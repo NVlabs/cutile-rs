@@ -30,8 +30,12 @@ pub fn scalar_from_name(name: &str) -> Option<ScalarType> {
         "f64" => Some(ScalarType::F64),
         "f8e4m3fn" | "f8E4M3FN" => Some(ScalarType::F8E4M3FN),
         "f8e5m2" | "f8E5M2" => Some(ScalarType::F8E5M2),
-        // Rust-facing names
+        // Rust-facing names (unsigned maps to signed CUDA types)
         "bool" => Some(ScalarType::I1),
+        "u8" => Some(ScalarType::I8),
+        "u16" => Some(ScalarType::I16),
+        "u32" => Some(ScalarType::I32),
+        "u64" => Some(ScalarType::I64),
         _ => None,
     }
 }

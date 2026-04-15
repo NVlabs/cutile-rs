@@ -68,7 +68,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         compile_options: &crate::hints::CompileOptions,
     ) -> Result<Self, JITError> {
         // 1. Check module exists.
-        if !modules.modules.contains_key(module_name) {
+        if !modules.modules().contains_key(module_name) {
             return Err(JITError::Generic(format!(
                 "Undefined module: {module_name}"
             )));
@@ -79,7 +79,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         // 3. Look up function.
         let (_, function) = modules
-            .functions
+            .functions()
             .get(kernel_naming.public_name())
             .with_context(|| format!("Undefined function: {function_name}"))?;
 
@@ -136,13 +136,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             &stride_args,
             &spec_args_map,
             &scalar_hints_map,
-            &modules.primitives,
+            &modules.primitives(),
             &optimization_hints,
         )?;
 
         // 10. Check namespace collision.
         if modules
-            .functions
+            .functions()
             .get(kernel_naming.entry_name().as_str())
             .is_some()
         {
@@ -459,7 +459,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         let Some(const_ty_str) = get_cuda_tile_element_type_from_rust_primitive_str(
             &type_inst.rust_element_instance_ty,
-            &self.modules.primitives,
+            &self.modules.primitives(),
         ) else {
             return self
                 .jit_error_result(&tr_ty.rust_ty.span(), "failed to compile constant value");

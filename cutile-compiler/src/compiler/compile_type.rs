@@ -41,7 +41,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let unknown_type_instance = TypeInstanceUserType::instantiate(
                         &ty,
                         generic_vars,
-                        &self.modules.primitives,
+                        &self.modules.primitives(),
                     )
                     .unwrap();
                     let type_instance = TypeInstance::UserType(unknown_type_instance);
@@ -49,16 +49,22 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             }
             syn::Type::Array(_) => {
-                let unknown_type_instance =
-                    TypeInstanceUserType::instantiate(&ty, generic_vars, &self.modules.primitives)
-                        .unwrap();
+                let unknown_type_instance = TypeInstanceUserType::instantiate(
+                    &ty,
+                    generic_vars,
+                    &self.modules.primitives(),
+                )
+                .unwrap();
                 let type_instance = TypeInstance::UserType(unknown_type_instance);
                 return Ok(Some(TileRustType::new_compound(type_instance)));
             }
             syn::Type::Slice(_) => {
-                let unknown_type_instance =
-                    TypeInstanceUserType::instantiate(&ty, generic_vars, &self.modules.primitives)
-                        .unwrap();
+                let unknown_type_instance = TypeInstanceUserType::instantiate(
+                    &ty,
+                    generic_vars,
+                    &self.modules.primitives(),
+                )
+                .unwrap();
                 let type_instance = TypeInstance::UserType(unknown_type_instance);
                 return Ok(Some(TileRustType::new_compound(type_instance)));
             }
@@ -75,13 +81,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             syn::Type::Path(_) => match get_type_ident(ty) {
                 Some(ident) => {
                     let type_name = ident.to_string();
-                    if let Some(item_struct) = self.modules.structs.get(type_name.as_str()) {
+                    if let Some(item_struct) = self.modules.structs().get(type_name.as_str()) {
                         ty_attrs = self.modules.get_cuda_tile_type_attrs(type_name.as_str());
                         if ty_attrs.is_none() {
                             let unknown_type_instance = TypeInstanceUserType::instantiate(
                                 &ty,
                                 generic_vars,
-                                &self.modules.primitives,
+                                &self.modules.primitives(),
                             )
                             .unwrap();
                             let type_instance = TypeInstance::UserType(unknown_type_instance);
@@ -92,10 +98,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                         structure = Some((type_name.clone(), &item_struct));
                         type_instance =
-                            Some(generic_vars.instantiate_type(ty, &self.modules.primitives)?);
+                            Some(generic_vars.instantiate_type(ty, &self.modules.primitives())?);
                     } else {
                         let local_type_instance =
-                            generic_vars.instantiate_type(ty, &self.modules.primitives)?;
+                            generic_vars.instantiate_type(ty, &self.modules.primitives())?;
                         if let TypeInstance::StringType(_string_inst) = local_type_instance {
                             return Ok(Some(TileRustType::new_string(TypeInstance::StringType(
                                 _string_inst,
@@ -106,7 +112,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         else {
                             return self.jit_error_result(&ty.span(), "Failed to compile type");
                         };
-                        if let Some(element_type_impl) = self.modules.primitives.get(&(
+                        if let Some(element_type_impl) = self.modules.primitives().get(&(
                             "ElementType".to_string(),
                             element_type_instance_str.to_string(),
                         )) {
@@ -131,13 +137,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 let type_name = type_name.unwrap().to_string();
                 let local_type_instance =
-                    generic_vars.instantiate_type(ty, &self.modules.primitives)?;
+                    generic_vars.instantiate_type(ty, &self.modules.primitives())?;
                 let Some(element_type_instance_str) =
                     local_type_instance.get_rust_element_instance_ty()
                 else {
                     return self.jit_error_result(&ty.span(), "Failed to compile type");
                 };
-                if let Some(element_type_impl) = self.modules.primitives.get(&(
+                if let Some(element_type_impl) = self.modules.primitives().get(&(
                     "ElementType".to_string(),
                     element_type_instance_str.to_string(),
                 )) {
@@ -236,7 +242,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return Ok(Some(TileRustType::new_structured_type(
                 type_name,
                 generic_vars,
-                &self.modules.primitives,
+                &self.modules.primitives(),
                 args,
                 type_instance,
             )?));
@@ -267,7 +273,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return Ok(Some(TileRustType::new_primitive_type(
                 type_name,
                 generic_vars,
-                &self.modules.primitives,
+                &self.modules.primitives(),
                 args,
                 TypeInstance::ElementType(element_instance),
             )?));
@@ -297,7 +303,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return Ok(Some(TileRustType::new_primitive_type(
                 type_name,
                 generic_vars,
-                &self.modules.primitives,
+                &self.modules.primitives(),
                 args,
                 TypeInstance::PtrType(ptr_instance),
             )?));

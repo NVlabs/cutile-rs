@@ -21,6 +21,7 @@ use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
 use crate::error::JITError;
 use crate::generics::{GenericVars, TypeInstance, TypeInstanceUserType};
+use crate::passes::name_resolution::{DefKind, Res};
 use crate::syn_utils::*;
 use crate::types::*;
 
@@ -1053,50 +1054,70 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Ok(Some(TileRustValue::new_compound(values, return_type)))
                 }
                 Expr::Path(path_expr) => {
-                    // For qualified paths (e.g., `ftz::Enabled`, `rounding::NearestEven`),
-                    // use the last segment as the variable name. These are ZST marker types
-                    // used by static_params -- they have no tile-ir representation.
                     let var_name = path_expr.path.segments.last().unwrap().ident.to_string();
 
-                    // Handle None specially - it's a Rust Option::None value, not a variable
+                    // Handle None specially — Rust Option::None, not a variable.
                     if var_name == "None" {
-                        // None is used for optional parameters - return None to indicate absence
                         return Ok(None);
                     }
 
-                    let value = match ctx.vars.get(&var_name) {
-                        Some(ct_value) => ct_value,
-                        None => {
-                            // Qualified paths like `ftz::Enabled` or `rounding::NearestEven`
-                            // are ZST marker types for static_params. They carry no tile-ir
-                            // value -- like string literals, they're compile-time constants
-                            // consumed by the op compilation path to emit tile-ir attributes.
-                            //
-                            // Return a String-kinded placeholder so arg indexing is preserved
-                            // in callers (type derivation, inline path). Validation happens
-                            // in resolve_static_params, which checks the type name against
-                            // the function's static_params mapping.
-                            if path_expr.path.segments.len() > 1 {
-                                let path_ty: syn::Type = syn::Type::Path(syn::TypePath {
-                                    qself: None,
-                                    path: path_expr.path.clone(),
-                                });
-                                let type_instance = TypeInstance::UserType(TypeInstanceUserType {
-                                    maybe_generic_ty: path_ty,
-                                });
-                                let ty = TileRustType::new_string(type_instance);
-                                return Ok(Some(TileRustValue::new_string(
-                                    Expr::Path(path_expr.clone()),
-                                    ty,
-                                )));
-                            }
-                            return self.jit_error_result(
-                                &path_expr.span(),
-                                &format!("undefined variable `{}`", var_name),
-                            );
+                    // 1. Local variable (single-segment paths, locals shadow module items).
+                    if path_expr.path.segments.len() == 1 {
+                        if let Some(value) = ctx.vars.get(&var_name) {
+                            return Ok(Some(value.clone()));
                         }
-                    };
-                    Ok(Some(value.clone()))
+                    }
+
+                    // 2. Resolve via name resolver (module-level structs, functions, etc.).
+                    let res = self
+                        .modules
+                        .name_resolver
+                        .resolve_path(&path_expr.path, &self.module_name);
+                    match res {
+                        Res::Def(DefKind::Struct, _) => {
+                            // ZST marker type (ftz::Enabled, rounding::NearestEven, etc.).
+                            // Return a String-kinded placeholder for static_params —
+                            // consumed by resolve_static_params during op compilation.
+                            let path_ty: syn::Type = syn::Type::Path(syn::TypePath {
+                                qself: None,
+                                path: path_expr.path.clone(),
+                            });
+                            let type_instance = TypeInstance::UserType(TypeInstanceUserType {
+                                maybe_generic_ty: path_ty,
+                            });
+                            let ty = TileRustType::new_string(type_instance);
+                            return Ok(Some(TileRustValue::new_string(
+                                Expr::Path(path_expr.clone()),
+                                ty,
+                            )));
+                        }
+                        _ => {}
+                    }
+
+                    // 3. Single-segment fallback: might be a local variable we missed
+                    //    (e.g. function params not yet in ctx.vars during type derivation).
+                    if path_expr.path.segments.len() == 1 {
+                        if let Some(value) = ctx.vars.get(&var_name) {
+                            return Ok(Some(value.clone()));
+                        }
+                    }
+
+                    // 4. Not found anywhere.
+                    let suggestion = self.modules.name_resolver.find_all_definitions(&var_name);
+                    if suggestion.is_empty() {
+                        return self.jit_error_result(
+                            &path_expr.span(),
+                            &format!("undefined variable `{var_name}`"),
+                        );
+                    } else {
+                        return self.jit_error_result(
+                            &path_expr.span(),
+                            &format!(
+                                "undefined variable `{var_name}` (did you mean the function defined in {}?)",
+                                suggestion.join(", ")
+                            ),
+                        );
+                    }
                 }
                 Expr::Call(call_expr) => {
                     let call_expr_func_str = call_expr.func.to_token_stream().to_string();
@@ -1302,8 +1323,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     )
                                 }
                             };
-                            let Some(cuda_tile_ty) =
-                                return_type.get_cuda_tile_element_type(&self.modules.primitives)?
+                            let Some(cuda_tile_ty) = return_type
+                                .get_cuda_tile_element_type(&self.modules.primitives())?
                             else {
                                 return self.jit_error_result(
                                     &lit_expr.span(),
@@ -1364,7 +1385,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         .unwrap();
                     let src_elem_ty: String = src_expr
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives)
+                        .get_instantiated_rust_element_type(&self.modules.primitives())
                         .unwrap();
                     let dst_elem_ty: String = get_rust_element_type_primitive(&cast_expr.ty);
                     match (src_elem_ty.as_str(), dst_elem_ty.as_str()) {
@@ -1426,7 +1447,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                     };
                     let Some(cuda_tile_ty) =
-                        return_type.get_cuda_tile_element_type(&self.modules.primitives)?
+                        return_type.get_cuda_tile_element_type(&self.modules.primitives())?
                     else {
                         return self.jit_error_result(
                             &lit_expr.span(),

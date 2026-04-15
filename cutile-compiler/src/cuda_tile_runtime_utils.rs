@@ -33,9 +33,12 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         .verify_bytecode_indices()
         .expect("tile-ir bytecode value-index verification failed");
 
-    if std::env::var("TILE_IR_DUMP").is_ok() {
-        eprintln!("{}", module.to_mlir_text());
-    }
+    // Dump IR via unified CUTILE_DUMP mechanism (also honors legacy TILE_IR_DUMP).
+    crate::dump::dump_module(
+        crate::dump::DumpStage::Ir,
+        &module.name,
+        &module.to_mlir_text(),
+    );
 
     cutile_ir::write_bytecode_to_file(module, bc_filename.as_str())
         .expect(&format!("Failed to write bytecode for {bc_filename}"));

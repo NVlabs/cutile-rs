@@ -275,18 +275,24 @@ pub mod core {
     impl ElementType for u64 {}
     #[cuda_tile::ty(name = "f64")]
     impl ElementType for f64 {}
+    #[cuda_tile::ty(name = "i16")]
+    impl ElementType for i16 {}
+    #[cuda_tile::ty(name = "i16")]
+    impl ElementType for u16 {}
     #[cuda_tile::ty(name = "i1")]
     impl ElementType for bool {}
 
-    /// TensorFloat-32 format (TF32) for matrix operations.
-    ///
-    /// TF32 is a special format used by NVIDIA Ampere and later GPUs for
-    /// accelerated matrix multiplication. It has the range of FP32 but the
-    /// precision of FP16.
-    #[derive(Copy, Clone)]
-    pub struct tf32(u32);
+    // GPU-specific types: re-exported from cuda-core.
+    pub use cuda_core::f8e4m3fn;
+    pub use cuda_core::f8e5m2;
+    pub use cuda_core::tf32;
+
     #[cuda_tile::ty(name = "tf32")]
     impl ElementType for tf32 {}
+    #[cuda_tile::ty(name = "f8e4m3fn")]
+    impl ElementType for f8e4m3fn {}
+    #[cuda_tile::ty(name = "f8e5m2")]
+    impl ElementType for f8e5m2 {}
 
     /// Marker trait for scalar values that can be broadcast to tiles.
     ///

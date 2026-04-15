@@ -11,6 +11,32 @@
 use half::{bf16, f16};
 use std::fmt::{Debug, Display};
 
+// ---------------------------------------------------------------------------
+// GPU-specific type wrappers (no host arithmetic, storage only)
+// ---------------------------------------------------------------------------
+
+/// TensorFloat-32 format (TF32). 19-bit format with FP32 range and FP16 precision.
+/// Used by Ampere+ GPUs for accelerated matrix multiplication.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct tf32(pub u32);
+
+/// FP8 E4M3FN format (4-bit exponent, 3-bit mantissa, no infinity).
+/// Used by Hopper+ GPUs for efficient matrix multiplication and quantized inference.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct f8e4m3fn(pub u8);
+
+/// FP8 E5M2 format (5-bit exponent, 2-bit mantissa).
+/// Same exponent range as FP16 with reduced precision.
+/// Used by Hopper+ GPUs.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct f8e5m2(pub u8);
+
 /// Runtime identifier for a `DType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DTypeId {
@@ -26,7 +52,10 @@ pub enum DTypeId {
     F16,
     BF16,
     F32,
+    TF32,
     F64,
+    F8E4M3FN,
+    F8E5M2,
 }
 
 impl DTypeId {
@@ -45,7 +74,10 @@ impl DTypeId {
             DTypeId::F16 => "f16",
             DTypeId::BF16 => "bf16",
             DTypeId::F32 => "f32",
+            DTypeId::TF32 => "tf32",
             DTypeId::F64 => "f64",
+            DTypeId::F8E4M3FN => "f8e4m3fn",
+            DTypeId::F8E5M2 => "f8e5m2",
         }
     }
 
@@ -54,8 +86,9 @@ impl DTypeId {
         match self {
             DTypeId::Bool | DTypeId::U8 | DTypeId::I8 => 1,
             DTypeId::U16 | DTypeId::I16 | DTypeId::F16 | DTypeId::BF16 => 2,
-            DTypeId::U32 | DTypeId::I32 | DTypeId::F32 => 4,
+            DTypeId::U32 | DTypeId::I32 | DTypeId::F32 | DTypeId::TF32 => 4,
             DTypeId::U64 | DTypeId::I64 | DTypeId::F64 => 8,
+            DTypeId::F8E4M3FN | DTypeId::F8E5M2 => 1,
         }
     }
 }
@@ -101,7 +134,10 @@ impl_dtype!(
     f16 => F16, f16::ZERO, f16::ONE,
     bf16 => BF16, bf16::ZERO, bf16::ONE,
     f32 => F32, 0.0, 1.0,
+    tf32 => TF32, tf32(0), tf32(0x3F800000),  // IEEE 754 1.0 in f32 bits
     f64 => F64, 0.0, 1.0,
+    f8e4m3fn => F8E4M3FN, f8e4m3fn(0), f8e4m3fn(0x38),  // 1.0 in E4M3FN
+    f8e5m2 => F8E5M2, f8e5m2(0), f8e5m2(0x3C),          // 1.0 in E5M2
 );
 
 #[cfg(test)]
@@ -122,7 +158,10 @@ mod tests {
         assert_eq!(DTypeId::F16.as_str(), "f16");
         assert_eq!(DTypeId::BF16.as_str(), "bf16");
         assert_eq!(DTypeId::F32.as_str(), "f32");
+        assert_eq!(DTypeId::TF32.as_str(), "tf32");
         assert_eq!(DTypeId::F64.as_str(), "f64");
+        assert_eq!(DTypeId::F8E4M3FN.as_str(), "f8e4m3fn");
+        assert_eq!(DTypeId::F8E5M2.as_str(), "f8e5m2");
     }
 
     #[test]
@@ -137,6 +176,7 @@ mod tests {
         assert_eq!(DTypeId::U32.size_in_bytes(), 4);
         assert_eq!(DTypeId::I32.size_in_bytes(), 4);
         assert_eq!(DTypeId::F32.size_in_bytes(), 4);
+        assert_eq!(DTypeId::TF32.size_in_bytes(), 4);
         assert_eq!(DTypeId::U64.size_in_bytes(), 8);
         assert_eq!(DTypeId::I64.size_in_bytes(), 8);
         assert_eq!(DTypeId::F64.size_in_bytes(), 8);

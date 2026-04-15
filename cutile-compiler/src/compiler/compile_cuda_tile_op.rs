@@ -780,7 +780,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let elem_ty_prefix = ptr_value
             .ty
-            .get_cuda_tile_element_type_prefix(&self.modules.primitives)?;
+            .get_cuda_tile_element_type_prefix(&self.modules.primitives())?;
         let atomic_mode = AtomicMode::new(mode.as_str(), elem_ty_prefix)? as i64;
 
         let mut operands = vec![ptrs, arg];
@@ -1382,7 +1382,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .unwrap();
         let elem_ty_str = operand_value
             .ty
-            .get_cuda_tile_element_type(&self.modules.primitives)?
+            .get_cuda_tile_element_type(&self.modules.primitives())?
             .unwrap();
         let elem_ir_ty = super::_type::make_scalar_tile_type(&elem_ty_str)
             .expect("failed to build scalar tile type for reduce element");
@@ -1542,7 +1542,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .expect("failed to convert scan result type");
         let elem_ty_str = operand_value
             .ty
-            .get_cuda_tile_element_type(&self.modules.primitives)?
+            .get_cuda_tile_element_type(&self.modules.primitives())?
             .unwrap();
         let elem_ir_ty = super::_type::make_scalar_tile_type(&elem_ty_str)
             .expect("failed to build scalar tile type for scan element");
@@ -1860,13 +1860,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .get(0)
                     .and_then(|arg| {
                         arg.ty
-                            .get_instantiated_rust_element_type(&self.modules.primitives)
+                            .get_instantiated_rust_element_type(&self.modules.primitives())
                     })
                     .expect("Failed to get element type for signedness inference.");
                 for arg in &compiled_args {
                     let arg_elem_ty = arg
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives)
+                        .get_instantiated_rust_element_type(&self.modules.primitives())
                         .expect("Operand types are not all equivalent.");
                     if arg_elem_ty != elem_ty {
                         return self.jit_error_result(&call_expr.span(), &format!("Element type mismatch for signedness inference: expected {elem_ty}, got {arg_elem_ty}"));
@@ -2075,7 +2075,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     };
                     // Build a DenseElements attribute from the literal value.
                     let elem_ty_str = return_type
-                        .get_cuda_tile_element_type(&self.modules.primitives)?
+                        .get_cuda_tile_element_type(&self.modules.primitives())?
                         .unwrap_or("i32".to_string());
                     let result_ir_ty = super::_type::scalar_from_name(&elem_ty_str)
                         .map(|sc| {
@@ -2347,7 +2347,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let Some(tile_element_type_instance) =
                         get_cuda_tile_element_type_from_rust_primitive_str(
                             &rust_element_type_instance,
-                            &self.modules.primitives,
+                            &self.modules.primitives(),
                         )
                     else {
                         return self.jit_error_result(&mac.span(), &format!("unable to determine tile element type for `{rust_element_type_instance}`"));
