@@ -1371,7 +1371,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         module,
                         loop_block_id,
                         &for_expr.body,
-                        &generic_vars,
+                        generic_vars,
                         &mut for_variables,
                         return_type,
                     )?;

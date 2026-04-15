@@ -517,14 +517,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         if std::env::var("CUTILE_DEBUG_COMPILER2").is_ok() {
             eprintln!(
                 "compiler2: lowered entry function body:\n{}",
-                quote::quote!(#lowered_fn_item).to_string()
+                quote::quote!(#lowered_fn_item)
             );
         }
 
         let return_value = self.compile_block(
             module,
             block_id,
-            &*lowered_fn_item.block,
+            &lowered_fn_item.block,
             generic_vars,
             &mut ctx,
             None,

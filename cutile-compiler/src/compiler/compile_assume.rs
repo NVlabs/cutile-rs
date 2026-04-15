@@ -87,6 +87,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     /// Generates tile-ir assume operation with appropriate predicate attribute.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile_value_assumption(
         &self,
         module: &mut Module,

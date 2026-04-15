@@ -92,13 +92,13 @@ impl AtomicMode {
                 &format!("invalid atomic mode `{mode}`; valid modes are: And, Or, Xor, Add, AddF, Max, Min, Umax, Umin, Xchg"),
             ),
         };
-        if elem_ty_prefix == ElementTypePrefix::Float {
-            if ![AtomicMode::XChg, AtomicMode::AddF].contains(&result) {
-                return SourceLocation::unknown().jit_error_result(&format!(
-                    "float types only support `Xchg` and `AddF` atomic modes, got `{:?}`",
-                    result
-                ));
-            }
+        if elem_ty_prefix == ElementTypePrefix::Float
+            && ![AtomicMode::XChg, AtomicMode::AddF].contains(&result)
+        {
+            return SourceLocation::unknown().jit_error_result(&format!(
+                "float types only support `Xchg` and `AddF` atomic modes, got `{:?}`",
+                result
+            ));
         }
         Ok(result)
     }
@@ -391,7 +391,7 @@ pub fn extract_string_literal(
         }
         _ => SourceLocation::unknown().jit_error_result(&format!(
             "`{param_name}` must be a string literal, got `{}`",
-            expr.to_token_stream().to_string()
+            expr.to_token_stream()
         )),
     }
 }
@@ -497,7 +497,7 @@ pub fn collect_mutated_variables_from_block(
 ) -> Result<BTreeSet<String>, JITError> {
     let mut local_vars: HashSet<String> = HashSet::new();
     let mut result: BTreeSet<String> = BTreeSet::new();
-    for (_i, statement) in block.stmts.iter().enumerate() {
+    for statement in block.stmts.iter() {
         match statement {
             Stmt::Local(local) => {
                 let mut var_names: Vec<String> = vec![];
@@ -628,7 +628,7 @@ pub fn dedup<T: Hash + Eq + Clone>(v: &mut Vec<T>) {
 pub fn parse_list_of_expr(tokens: TokenStream) -> Result<Vec<Expr>, JITError> {
     let mut args: Vec<Expr> = vec![];
     let mut arg_expr: Vec<TokenTree> = vec![];
-    for (_i, token) in tokens.clone().into_iter().enumerate() {
+    for token in tokens.clone().into_iter() {
         match &token {
             TokenTree::Literal(_lit) => {
                 arg_expr.push(token.clone());
@@ -638,7 +638,7 @@ pub fn parse_list_of_expr(tokens: TokenStream) -> Result<Vec<Expr>, JITError> {
             }
             TokenTree::Punct(punct) => {
                 if punct.as_char() == ',' {
-                    if arg_expr.len() > 0 {
+                    if !arg_expr.is_empty() {
                         let expr =
                             syn::parse2::<syn::Expr>(arg_expr.into_iter().collect()).unwrap();
                         args.push(expr);
@@ -649,14 +649,12 @@ pub fn parse_list_of_expr(tokens: TokenStream) -> Result<Vec<Expr>, JITError> {
                 }
             }
             _ => {
-                return SourceLocation::unknown().jit_error_result(&format!(
-                    "unexpected token `{}` in expression list",
-                    token.to_string()
-                ));
+                return SourceLocation::unknown()
+                    .jit_error_result(&format!("unexpected token `{}` in expression list", token));
             }
         }
     }
-    if arg_expr.len() > 0 {
+    if !arg_expr.is_empty() {
         let expr = syn::parse2::<syn::Expr>(arg_expr.into_iter().collect()).unwrap();
         args.push(expr);
     }
@@ -677,7 +675,7 @@ pub fn update_token(
     let Some(var_arg_ident) = get_ident_from_expr(var_arg) else {
         return SourceLocation::unknown().jit_error_result(&format!(
             "expected a variable name, got `{}`",
-            var_arg.to_token_stream().to_string()
+            var_arg.to_token_stream()
         ));
     };
     let var_name = var_arg_ident.to_string();
@@ -710,7 +708,7 @@ pub fn get_token_from_expr(
     let Some(var_arg_ident) = get_ident_from_expr(var_arg) else {
         return SourceLocation::unknown().jit_error_result(&format!(
             "expected a variable name, got `{}`",
-            var_arg.to_token_stream().to_string()
+            var_arg.to_token_stream()
         ));
     };
     let var_name = var_arg_ident.to_string();
@@ -742,7 +740,7 @@ pub fn update_outer_block_type_meta(
     inner_block_vars: &mut CompilerContext,
     outer_block_vars: &mut CompilerContext,
     field_name: String,
-) -> () {
+) {
     let mut var_map = std::collections::HashMap::new();
     for var_name in outer_block_vars.var_keys() {
         var_map.insert(var_name.clone(), var_name.clone());
@@ -756,7 +754,7 @@ pub fn update_type_meta(
     outer_block_vars: &mut CompilerContext,
     outer2inner_vars: &std::collections::HashMap<String, String>,
     _field_name: String,
-) -> () {
+) {
     use super::shared_types::Mutability;
     let outer_keys_ = outer_block_vars.var_keys();
     let outer_keys = outer_keys_
