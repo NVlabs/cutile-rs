@@ -1088,12 +1088,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         .modules
                         .name_resolver
                         .resolve_path(&path_expr.path, &self.module_name);
-                    match res {
-                        Res::Def(DefKind::Struct, _) => {
-                            // Known DSL struct — return as ZST marker placeholder.
-                            return Ok(Some(Self::make_zst_marker(path_expr)));
-                        }
-                        _ => {}
+                    if let Res::Def(DefKind::Struct, _) = res {
+                        // Known DSL struct — return as ZST marker placeholder.
+                        return Ok(Some(Self::make_zst_marker(path_expr)));
                     }
 
                     // 3. Multi-segment path not in the resolver — treat as a ZST
@@ -1109,18 +1106,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // 4. Single-segment, not a local, not in resolver — error.
                     let suggestion = self.modules.name_resolver.find_all_definitions(&var_name);
                     if suggestion.is_empty() {
-                        return self.jit_error_result(
+                        self.jit_error_result(
                             &path_expr.span(),
                             &format!("undefined variable `{var_name}`"),
-                        );
+                        )
                     } else {
-                        return self.jit_error_result(
+                        self.jit_error_result(
                             &path_expr.span(),
                             &format!(
                                 "undefined variable `{var_name}` (did you mean the function defined in {}?)",
                                 suggestion.join(", ")
                             ),
-                        );
+                        )
                     }
                 }
                 Expr::Call(call_expr) => {
@@ -1327,7 +1324,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 }
                             };
                             let Some(cuda_tile_ty) = return_type
-                                .get_cuda_tile_element_type(&self.modules.primitives())?
+                                .get_cuda_tile_element_type(self.modules.primitives())?
                             else {
                                 return self.jit_error_result(
                                     &lit_expr.span(),
@@ -1386,7 +1383,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         .unwrap();
                     let src_elem_ty: String = src_expr
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives())
+                        .get_instantiated_rust_element_type(self.modules.primitives())
                         .unwrap();
                     let dst_elem_ty: String = get_rust_element_type_primitive(&cast_expr.ty);
                     match (src_elem_ty.as_str(), dst_elem_ty.as_str()) {
@@ -1448,7 +1445,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                     };
                     let Some(cuda_tile_ty) =
-                        return_type.get_cuda_tile_element_type(&self.modules.primitives())?
+                        return_type.get_cuda_tile_element_type(self.modules.primitives())?
                     else {
                         return self.jit_error_result(
                             &lit_expr.span(),

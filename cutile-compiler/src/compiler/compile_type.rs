@@ -41,7 +41,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let unknown_type_instance = TypeInstanceUserType::instantiate(
                         ty,
                         generic_vars,
-                        &self.modules.primitives(),
+                        self.modules.primitives(),
                     )
                     .unwrap();
                     let type_instance = TypeInstance::UserType(unknown_type_instance);
@@ -52,7 +52,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let unknown_type_instance = TypeInstanceUserType::instantiate(
                     ty,
                     generic_vars,
-                    &self.modules.primitives(),
+                    self.modules.primitives(),
                 )
                 .unwrap();
                 let type_instance = TypeInstance::UserType(unknown_type_instance);
@@ -62,7 +62,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let unknown_type_instance = TypeInstanceUserType::instantiate(
                     ty,
                     generic_vars,
-                    &self.modules.primitives(),
+                    self.modules.primitives(),
                 )
                 .unwrap();
                 let type_instance = TypeInstance::UserType(unknown_type_instance);
@@ -87,7 +87,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let unknown_type_instance = TypeInstanceUserType::instantiate(
                                 ty,
                                 generic_vars,
-                                &self.modules.primitives(),
+                                self.modules.primitives(),
                             )
                             .unwrap();
                             let type_instance = TypeInstance::UserType(unknown_type_instance);
@@ -98,10 +98,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                         structure = Some((type_name.clone(), item_struct));
                         type_instance =
-                            Some(generic_vars.instantiate_type(ty, &self.modules.primitives())?);
+                            Some(generic_vars.instantiate_type(ty, self.modules.primitives())?);
                     } else {
                         let local_type_instance =
-                            generic_vars.instantiate_type(ty, &self.modules.primitives())?;
+                            generic_vars.instantiate_type(ty, self.modules.primitives())?;
                         if let TypeInstance::StringType(_string_inst) = local_type_instance {
                             return Ok(Some(TileRustType::new_string(TypeInstance::StringType(
                                 _string_inst,
@@ -137,7 +137,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 let type_name = type_name.unwrap().to_string();
                 let local_type_instance =
-                    generic_vars.instantiate_type(ty, &self.modules.primitives())?;
+                    generic_vars.instantiate_type(ty, self.modules.primitives())?;
                 let Some(element_type_instance_str) =
                     local_type_instance.get_rust_element_instance_ty()
                 else {
@@ -242,7 +242,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return Ok(Some(TileRustType::new_structured_type(
                 type_name,
                 generic_vars,
-                &self.modules.primitives(),
+                self.modules.primitives(),
                 args,
                 type_instance,
             )?));
@@ -273,7 +273,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             Ok(Some(TileRustType::new_primitive_type(
                 type_name,
                 generic_vars,
-                &self.modules.primitives(),
+                self.modules.primitives(),
                 args,
                 TypeInstance::ElementType(element_instance),
             )?))
@@ -303,7 +303,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             Ok(Some(TileRustType::new_primitive_type(
                 type_name,
                 generic_vars,
-                &self.modules.primitives(),
+                self.modules.primitives(),
                 args,
                 TypeInstance::PtrType(ptr_instance),
             )?))

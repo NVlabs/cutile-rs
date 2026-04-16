@@ -99,7 +99,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let out = operands.remove(0);
                 let out_type = out.ty.clone();
                 let Some(out_rust_element_type) =
-                    out_type.get_instantiated_rust_element_type(&self.modules.primitives())
+                    out_type.get_instantiated_rust_element_type(self.modules.primitives())
                 else {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -119,7 +119,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 };
                 let Some(out_cuda_tile_element_type) =
-                    out_type.get_cuda_tile_element_type(&self.modules.primitives())?
+                    out_type.get_cuda_tile_element_type(self.modules.primitives())?
                 else {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -136,7 +136,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 } else if !out_is_float {
                     let Some(lhs_elem_ty) = lhs
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives())
+                        .get_instantiated_rust_element_type(self.modules.primitives())
                     else {
                         return self.jit_error_result(
                             &call_expr.span(),
@@ -145,7 +145,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     };
                     let Some(rhs_elem_ty) = lhs
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives())
+                        .get_instantiated_rust_element_type(self.modules.primitives())
                     else {
                         return self.jit_error_result(
                             &call_expr.span(),
@@ -638,7 +638,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     "tile_to_scalar" => {
                         let Some(element_type) =
-                            get_element_type_structured(&old_type, &self.modules.primitives())
+                            get_element_type_structured(&old_type, self.modules.primitives())
                         else {
                             return self.jit_error_result(
                                 &call_expr.span(),
@@ -665,7 +665,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     "tile_to_pointer" => {
                         let Some(element_type) =
-                            get_element_type_structured(&old_type, &self.modules.primitives())
+                            get_element_type_structured(&old_type, self.modules.primitives())
                         else {
                             return self.jit_error_result(
                                 &call_expr.span(),
@@ -778,16 +778,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             return Ok(Some(arg));
                         }
                         let output_type =
-                            tile_ir_type_from_trt(&new_type_compiled, &self.modules.primitives())
+                            tile_ir_type_from_trt(&new_type_compiled, self.modules.primitives())
                                 .ok_or_else(|| {
-                                self.jit_error(
-                                    &call_expr.span(),
-                                    &format!(
-                                        "Failed to obtain tile-ir type for convert {}",
-                                        call_expr.to_token_stream()
-                                    ),
-                                )
-                            })?;
+                                    self.jit_error(
+                                        &call_expr.span(),
+                                        &format!(
+                                            "Failed to obtain tile-ir type for convert {}",
+                                            call_expr.to_token_stream()
+                                        ),
+                                    )
+                                })?;
                         // These aren't required for all ops.
                         let (op_id, results) = match (
                             old_element_type_str.as_str(),
@@ -815,9 +815,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // Integer → float: IToF with signedness from source type.
                             (from, to)
                                 if super::_type::scalar_from_name(from)
-                                    .map_or(false, |s| s.is_integer())
+                                    .is_some_and(|s| s.is_integer())
                                     && super::_type::scalar_from_name(to)
-                                        .map_or(false, |s| s.is_float()) =>
+                                        .is_some_and(|s| s.is_float()) =>
                             {
                                 let signedness = signedness_attr(
                                     "signedness",
@@ -844,9 +844,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // Float → integer: FToI with signedness from target type.
                             (from, to)
                                 if super::_type::scalar_from_name(from)
-                                    .map_or(false, |s| s.is_float())
+                                    .is_some_and(|s| s.is_float())
                                     && super::_type::scalar_from_name(to)
-                                        .map_or(false, |s| s.is_integer()) =>
+                                        .is_some_and(|s| s.is_integer()) =>
                             {
                                 let signedness = signedness_attr(
                                     "signedness",
@@ -877,9 +877,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // cutile-python's _get_type_conversion_encoder.
                             (from, to)
                                 if super::_type::scalar_from_name(from)
-                                    .map_or(false, |s| s.is_float())
+                                    .is_some_and(|s| s.is_float())
                                     && super::_type::scalar_from_name(to)
-                                        .map_or(false, |s| s.is_float()) =>
+                                        .is_some_and(|s| s.is_float()) =>
                             {
                                 let rounding = rounding_mode_attr("nearest_even");
                                 let Some(input_value) = arg.value else {

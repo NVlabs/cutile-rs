@@ -145,7 +145,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None);
                 // println!("inline_function_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ngeneric_arg_inference={generic_arg_inference:#?}", fn_item.sig.ident.to_string());
                 generic_arg_inference
-                    .get_generic_vars_instance(generic_vars, &self.modules.primitives())
+                    .get_generic_vars_instance(generic_vars, self.modules.primitives())
             };
             // Add function call const generics as variables.
             for (key, value) in &call_generic_vars.inst_i32 {
@@ -296,7 +296,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 generic_arg_inference.map_args_to_params(&call_arg_rust_tys, Some(self_ty));
                 // println!("sig={} \nargs={} \narg_map={:#?}", impl_method.sig.to_token_stream().to_string(), args.to_token_stream().to_string(), generic_arg_inference.param2arg);
                 let inferred_generics = generic_arg_inference
-                    .get_generic_vars_instance(generic_vars, &self.modules.primitives());
+                    .get_generic_vars_instance(generic_vars, self.modules.primitives());
 
                 // If there are generics passed as part of the method call, capture them.
                 if method_call_turbofish.is_some() {
