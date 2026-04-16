@@ -14,170 +14,171 @@
 #![allow(nonstandard_style)]
 #![allow(unused_variables)]
 
-/// Core GPU kernel programming types and operations.
-///
-/// This module provides the foundational types and operations for writing GPU kernels
-/// in Rust. It defines a domain-specific language (DSL) that compiles to MLIR and then
-/// to optimized CUDA code.
-///
-/// ## Overview
-///
-/// The core module provides:
-///
-/// - **Element types**: Scalar types that can be stored in tensors (`f32`, `f16`, `i32`, etc.)
-/// - **Tiles**: Register/shared memory arrays that represent data being processed
-/// - **Tensors**: GPU memory views with shape and stride information
-/// - **Partitions**: Views that divide tensors into tiles for block-level processing
-/// - **Operations**: Element-wise arithmetic, broadcasting, reshaping, matrix operations
-///
-/// ## Writing GPU Kernels
-///
-/// GPU kernels are written as regular Rust functions with special attributes:
-///
-/// ```rust,ignore
-/// #[cutile::module]
-/// mod my_kernels {
-///     use cutile::core::*;
-///
-///     #[cutile::entry]
-///     fn vector_add<T: ElementType, const N: i32>(
-///         z: &mut Tensor<T, {[N]}>,
-///         x: &Tensor<T, {[-1]}>,
-///         y: &Tensor<T, {[-1]}>,
-///     ) {
-///         // Load tiles from input tensors based on block position
-///         let tile_x = load_tile_like_1d(x, z);
-///         let tile_y = load_tile_like_1d(y, z);
-///
-///         // Perform computation on tiles (in registers/shared memory)
-///         let result = tile_x + tile_y;
-///
-///         // Store result back to global memory
-///         z.store(result);
-///     }
-/// }
-/// ```
-///
-/// ## Type System
-///
-/// ### Element Types
-///
-/// [`ElementType`] is the trait for scalar types that can be stored in tensors:
-/// - Floating point: `f16`, `f32`, `f64`, `tf32`
-/// - Integer: `i32`, `i64`, `u32`, `u64`
-/// - Boolean: `bool` (maps to `i1`)
-///
-/// ### Tiles vs Tensors
-///
-/// - **[`Tile`]**: Data in registers or shared memory. Fast to access, supports element-wise operations.
-/// - **[`Tensor`]**: View of data in global GPU memory. Must be loaded to tiles for processing.
-///
-/// ### Shapes
-///
-/// Shapes are compile-time constants represented as `const [i32; N]`:
-/// - `{[128]}` - 1D with 128 elements
-/// - `{[64, 64]}` - 2D with 64×64 elements
-/// - `{[-1]}` - Dynamic size (inferred at runtime)
-///
-/// ## Common Operations
-///
-/// ### Loading and Storing
-///
-/// ```rust,ignore
-/// // Load entire tensor to a tile
-/// let tile = load_tile_mut(&mut tensor);
-///
-/// // Load from a specific position
-/// let tile = load_tile_like_1d(&input_tensor, &output_tensor);
-///
-/// // Store tile back to tensor
-/// tensor.store(tile);
-/// ```
-///
-/// ### Arithmetic
-///
-/// Tiles support standard arithmetic operators that work element-wise:
-///
-/// ```rust,ignore
-/// let a: Tile<f32, {[128]}> = ...;
-/// let b: Tile<f32, {[128]}> = ...;
-///
-/// let sum = a + b;
-/// let product = a * b;
-/// let diff = a - b;
-/// let quot = a / b;
-/// ```
-///
-/// ### Broadcasting
-///
-/// ```rust,ignore
-/// // Broadcast a scalar to a tile
-/// let scalar = 3.14f32;
-/// let tile = scalar.broadcast(const_shape![128]);
-///
-/// // Reshape a tile
-/// let reshaped = tile.reshape(const_shape![8, 16]);
-/// ```
-///
-/// ### Matrix Operations
-///
-/// ```rust,ignore
-/// // Matrix multiplication using hardware accelerated MMA
-/// let c = mma(a, b, acc); // c = a * b + acc
-/// ```
-///
-/// ## Partitions
-///
-/// [`Partition`] views divide tensors into tiles for parallel processing:
-///
-/// ```rust,ignore
-/// let tensor_shape = tensor.shape();
-/// let partition = tensor.partition(const_shape![64, 64]);
-///
-/// // Each thread block loads its partition based on block ID
-/// let pid = get_tile_block_id();
-/// let tile = partition.load([pid.0, pid.1]);
-/// ```
-///
-/// ## Block Operations
-///
-/// Get information about the current thread block:
-///
-/// ```rust,ignore
-/// let (x, y, z) = get_tile_block_id();  // Current block position
-/// let (gx, gy, gz) = get_num_tile_blocks();  // Total number of blocks
-/// ```
-///
-/// ## Debugging
-///
-/// Print from GPU kernels (for debugging):
-///
-/// ```rust,ignore
-/// cuda_tile_print!("Block ID: {}, Value: {}\n", pid.0, value);
-/// cuda_tile_assert!(value > 0, "Value must be positive");
-/// ```
-///
-/// ## Advanced: Type Conversions
-///
-/// ```rust,ignore
-/// // Convert between element types
-/// let f32_tile: Tile<f32, {[128]}> = convert_tile(i32_tile);
-///
-/// // Convert scalar to tile and back
-/// let tile = scalar_to_tile(3.14f32);
-/// let scalar: f32 = tile_to_scalar(tile);
-/// ```
-///
-/// ## Safety and Correctness
-///
-/// - Bounds checking can be enabled with `check_partition_access()`
-/// - Type system ensures shape compatibility at compile time
-/// - Undefined behavior if tensor shapes don't match partition shapes at runtime
-///
-/// ## See Also
-///
-/// - [`tile_async`](crate::tile_async) - Async execution and kernel compilation
-/// - [`kernels`](crate::kernels) - Pre-built kernel examples
+//! Core GPU kernel programming types and operations.
+//!
+//! This module provides the foundational types and operations for writing GPU kernels
+//! in Rust. It defines a domain-specific language (DSL) that compiles to MLIR and then
+//! to optimized CUDA code.
+//!
+//! ## Overview
+//!
+//! The core module provides:
+//!
+//! - **Element types**: Scalar types that can be stored in tensors (`f32`, `f16`, `i32`, etc.)
+//! - **Tiles**: Register/shared memory arrays that represent data being processed
+//! - **Tensors**: GPU memory views with shape and stride information
+//! - **Partitions**: Views that divide tensors into tiles for block-level processing
+//! - **Operations**: Element-wise arithmetic, broadcasting, reshaping, matrix operations
+//!
+//! ## Writing GPU Kernels
+//!
+//! GPU kernels are written as regular Rust functions with special attributes:
+//!
+//! ```rust,ignore
+//! #[cutile::module]
+//! mod my_kernels {
+//!     use cutile::core::*;
+//!
+//!     #[cutile::entry]
+//!     fn vector_add<T: ElementType, const N: i32>(
+//!         z: &mut Tensor<T, {[N]}>,
+//!         x: &Tensor<T, {[-1]}>,
+//!         y: &Tensor<T, {[-1]}>,
+//!     ) {
+//!         // Load tiles from input tensors based on block position
+//!         let tile_x = load_tile_like_1d(x, z);
+//!         let tile_y = load_tile_like_1d(y, z);
+//!
+//!         // Perform computation on tiles (in registers/shared memory)
+//!         let result = tile_x + tile_y;
+//!
+//!         // Store result back to global memory
+//!         z.store(result);
+//!     }
+//! }
+//! ```
+//!
+//! ## Type System
+//!
+//! ### Element Types
+//!
+//! [`ElementType`] is the trait for scalar types that can be stored in tensors:
+//! - Floating point: `f16`, `f32`, `f64`, `tf32`
+//! - Integer: `i32`, `i64`, `u32`, `u64`
+//! - Boolean: `bool` (maps to `i1`)
+//!
+//! ### Tiles vs Tensors
+//!
+//! - **[`Tile`]**: Data in registers or shared memory. Fast to access, supports element-wise operations.
+//! - **[`Tensor`]**: View of data in global GPU memory. Must be loaded to tiles for processing.
+//!
+//! ### Shapes
+//!
+//! Shapes are compile-time constants represented as `const [i32; N]`:
+//! - `{[128]}` - 1D with 128 elements
+//! - `{[64, 64]}` - 2D with 64×64 elements
+//! - `{[-1]}` - Dynamic size (inferred at runtime)
+//!
+//! ## Common Operations
+//!
+//! ### Loading and Storing
+//!
+//! ```rust,ignore
+//! // Load entire tensor to a tile
+//! let tile = load_tile_mut(&mut tensor);
+//!
+//! // Load from a specific position
+//! let tile = load_tile_like_1d(&input_tensor, &output_tensor);
+//!
+//! // Store tile back to tensor
+//! tensor.store(tile);
+//! ```
+//!
+//! ### Arithmetic
+//!
+//! Tiles support standard arithmetic operators that work element-wise:
+//!
+//! ```rust,ignore
+//! let a: Tile<f32, {[128]}> = ...;
+//! let b: Tile<f32, {[128]}> = ...;
+//!
+//! let sum = a + b;
+//! let product = a * b;
+//! let diff = a - b;
+//! let quot = a / b;
+//! ```
+//!
+//! ### Broadcasting
+//!
+//! ```rust,ignore
+//! // Broadcast a scalar to a tile
+//! let scalar = 3.14f32;
+//! let tile = scalar.broadcast(const_shape![128]);
+//!
+//! // Reshape a tile
+//! let reshaped = tile.reshape(const_shape![8, 16]);
+//! ```
+//!
+//! ### Matrix Operations
+//!
+//! ```rust,ignore
+//! // Matrix multiplication using hardware accelerated MMA
+//! let c = mma(a, b, acc); // c = a * b + acc
+//! ```
+//!
+//! ## Partitions
+//!
+//! [`Partition`] views divide tensors into tiles for parallel processing:
+//!
+//! ```rust,ignore
+//! let tensor_shape = tensor.shape();
+//! let partition = tensor.partition(const_shape![64, 64]);
+//!
+//! // Each thread block loads its partition based on block ID
+//! let pid = get_tile_block_id();
+//! let tile = partition.load([pid.0, pid.1]);
+//! ```
+//!
+//! ## Block Operations
+//!
+//! Get information about the current thread block:
+//!
+//! ```rust,ignore
+//! let (x, y, z) = get_tile_block_id();  // Current block position
+//! let (gx, gy, gz) = get_num_tile_blocks();  // Total number of blocks
+//! ```
+//!
+//! ## Debugging
+//!
+//! Print from GPU kernels (for debugging):
+//!
+//! ```rust,ignore
+//! cuda_tile_print!("Block ID: {}, Value: {}\n", pid.0, value);
+//! cuda_tile_assert!(value > 0, "Value must be positive");
+//! ```
+//!
+//! ## Advanced: Type Conversions
+//!
+//! ```rust,ignore
+//! // Convert between element types
+//! let f32_tile: Tile<f32, {[128]}> = convert_tile(i32_tile);
+//!
+//! // Convert scalar to tile and back
+//! let tile = scalar_to_tile(3.14f32);
+//! let scalar: f32 = tile_to_scalar(tile);
+//! ```
+//!
+//! ## Safety and Correctness
+//!
+//! - Bounds checking can be enabled with `check_partition_access()`
+//! - Type system ensures shape compatibility at compile time
+//! - Undefined behavior if tensor shapes don't match partition shapes at runtime
+//!
+//! ## See Also
+//!
+//! - [`tile_async`](crate::tile_async) - Async execution and kernel compilation
+//! - [`kernels`](crate::kernels) - Pre-built kernel examples
+
 // ---------------------------------------------------------------
 // Static operation parameter modules
 //
