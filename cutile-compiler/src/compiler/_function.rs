@@ -150,7 +150,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             &stride_args,
             &spec_args_map,
             &scalar_hints_map,
-            &modules.primitives(),
+            modules.primitives(),
             &optimization_hints,
         )?;
 
@@ -495,7 +495,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         let Some(const_ty_str) = get_cuda_tile_element_type_from_rust_primitive_str(
             &type_inst.rust_element_instance_ty,
-            &self.modules.primitives(),
+            self.modules.primitives(),
         ) else {
             return self
                 .jit_error_result(&tr_ty.rust_ty.span(), "failed to compile constant value");
