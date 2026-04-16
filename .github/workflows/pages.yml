@@ -37,7 +37,7 @@ jobs:
         run: sphinx-build -b html cutile-book cutile-book/_build/html
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: cutile-book/_build/html
 
