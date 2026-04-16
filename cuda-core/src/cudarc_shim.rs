@@ -163,9 +163,7 @@ impl CudaContext {
         if error_state == 0 {
             Ok(())
         } else {
-            Err(DriverError(unsafe {
-                std::mem::transmute::<u32, cuda_bindings::cudaError_enum>(error_state)
-            }))
+            Err(DriverError(error_state))
         }
     }
 
