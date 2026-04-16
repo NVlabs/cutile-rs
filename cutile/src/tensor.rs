@@ -578,7 +578,7 @@ impl<T: DType> Tensor<T> {
             return tensor_error_result("Reinterpret shape must preserve total byte size.");
         }
         let alignment = align_of::<U>() as u64;
-        if alignment > 1 && self.cu_deviceptr() % alignment != 0 {
+        if alignment > 1 && !self.cu_deviceptr().is_multiple_of(alignment) {
             return tensor_error_result(
                 "Tensor storage alignment is incompatible with reinterpret target type.",
             );
@@ -826,7 +826,7 @@ impl<T: DType> Reshape for Tensor<T> {
     }
 }
 
-impl<'a, T: DType> Reshape for &'a Arc<Tensor<T>> {
+impl<T: DType> Reshape for &Arc<Tensor<T>> {
     type Output = Arc<Tensor<T>>;
     fn reshape(self, shape: &[usize]) -> Result<Arc<Tensor<T>>, Error> {
         self.reshape_shared(shape)
@@ -1052,7 +1052,7 @@ impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
     }
 }
 
-impl<'a, T: DType> Partition<&'a mut Tensor<T>> {
+impl<T: DType> Partition<&mut Tensor<T>> {
     pub fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
     }
@@ -1318,7 +1318,7 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
     }
 }
 
-impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
+impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());
@@ -1462,7 +1462,7 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
     }
 }
 
-impl<'a, T: DType + Sync> KernelInputStored for &'a Tensor<T> {
+impl<T: DType + Sync> KernelInputStored for &Tensor<T> {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());

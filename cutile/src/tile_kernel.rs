@@ -48,6 +48,7 @@ pub struct TileFunctionKey {
 }
 
 impl TileFunctionKey {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         module_name: String,
         function_name: String,
@@ -580,7 +581,7 @@ impl<T: DType> KernelArgument for &Partition<Tensor<T>> {
 }
 
 /// Same as above but for borrowed mutable tensor partitions.
-impl<'a, T: DType> KernelArgument for &Partition<&'a mut Tensor<T>> {
+impl<T: DType> KernelArgument for &Partition<&mut Tensor<T>> {
     fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());
