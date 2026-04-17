@@ -5,11 +5,11 @@
 
 //! Lazy, composable GPU operations and combinator types.
 
-use crate::device_context::with_default_device_policy;
+use crate::device_context::{get_device_pool, with_default_device_policy};
 use crate::device_future::DeviceFuture;
 use crate::error::{device_error, DeviceError};
 use crate::scheduling_policies::SchedulingPolicy;
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{CudaContext, CudaMemPool, CudaStream};
 use std::cell::{Cell, UnsafeCell};
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -61,6 +61,7 @@ pub struct ExecutionContext {
     device: Device,
     cuda_stream: Arc<CudaStream>,
     cuda_context: Arc<CudaContext>,
+    pool: Option<Arc<CudaMemPool>>,
 }
 
 impl ExecutionContext {
@@ -71,6 +72,17 @@ impl ExecutionContext {
             cuda_stream,
             cuda_context,
             device,
+            pool: None,
+        }
+    }
+    pub fn with_pool(cuda_stream: Arc<CudaStream>, pool: Option<Arc<CudaMemPool>>) -> Self {
+        let cuda_context = cuda_stream.context().clone();
+        let device = cuda_context.ordinal();
+        Self {
+            cuda_stream,
+            cuda_context,
+            device,
+            pool,
         }
     }
     pub fn get_cuda_stream(&self) -> &Arc<CudaStream> {
@@ -81,6 +93,21 @@ impl ExecutionContext {
     }
     pub fn get_device_id(&self) -> Device {
         self.device
+    }
+    pub fn get_pool(&self) -> Option<&Arc<CudaMemPool>> {
+        self.pool.as_ref()
+    }
+    /// Allocates device memory on this context's stream, using the custom pool if set.
+    ///
+    /// # Safety
+    /// The stream must be valid and not destroyed.
+    pub unsafe fn alloc_async(&self, num_bytes: usize) -> cuda_core::sys::CUdeviceptr {
+        match &self.pool {
+            Some(pool) => {
+                cuda_core::malloc_from_pool_async(num_bytes, pool, &self.cuda_stream)
+            }
+            None => cuda_core::malloc_async(num_bytes, &self.cuda_stream),
+        }
     }
     #[expect(
         dead_code,
@@ -186,9 +213,10 @@ pub trait DeviceOp:
         policy: &Arc<dyn SchedulingPolicy>,
     ) -> Result<DeviceFuture<<Self as DeviceOp>::Output, Self>, DeviceError> {
         let stream = policy.next_stream()?;
+        let pool = get_device_pool(stream.context().ordinal()).ok().flatten();
         let mut future = DeviceFuture::new();
         future.device_operation = Some(self);
-        future.execution_context = Some(ExecutionContext::new(stream));
+        future.execution_context = Some(ExecutionContext::with_pool(stream, pool));
         Ok(future)
     }
     /// Chain a follow-up operation that runs **on the same stream** as `self`.
@@ -315,7 +343,7 @@ pub trait DeviceOp:
     fn graph(
         self,
     ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
-        with_default_device_policy(|policy| {
+        with_default_device_policy(|policy, _pool| {
             let stream = policy.next_stream()?;
             self.graph_on(stream)
         })?
@@ -337,9 +365,15 @@ pub trait DeviceOp:
     /// The policy picks a stream (round-robin by default), submits the work, and blocks
     /// until the GPU finishes. Equivalent to `.await` but blocking.
     fn sync(self) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        with_default_device_policy(|policy| {
+        with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
-            self.sync_on(&stream)
+            acquire_execution_lock()?;
+            let ctx = ExecutionContext::with_pool(stream.clone(), pool.cloned());
+            let res = unsafe { self.execute(&ctx) };
+            let sync_res = stream.synchronize();
+            release_execution_lock();
+            sync_res?;
+            res
         })?
     }
     /// Execute on a stream without synchronizing. The GPU may still be
@@ -353,7 +387,8 @@ pub trait DeviceOp:
         self,
         stream: &Arc<CudaStream>,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let pool = get_device_pool(stream.context().ordinal()).ok().flatten();
+        let ctx = ExecutionContext::with_pool(stream.clone(), pool);
         unsafe { self.execute(&ctx) }
     }
     /// Execute on an **explicit stream** and block until the GPU finishes.
@@ -363,7 +398,8 @@ pub trait DeviceOp:
     /// ordering or are debugging concurrency issues.
     fn sync_on(self, stream: &Arc<CudaStream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         acquire_execution_lock()?;
-        let ctx = ExecutionContext::new(stream.clone());
+        let pool = get_device_pool(stream.context().ordinal()).ok().flatten();
+        let ctx = ExecutionContext::with_pool(stream.clone(), pool);
         let res = unsafe { self.execute(&ctx) };
         let sync_res = stream.synchronize();
         release_execution_lock();
@@ -419,11 +455,11 @@ impl<T: Send> IntoFuture for BoxedDeviceOp<T> {
     type Output = Result<T, DeviceError>;
     type IntoFuture = DeviceFuture<T, Self>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -487,11 +523,11 @@ impl<T: Send + Sync> IntoFuture for SharedDeviceOp<T> {
     type Output = Result<Arc<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Arc<T>, SharedDeviceOp<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -651,11 +687,11 @@ where
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, AndThen<I, DI, O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -693,11 +729,11 @@ impl<T: Send> IntoFuture for Value<T> {
     type Output = Result<T, DeviceError>;
     type IntoFuture = DeviceFuture<T, Value<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -754,11 +790,11 @@ impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> IntoFuture for Empty<
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, Empty<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -813,11 +849,11 @@ impl<T1: Send, T2: Send, A: DeviceOp<Output = T1>, B: DeviceOp<Output = T2>> Int
     type Output = Result<(T1, T2), DeviceError>;
     type IntoFuture = DeviceFuture<(T1, T2), Zip<T1, T2, A, B>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -1029,11 +1065,11 @@ where
     type Output = Result<T1, DeviceError>;
     type IntoFuture = DeviceFuture<T1, SelectLeft<T1, T2, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -1076,11 +1112,11 @@ where
     type Output = Result<T2, DeviceError>;
     type IntoFuture = DeviceFuture<T2, SelectRight<T1, T2, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -1346,11 +1382,11 @@ impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce(&ExecutionContext) -> DO + Sen
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, StreamOperation<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -1407,11 +1443,11 @@ where
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, AndThenWithContext<I, DI, O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,
@@ -1476,11 +1512,11 @@ impl<T: Send> IntoFuture for DeviceOpVec<T> {
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, Self>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
             let mut f = DeviceFuture::new();
             f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
+            f.execution_context = Some(ExecutionContext::with_pool(stream, pool.cloned()));
             Ok(f)
         }) {
             Ok(Ok(future)) => future,

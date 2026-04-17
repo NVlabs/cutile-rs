@@ -702,9 +702,9 @@ where
     type Output = Result<Partition<I>, DeviceError>;
     type IntoFuture = DeviceFuture<Partition<I>, DeviceOperationPartition<RANK, I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::with_pool(stream, pool.cloned())))
         }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),
@@ -767,9 +767,9 @@ where
     type Output = Result<I, DeviceError>;
     type IntoFuture = DeviceFuture<I, UnwrapPartition<I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::with_pool(stream, pool.cloned())))
         }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),
@@ -843,9 +843,9 @@ where
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, TensorToHostVec<T, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
+        match with_default_device_policy(|policy, pool| {
             let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::with_pool(stream, pool.cloned())))
         }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),

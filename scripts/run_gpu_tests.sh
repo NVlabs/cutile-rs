@@ -41,6 +41,14 @@ run_step \
     "cutile GPU error-quality tests" \
     cargo test -p cutile --test gpu
 
+for test_target in \
+    pool_allocation
+do
+    run_step \
+        "cuda-async GPU integration test ${test_target}" \
+        cargo test -p cuda-async --test "$test_target"
+done    
+
 print_summary_and_exit \
     "All GPU tests passed!" \
     "Some GPU tests failed. See output above for details."
