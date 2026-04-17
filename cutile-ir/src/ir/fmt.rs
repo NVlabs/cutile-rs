@@ -1067,7 +1067,7 @@ impl<'a> ModulePrinter<'a> {
         let pad = " ".repeat(self.indent);
 
         // Operands: [lb, ub, step, init_values...]
-        let lb = op.operands.get(0).map(|v| v.index());
+        let lb = op.operands.first().map(|v| v.index());
         let ub = op.operands.get(1).map(|v| v.index());
         let step = op.operands.get(2).map(|v| v.index());
         let init_values = &op.operands[3.min(op.operands.len())..];
@@ -2595,7 +2595,7 @@ fn format_dense_i32_array(attr: &Attribute) -> String {
                 .collect();
             format!("[{}]", elems.join(", "))
         }
-        _ => format!("{}", format_attr(attr)),
+        _ => format_attr(attr).to_string(),
     }
 }
 

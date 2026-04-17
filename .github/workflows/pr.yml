@@ -47,11 +47,6 @@ jobs:
           # Install rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source "${HOME}/.cargo/env"
-          rustup default nightly
-          wget https://apt.llvm.org/llvm.sh
-          bash ./llvm.sh 21
-          apt install -y --no-install-recommends libmlir-21-dev mlir-21-tools libpolly-21-dev
-          update-alternatives --install /usr/bin/llvm-config llvm-config /usr/lib/llvm-21/bin/llvm-config 1
 
       - name: Build
         run: |
@@ -66,7 +61,7 @@ jobs:
       - name: Clippy
         run: |
           source "${HOME}/.cargo/env"
-          cargo clippy
+          cargo clippy -- --deny clippy::all --allow clippy::missing-safety-doc --allow clippy::type_complexity
 
       - name: Test (compile only)
         run: |

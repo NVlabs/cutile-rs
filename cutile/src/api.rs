@@ -280,7 +280,6 @@ pub fn memcpy<T: DType>(dst: &mut Tensor<T>, src: &Tensor<T>) -> Memcpy {
 /// the destination is borrowed immutably but written to through the device
 /// pointer during graph replay.
 ///
-
 pub struct Memcpy {
     src_ptr: cuda_core::sys::CUdeviceptr,
     dst_ptr: cuda_core::sys::CUdeviceptr,
@@ -638,6 +637,7 @@ pub fn convert<FromType: DType, ToType: DType>(
 /// - `std`: Standard deviation
 /// - `shape`: Tensor shape
 /// - `seed`: Optional random seed for reproducibility
+///
 /// Generates a tensor with values from a normal distribution.
 ///
 /// Supports `f32` and `f64` natively via cuRAND. For `f16`, generates `f32`
@@ -675,7 +675,7 @@ pub fn randn_f16<const RANK: usize>(
             let res = value((Arc::new(src_tensor), dst))
                 .then(convert_apply)
                 .unzip();
-            res.1.unpartition().reshape(&shape.to_vec())
+            res.1.unpartition().reshape(shape.as_ref())
         })
     })
 }

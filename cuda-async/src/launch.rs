@@ -33,9 +33,9 @@ impl Drop for AsyncKernelLaunch {
         let _ = self
             .args
             .iter()
-            .map(|arg| {
+            .map(|&arg| {
                 // Reconstruct the boxes. Pointers will be dropped when they go out of scope.
-                unsafe { Box::from_raw(*arg) }
+                unsafe { Box::from_raw(arg as *mut usize) }
             })
             .collect::<Vec<_>>();
     }
