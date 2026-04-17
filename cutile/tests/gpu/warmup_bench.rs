@@ -143,6 +143,7 @@ fn warmup_eliminates_first_call_jit() {
             vec!["f32".into(), "64".into()],
             stride_args(),
             spec_args_64,
+            vec![],
             None,
             CompileOptions::default(),
             bench_module::_SOURCE_HASH.into(),

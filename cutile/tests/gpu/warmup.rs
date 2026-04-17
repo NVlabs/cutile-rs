@@ -15,7 +15,7 @@ use cutile::tile_kernel::{
     TileFunctionKey, TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
-    get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+    compile_tile_ir_module, get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
 };
 use cutile_compiler::specialization::SpecializationBits;
 use once_cell::sync::Lazy;
@@ -546,14 +546,14 @@ fn load_module_from_bytes_concurrent() {
                 ("y", &[1i32][..]),
             ],
             &[],
+            &[],
             None,
             gpu_name.clone(),
             &CompileOptions::default(),
         )
         .unwrap();
-        let module_op = compiler.compile().unwrap();
-        let cubin_filename =
-            cutile_compiler::cuda_tile_runtime_utils::compile_module(&module_op, &gpu_name);
+        let tile_module = compiler.compile().unwrap();
+        let cubin_filename = compile_tile_ir_module(&tile_module, &gpu_name);
         let cubin_bytes = std::fs::read(&cubin_filename).expect("failed to read cubin");
 
         // Spawn multiple threads, each loading the same cubin bytes.

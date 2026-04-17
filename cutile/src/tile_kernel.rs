@@ -124,6 +124,7 @@ pub struct TileFunctionKeyBuilder {
     function_generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
     spec_args: Vec<(String, SpecializationBits)>,
+    scalar_hints: Vec<(String, DivHint)>,
     grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
     source_hash: String,
@@ -143,6 +144,10 @@ impl TileFunctionKeyBuilder {
     }
     pub fn spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
         self.spec_args = spec_args;
+        self
+    }
+    pub fn scalar_hints(mut self, scalar_hints: Vec<(String, DivHint)>) -> Self {
+        self.scalar_hints = scalar_hints;
         self
     }
     pub fn grid(mut self, grid: (u32, u32, u32)) -> Self {
@@ -176,6 +181,7 @@ impl TileFunctionKeyBuilder {
             function_generics: self.function_generics,
             stride_args: self.stride_args,
             spec_args: self.spec_args,
+            scalar_hints: self.scalar_hints,
             grid: self.grid,
             compile_options: self.compile_options,
             source_hash: self.source_hash,
@@ -199,6 +205,7 @@ impl TileFunctionKey {
             function_generics: vec![],
             stride_args: vec![],
             spec_args: vec![],
+            scalar_hints: vec![],
             grid: None,
             compile_options: CompileOptions::default(),
             source_hash: String::new(),
@@ -212,7 +219,7 @@ impl TileFunctionKey {
 impl FunctionKey for TileFunctionKey {
     fn get_disk_hash_string(&self) -> String {
         let canonical = format!(
-            "{}:{}:{}:{}:{}:{:?}:{:?}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{:?}:{:?}:{}:{}:{}:{}",
             self.module_name,
             self.function_name,
             self.function_generics.join(","),
@@ -222,6 +229,11 @@ impl FunctionKey for TileFunctionKey {
                 .collect::<Vec<_>>()
                 .join(";"),
             self.spec_args
+                .iter()
+                .map(|(k, v)| format!("{}={:?}", k, v))
+                .collect::<Vec<_>>()
+                .join(";"),
+            self.scalar_hints
                 .iter()
                 .map(|(k, v)| format!("{}={:?}", k, v))
                 .collect::<Vec<_>>()
@@ -405,6 +417,10 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
                     .map(|x| (x.0.as_str(), x.1.as_slice()))
                     .collect::<Vec<_>>(),
                 &key.spec_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
+                &key.scalar_hints
                     .iter()
                     .map(|x| (x.0.as_str(), &x.1))
                     .collect::<Vec<_>>(),
@@ -598,6 +614,7 @@ pub struct WarmupSpec {
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
     pub spec_args: Vec<(String, SpecializationBits)>,
+    pub scalar_hints: Vec<(String, DivHint)>,
     pub const_grid: Option<(u32, u32, u32)>,
 }
 
@@ -609,6 +626,7 @@ impl WarmupSpec {
             function_generics: generics,
             stride_args: vec![],
             spec_args: vec![],
+            scalar_hints: vec![],
             const_grid: None,
         }
     }
@@ -622,6 +640,12 @@ impl WarmupSpec {
     /// Set specialization arguments for this spec.
     pub fn with_spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
         self.spec_args = spec_args;
+        self
+    }
+
+    /// Set scalar div hints for this spec.
+    pub fn with_scalar_hints(mut self, scalar_hints: Vec<(String, DivHint)>) -> Self {
+        self.scalar_hints = scalar_hints;
         self
     }
 
@@ -688,6 +712,7 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
             spec.function_generics.clone(),
             spec.stride_args.clone(),
             spec.spec_args.clone(),
+            spec.scalar_hints.clone(),
             spec.const_grid,
             CompileOptions::default(),
             source_hash.to_string(),
@@ -734,6 +759,11 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                         .collect::<Vec<_>>(),
                     &spec
                         .spec_args
+                        .iter()
+                        .map(|x| (x.0.as_str(), &x.1))
+                        .collect::<Vec<_>>(),
+                    &spec
+                        .scalar_hints
                         .iter()
                         .map(|x| (x.0.as_str(), &x.1))
                         .collect::<Vec<_>>(),
@@ -789,13 +819,18 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                     .iter()
                     .map(|x| (x.0.as_str(), &x.1))
                     .collect::<Vec<_>>(),
+                &spec
+                    .scalar_hints
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
                 spec.const_grid,
                 gpu_name.clone(),
                 &key.compile_options,
             )?;
             let validator = Arc::new(compiler.get_validator());
-            let module_op = compiler.compile()?;
-            let cubin_filename = compile_module(&module_op, &gpu_name);
+            let tile_module = compiler.compile()?;
+            let cubin_filename = compile_tile_ir_module(&tile_module, &gpu_name);
             let jit_elapsed = t0.elapsed();
 
             // Persist to disk cache.
