@@ -41,7 +41,7 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
     );
 
     cutile_ir::write_bytecode_to_file(module, bc_filename.as_str())
-        .expect(&format!("Failed to write bytecode for {bc_filename}"));
+        .unwrap_or_else(|_| panic!("Failed to write bytecode for {bc_filename}"));
     let output = Command::new("tileiras")
         .arg("--gpu-name")
         .arg(gpu_name)
@@ -51,7 +51,7 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         .arg(&cubin_filename)
         .arg(&bc_filename)
         .output()
-        .expect(format!("Failed to launch tileiras for {bc_filename}").as_str());
+        .unwrap_or_else(|_| panic!("Failed to launch tileiras for {bc_filename}"));
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
