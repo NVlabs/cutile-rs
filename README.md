@@ -81,6 +81,24 @@ rustup default stable
 Install CUDA 13.2 for your OS by following the official instructions:
 https://developer.nvidia.com/cuda-downloads
 
+### libclang (for `cuda-bindings`)
+
+The `cuda-bindings` crate uses `bindgen`, which loads `libclang` at build time and
+needs clang's compiler-builtin headers (`stddef.h`, `stdarg.h`, ...). On
+Debian/Ubuntu these are not pulled in by `libclang*` alone; install them
+explicitly (use the version matching your installed `libclang*`):
+
+```bash
+sudo apt-get install -y libclang-common-18-dev clang
+```
+
+If you can't install these packages, you can instead point bindgen at any
+existing clang resource directory:
+
+```bash
+export BINDGEN_EXTRA_CLANG_ARGS="-I$(clang -print-resource-dir)/include"
+```
+
 ## Configure Environment
 
 Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
