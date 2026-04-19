@@ -2050,8 +2050,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     "Unexpected dense value.",
                                 );
                             }
-                            let (ty, const_val) =
+                            let (ty_raw, const_val) =
                                 (ty_val_split[0].to_string(), ty_val_split[1].to_string());
+                            // Resolve generic type parameters (e.g. `T::ZERO` where
+                            // `T` is a kernel generic) to their concrete
+                            // monomorphized type name before dispatching to
+                            // `get_const_hex`.
+                            let ty = generic_args
+                                .inst_types
+                                .get(&ty_raw)
+                                .cloned()
+                                .unwrap_or(ty_raw);
                             match const_val.as_str() {
                                 "ZERO" => (get_const_hex(ty.as_str(), "zero")?, ty.clone()),
                                 "ONE" => (get_const_hex(ty.as_str(), "one")?, ty.clone()),

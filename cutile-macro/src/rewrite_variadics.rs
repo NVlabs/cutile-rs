@@ -2028,6 +2028,9 @@ impl RewriteVariadicsPass {
                     self.rewrite_sig(&mut result.sig, &const_instances)?;
                     impl_items.push(TraitItem::Fn(result));
                 }
+                TraitItem::Const(const_item) => {
+                    impl_items.push(TraitItem::Const(const_item.clone()));
+                }
                 _ => return Err(syn_err(concrete_item.span(), "Unsupported impl item")),
             }
         }
@@ -2079,6 +2082,9 @@ impl RewriteVariadicsPass {
                     let mut result = type_impl.clone();
                     result.ty = desugar_ty(&type_impl.ty, const_instances)?;
                     impl_items.push(ImplItem::Type(result));
+                }
+                ImplItem::Const(const_impl) => {
+                    impl_items.push(ImplItem::Const(const_impl.clone()));
                 }
                 ImplItem::Fn(fn_impl) => {
                     // We pass in the unmodified self type item.self_ty

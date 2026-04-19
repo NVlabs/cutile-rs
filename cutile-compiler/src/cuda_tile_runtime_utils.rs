@@ -40,8 +40,17 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         &module.to_mlir_text(),
     );
 
-    cutile_ir::write_bytecode_to_file(module, bc_filename.as_str())
-        .expect(&format!("Failed to write bytecode for {bc_filename}"));
+    let bytes = cutile_ir::write_bytecode(module)
+        .unwrap_or_else(|e| panic!("Failed to serialize bytecode for {bc_filename}: {e}"));
+
+    if crate::dump::should_dump(crate::dump::DumpStage::Bytecode) {
+        let decoded = cutile_ir::decode_bytecode(&bytes)
+            .unwrap_or_else(|e| format!("<bytecode decode failed: {e}>"));
+        crate::dump::dump_module(crate::dump::DumpStage::Bytecode, &module.name, &decoded);
+    }
+
+    std::fs::write(&bc_filename, &bytes)
+        .unwrap_or_else(|e| panic!("Failed to write bytecode for {bc_filename}: {e}"));
     let output = Command::new("tileiras")
         .arg("--gpu-name")
         .arg(gpu_name)

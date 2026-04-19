@@ -1,0 +1,3 @@
+[submodule "cuda-tile-rs/cuda-tile"]
+	path = cuda-tile-rs/cuda-tile
+	url = https://github.com/NVIDIA/cuda-tile.git

@@ -723,6 +723,13 @@ pub fn get_variadic_op_data(op_name: &str) -> Option<VariadicOpData> {
             output_map: ("()", &[]),
             return_type: ("()", &[]),
         }),
+        "num_tiles" => Some(VariadicOpData {
+            const_length_vars: &["N"],
+            cga_map: HashMap::from([("S", "N")]),
+            input_map: vec![(0, "Partition", &["S"])],
+            output_map: ("i32", &[]),
+            return_type: ("i32", &[]),
+        }),
         "fma" => Some(VariadicOpData {
             const_length_vars: &["N"],
             cga_map: HashMap::from([("S", "N")]),
