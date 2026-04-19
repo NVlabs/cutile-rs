@@ -29,13 +29,35 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("cargo:rustc-link-lib=dylib=cuda");
     println!("cargo:rustc-link-lib=dylib=curand");
 
-    bindgen::builder()
+    let bindings = bindgen::builder()
         .header("wrapper.h")
         .clang_arg(format!("-I{}/include", cuda_toolkit_dir()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
-        .unwrap()
-        .write_to_file(Path::new(&env::var("OUT_DIR")?).join("bindings.rs"))?;
+        .map_err(|e| -> Box<dyn Error> {
+            let msg = e.to_string();
+            // Common case: libclang runtime is installed but the matching
+            // clang builtin headers (stddef.h, stdarg.h, ...) are missing.
+            // On Debian/Ubuntu these live in `libclang-common-<N>-dev`.
+            if msg.contains("'stddef.h' file not found")
+                || msg.contains("'stdarg.h' file not found")
+            {
+                return format!(
+                    "bindgen failed to parse CUDA headers: {msg}\n\n\
+                     hint: clang's builtin headers appear to be missing. \
+                     On Debian/Ubuntu install them alongside libclang, e.g.:\n    \
+                         sudo apt-get install -y libclang-common-18-dev clang\n\
+                     (use the version matching your installed `libclang*` package). \
+                     Alternatively, set BINDGEN_EXTRA_CLANG_ARGS to point at a \
+                     clang resource directory containing these headers, e.g.:\n    \
+                         export BINDGEN_EXTRA_CLANG_ARGS=\"-I$(clang -print-resource-dir)/include\"\n"
+                )
+                .into();
+            }
+            format!("bindgen failed to generate CUDA bindings: {msg}").into()
+        })?;
+
+    bindings.write_to_file(Path::new(&env::var("OUT_DIR")?).join("bindings.rs"))?;
 
     Ok(())
 }
