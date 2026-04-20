@@ -33,7 +33,7 @@ jobs:
           apt update
           apt install -y --no-install-recommends curl wget ca-certificates \
             lsb-release git software-properties-common gnupg cmake zlib1g-dev \
-            libzstd-dev git
+            libzstd-dev git libclang-common-18-dev clang
 
       - name: Clone repository
         uses: actions/checkout@v6
