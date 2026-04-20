@@ -16,7 +16,7 @@ Set `CUTILE_DUMP` to inspect the compiler's internal state after each pass.
 Output goes to stderr.
 
 ```bash
-# Dump the Tile IR (MLIR-like text) for all kernels:
+# Dump the Tile IR for all kernels:
 CUTILE_DUMP=ir cargo test -p cutile --test my_test -- --nocapture
 
 # Dump multiple stages:
@@ -34,8 +34,8 @@ CUTILE_DUMP=all cargo test ...
 | `resolved` | After name resolution (paths resolved) |
 | `typed` | After type inference (types annotated) |
 | `instantiated` | After monomorphization (no generics remain) |
-| `ir` | cutile-ir Module (MLIR-like text) |
-| `bytecode` / `bc` | Decoded bytecode |
+| `ir` | cutile-ir Module, pretty-printed |
+| `bytecode` / `bc` | Encoded bytecode, decoded to human-readable text |
 
 ### Filtering
 

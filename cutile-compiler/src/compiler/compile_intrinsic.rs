@@ -24,7 +24,9 @@ use crate::types::*;
 
 use cutile_ir::builder::{append_op, build_block, OpBuilder};
 use cutile_ir::bytecode::Opcode;
-use cutile_ir::ir::{Attribute, BlockId, Module, Region, Value};
+use cutile_ir::ir::{
+    Attribute, BlockId, Module, Region, ScalarType, TileElementType, TileType, Type, Value,
+};
 
 use quote::ToTokens;
 use std::collections::HashMap;
@@ -360,6 +362,112 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         );
                     }
                 }
+            }
+            "num_tiles" => {
+                // Signature: fn num_tiles(view: &Partition<E, S>, axis: i32) -> i32
+                //
+                // Lowers to `cuda_tile.get_index_space_shape` producing N scalar
+                // i32 results (one per partition-view axis), then returns
+                // result[axis]. `axis` must be a compile-time constant.
+                if call_expr.args.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`num_tiles` expects 2 arguments, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let view = self
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[0],
+                        generic_vars,
+                        ctx,
+                        None,
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.args[0].span(),
+                            "failed to compile partition-view argument to `num_tiles`",
+                        )
+                    })?;
+                let axis_val = self
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[1],
+                        generic_vars,
+                        ctx,
+                        None,
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.args[1].span(),
+                            "failed to compile axis argument to `num_tiles`",
+                        )
+                    })?;
+
+                let Some(axis_bounds) = axis_val.bounds else {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "`num_tiles` axis must be a compile-time constant",
+                    );
+                };
+                if !axis_bounds.is_exact() {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "`num_tiles` axis must have a single known value",
+                    );
+                }
+                let axis = axis_bounds.start as usize;
+
+                let view_value = view.value.ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.args[0].span(),
+                        "expected a direct value for the partition view",
+                    )
+                })?;
+                let view_ty = module.value_type(view_value).clone();
+                let Type::PartitionView(pv) = &view_ty else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!("`num_tiles` expects a partition view, got `{:?}`", view_ty),
+                    );
+                };
+                let rank = pv.tile_shape.len();
+                if axis >= rank {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        &format!("`num_tiles` axis {axis} out of range for rank-{rank} partition"),
+                    );
+                }
+
+                let i32_scalar_ty = Type::Tile(TileType {
+                    shape: vec![],
+                    element_type: TileElementType::Scalar(ScalarType::I32),
+                });
+                let mut op_builder = OpBuilder::new(
+                    Opcode::GetIndexSpaceShape,
+                    self.ir_location(&call_expr.span()),
+                )
+                .operand(view_value);
+                for _ in 0..rank {
+                    op_builder = op_builder.result(i32_scalar_ty.clone());
+                }
+                let (op_id, results) = op_builder.build(module);
+                append_op(module, block_id, op_id);
+
+                let selected = results[axis];
+                let return_type = return_type.ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.span(),
+                        "`num_tiles` return type could not be inferred",
+                    )
+                })?;
+                let tr_value = TileRustValue::new_value_kind_like(selected, return_type);
+                Ok(Some(tr_value))
             }
             "reduce" => {
                 if call_expr.args.len() != 2 {

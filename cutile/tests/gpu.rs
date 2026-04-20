@@ -13,3 +13,6 @@ mod error_quality;
 
 #[path = "gpu/tensor.rs"]
 mod tensor;
+
+#[path = "gpu/num_tiles.rs"]
+mod num_tiles;

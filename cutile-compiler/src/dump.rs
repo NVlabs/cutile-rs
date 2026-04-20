@@ -29,9 +29,9 @@ pub enum DumpStage {
     Typed,
     /// After monomorphization (no generics remain).
     Instantiated,
-    /// cutile-ir Module (MLIR-like text).
+    /// cutile-ir Module, pretty-printed.
     Ir,
-    /// Decoded bytecode.
+    /// Encoded bytecode, decoded to human-readable text.
     Bytecode,
 }
 

@@ -26,6 +26,22 @@ members = [
     # Examples and benchmarks.
     "cutile-examples",
     "cutile-benchmarks",
+
+    # Thin wrapper around the cuda-tile C++ library; excluded from
+    # default-members because its build downloads and compiles LLVM.
+    "cuda-tile-rs",
+]
+
+default-members = [
+    "cuda-bindings",
+    "cuda-core",
+    "cuda-async",
+    "cutile-compiler",
+    "cutile-macro",
+    "cutile-ir",
+    "cutile",
+    "cutile-examples",
+    "cutile-benchmarks",
 ]
 
 [workspace.package]
