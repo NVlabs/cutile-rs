@@ -84,7 +84,6 @@ fn run_warmup_worker(role: &str, cache_root: &std::path::Path) -> std::process::
 }
 
 // Compile_warmup 
-
 #[test]
 fn compile_warmup_populates_cache() {
     common::with_test_stack(move || {
@@ -266,8 +265,6 @@ fn multi_thread_compile_dedup() {
         );
     });
 }
-
-
 
 // Verifies the disk → memory cache path: compile a kernel (populating both
 // caches), evict from memory, re-warmup → the second compilation should load
@@ -454,10 +451,8 @@ fn disk_cache_corrupted_cubin_self_heals() {
 }
 
 // Multi-spec warmup does not skip subsequent specs
-// Regression test for the IIFE fix in compile_warmup.  Pre-compile spec A,
-// then warmup [A, B].  Spec A should be skipped (cache hit) and spec B must
-// still be compiled.  Without the IIFE, a `return Ok(())` in the cache-hit
-// path would exit the outer function, silently skipping B.
+// Tests that when warming up multiple specs [A, B], if A is cached (skipped),
+// B is still compiled correctly.
 #[test]
 fn multi_spec_warmup_compiles_all() {
     common::with_test_stack(|| {
@@ -516,7 +511,7 @@ fn multi_spec_warmup_compiles_all() {
 
 // Load_module_from_bytes multi-thread safety 
 // Verifies that load_module_from_bytes can be called concurrently from
-// multiple threads without tmp file collisions (validates C2 fix).
+// multiple threads without tmp file collisions .
 #[test]
 fn load_module_from_bytes_concurrent() {
     common::with_test_stack(|| {
