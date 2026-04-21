@@ -11,7 +11,6 @@
 use cutile::tile_kernel::{CompileOptions, EntryMeta, FunctionKey, TileFunctionKey, WarmupSpec};
 use cutile_compiler::specialization::SpecializationBits;
 
-
 fn default_key() -> cutile::tile_kernel::TileFunctionKeyBuilder {
     TileFunctionKey::builder("m", "f")
         .source_hash("hash")
@@ -21,7 +20,6 @@ fn default_key() -> cutile::tile_kernel::TileFunctionKeyBuilder {
 }
 
 // TileFunctionKey hash properties
-
 #[test]
 fn cache_key_hash_deterministic() {
     let key1 = TileFunctionKey::builder("mod", "fn")
@@ -160,7 +158,6 @@ fn cache_key_different_spec_args() {
     );
 }
 
-
 #[test]
 fn cache_key_different_compile_options() {
     let key_a = default_key()
@@ -189,8 +186,6 @@ fn cache_key_different_compile_options() {
     assert_ne!(key_c.get_hash_string(), key_d.get_hash_string());
 }
 
-// WarmupSpec builder
-
 #[test]
 fn warmup_spec_builder() {
     let spec = WarmupSpec::new("my_kernel", vec!["f32".into(), "128".into()])
@@ -201,8 +196,6 @@ fn warmup_spec_builder() {
     assert_eq!(spec.stride_args.len(), 1);
     assert_eq!(spec.const_grid, Some((4, 1, 1)));
 }
-
-//  EntryMeta
 
 #[test]
 fn entry_meta_fields() {
