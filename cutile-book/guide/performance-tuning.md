@@ -1,4 +1,4 @@
-# Performance Tuning
+# Tuning for Performance
 
 This guide covers techniques for optimizing cuTile Rust kernel performance. For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Interoperability](interoperability.md).
 
@@ -425,7 +425,7 @@ fn fast_matmul<const S: [i32; 2]>(
 
 ## Next Steps
 
-- See [Memory Hierarchy](memory-hierarchy.md) for detailed memory optimization
-- Learn about [Async Execution](async-execution.md) for overlapping operations
-- Read [Interoperability](interoperability.md) for integrating custom CUDA kernels when tile programming isn't enough
-- Check [Debugging](debugging.md) for troubleshooting performance issues
+- Continue to [Integrating with CUDA C++](interoperability.md) for the escape hatch when tile programming isn't enough
+- Review [Where Data Lives](memory-hierarchy.md) for memory-layout optimization
+- Review [Orchestrating Device Operations](device-operations.md) for overlapping operations across kernels
+- Check [Debugging and Profiling](debugging.md) for troubleshooting performance issues

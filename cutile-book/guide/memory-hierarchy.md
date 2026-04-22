@@ -1,4 +1,4 @@
-# Memory Hierarchy
+# Where Data Lives: The GPU Memory Hierarchy
 
 Understanding GPU memory is essential for writing fast kernels. The key insight: **data locality determines performance**.
 
@@ -256,4 +256,4 @@ fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i3
 
 ---
 
-Continue to [Operations](operations.md) to see what you can do with tiles.
+Continue to [Working with Data](working-with-data.md) to meet the tensor and tile abstractions that sit on top of this hierarchy.

@@ -91,14 +91,12 @@ tutorials/10-cuda-graphs
 :caption: User Guide
 
 guide/introduction
-guide/tile-programming-model
-guide/data-model
-guide/execution-model
+guide/thinking-in-tiles
 guide/memory-hierarchy
-guide/operations
-guide/dsl-api
-guide/async-execution
-guide/deviceop-reference
+guide/working-with-data
+guide/writing-computations
+guide/execution-model
+guide/device-operations
 guide/performance-tuning
 guide/interoperability
 guide/debugging
@@ -106,9 +104,10 @@ guide/debugging
 
 ```{toctree}
 :hidden:
-:maxdepth: 1
-:caption: Appendix
+:maxdepth: 2
+:caption: Reference
 
-appendix/definitions
-appendix/syntax-reference
+reference/dsl-api
+reference/deviceop-reference
+reference/glossary
 ```

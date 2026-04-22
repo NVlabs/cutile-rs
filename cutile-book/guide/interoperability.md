@@ -1,4 +1,4 @@
-# Interoperability
+# Integrating with CUDA C++
 
 The tile model handles dense tensor algebra well — GEMM, element-wise operations, reductions, convolutions — but some algorithms depend on **warp-level primitives** (`__shfl_sync`, `__ballot_sync`, `__reduce_sync`) for things like custom scan/prefix-sum, cooperative groups, or irregular data access patterns. For these, write the kernel in CUDA C++ and integrate it using the approach below.
 
@@ -242,4 +242,20 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 
 ---
 
-Continue to [Debugging](debugging.md) for troubleshooting, or see [Performance Tuning](performance-tuning.md) for optimization techniques. This chapter builds on the `DeviceOp` model introduced in [Async Execution](async-execution.md).
+## Coming from cuTile Python
+
+If you're familiar with [cuTile Python](https://docs.nvidia.com/cuda/cutile-python/), here's how the kernel-side concepts map to cuTile Rust:
+
+| cuTile Python | cuTile Rust |
+|---------------|-------------|
+| `@ct.kernel` | `#[cutile::entry()]` |
+| `ct.load()` | `load_tile_like_2d()` |
+| `ct.store()` | `tensor.store()` |
+| `ct.bid(0)` | Implicit via partition |
+| `ct.launch()` | Async operation + `.await` |
+
+Both front-ends use the same underlying Tile IR compilation pipeline and generate equivalent GPU code; the difference is the host language and its type system.
+
+---
+
+Continue to [Debugging and Profiling](debugging.md) for troubleshooting. This chapter builds on the `DeviceOp` model introduced in [Orchestrating Device Operations](device-operations.md).

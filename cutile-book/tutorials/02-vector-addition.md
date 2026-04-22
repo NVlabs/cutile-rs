@@ -203,3 +203,11 @@ z.store(tile_x + tile_y + tile_w);
 ### Exercise 3: Non-Square Partitions
 
 Try `partition([4, 8])` — rectangular tiles. Does it still work?
+
+---
+
+## See also
+
+- [Thinking in Tiles](../guide/thinking-in-tiles.md) — tile blocks, partitioning, and the grid
+- [Writing Computations on Tiles](../guide/writing-computations.md) — arithmetic and load/store operations
+- [DSL API Reference](../reference/dsl-api.md) — full signatures for `load_tile_like_2d`, `store`, and the arithmetic operators used here

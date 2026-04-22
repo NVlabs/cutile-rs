@@ -136,6 +136,8 @@ Write a safe Rust wrapper function around the unsafe kernel that validates the p
 
 ---
 
-## See Also
+## See also
 
-For a structured approach to integrating pre-compiled CUDA C++ kernels — using `AsyncKernelLaunch` instead of raw pointers — see the [Interoperability](../guide/interoperability.md) guide.
+- [Integrating with CUDA C++](../guide/interoperability.md) — a structured approach to pre-compiled CUDA C++ kernels using `AsyncKernelLaunch` instead of raw pointers
+- [Working with Data](../guide/working-with-data.md) — `PointerTile` and the safety model for pointer-based kernels
+- [DSL API Reference](../reference/dsl-api.md#memory-pointer-based) — `int_to_ptr`, `ptr_to_int`, `ptr_to_ptr`, and atomic operations

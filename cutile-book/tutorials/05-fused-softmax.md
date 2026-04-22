@@ -210,3 +210,11 @@ log_softmax(x)_i = x_i - max(x) - log(Σ exp(x_j - max(x)))
 ```
 You can fuse this too.
 :::
+
+---
+
+## See also
+
+- [Writing Computations on Tiles](../guide/writing-computations.md#reduction-operations) — `reduce_max`, `reduce_sum`, and broadcasting patterns
+- [Tuning for Performance](../guide/performance-tuning.md) — kernel fusion and arithmetic intensity
+- [DSL API Reference](../reference/dsl-api.md#reduction-and-scan) — reduction operator signatures

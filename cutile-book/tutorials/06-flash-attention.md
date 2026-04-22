@@ -302,3 +302,12 @@ How many times less memory does the fused kernel use?
 ### Exercise 2: Add Causal Masking
 
 For autoregressive models (like GPT), we only attend to *previous* positions. Modify the kernel to skip computing attention scores where `key_position > query_position`.
+
+---
+
+## See also
+
+- [Writing Computations on Tiles](../guide/writing-computations.md) — `mma`, reductions, and broadcasting combined
+- [Where Data Lives](../guide/memory-hierarchy.md) — why tiled access matters for bandwidth-bound kernels
+- [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core utilization and tile-size selection
+- [DSL API Reference](../reference/dsl-api.md) — operator reference for the patterns used here

@@ -392,3 +392,12 @@ Does the code need changes?
 ### Exercise 3: Mixed Precision
 
 Try using `f16` (half precision) for inputs and `f32` for the accumulator. This is common in ML for faster compute.
+
+---
+
+## See also
+
+- [Writing Computations on Tiles](../guide/writing-computations.md#matrix-operations) — `mma` usage and the accumulate pattern
+- [Thinking in Tiles](../guide/thinking-in-tiles.md) — 2D partitioning and grid mapping
+- [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core alignment requirements and tile-size selection
+- [DSL API Reference](../reference/dsl-api.md#matrix-multiply) — `mma` signature and element-type constraints

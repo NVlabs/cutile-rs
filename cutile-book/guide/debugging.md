@@ -1,4 +1,4 @@
-# Debugging
+# Debugging and Profiling
 
 This guide covers techniques for debugging cuTile Rust programs, organized by the typical debugging workflow: inspect the error, inspect values, verify correctness, then profile performance.
 
@@ -380,7 +380,7 @@ The JIT kernel cache is in-memory per process. Restart the process to force reco
 
 ## Next Steps
 
-- See [Performance Tuning](performance-tuning.md) for optimization techniques
-- See [Interoperability](interoperability.md) for integrating custom CUDA kernels
-- Review [Syntax Reference](../appendix/syntax-reference.md) for the complete API
+- Review [Tuning for Performance](performance-tuning.md) for optimization techniques
+- Review [Integrating with CUDA C++](interoperability.md) for integrating custom CUDA kernels
+- Look up APIs in the [DSL API Reference](../reference/dsl-api.md) and [DeviceOp API Reference](../reference/deviceop-reference.md)
 - Try the [Tutorials](../tutorials/01-hello-world.md) for working examples
