@@ -1,4 +1,4 @@
-# Introduction to cuTile Rust
+# Introduction
 
 ## What is cuTile Rust?
 
@@ -167,10 +167,10 @@ This pattern is key to performance: global memory is slow compared to on-chip re
 - You need maximum portability across GPU *vendors*
 - Your team is deeply invested in the CUDA C++ ecosystem
 
-> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, cuTile Rust provides an [Interoperability](interoperability.md) that lets you integrate pre-compiled kernels into the same async execution model.
+> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, see [Integrating with CUDA C++](interoperability.md); custom kernels can participate in the same `DeviceOp` execution model as your tile kernels.
 
 ---
 
 ## Next Steps
 
-Continue to learn about the [Tile Programming Model](tile-programming-model.md) or jump straight to the [Tutorials](../tutorials/01-hello-world.md).
+Continue to [Thinking in Tiles](thinking-in-tiles.md), or jump straight to the [Tutorials](../tutorials/01-hello-world.md).

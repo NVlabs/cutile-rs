@@ -246,3 +246,10 @@ let (a, b, c, d) = zip!(
 ### Exercise 3: Measure the Difference
 
 Time a sync version vs. an async version with overlapped work. Use `std::time::Instant` to measure.
+
+---
+
+## See also
+
+- [Orchestrating Device Operations](../guide/device-operations.md) — full treatment of `DeviceOp`, streams, and scheduling
+- [DeviceOp API Reference](../reference/deviceop-reference.md) — combinator signatures (`.then()`, `.shared()`, `unzip`, `zip!`)

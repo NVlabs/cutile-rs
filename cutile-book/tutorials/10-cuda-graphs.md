@@ -426,3 +426,10 @@ The complete working example with benchmarks:
 ```bash
 cargo run -p cutile-examples --example cuda_graphs
 ```
+
+---
+
+## See also
+
+- [Orchestrating Device Operations](../guide/device-operations.md#cuda-graphs-graph_onstream) — where CUDA graphs fit alongside sync and async execution
+- [DeviceOp API Reference: CUDA Graph Integration](../reference/deviceop-reference.md#cuda-graph-integration) — `.graph_on(stream)` and `CudaGraph::scope` signatures

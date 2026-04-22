@@ -1,17 +1,29 @@
-# cuTile Rust
-cuTile Rust (`cutile-rs`) is a research project for writing tile-based GPU kernels in Rust.
+<div align="center">
+
+<h1>cuTile Rust</h1>
+
+[![Crates.io](https://img.shields.io/crates/v/cutile.svg)](https://crates.io/crates/cutile)
+[![Docs](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pages.yml?branch=main&label=docs)](https://nvlabs.github.io/cutile-rs/)
+[![Build](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pr.yml?event=push&label=build)](https://github.com/NVlabs/cutile-rs/actions/workflows/pr.yml)
+[![GitHub stars](https://img.shields.io/github/stars/NVlabs/cutile-rs?style=social)](https://github.com/NVlabs/cutile-rs/stargazers)
+
+| [**Documentation**](https://nvlabs.github.io/cutile-rs/) | [**Quick Start**](#quick-start) | [**Setup**](#setup) | [**Examples**](cutile-examples/examples) |
+
+</div>
+
+cuTile Rust (`cutile-rs`) is a research project which lets you write tile-based GPU kernels in Rust.
 The workspace combines:
 
 - a safe user-facing DSL for authoring kernels
 - a safe host-side API for asynchronously executing kernel functions
 - a pure Rust compiler pipeline backed by the CUDA Tile compiler
 
-# Project Status
+## Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
 
 Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
 
-# Quick Start
+## Quick Start
 
 ```rust
 use cutile::prelude::*;
@@ -50,13 +62,13 @@ The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. O
 - Run the above example via `cargo run -p cutile-examples --example add_refs`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
-# Built with cuTile Rust
+## Built with cuTile Rust
 
 - [Grout](https://github.com/huggingface/grout) — Qwen 3 inference engine in Rust by Hugging Face
 
-# Setup
+## Setup
 
-## Requirements
+### Requirements
 
 - **NVIDIA GPU** with compute capability `sm_80` or higher (minimum supported architecture: `sm_80`).
   - `sm_100+` is supported by CUDA 13.1+.
@@ -66,9 +78,9 @@ The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. O
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
 
-## Install
+### Install
 
-### Rust
+#### Rust
 
 To install Rust:
 ```bash
@@ -76,30 +88,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup default stable
 ```
 
-### CUDA
+#### CUDA
 
 Install CUDA 13.2 for your OS by following the official instructions:
 https://developer.nvidia.com/cuda-downloads
 
-### libclang (for `cuda-bindings`)
-
-The `cuda-bindings` crate uses `bindgen`, which loads `libclang` at build time and
-needs clang's compiler-builtin headers (`stddef.h`, `stdarg.h`, ...). On
-Debian/Ubuntu these are not pulled in by `libclang*` alone; install them
-explicitly (use the version matching your installed `libclang*`):
-
-```bash
-sudo apt-get install -y libclang-common-18-dev clang
-```
-
-If you can't install these packages, you can instead point bindgen at any
-existing clang resource directory:
-
-```bash
-export BINDGEN_EXTRA_CLANG_ARGS="-I$(clang -print-resource-dir)/include"
-```
-
-## Configure Environment
+### Configure Environment
 
 Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
 
@@ -109,7 +103,7 @@ Example `.cargo/config.toml`:
 CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false }
 ```
 
-## Verifying Installation
+### Verifying Installation
 
 Run the hello world example:
 
@@ -119,7 +113,7 @@ cargo run -p cutile-examples --example hello_world
 
 If everything works, you should see: `Hello, I am tile <0, 0, 0> in a kernel with <1, 1, 1> tiles.`
 
-# Via Nix
+## Via Nix
 
 We provide a Nix flake for easy setup and development. Flakes must be enabled in your Nix configuration, if not already, add to `~/.config/nix/nix.conf`:
 ```
@@ -141,7 +135,7 @@ nix develop
 
 The flake automatically locates host NVIDIA driver libraries on both NixOS and non-NixOS systems.
 
-# Tests
+## Tests
 - cuTile IR: `cargo test --package cutile-ir`
 - cuTile Rust Compiler: `cargo test --package cutile-compiler`
 - cuTile Rust Library: `cargo test --package cutile`
@@ -149,7 +143,7 @@ The flake automatically locates host NVIDIA driver libraries on both NixOS and n
 - Benchmarks: `cargo bench`
 - Everything: `./scripts/run_all.sh` (or pipe to a log file: `./scripts/run_all.sh 2>&1 | tee test_run.log`)
 
-## Workspace Crates
+### Workspace Crates
 
 ```
 cutile                 User-facing crate for authoring and executing tile kernels
@@ -177,6 +171,6 @@ cuda-core              Idiomatic safe CUDA API
 cuda-bindings          NVIDIA CUDA bindings
 ```
 
-# License
+## License
 The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
 All other crates are licensed under the Apache License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0

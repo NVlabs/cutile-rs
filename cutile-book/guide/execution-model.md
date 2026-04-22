@@ -1,4 +1,4 @@
-# Execution Model
+# How Kernels Run on the GPU
 
 This page describes how cuTile Rust programs execute on NVIDIA GPUs.
 
@@ -163,25 +163,9 @@ These can vary at runtime:
 - **Tensor data** — Actual element values.
 - **Grid size** — Number of tile blocks to launch.
 
-## Python Subset (Comparison)
-
-If you're familiar with [cuTile Python](https://docs.nvidia.com/cuda/cutile-python/), here's how concepts map:
-
-| cuTile Python | cuTile Rust |
-|---------------|-----------|
-| `@ct.kernel` | `#[cutile::entry()]` |
-| `ct.load()` | `load_tile_like_2d()` |
-| `ct.store()` | `tensor.store()` |
-| `ct.bid(0)` | Implicit via partition |
-| `ct.launch()` | Async operation + `.await` |
-
-Both use the same underlying compilation pipeline and generate equivalent GPU code.
-
----
-
 ## Next Steps
 
-- Learn about the [Data Model](data-model.md) for details on types and shapes
-- Explore [Memory Hierarchy](memory-hierarchy.md) for performance optimization
-- See [Async Execution](async-execution.md) for concurrent CPU/GPU work
-- See [Interoperability](interoperability.md) for integrating custom CUDA kernels into the `DeviceOp` model
+- Continue to [Orchestrating Device Operations](device-operations.md) for the host-side execution story
+- Review [Working with Data](working-with-data.md) for details on types and shapes
+- Review [Where Data Lives](memory-hierarchy.md) for memory layout details
+- See [Integrating with CUDA C++](interoperability.md) for combining custom CUDA kernels with the `DeviceOp` model
