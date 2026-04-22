@@ -1,49 +1,38 @@
 # Tuning for Performance
 
-This guide covers techniques for optimizing cuTile Rust kernel performance. For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Interoperability](interoperability.md).
-
-## The Performance Mindset
-
-GPU performance optimization focuses on three key areas:
-
-1. **Memory bandwidth** — Moving data efficiently
-2. **Compute utilization** — Keeping ALUs busy
-3. **Occupancy** — Maximizing parallel execution
+GPU performance optimization balances three concerns: memory bandwidth (moving data efficiently), compute utilization (keeping ALUs busy), and occupancy (maximizing parallel execution). Good kernels are well-balanced across all three; poor kernels are bottlenecked on one.
 
 ```{figure} ../_static/images/performance-triangle.svg
 :width: 100%
 :alt: The GPU performance triangle showing memory bandwidth, compute utilization, and occupancy
 ```
 
-## Architecture-Specific Configuration
+For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Integrating with CUDA C++](interoperability.md).
 
-### Optimization Hints
+---
+
+## Compiler Hints and Specialization
 
 cuTile Rust provides `optimization_hints` at two levels: **entry-level** (kernel-wide) and **per-op** (on individual load/store operations).
 
-#### Entry-Level Hints
-
-Set `occupancy` and `num_cta_in_cga` in the entry annotation. These can also be overridden at runtime via `CompileOptions`:
+Entry-level hints go on the entry annotation. They can also be overridden at runtime via `CompileOptions` for autotuning — different values trigger separate JIT compilations and are part of the kernel cache key:
 
 ```rust
 #[cutile::entry(
     optimization_hints = (
-        sm_120 = (                         // Blackwell-specific hints
-            num_cta_in_cga = 2,           // CTAs per Cooperative Group
-            occupancy = 2,                 // Target occupancy
-            max_divisibility = 16,         // Cap auto-inferred alignment
+        sm_120 = (                       // Blackwell-specific hints
+            num_cta_in_cga = 2,
+            occupancy = 2,
+            max_divisibility = 16,
         ),
-        sm_90 = (                          // Ampere-specific hints
+        sm_90 = (                        // Hopper-specific hints
             num_cta_in_cga = 1,
         ),
     )
 )]
 fn optimized_kernel<const S: [i32; 2]>(...) { ... }
-```
 
-To override entry-level hints at runtime (e.g. for autotuning):
-
-```rust
+// Runtime override for autotuning:
 use cutile::tile_kernel::CompileOptions;
 
 let result = my_kernel(input)
@@ -52,79 +41,37 @@ let result = my_kernel(input)
     .await;
 ```
 
-Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
-
-#### Per-Op Hints
-
-`latency` and `disallow_tma` are set directly on individual load/store operations:
+Per-op hints (`latency`, `disallow_tma`) apply to individual load/store operations:
 
 ```rust
-// Per-op latency hint on a view load
 let tile: Tile<f32, S> = load_from_view(&partition, idx, Some(4), false);
-
-// Disable TMA on a specific store
 unsafe { store_to_view_mut(&mut partition, tile, idx, None, true); }
-
-// Per-op latency on a pointer load
 let (values, token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Some(4));
 ```
 
-### Hint Reference
+| Level | Hint | Description | Default |
+|---|---|---|---|
+| Entry | `max_divisibility` | Cap on auto-inferred alignment divisor | 16 |
+| Entry | `num_cta_in_cga` | CTAs in Cooperative Group Array | 1 |
+| Entry | `occupancy` | Target occupancy level | Auto |
+| Per-op | `latency` | Latency optimization hint (`Option<i32>`) | `None` (compiler decides) |
+| Per-op | `disallow_tma` | Disable Tensor Memory Accelerator for this op | `false` (TMA allowed) |
 
-#### Entry-Level Hints
-
-| Hint | Description | Default |
-|------|-------------|---------|
-| `max_divisibility` | Cap on auto-inferred alignment divisor | 16 |
-| `num_cta_in_cga` | CTAs in Cooperative Group Array | 1 |
-| `occupancy` | Target occupancy level | Auto |
-
-#### Per-Op Hints (on load/store operations)
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `latency` | Latency optimization hint (`Option<i32>`) | `None` (compiler decides) |
-| `disallow_tma` | Disable Tensor Memory Accelerator for this op (`bool`) | `false` (TMA allowed) |
-
-### Tile Size Selection
-
-Tile sizes significantly impact performance. General guidelines:
+**Tile size** significantly impacts performance. Larger tiles mean fewer memory transactions but more registers per block, reducing occupancy. General guidelines:
 
 | GPU Architecture | Recommended Tile Sizes |
-|------------------|----------------------|
+|------------------|------------------------|
 | Ampere (A100) | `[128, 128]`, `[64, 64]`, `[256, 64]` |
 | Hopper (H100) | `[128, 128]`, `[64, 128]`, `[128, 256]` |
 | Ada (RTX 4090) | `[64, 64]`, `[128, 64]` |
 
-```rust
-// Choose tile size based on workload characteristics
-#[cutile::entry(
-    optimization_hints = (sm_120 = (max_divisibility = 16,),)
-)]
-fn matmul<const TILE_M: i32, const TILE_N: i32, const TILE_K: i32>(
-    c: &mut Tensor<f32, {[TILE_M, TILE_N]}>,
-    a: &Tensor<f32, {[-1, -1]}>,
-    b: &Tensor<f32, {[-1, -1]}>
-) {
-    // TILE_M=128, TILE_N=128, TILE_K=32 is often a good starting point
-}
-```
+| Tile Size     | Registers (approx) | Max Occupancy |
+|---------------|--------------------|---------------|
+| `[32, 32]`    | ~32                | High          |
+| `[64, 64]`    | ~64-128            | Medium-High   |
+| `[128, 128]`  | ~256+              | Medium        |
 
-### Register Pressure
-
-Larger tiles use more registers, potentially reducing occupancy:
-
-| Tile Size | Registers (approx) | Max Occupancy |
-|-----------|-------------------|---------------|
-| `[32, 32]` | ~32 | High |
-| `[64, 64]` | ~64-128 | Medium-High |
-| `[128, 128]` | ~256+ | Medium |
-
-**Trade-off:** Larger tiles = fewer memory transactions, but lower occupancy.
-
-### Unchecked Accesses
-
-For maximum performance, disable bounds checking (use with caution):
+Two strategies remove bounds checks on tile loads and stores, depending on how stable your problem sizes are. **`unchecked_accesses = true`** (with `unsafe`) removes all runtime bounds checks from tile loads and stores. Compile-time shape and MMA-dimension checks still apply. Use when problem sizes vary widely and compilation overhead matters more than the safety net:
 
 ```rust
 #[cutile::entry(unchecked_accesses = true)]
@@ -133,11 +80,7 @@ unsafe fn fast_kernel<const S: [i32; 2]>(...) {
 }
 ```
 
-Setting `unchecked_accesses = true` removes all runtime bounds checks on `load` and `store` operations. The entry point must be marked `unsafe`, and the call site must use an `unsafe` block. Even with bounds checks disabled, cuTile Rust's compile-time checks still apply: tile shapes, `mma` dimensions, and element types are still validated.
-
-### Eliminating Bounds Checks with Static Shapes
-
-An alternative to `unchecked_accesses` is to make all tensor dimensions static const generics and provide the launch grid via `.const_grid()`. When the JIT compiler knows every dimension at compile time, it can prove that all partition accesses are in bounds and optimize the bounds checks away entirely — no `unsafe` required.
+**`.const_grid()` with fully static tensor shapes** keeps the safety net. When every dimension is a compile-time const and the grid is passed via `.const_grid()`, the JIT compiler can prove all partition accesses are in bounds and optimize the checks away — no `unsafe` needed:
 
 ```rust
 #[cutile::entry()]
@@ -147,8 +90,8 @@ fn gemm<
     const M: i32, const N: i32, const K: i32,
 >(
     z: &mut Tensor<E, { [BM, BN] }>,
-    x: &Tensor<E, { [M, K] }>,    // Fully static — no dynamic dimensions
-    y: &Tensor<E, { [K, N] }>,    // Fully static — no dynamic dimensions
+    x: &Tensor<E, { [M, K] }>,    // Fully static
+    y: &Tensor<E, { [K, N] }>,    // Fully static
 ) {
     let part_x = x.partition(const_shape![BM, BK]);
     let part_y = y.partition(const_shape![BK, BN]);
@@ -156,20 +99,14 @@ fn gemm<
 
     let mut acc = load_tile_mut(z);
     for i in 0i32..(K / BK) {
-        // The compiler knows K, BK, M, N, BM, BN at JIT time.
-        // It can prove pid.0 < M/BM, i < K/BK, pid.1 < N/BN,
-        // so these loads are guaranteed in bounds — checks eliminated.
         let tile_x = part_x.load([pid.0, i]);
         let tile_y = part_y.load([i, pid.1]);
         acc = mma(tile_x, tile_y, acc);
     }
     z.store(acc);
 }
-```
 
-On the host side, pass the grid as a compile-time constant via `.const_grid()`:
-
-```rust
+// On the host side:
 let grid = z.grid()?;
 let (z, _x, _y) = gemm(z, x, y)
     .const_grid(grid)
@@ -177,49 +114,24 @@ let (z, _x, _y) = gemm(z, x, y)
     .sync_on(&stream)?;
 ```
 
-`.const_grid()` passes the grid dimensions as compile-time constants to the JIT compiler, which enables it to reason about the range of `get_tile_block_id()` values and prove that all partition accesses derived from them are within bounds.
+The tradeoff: every new combination of const values triggers a JIT recompilation. Use this when problem sizes come from a small, known set — the JIT cache makes repeated sizes free.
 
-**Tradeoff:** Every new combination of `M`, `N`, `K`, `BM`, `BN`, `BK` triggers a JIT recompilation. Use this approach when problem sizes come from a small, known set (the JIT cache makes repeated sizes free). Use `unchecked_accesses` when problem sizes vary widely and compilation overhead matters more than safety.
+---
 
 ## Memory Optimization
 
-### Coalesced Memory Access
+**Coalesced access** — adjacent threads reading adjacent memory locations — is how the GPU memory system is designed to be used. cuTile Rust's tile load operations automatically generate coalesced access patterns, so you get this for free from `load_tile_like_2d`, `Partition::load`, and the standard loading APIs.
 
-The GPU memory system is optimized for **coalesced access** — adjacent threads accessing adjacent memory:
+**Keep data in registers.** Load once from global memory, compute many times in registers:
 
-```rust
-// GOOD: Coalesced access pattern
-// Threads in a warp access consecutive elements
-let tile = load_tile_like_2d(input, output);  // Automatic coalescing
-
-// The load operation automatically generates coalesced memory transactions
-```
-
-### Load/Store Hints
-
-Use load hints to optimize memory access patterns:
+| Memory Level | Latency | Strategy |
+|--------------|---------|----------|
+| Registers | ~0 cycles | Keep data in tiles |
+| Shared Memory | ~20 cycles | Reuse across iterations |
+| L2 Cache | ~200 cycles | Temporal locality |
+| Global Memory | ~400 cycles | Minimize accesses |
 
 ```rust
-// Standard load
-let tile = load_tile_like_2d(input, output);
-
-// Load with cache hints (when available)
-// The compiler may generate different PTX based on access patterns
-```
-
-### Memory Hierarchy Utilization
-
-Maximize use of faster memory levels:
-
-| Memory Level | Relative Speed | Latency | Strategy |
-|--------------|----------------|---------|----------|
-| Registers | Fastest | ~0 cycles | Keep data in tiles |
-| Shared Memory | Very fast | ~20 cycles | Reuse across iterations |
-| L2 Cache | Fast | ~200 cycles | Temporal locality |
-| Global Memory | Slowest | ~400 cycles | Minimize accesses |
-
-```rust
-// Pattern: Load once, compute many
 #[cutile::entry()]
 fn fused_ops<const S: [i32; 2]>(
     output: &mut Tensor<f32, S>,
@@ -227,94 +139,23 @@ fn fused_ops<const S: [i32; 2]>(
 ) {
     // Single load from global memory
     let tile = load_tile_like_2d(input, output);
-    
+
     // Multiple operations in registers (free!)
     let normalized = tile - reduce_max(tile, 1i32);
     let exp_vals = exp(normalized);
     let softmax = true_div(exp_vals, reduce_sum(exp_vals, 1));
-    
+
     // Single store to global memory
     output.store(softmax);
 }
 ```
 
-## Compute Optimization
-
-### Tensor Core Utilization
-
-cuTile Rust automatically uses Tensor Cores for matrix operations when shapes align:
+**Kernel fusion** is the register strategy scaled up — combining multiple logical operations into a single kernel. A pipeline of 3 kernels might read and write intermediate results to global memory 6 times; fusing into one kernel eliminates most of those round-trips:
 
 ```rust
-// Tensor Core requirements:
-// - Matrix dimensions divisible by 16 (f16) or 8 (tf32)
-// - Appropriate data types (f16, bf16, tf32)
+// UNFUSED: 3 kernels, 6 loads + 3 stores total.
 
-#[cutile::entry()]
-fn tensor_core_matmul<const M: i32, const N: i32>(
-    c: &mut Tensor<f16, {[M, N]}>,  // f16 enables Tensor Cores
-    a: &Tensor<f16, {[-1, -1]}>,
-    b: &Tensor<f16, {[-1, -1]}>
-) {
-    let tile_a = load_tile_like_2d(a, c);
-    let tile_b = load_tile_like_2d(b, c);
-    
-    // MMA automatically uses Tensor Cores
-    let acc = constant(0.0f32, c.shape());
-    let result = mma(tile_a, tile_b, acc);
-    c.store(result);
-}
-```
-
-### Arithmetic Intensity
-
-**Arithmetic intensity** = FLOPs / Bytes transferred
-
-Higher arithmetic intensity = better GPU utilization.
-
-| Operation | Arithmetic Intensity | Bound |
-|-----------|---------------------|-------|
-| Vector Add | 0.125 | Memory |
-| Matrix-Vector | 1-2 | Memory |
-| Matrix-Matrix | O(N) | Compute |
-| Fused Softmax | ~10+ | Compute |
-
-```rust
-// Low arithmetic intensity: simple elementwise
-let c = a + b;  // 1 FLOP per 12 bytes (3 f32s)
-
-// High arithmetic intensity: matrix multiply
-let c = mma(a, b, acc);  // O(N) FLOPs per element
-
-// Very high: fused operations
-let result = softmax(matmul(a, b));  // Many FLOPs, few memory ops
-```
-
-### Instruction-Level Parallelism
-
-The compiler automatically exploits ILP, but you can help:
-
-```rust
-// Independent operations can execute in parallel
-let sum1 = reduce_sum(tile1, 1i32);
-let sum2 = reduce_sum(tile2, 1i32);  // Can overlap with sum1
-
-// Dependent operations serialize
-let step1 = tile * 2.0;
-let step2 = step1 + 1.0;  // Must wait for step1
-```
-
-## Kernel Fusion
-
-Fusing multiple operations into one kernel reduces memory traffic:
-
-```rust
-// UNFUSED: Multiple kernels, multiple memory round-trips
-// kernel1: y = a + b  (load a, b; store y)
-// kernel2: z = y * c  (load y, c; store z)
-// kernel3: w = exp(z) (load z; store w)
-// Total: 6 loads + 3 stores
-
-// FUSED: Single kernel, single memory round-trip
+// FUSED: 1 kernel, 3 loads + 1 store (3× memory reduction).
 #[cutile::entry()]
 fn fused<const S: [i32; 2]>(
     w: &mut Tensor<f32, S>,
@@ -325,107 +166,90 @@ fn fused<const S: [i32; 2]>(
     let tile_a = load_tile_like_2d(a, w);
     let tile_b = load_tile_like_2d(b, w);
     let tile_c = load_tile_like_2d(c, w);
-    
-    // All in registers - no intermediate memory traffic
+
+    // All in registers — no intermediate memory traffic
     let y = tile_a + tile_b;
     let z = y * tile_c;
     let result = exp(z);
-    
+
     w.store(result);
 }
-// Total: 3 loads + 1 store (3x memory reduction!)
 ```
 
-## Profiling
-
-### Key Metrics
-
-When profiling cuTile Rust kernels, focus on:
-
-| Metric | Target | Tool |
-|--------|--------|------|
-| Memory Throughput | >80% of peak | Nsight Compute |
-| Compute Throughput | >70% for compute-bound | Nsight Compute |
-| Occupancy | >50% | Nsight Compute |
-| Register Spills | 0 | Nsight Compute |
-
-### Identifying Bottlenecks
-
-```
-Memory Bound:
-- Low compute throughput
-- High memory throughput (near peak)
-- Solution: Increase arithmetic intensity, fuse kernels
-
-Compute Bound:
-- High compute throughput
-- Low memory throughput
-- Solution: Already optimal for this algorithm
-
-Latency Bound:
-- Low both compute and memory
-- High stall cycles
-- Solution: Increase parallelism, overlap operations
-```
-
-## Common Pitfalls
-
-### 1. Uncoalesced Memory Access
-
-```rust
-// AVOID: Strided access patterns when possible
-// The compiler handles this, but algorithm design matters
-```
-
-### 2. Excessive Synchronization
-
-```rust
-// Tile operations are designed to minimize sync points
-// Trust the compiler to handle thread synchronization
-```
-
-### 3. Wrong Tile Size
-
-```rust
-// Too small: High overhead, poor utilization
-const TILE_SIZE: [i32; 2] = [8, 8];  // Usually too small
-
-// Too large: Register spills, low occupancy
-const TILE_SIZE: [i32; 2] = [512, 512];  // Probably too large
-
-// Just right: Balance of efficiency and occupancy
-const TILE_SIZE: [i32; 2] = [64, 64];  // Good starting point
-```
-
-### 4. Ignoring Data Types
-
-```rust
-// f16/bf16 can double throughput on Tensor Cores
-// Use when precision allows
-
-#[cutile::entry()]
-fn fast_matmul<const S: [i32; 2]>(
-    c: &mut Tensor<f16, S>,  // Half precision = 2x throughput
-    a: &Tensor<f16, {[-1, -1]}>,
-    b: &Tensor<f16, {[-1, -1]}>
-) { ... }
-```
-
-## Performance Checklist
-
-- [ ] **Tile size** appropriate for workload and GPU architecture
-- [ ] **Memory access** patterns are coalesced
-- [ ] **Kernel fusion** applied where possible
-- [ ] **Data types** optimized (f16/bf16 for Tensor Cores)
-- [ ] **Arithmetic intensity** maximized
-- [ ] **Occupancy** balanced with tile size
-- [ ] **Profiled** with Nsight Compute
+For the full memory hierarchy model and arithmetic intensity analysis, see [Where Data Lives](memory-hierarchy.md).
 
 ---
 
-## Next Steps
+## Compute Optimization
 
-- Continue to [Integrating with CUDA C++](interoperability.md) for the escape hatch when tile programming isn't enough
-- Review [Where Data Lives](memory-hierarchy.md) for memory-layout optimization
-- Review [Orchestrating Device Operations](device-operations.md) for overlapping operations across kernels
-- Check [Debugging and Profiling](debugging.md) for troubleshooting performance issues
+**Tensor Cores** deliver massive throughput for matrix operations when shapes align. cuTile Rust automatically uses them when matrix dimensions are divisible by 16 (for `f16`/`bf16`) or 8 (for `tf32`), and element types are `f16`, `bf16`, or `tf32`:
+
+```rust
+#[cutile::entry()]
+fn tensor_core_matmul<const M: i32, const N: i32>(
+    c: &mut Tensor<f16, {[M, N]}>,  // f16 enables Tensor Cores
+    a: &Tensor<f16, {[-1, -1]}>,
+    b: &Tensor<f16, {[-1, -1]}>
+) {
+    let tile_a = load_tile_like_2d(a, c);
+    let tile_b = load_tile_like_2d(b, c);
+
+    // MMA automatically uses Tensor Cores
+    let acc = constant(0.0f32, c.shape());
+    let result = mma(tile_a, tile_b, acc);
+    c.store(result);
+}
+```
+
+**Arithmetic intensity** is FLOPs per byte transferred. Higher is better: high-intensity kernels are compute-bound rather than memory-bound.
+
+| Operation | Arithmetic Intensity | Bound |
+|-----------|----------------------|-------|
+| Vector Add | ~0.1 | Memory |
+| Matrix-Vector | 1-2 | Memory |
+| Matrix-Matrix | O(N) | Compute |
+| Fused Softmax | ~10+ | Compute |
+
+See [Where Data Lives: Arithmetic Intensity](memory-hierarchy.md#arithmetic-intensity) for the full treatment.
+
+**Instruction-level parallelism** (ILP) lets the compiler overlap independent operations. Write independent branches explicitly so the compiler can schedule them in parallel:
+
+```rust
+// Independent operations — compiler can overlap them
+let sum1 = reduce_sum(tile1, 1i32);
+let sum2 = reduce_sum(tile2, 1i32);  // Can execute concurrently
+
+// Dependent operations — serialize
+let step1 = tile * 2.0;
+let step2 = step1 + 1.0;  // Must wait for step1
+```
+
+---
+
+## Profiling and Pitfalls
+
+Focus on four metrics when profiling with Nsight Compute:
+
+| Metric | Target |
+|---|---|
+| Memory Throughput | >80% of peak for memory-bound kernels |
+| Compute Throughput | >70% for compute-bound kernels |
+| Occupancy | >50% |
+| Register Spills | 0 |
+
+Identify the bottleneck from the profile:
+- **High memory throughput, low compute** → memory-bound; increase arithmetic intensity, fuse kernels.
+- **Low memory throughput, high compute** → compute-bound; already near-optimal for this algorithm.
+- **Low on both, high stall cycles** → latency-bound; increase parallelism, overlap independent operations.
+
+Common pitfalls:
+- **Wrong tile size.** `[8, 8]` is usually too small (overhead dominates); `[512, 512]` is usually too large (register spills, low occupancy). Start with `[64, 64]` or `[128, 128]`.
+- **Wrong dtype.** Using `f32` when `f16`/`bf16` would suffice leaves 2× Tensor Core throughput on the table.
+- **Excessive synchronization.** Let the compiler handle thread synchronization; avoid introducing extra sync points.
+- **Algorithmic stride.** Tile operations coalesce automatically, but strided access patterns in your algorithm logic defeat this.
+
+Pre-ship checklist: tile size appropriate for workload and architecture; memory access coalesced; kernel fusion applied where possible; data types optimized (`f16`/`bf16` for Tensor Cores); arithmetic intensity maximized; occupancy balanced against tile size; profiled with Nsight Compute.
+
+---
+
+Continue to [Integrating with CUDA C++](interoperability.md) for the escape hatch when tile programming isn't enough, or [Debugging and Profiling](debugging.md) for deeper troubleshooting.

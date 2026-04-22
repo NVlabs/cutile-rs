@@ -4,6 +4,8 @@ The fundamental unit of computation in cuTile Rust is the **tile** — an immuta
 
 ![Thread-centric vs Tile-centric programming mental model](../_static/images/mental-model-shift.svg)
 
+---
+
 ## Tile-Based vs Thread-Based Programming
 
 Traditional CUDA programming asks you to think in terms of individual threads and explicit thread indices:
@@ -34,7 +36,9 @@ fn add<const S: [i32; 2]>(
 
 Instead of managing thread indices directly, you describe what should happen to one tile-shaped region of the data. The compiler and runtime handle how that work is mapped onto the underlying GPU execution model.
 
-## Tile Blocks and Tile Threads
+---
+
+## Tile Blocks
 
 A **tile block** is a logical thread and the basic unit of concurrent execution on the GPU. Each tile block runs the kernel function once, operating on one partition of the data. A tile block is identified by its coordinates, obtained via `get_tile_block_id()`:
 
@@ -43,9 +47,11 @@ let pid: (i32, i32, i32) = get_tile_block_id();    // This block's (x, y, z) coo
 let npids: (i32, i32, i32) = get_num_tile_blocks(); // Total grid dimensions
 ```
 
-The cuTile Rust compiler maps each tile block to one or more underlying CUDA execution units (thread blocks, clusters, or warps) depending on the target architecture — but from the programmer's perspective, a tile block is simply a single-threaded context that processes one tile of data.
+The cuTile Rust compiler maps each tile block to one or more underlying CUDA execution units (thread blocks, clusters, or warps) depending on the target architecture — but from the programmer's perspective, a tile block is simply a single-threaded context that processes one tile of data. The terms **tile block** and **tile thread** are interchangeable: the API uses `get_tile_block_id()` and `get_num_tile_blocks()`, while the guides often say "tile thread" to emphasize the single-threaded programming model.
 
-The terms **tile block** and **tile thread** are interchangeable. The API uses `get_tile_block_id()` and `get_num_tile_blocks()`, while the guides often say "tile thread" to emphasize the single-threaded programming model.
+When a kernel launches, the GPU's hardware scheduler assigns tile blocks to Streaming Multiprocessors (SMs) as resources become available. Tile blocks that fit on available SMs run **in parallel** — simultaneously on separate hardware units. The full set of tile blocks runs **concurrently** — their relative order of execution is unspecified and they are independent of one another. This matches Rust's distinction between concurrency and parallelism: parallelism is work happening at the exact same time on different hardware, while concurrency is independently executing tasks making progress over time.
+
+---
 
 ## Partitioning
 
@@ -81,11 +87,11 @@ let tile = part_x.load([pid.0, i]);
 
 Because the partitioning happens on the device side, the same `&Tensor` can be partitioned in different ways within the same kernel. For example, in GEMM the input matrices `x` and `y` are each partitioned with a different shape inside the kernel body (`const_shape![BM, BK]` and `const_shape![BK, BN]` respectively), even though both were passed as plain `Arc<Tensor<T>>` from the host.
 
+---
+
 ## The Grid
 
 The **grid** determines how many tile blocks run. It can be specified explicitly or inferred from the partitioned tensors passed to the kernel.
-
-### Grid Inference
 
 A host-side partition's grid is computed by dividing the tensor's shape by the partition shape, rounding up:
 
@@ -93,9 +99,7 @@ A host-side partition's grid is computed by dividing the tensor's shape by the p
 grid[i] = ceil(tensor_shape[i] / partition_shape[i])
 ```
 
-The result is mapped to a 3D tuple `(x, y, z)`, with trailing dimensions set to 1 for tensors of rank less than 3. The mapping is direct and order-preserving: tensor dimension 0 maps to grid `x`, dimension 1 to `y`, and dimension 2 to `z`.
-
-For example, a `[128, 256]` tensor partitioned with `[32, 64]` produces a grid of `(4, 4, 1)`:
+The result is mapped to a 3D tuple `(x, y, z)`, with trailing dimensions set to 1 for tensors of rank less than 3. The mapping is direct and order-preserving: tensor dimension 0 maps to grid `x`, dimension 1 to `y`, and dimension 2 to `z`. For example, a `[128, 256]` tensor partitioned with `[32, 64]` produces a grid of `(4, 4, 1)`:
 
 ```text
 Tensor shape:    [128, 256]
@@ -103,11 +107,9 @@ Partition shape: [ 32,  64]
 Grid:            (ceil(128/32), ceil(256/64), 1) = (4, 4, 1)
 ```
 
-### From Grid Coordinates to Sub-Tensors
-
 Inside the kernel, `get_tile_block_id()` returns the tile block's `(x, y, z)` coordinates in the grid. These coordinates correspond directly to the sub-tensor indices in the partition. For the example above, tile block `(2, 1, 0)` processes the sub-tensor at rows `2×32..3×32` and columns `1×64..2×64` — that is, the region `[64:96, 64:128]` of the original tensor.
 
-For a `&mut Tensor`, this mapping is implicit — the kernel receives the sub-tensor directly, and loads and stores operate within the sub-tensor's bounds. For a `&Tensor` partitioned on the device side, you use the tile block ID to index into the partition explicitly:
+For a `&mut Tensor`, this mapping is implicit: the kernel receives the sub-tensor directly, and loads and stores operate within the sub-tensor's bounds. For a `&Tensor` partitioned on the device side, you use the tile block ID to index into the partition explicitly:
 
 ```rust
 let pid: (i32, i32, i32) = get_tile_block_id();
@@ -120,8 +122,6 @@ let part_x = x.partition(const_shape![BM, BK]);
 let tile_x = part_x.load([pid.0, i]);  // Loads tile at row pid.0, column i
 ```
 
-### Launch Grid Inference
-
 At kernel launch time, the launcher calls `.grid()` on each `&mut Tensor` parameter's host-side `Partition` and collects the resulting grids. If no explicit grid is specified via `.grid()` or `.const_grid()`, the launch grid is **inferred** from these partition grids:
 
 ```rust
@@ -130,25 +130,15 @@ let z = zeros(&[1024, 1024]).sync_on(&stream)?.partition([64, 64]);
 let (z, _x, _y) = add(z, x, y).sync_on(&stream)?;
 ```
 
-When multiple `&mut Tensor` parameters are present, all of their inferred grids must match or the launch will fail with an error.
-
-### Explicit Grid
-
-You can also set the grid manually, which overrides inference:
+When multiple `&mut Tensor` parameters are present, all of their inferred grids must match or the launch will fail with an error. You can also set the grid manually, which overrides inference:
 
 ```rust
 launcher.grid((16, 16, 1)).sync_on(&stream)?;
 ```
 
-Each tile block receives unique 3-dimensional coordinates within the grid via `get_tile_block_id()`.
+---
 
-## Concurrent and Parallel Execution
-
-When a kernel launches, the GPU's hardware scheduler assigns tile blocks to Streaming Multiprocessors (SMs) as resources become available. Tile blocks that fit on available SMs run **in parallel** — simultaneously on separate hardware units. The full set of tile blocks runs **concurrently** — their relative order of execution is unspecified and they are independent of one another.
-
-This matches Rust's distinction between concurrency and parallelism: parallelism is work happening at the exact same time on different hardware, while concurrency is independently executing tasks making progress over time.
-
-## Tile Types
+To recap, the three core types in a kernel's data flow are:
 
 | Type | Description | Lives In |
 |------|-------------|----------|
@@ -156,10 +146,6 @@ This matches Rust's distinction between concurrency and parallelism: parallelism
 | `Partition<E, S>` | Logical division of a tensor into sub-regions | Metadata only |
 | `Tile<E, S>` | Immutable data fragment for computation; compile-time static shapes | GPU registers |
 
-The flow is always: **Tensor → Partition → Tile → Compute → Store**
-
-You only load from and store to HBM (global memory). The underlying [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) runtime handles mapping your tiles onto the hardware memory hierarchy — including shared memory, caches, and registers — so you never need to manage these resources yourself.
-
----
+The flow is always: **Tensor → Partition → Tile → Compute → Store**. You only load from and store to HBM; the underlying [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) runtime maps tiles onto the hardware memory hierarchy (shared memory, caches, registers) so you never manage those resources yourself.
 
 Continue to [Where Data Lives](memory-hierarchy.md) to understand the GPU memory model that tiles map onto.

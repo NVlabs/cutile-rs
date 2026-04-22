@@ -1,4 +1,4 @@
-# Tutorial 8: Data Parallel MLP
+# 8. Data Parallel MLP
 
 > Note: While async concepts are taught using the `tokio` runtime, any async runtime can be used.
 
@@ -231,4 +231,4 @@ What would we need to change to construct a pipeline that overlaps data movement
 ## See also
 
 - [Orchestrating Device Operations](../guide/device-operations.md) — stream scheduling and the `DeviceOp` lifecycle
-- [DeviceOp API Reference](../reference/deviceop-reference.md) — `.schedule()`, scheduling policies, and execution methods
+- [Host API](../reference/host-api.md) — `.schedule()`, scheduling policies, and execution methods

@@ -1,4 +1,4 @@
-# DSL API Reference
+# DSL API
 
 > **Status**: This API is under active development. Expect changes.
 
@@ -162,7 +162,7 @@ mod my_kernels {
 
 See `cutile-examples/examples/inter_module.rs` for a runnable version.
 
-### How `cutile::core` Works
+### `cutile::core` internals
 
 `cutile::core` (defined in `_core.rs`) is itself a `#[cutile::module]`
 containing the built-in DSL operations. When you write `use cutile::core::*;`,

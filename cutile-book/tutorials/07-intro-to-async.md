@@ -1,4 +1,4 @@
-# Tutorial 7: Intro to Async Execution
+# 7. Intro to Async Execution
 
 > Note: While async concepts are taught using the `tokio` runtime, any async runtime can be used.
 
@@ -166,7 +166,7 @@ let (a, b, c) = combined.await?;
 
 ---
 
-## When to Use Async
+## Choosing between sync and async
 
 | Scenario | Use Sync | Use Async |
 |----------|----------|-----------|
@@ -252,4 +252,4 @@ Time a sync version vs. an async version with overlapped work. Use `std::time::I
 ## See also
 
 - [Orchestrating Device Operations](../guide/device-operations.md) — full treatment of `DeviceOp`, streams, and scheduling
-- [DeviceOp API Reference](../reference/deviceop-reference.md) — combinator signatures (`.then()`, `.shared()`, `unzip`, `zip!`)
+- [Host API](../reference/host-api.md) — combinator signatures (`.then()`, `.shared()`, `unzip`, `zip!`) and the full host-side API

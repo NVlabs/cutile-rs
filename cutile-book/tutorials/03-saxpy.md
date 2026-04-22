@@ -1,4 +1,4 @@
-# Tutorial 3: SAXPY
+# 3. SAXPY
 
 SAXPY stands for **S**ingle-precision **A**·**X** **P**lus **Y** — a classic numerical computing operation where a scalar multiplies a vector and the result is added to another vector:
 
@@ -168,6 +168,6 @@ fn saxpy_extended<const S: [i32; 2]>(
 
 ## See also
 
-- [Writing Computations on Tiles](../guide/writing-computations.md) — scalar arithmetic and `broadcast`
+- [Writing Computations](../guide/writing-computations.md) — scalar arithmetic and `broadcast`
 - [Working with Data](../guide/working-with-data.md) — shape broadcasting rules
-- [DSL API Reference](../reference/dsl-api.md) — `broadcast`, `broadcast_scalar`, and arithmetic operator signatures
+- [DSL API](../reference/dsl-api.md) — `broadcast`, `broadcast_scalar`, and arithmetic operator signatures

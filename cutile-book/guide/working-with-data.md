@@ -1,6 +1,8 @@
-# Working with Data: Tensors, Tiles, and Partitions
+# Working with Data
 
 cuTile Rust leverages Rust's type system to catch errors at compile time. Shape mismatches, type errors, and many common GPU programming bugs are caught before your code even runs.
+
+---
 
 ## Tensors vs Tiles
 
@@ -30,61 +32,9 @@ fn kernel(
 
 ---
 
-## Core Types
+## Host-side and Device-side Types
 
-The `Tensor` and `Partition` types exist on both the host side (CPU) and the device side (GPU kernel), but they are different Rust types with similar semantics. Host-side types are parameterized by element type only; device-side types carry shape information in the type system for compile-time optimization.
-
-### Tensor Creation
-
-The `api` module provides functions for creating tensors on the GPU:
-
-```rust
-use cutile::api;
-
-// Constant-filled tensors
-let z = api::zeros::<f32>(&[1024]).sync_on(&stream)?;     // all zeros
-let o = api::ones::<f32>(&[256, 256]).sync_on(&stream)?;  // all ones
-let f = api::full(3.14f32, &[512]).sync_on(&stream)?;     // fill with value
-
-// Sequential and evenly spaced values
-let r = api::arange::<i32>(1024).sync_on(&stream)?;       // [0, 1, 2, ..., 1023]
-let l = api::linspace(0.0, 1.0, 256).sync_on(&stream)?;   // 256 values from 0 to 1
-
-// Identity matrices
-let I = api::eye(64).sync_on(&stream)?;                    // 64x64 identity
-let R = api::eye_rect(32, 64).sync_on(&stream)?;           // 32x64, ones on diagonal
-
-// Random tensors
-let u = api::rand::<f32, 1>(&[1024]).sync_on(&stream)?;   // uniform [0, 1)
-let n = api::randn::<f32, 1>(&[1024]).sync_on(&stream)?;  // normal (0, 1)
-```
-
-### Views and Slices
-
-`TensorView` provides zero-copy borrowed views of tensors with different
-shape or offset. Views borrow the underlying tensor — the tensor cannot be
-mutated while a view exists.
-
-```rust
-let tensor = api::arange::<f32>(1024).sync_on(&stream)?;
-
-// Reshape without copying
-let matrix = tensor.view(&[32, 32])?;
-
-// Slice: borrow a subregion (numpy-style ranges)
-let first_half = tensor.slice(&[0..512])?;           // elements 0-511
-let row_slice = matrix.slice(&[1..3])?;              // rows 1-2, all columns
-let block = matrix.slice(&[1..3, 2..6])?;            // rows 1-2, cols 2-5
-
-// Chained slices accumulate offsets
-let inner = tensor.slice(&[100..200])?.slice(&[10..20])?;  // = tensor[110..120]
-```
-
-Views and slices can be passed to kernels as `&Tensor` parameters. The
-offset is applied host-side — the kernel receives a pointer to the correct
-starting address.
-
-### Host-Side Types
+The `Tensor` and `Partition` types exist on both the host side (CPU) and the device side (GPU kernel), but they are different Rust types with similar semantics. Host-side types are parameterized by element type only; device-side types additionally carry shape information in the type system for compile-time optimization.
 
 On the host, you allocate tensors, partition them, and pass them to kernel launchers:
 
@@ -99,20 +49,39 @@ let partitioned: Partition<Tensor<f32>> = tensor.partition([16, 16]);
 let partitioned_ref = (&mut tensor).partition([16, 16]);
 
 // Read-only inputs: borrow, Arc, or owned
-let input: &Tensor<f32> = &tensor;           // borrow
-let shared: Arc<Tensor<f32>> = Arc::new(tensor);  // shared ownership
+let input: &Tensor<f32> = &tensor;
+let shared: Arc<Tensor<f32>> = Arc::new(tensor);
 ```
 
-The generated launcher accepts multiple forms for each parameter type.
-`&Tensor` params accept `&Tensor<T>`, `Arc<Tensor<T>>`, or `Tensor<T>`.
-`&mut Tensor` params accept `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>`.
+The generated launcher accepts multiple forms for each parameter type. `&Tensor` params accept `&Tensor<T>`, `Arc<Tensor<T>>`, or `Tensor<T>`. `&mut Tensor` params accept `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>`.
 
-### Device-Side Types
-
-Inside a kernel, tensors and tiles carry their shape as a type parameter. This enables compile-time shape checking and optimization:
+The `api::*` module constructs tensors on the device. Each constructor returns a `DeviceOp`, so allocation and initialization are lazy until `.sync()` or `.await`:
 
 ```rust
-// Device-side Tensor<E, S> — element type + shape
+use cutile::api;
+
+// 3D tensor of random values from a standard normal distribution.
+let weights: Tensor<f32> = api::randn(0.0f32, 1.0, [32, 64, 128], None).sync_on(&stream)?;
+
+// Other common constructors: zeros, ones, full, arange, linspace, eye, rand, randn.
+// Note: zeros/ones/full take &[usize] slices; rand/randn take [usize; RANK] arrays + Option<u64> seed.
+```
+
+**`TensorView`** provides zero-copy views and slices of an existing tensor, which matters for performance: when you want to process a subregion, views avoid the allocation and copy you'd otherwise need. The offset is applied host-side, so passing a view to a kernel hands it a pointer to the correct starting address with no data movement.
+
+```rust
+let tensor = api::arange::<f32>(1024).sync_on(&stream)?;
+
+let matrix = tensor.view(&[32, 32])?;           // Reshape without copying
+let row_slice = matrix.slice(&[1..3])?;         // Rows 1-2, all columns
+let block = matrix.slice(&[1..3, 2..6])?;       // Rows 1-2, cols 2-5
+```
+
+Views and slices pass to kernels as `&Tensor` parameters. Use them for attention over a sub-sequence, GEMM over a sub-matrix, and similar sub-region patterns — no allocation, no copy. See the [Host API](../reference/host-api.md#tensor-creation-and-views) for the full list of constructors and `TensorView` methods.
+
+Inside a kernel, tensors and tiles carry their shape as a type parameter, enabling compile-time shape checking and optimization:
+
+```rust
 fn kernel(
     output: &mut Tensor<f32, { [BM, BN] }>,  // Static shape from partition
     input: &Tensor<f32, { [-1, -1] }>,       // Dynamic shape
@@ -123,13 +92,13 @@ fn kernel(
 
     // Tile<E, S> — immutable data fragment in registers
     let tile_a: Tile<f32, { [BM, BN] }> = load_tile_like_2d(input, output);
-    let result = tile_a * 2.0;       // Operations create new tiles
+    let result = tile_a * 2.0;
     output.store(result);
 }
 ```
 
 | Type | Side | Parameterized By | Description |
-|------|------|-----------------|-------------|
+|------|------|------------------|-------------|
 | `Tensor<T>` | Host | Element type | Tensor in global memory; allocated and managed on the CPU |
 | `Partition<Tensor<T>>` | Host | Element type | Host-side wrapper recording a tensor and its partition shape |
 | `Arc<Tensor<T>>` | Host | Element type | Shared reference for read-only kernel inputs |
@@ -137,105 +106,31 @@ fn kernel(
 | `Partition<E, S>` | Device | Element type + shape | Read-only view of a `&Tensor` divided into tiles inside a kernel |
 | `Tile<E, S>` | Device | Element type + shape (always static) | Immutable data fragment in GPU registers |
 
----
-
-## Element Types
-
-cuTile Rust supports various numeric types for GPU computation:
-
-### Floating Point Types
-
-| Type | Size | Description | Use Case |
-|------|------|-------------|----------|
-| `f16` | 16-bit | Half precision | Training, inference (2× Tensor Core throughput) |
-| `bf16` | 16-bit | Brain float (FP16 range, less precision) | Training (better range than `f16`) |
-| `f32` | 32-bit | Single precision | General purpose, debugging |
-| `f64` | 64-bit | Double precision | Scientific computing |
-| `tf32` | 19-bit | TensorFloat-32 | Tensor Core operations |
-| `f8e4m3fn` | 8-bit | FP8 E4M3FN (no infinity) | Quantized storage; convert to `f16`/`f32` for compute |
-| `f8e5m2` | 8-bit | FP8 E5M2 | Quantized storage; convert to `f16`/`f32` for compute |
-
-### Integer Types
-
-| Type | Size | Description |
-|------|------|-------------|
-| `i8` / `u8` | 8-bit | Signed/unsigned byte |
-| `i16` / `u16` | 16-bit | Signed/unsigned short |
-| `i32` / `u32` | 32-bit | Signed/unsigned int |
-| `i64` / `u64` | 64-bit | Signed/unsigned long |
-
-### Boolean Type
-
-| Type | Description |
-|------|-------------|
-| `bool` | Boolean (true/false), maps to `i1` |
-
-### Choosing Element Types
-
-| Type | Performance | Precision | Recommendation |
-|------|-------------|-----------|----------------|
-| `f32` | Baseline | High | Development, debugging |
-| `f16` | 2× on Tensor Cores | Medium | Inference |
-| `bf16` | 2× on Tensor Cores | Medium (better range) | Training |
-| `i32` | Native integer ops | Exact | Indexing, control flow |
+For the full list of supported element types (`f16`, `bf16`, `f32`, `f64`, `tf32`, `f8e4m3fn`, `f8e5m2`, integer types, `bool`), see the [DSL API: ElementType](../reference/dsl-api.md#elementtype). For the `api::*` module and `TensorView`, see [Host API: Tensor Creation and Views](../reference/host-api.md#tensor-creation-and-views).
 
 ---
 
-## Shapes
+## Shapes and Broadcasting
 
-Shapes define the dimensions of tensors and tiles.
-
-### Static Shapes (Compile-Time)
-
-When you know the shape at compile time, use const generics:
+**Static shapes** are compile-time constants. **Dynamic shapes** (written as `-1`) are determined at runtime.
 
 ```rust
-fn kernel<const BM: i32, const BN: i32>(
-    output: &mut Tensor<f32, { [BM, BN] }>,  // Static shape
+// Static: known at compile time, fully optimized
+fn kernel_static<const BM: i32, const BN: i32>(
+    output: &mut Tensor<f32, { [BM, BN] }>,
+) { /* BM and BN known; compiler can optimize layout and access patterns */ }
+
+// Dynamic: -1 means "determined at runtime"
+fn kernel_dynamic(
+    input: &Tensor<f32, { [-1, -1] }>,
 ) {
-    // BM and BN are known at compile time
-    // Compiler can optimize layout and access patterns
+    let shape = input.shape();  // Query actual dimensions at runtime
 }
 ```
 
-**Benefits:**
-- Compiler can optimize layout and access patterns
-- Shape errors caught at compile time
-- Zero runtime overhead for shape checks
+Static shapes let the compiler optimize layout and access patterns and catch shape errors at compile time, at the cost of re-compilation whenever a type or const generic changes. Dynamic shape dimensions that vary across launches do not trigger re-compilation.
 
-**Drawbacks:**
-- Kernels are re-compiled whenever their type or const generics change. 
-- Too many consts which change across kernel launches will trigger excessive re-compilation, 
-  which may not be desirable/optimal for all applications.
-
-### Dynamic Shapes (Runtime)
-
-When the shape is only known at runtime:
-
-```rust
-fn kernel(
-    input: &Tensor<f32, { [-1, -1] }>,  // Dynamic shape
-) {
-    // -1 means "determined at runtime"
-    let shape = input.shape();  // Query actual dimensions
-}
-```
-
-Dynamic shape dimensions which vary across kernel launches do not trigger re-compilation.
-
-### Common Tile Sizes
-
-For optimal performance, tile dimensions are typically powers of two:
-
-| Shape | Total Elements | Use Case |
-|-------|----------------|----------|
-| `[64, 64]` | 4,096 | General matrix ops |
-| `[128, 128]` | 16,384 | Large matrix ops |
-| `[256, 64]` | 16,384 | Tall tiles |
-| `[64, 256]` | 16,384 | Wide tiles |
-| `[1024]` | 1,024 | 1D vectors |
-
-### The Common Pattern: Static Output, Dynamic Input
+The common pattern is **static output, dynamic input**: the tile size is a const generic, while the full tensor dimensions are runtime values:
 
 ```rust
 #[cutile::entry()]
@@ -250,145 +145,48 @@ fn add<const S: [i32; 2]>(
 }
 ```
 
----
-
-## Shape Broadcasting
-
-When operating on tiles of different shapes, cuTile Rust uses **broadcasting** rules similar to NumPy:
-
-### Broadcasting Rules
-
-1. **Align dimensions from the right**
-2. **Dimensions are compatible if they're equal or one is 1**
-3. **The result shape is the maximum along each dimension**
+**Broadcasting** expands a tile of one shape to operate against a tile of another, following NumPy rules: align dimensions from the right; two dimensions are compatible if they are equal or one of them is 1; the result shape is the maximum along each dimension.
 
 ```rust
-// Example: [64, 64] + [1, 64] -> [64, 64]
-let tile_a: Tile<f32, [64, 64]> = ...;
-let tile_b: Tile<f32, [1, 64]> = ...;
-let result = tile_a + tile_b.broadcast(const_shape![64, 64]);  // Result is [64, 64], B broadcast along dim 0
+// [64, 64] + [1, 64] -> [64, 64]  (broadcast B along dim 0)
+let tile_a: Tile<f32, {[64, 64]}> = ...;
+let tile_b: Tile<f32, {[1, 64]}> = ...;
+let result = tile_a + tile_b.broadcast(const_shape![64, 64]);
 ```
-
-<!--
-### Broadcasting Examples
-
-```
-Shape A      Shape B      Result
-[64, 64]  +  [64, 64]  -> [64, 64]   (exact match)
-[64, 64]  +  [1, 64]   -> [64, 64]   (broadcast B along dim 0)
-[64, 64]  +  [64, 1]   -> [64, 64]   (broadcast B along dim 1)
-[64, 64]  +  [1, 1]    -> [64, 64]   (broadcast B along both dims)
-[64, 1]   +  [1, 64]   -> [64, 64]   (broadcast both)
-```
--->
-
-<!--
-### Arithmetic Promotion
-
-When operating on tiles with different dtypes, automatic promotion occurs:
-
-```rust
-// f16 + f32 -> f32
-let a: Tile<f16, S> = ...;
-let b: Tile<f32, S> = ...;
-let c = a + b;  // c is Tile<f32, S>
-```
-
-**Promotion Hierarchy:**
-```
-f16 < bf16 < f32 < f64
-i8 < i16 < i32 < i64
-```
--->
 
 ---
 
-## Type Safety
+## Type Safety and Generics
 
-### Compile-Time Shape Checking
-
-The compiler catches shape mismatches:
+The compiler catches shape mismatches, element-type mismatches, and matrix-multiply dimension errors before code runs:
 
 ```rust
-// ❌ Won't compile: shapes don't match
+// ❌ Shape mismatch
 let a: Tile<f32, {[4, 4]}> = ...;
 let b: Tile<f32, {[8, 8]}> = ...;
 let c = a + b;  // Error: cannot add [4,4] and [8,8]
 
-// ✅ Correct: same shapes
-let a: Tile<f32, {[4, 4]}> = ...;
-let b: Tile<f32, {[4, 4]}> = ...;
-let c = a + b;  // OK: both [4,4]
-```
-
-### Element Type Checking
-
-```rust
-// ❌ Won't compile: type mismatch without conversion
+// ❌ Element-type mismatch without conversion
 let x: Tile<f32, {[4, 4]}> = ...;
 let y: Tile<i32, {[4, 4]}> = ...;
 let z = x + y;  // Error: cannot add f32 and i32
 
-// ✅ Correct: explicit conversion
+// ✅ Explicit conversion
 let y_float: Tile<f32, {[4, 4]}> = convert_tile(y);
-let z = x + y_float;  // OK
+let z = x + y_float;
+
+// ❌ MMA inner dimensions don't match: [M=16, K=8] × [K=16, N=32]
+let a: Tile<f32, {[16, 8]}>;
+let b: Tile<f32, {[16, 32]}>;
+let c = mma(a, b, zeros);  // Error!
+
+// ✅ MMA inner dims match: [M=16, K=8] × [K=8, N=32] -> [16, 32]
+let a: Tile<f32, {[16, 8]}>;
+let b: Tile<f32, {[8, 32]}>;
+let c = mma(a, b, zeros);
 ```
 
-### Matrix Multiplication Shape Rules
-
-For `C = A @ B`:
-- A shape: `[M, K]`
-- B shape: `[K, N]`
-- C shape: `[M, N]`
-
-The inner dimension K must match:
-
-```rust
-// ❌ Won't compile: inner dimensions don't match
-let a: Tile<f32, {[16, 8]}>;   // [M=16, K=8]
-let b: Tile<f32, {[16, 32]}>;  // [K=16, N=32]  K mismatch!
-let c = mma(a, b, zeros);      // Error!
-
-// ✅ Correct: K dimensions match
-let a: Tile<f32, {[16, 8]}>;   // [M=16, K=8]
-let b: Tile<f32, {[8, 32]}>;   // [K=8, N=32]   K matches!
-let c = mma(a, b, zeros);      // OK: result is [16, 32]
-```
-
----
-
-## Type Conversions
-
-### Explicit Casting
-
-Convert between types explicitly:
-
-```rust
-let float_tile: Tile<f32, S> = ...;
-
-// Float to integer
-let int_tile: Tile<i32, S> = convert_tile(float_tile);
-
-// Integer extension
-let i8_tile: Tile<i8, S> = ...;
-let i32_tile: Tile<i32, S> = convert_tile(i8_tile);
-```
-
-<!--
-### Conversion Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `trunci::<T>()` | Truncate to smaller integer type |
-| `exti::<T>()` | Sign-extend to larger integer type |
-| `cast::<T>()` | General type conversion |
--->
-
----
-
-## Generic Kernels
-
-Use generics to specify flexible, reusable kernels:
+**Generic kernels** let a single function handle multiple element types and shapes:
 
 ```rust
 #[cutile::entry()]
@@ -405,11 +203,7 @@ fn flexible_gemm<
 ) {
     // Works for any element type and tile sizes!
 }
-```
 
-Launch with specific types:
-
-```rust
 let generics = vec![
     "f32".to_string(),  // E
     "16".to_string(),   // BM
@@ -420,92 +214,8 @@ let generics = vec![
 gemm(z, x, y).generics(generics).sync_on(&stream);
 ```
 
-### The ElementType Trait
-
-Custom element types must implement `ElementType`:
-
-```rust
-pub trait ElementType: Copy + Clone {}
-
-// Built-in implementations:
-impl ElementType for f32 { ... }
-impl ElementType for f16 { ... }
-impl ElementType for i32 { ... }
-// etc.
-```
+Custom element types implement the [`ElementType`](../reference/dsl-api.md#elementtype) trait. The built-in numeric types all implement it.
 
 ---
 
-## Memory Layout
-
-### Tensor Memory Layout
-
-Tensors in global memory use row-major (C-style) layout:
-
-```{figure} ../_static/images/tensor-memory-layout.svg
-:width: 100%
-:alt: Tensor memory layout showing row-major ordering
-```
-
-**Key insight:** Consecutive elements in a row are adjacent in memory, enabling coalesced memory access when threads read along rows.
-
-### Tile Register Layout
-
-Tiles exist in registers without a specific addressable layout. The compiler optimizes register usage automatically.
-
----
-
-## Shape Utilities
-
-### const_shape! Macro
-
-Create compile-time shapes:
-
-```rust
-use cutile::core::const_shape;
-
-let shape = const_shape![64, 64];       // [64, 64]
-let shape_3d = const_shape![8, 16, 32]; // [8, 16, 32]
-```
-
-### Shape Operations
-
-```rust
-// Get shape at runtime
-let dims = tensor.shape();  // Returns shape info
-
-// Reshape (total elements must match)
-let reshaped = tile.reshape(const_shape![8, 8]);
-
-// Broadcast (expand dimensions)
-let scalar: Tile<f32, {[]}> = constant(2.0f32, const_shape![]);
-let expanded = scalar.broadcast(const_shape![64, 64]);
-```
-
----
-
-## Summary
-
-| Concept | Purpose |
-|---------|---------|
-| **Static shapes** `{[M, N]}` | Compile-time known, fully optimized |
-| **Dynamic shapes** `{[-1, -1]}` | Runtime determined |
-| **Tensor\<T\>** (host) | Tensor in global memory, allocated and managed on the CPU |
-| **Tensor\<E, S\>** (device) | Kernel parameter with element type and shape |
-| **Partition\<Tensor\<T\>\>** (host) | Wrapper recording a tensor and its partition shape |
-| **Partition\<E, S\>** (device) | Read-only view of a tensor divided into tiles inside a kernel |
-| **Tile\<E, S\>** (device only) | Immutable data fragment in GPU registers |
-| **Const generics** | Flexible, type-safe kernels |
-| **Broadcasting** | Automatic shape expansion |
-
-**Key benefits:**
-- Catch shape mismatches at compile time
-- Zero runtime overhead for static shapes
-- Generic kernels work with any valid configuration
-
----
-
-## Next Steps
-
-- Continue to [Writing Computations on Tiles](writing-computations.md) for the operations you can apply
-- Look up individual operations in the [DSL API Reference](../reference/dsl-api.md)
+Continue to [Writing Computations](writing-computations.md) for the operations you can apply on tiles. For type signatures, operator catalogs, and `const_shape!` / shape utilities, see the [DSL API reference](../reference/dsl-api.md).

@@ -1,4 +1,4 @@
-# Tutorial 5: Fused Softmax
+# 5. Fused Softmax
 
 Softmax is a multi-step operation:
 
@@ -12,7 +12,7 @@ A naive implementation would use separate kernels for each step. **Kernel fusion
 
 ---
 
-## Why Subtract the Max?
+## Numerical stability
 
 Subtracting the row maximum before calling `exp` prevents overflow:
 
@@ -215,6 +215,6 @@ You can fuse this too.
 
 ## See also
 
-- [Writing Computations on Tiles](../guide/writing-computations.md#reduction-operations) — `reduce_max`, `reduce_sum`, and broadcasting patterns
+- [Writing Computations](../guide/writing-computations.md#numerically-stable-softmax) — `reduce_max`, `reduce_sum`, and broadcasting patterns
 - [Tuning for Performance](../guide/performance-tuning.md) — kernel fusion and arithmetic intensity
-- [DSL API Reference](../reference/dsl-api.md#reduction-and-scan) — reduction operator signatures
+- [DSL API](../reference/dsl-api.md#reduction-and-scan) — reduction operator signatures

@@ -1,4 +1,4 @@
-# Tutorial 6: Fused Multihead Attention
+# 6. Fused Multihead Attention
 
 Attention is a performance-critical operation at the heart of transformer models (BERT, GPT, etc.). It computes a weighted combination of values, where the weights reflect the relevance of each position in the sequence. Given parameters Q, K, and V constructed from an input sequence, attention is computed as:
 
@@ -307,7 +307,7 @@ For autoregressive models (like GPT), we only attend to *previous* positions. Mo
 
 ## See also
 
-- [Writing Computations on Tiles](../guide/writing-computations.md) — `mma`, reductions, and broadcasting combined
+- [Writing Computations](../guide/writing-computations.md) — `mma`, reductions, and broadcasting combined
 - [Where Data Lives](../guide/memory-hierarchy.md) — why tiled access matters for bandwidth-bound kernels
 - [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core utilization and tile-size selection
-- [DSL API Reference](../reference/dsl-api.md) — operator reference for the patterns used here
+- [DSL API](../reference/dsl-api.md) — operator reference for the patterns used here

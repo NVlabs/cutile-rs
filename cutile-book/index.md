@@ -108,6 +108,6 @@ guide/debugging
 :caption: Reference
 
 reference/dsl-api
-reference/deviceop-reference
+reference/host-api
 reference/glossary
 ```
