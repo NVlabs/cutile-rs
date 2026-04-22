@@ -1,13 +1,11 @@
+<!-- # cuTile Rust -->
+
 <div align="center">
 
-<h1>cuTile Rust</h1>
+<img src="assets/logo.svg" alt="cuTile Rust" width="380">
 
 [![Crates.io](https://img.shields.io/crates/v/cutile.svg)](https://crates.io/crates/cutile)
-[![Docs](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pages.yml?branch=main&label=docs)](https://nvlabs.github.io/cutile-rs/)
 [![Build](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pr.yml?event=push&label=build)](https://github.com/NVlabs/cutile-rs/actions/workflows/pr.yml)
-[![GitHub stars](https://img.shields.io/github/stars/NVlabs/cutile-rs?style=social)](https://github.com/NVlabs/cutile-rs/stargazers)
-
-| [**Documentation**](https://nvlabs.github.io/cutile-rs/) | [**Quick Start**](#quick-start) | [**Setup**](#setup) | [**Examples**](cutile-examples/examples) |
 
 </div>
 

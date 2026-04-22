@@ -1,4 +1,4 @@
-# The cuTile Rust Book
+# cuTile Rust
 
 **cuTile Rust** is a high-performance GPU programming library that lets you write Rust code that compiles directly to CUDA kernels.
 
