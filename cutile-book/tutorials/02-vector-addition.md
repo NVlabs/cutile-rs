@@ -1,4 +1,4 @@
-# Tutorial 2: Vector Addition
+# 2. Vector Addition
 
 In cutile, tile threads run concurrently and each tile knows its coordinates via `get_tile_block_id()`. To make tiles process different pieces of data, we use **partitioning** — dividing the output tensor into sub-tensors so that each tile thread reads from and writes to a distinct region.
 
@@ -203,3 +203,11 @@ z.store(tile_x + tile_y + tile_w);
 ### Exercise 3: Non-Square Partitions
 
 Try `partition([4, 8])` — rectangular tiles. Does it still work?
+
+---
+
+## See also
+
+- [Thinking in Tiles](../guide/thinking-in-tiles.md) — tile blocks, partitioning, and the grid
+- [Writing Computations](../guide/writing-computations.md) — arithmetic and load/store operations
+- [DSL API](../reference/dsl-api.md) — full signatures for `load_tile_like_2d`, `store`, and the arithmetic operators used here

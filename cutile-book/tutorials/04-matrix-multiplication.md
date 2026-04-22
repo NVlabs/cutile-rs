@@ -1,4 +1,4 @@
-# Tutorial 4: Matrix Multiplication
+# 4. Matrix Multiplication
 
 Matrix multiplication (GEMM = General Matrix Multiply) is everywhere in modern computing:
 
@@ -392,3 +392,12 @@ Does the code need changes?
 ### Exercise 3: Mixed Precision
 
 Try using `f16` (half precision) for inputs and `f32` for the accumulator. This is common in ML for faster compute.
+
+---
+
+## See also
+
+- [Writing Computations](../guide/writing-computations.md#tiled-matrix-multiply) — `mma` usage and the accumulate pattern
+- [Thinking in Tiles](../guide/thinking-in-tiles.md) — 2D partitioning and grid mapping
+- [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core alignment requirements and tile-size selection
+- [DSL API](../reference/dsl-api.md#matrix-multiply) — `mma` signature and element-type constraints

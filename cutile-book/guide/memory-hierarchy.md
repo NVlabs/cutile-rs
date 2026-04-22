@@ -1,14 +1,12 @@
-# Memory Hierarchy
+# Where Data Lives
 
-Understanding GPU memory is essential for writing fast kernels. The key insight: **data locality determines performance**.
-
-## The Memory Pyramid
-
-Modern NVIDIA GPUs (H100 shown) have a multi-level memory hierarchy:
+Understanding GPU memory is essential for writing fast kernels. The key insight: **data locality determines performance**. Modern NVIDIA GPUs have a multi-level memory hierarchy — faster memory is smaller; larger memory is slower. Writing a fast kernel means keeping the working set high in the pyramid.
 
 ![GPU Memory Hierarchy showing registers at top (fastest) down to HBM at bottom (largest)](../_static/images/memory-hierarchy.svg)
 
-## Memory Types in Detail
+---
+
+## The Memory Hierarchy
 
 ### Global Memory (HBM)
 
@@ -23,10 +21,7 @@ Modern NVIDIA GPUs (H100 shown) have a multi-level memory hierarchy:
 let x: Arc<Tensor<f32>> = ones(&[1024, 1024]).map(Into::into).sync_on(&stream)?;
 ```
 
-**Best practices:**
-- Coalesce memory accesses (adjacent threads access adjacent memory)
-- Minimize global memory round-trips
-- Load once, use many times
+Coalesce memory accesses, minimize round-trips, and load once to use many times.
 
 ### L2 Cache
 
@@ -35,10 +30,7 @@ let x: Arc<Tensor<f32>> = ones(&[1024, 1024]).map(Into::into).sync_on(&stream)?;
 - **Bandwidth**: Several times faster than HBM
 - **Latency**: ~200 cycles
 
-**cuTile Rust automatically benefits from L2** when you:
-- Reuse data across tiles
-- Access memory in predictable patterns
-- Keep working sets small
+cuTile Rust automatically benefits from L2 when you reuse data across tiles, access memory in predictable patterns, and keep working sets small.
 
 ### Shared Memory (SMEM)
 
@@ -49,7 +41,7 @@ let x: Arc<Tensor<f32>> = ones(&[1024, 1024]).map(Into::into).sync_on(&stream)?;
 - **Scope**: Shared within a tile block
 
 :::{note}
-In the tile programming model, **you never manage shared memory directly**. You simply load from and store to global memory (HBM) using tensors, and the underlying [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) compiler and runtime handle the mapping onto hardware resources — including shared memory, threads, and Tensor Cores — automatically. This is a key advantage of the tile-based abstraction over traditional CUDA programming, where shared memory management is a significant source of complexity and bugs.
+In the tile programming model, **you never manage shared memory directly**. You load from and store to global memory (HBM), and the underlying [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) compiler and runtime handle the mapping onto hardware resources — including shared memory, threads, and Tensor Cores — automatically. This is a key advantage over traditional CUDA programming, where shared memory management is a significant source of complexity and bugs.
 :::
 
 ### Registers (RMEM)
@@ -60,43 +52,47 @@ In the tile programming model, **you never manage shared memory directly**. You 
 - **Latency**: ~1 cycle
 - **Scope**: Private to each thread within a tile block
 
-**In cuTile Rust, `Tile<E, S>` data lives in registers during computation.** You load data from global memory (HBM) into tiles, compute on tiles, and store results back:
+In cuTile Rust, `Tile<E, S>` data lives in registers during computation. You load data from global memory (HBM) into tiles, compute on tiles, and store results back:
 
 ```rust
 let tile: Tile<f32, {[16, 16]}> = load_tile_like_2d(input, output);
 // 'tile' lives in registers — loaded from HBM, computed on in registers
 ```
 
+| Memory Level | Size          | Latency      | Use For             |
+|--------------|---------------|--------------|---------------------|
+| Registers    | 256KB/SM      | ~1 cycle     | Active computation  |
+| Shared Mem   | 228KB/SM      | ~20 cycles   | Block-level sharing |
+| L2 Cache     | ~50 MB        | ~200 cycles  | Automatic caching   |
+| HBM          | Varies by GPU | ~400 cycles  | Large data storage  |
+
 ---
 
-## Data Movement in cuTile Rust
+## Data Movement and Access Patterns
 
-### The Load/Store Pattern
+The fundamental pattern is Load → Compute → Store:
 
-The fundamental pattern is:
 1. **Load** from global memory (HBM) into tiles
 2. **Compute** on tiles
 3. **Store** results back to global memory (HBM)
 
-You only interact with global memory (HBM) — the [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) runtime decides how to map your tiles onto the hardware memory hierarchy (registers, shared memory, caches) for optimal performance.
+You only interact with global memory — the [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) runtime decides how to map your tiles onto the hardware memory hierarchy (registers, shared memory, caches) for optimal performance.
 
 ```rust
 #[cutile::entry()]
 fn kernel(output: &mut Tensor<f32, S>, input: &Tensor<f32, {[-1, -1]}>) {
     // 1. Load: HBM → Tile
     let tile = load_tile_like_2d(input, output);
-    
+
     // 2. Compute on tile
     let result = tile * 2.0 + 1.0;
-    
+
     // 3. Store: Tile → HBM
     output.store(result);
 }
 ```
 
 ![Load-Compute-Store data flow between global memory and tiles](../_static/images/data-flow.svg)
-
-### Partitioning for Tiled Access
 
 Partitioning logically divides a tensor into a grid of equally sized sub-regions, each processed by one tile block:
 
@@ -109,13 +105,7 @@ let output = zeros(&[1024, 1024])
 // Tile (i, j) processes output[i*16:(i+1)*16, j*16:(j+1)*16]
 ```
 
----
-
-## Memory Access Patterns
-
-### Coalesced Access (Good)
-
-When the underlying threads within a tile block access adjacent memory locations, the hardware can combine these into a single wide memory transaction:
+When the underlying threads within a tile block access adjacent memory locations, the hardware combines them into a single wide memory transaction — this is **coalesced access**:
 
 ```text
 Thread 0: memory[0]
@@ -127,11 +117,9 @@ Thread 31: memory[31]
 → Single 128-byte transaction! Efficient!
 ```
 
-cuTile Rust's tile load operations automatically generate coalesced access patterns — the compiler maps tile elements to threads in a way that maximizes memory throughput. This is one of the key advantages of the tile programming model: you choose tile shapes and access patterns, and the compiler handles the thread-level memory coalescing.
+cuTile Rust's tile load operations automatically generate coalesced access patterns: the compiler maps tile elements to threads in a way that maximizes memory throughput. This is a key advantage of the tile programming model — you choose tile shapes and access patterns, and the compiler handles thread-level coalescing.
 
-### Strided Access (Avoid)
-
-When threads access memory with large gaps between addresses, each access becomes a separate transaction:
+When threads access memory with large gaps between addresses, each access becomes a separate transaction — **strided access**:
 
 ```text
 Thread 0: memory[0]
@@ -148,62 +136,11 @@ Strided access can reduce effective bandwidth by 32x or more. Use tile operation
 
 ---
 
-## Data Reuse Strategies
+## Arithmetic Intensity
 
-### Strategy 1: Tile Reuse
+**Arithmetic intensity** is operations per byte of memory access. Higher is better — it means more compute per memory transaction, which is how you stay ahead of bandwidth limits.
 
-Load data once, use multiple times:
-
-```rust
-fn gemm_tile<const BM: i32, const BN: i32, const BK: i32, const K: i32>(
-    z: &mut Tensor<f32, {[BM, BN]}>,
-    x: &Tensor<f32, {[-1, K]}>,
-    y: &Tensor<f32, {[K, -1]}>,
-) {
-    let mut acc = load_tile_mut(z);
-    
-    for i in 0..(K / BK) {
-        let tile_x = x.partition(const_shape![BM, BK]).load([pid.0, i]);
-        let tile_y = y.partition(const_shape![BK, BN]).load([i, pid.1]);
-        
-        // tile_x and tile_y are loaded once, used for BM×BN×BK operations
-        acc = mma(tile_x, tile_y, acc);
-    }
-    
-    z.store(acc);
-}
-```
-
-**Arithmetic intensity** = Operations / Memory Access
-
-Higher is better! The tiled GEMM above achieves ~O(BK) reuse per loaded element.
-
-### Strategy 2: Partition Wisely
-
-Choose partition sizes that:
-1. Are not too large (the runtime needs to map tiles onto finite hardware resources)
-2. Maximize reuse (not too small)
-3. Are powers of 2 or multiples of common hardware widths
-
-```rust
-// Good: Powers of 2, reasonable size
-.partition([64, 64])   // 4096 elements per tile
-.partition([128, 32])  // 4096 elements per tile
-
-// Bad: Too small (overhead dominates)
-.partition([4, 4])     // Only 16 elements per tile
-
-// Bad: Too large (may spill to slower memory)
-.partition([512, 512]) // 262144 elements per tile
-```
-
----
-
-## Memory-Bound vs Compute-Bound
-
-### Memory-Bound Kernels
-
-Limited by memory bandwidth, not compute:
+A kernel is **memory-bound** when bandwidth limits throughput (low arithmetic intensity):
 
 ```rust
 // Element-wise add: 3 memory ops, 1 compute op
@@ -219,12 +156,9 @@ fn add<const S: [i32; 2]>(
 // Arithmetic intensity: 1 FLOP / 12 bytes = 0.08 FLOPS/byte
 ```
 
-### Compute-Bound Kernels
-
-Limited by compute throughput:
+A kernel is **compute-bound** when compute throughput limits it (high arithmetic intensity). Matrix multiply is the canonical example — O(N³) compute on O(N²) memory:
 
 ```rust
-// Matrix multiply: O(N³) compute, O(N²) memory
 fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i32>(
     z: &mut Tensor<E, { [BM, BN] }>,
     x: &Tensor<E, { [-1, K] }>,
@@ -235,25 +169,44 @@ fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i3
 // Arithmetic intensity: O(N) FLOPS/byte for large N
 ```
 
-**Goal**: Make kernels compute-bound by maximizing data reuse.
+Raising arithmetic intensity is a matter of data reuse. The main technique is tiled reuse — load a tile once and use it many times:
+
+```rust
+fn gemm_tile<const BM: i32, const BN: i32, const BK: i32, const K: i32>(
+    z: &mut Tensor<f32, {[BM, BN]}>,
+    x: &Tensor<f32, {[-1, K]}>,
+    y: &Tensor<f32, {[K, -1]}>,
+) {
+    let mut acc = load_tile_mut(z);
+
+    for i in 0..(K / BK) {
+        let tile_x = x.partition(const_shape![BM, BK]).load([pid.0, i]);
+        let tile_y = y.partition(const_shape![BK, BN]).load([i, pid.1]);
+
+        // tile_x and tile_y are loaded once, used for BM×BN×BK operations
+        acc = mma(tile_x, tile_y, acc);
+    }
+
+    z.store(acc);
+}
+```
+
+Each loaded element drives ~O(BK) operations. The other lever is partition size. Partitions that are too small waste reuse opportunities and drown in overhead; partitions that are too large overflow register capacity and spill to slower memory. Aim for powers of two or multiples of common hardware widths:
+
+```rust
+// Good: Powers of 2, reasonable size
+.partition([64, 64])   // 4096 elements per tile
+.partition([128, 32])  // 4096 elements per tile
+
+// Bad: Too small (overhead dominates)
+.partition([4, 4])     // Only 16 elements per tile
+
+// Bad: Too large (may spill to slower memory)
+.partition([512, 512]) // 262144 elements per tile
+```
+
+The goal is to make kernels compute-bound by maximizing data reuse.
 
 ---
 
-## Summary
-
-| Memory Level | Size | Latency | Use For |
-|-------------|------|---------|---------|
-| Registers | 256KB/SM | ~1 cycle | Active computation |
-| Shared Mem | 228KB/SM | ~20 cycles | Block-level sharing |
-| L2 Cache | ~50 MB | ~200 cycles | Automatic caching |
-| HBM | Varies by GPU | ~400 cycles | Large data storage |
-
-**Key takeaways:**
-1. You only load from and store to HBM — the [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) runtime manages the rest of the memory hierarchy for you
-2. Load once, use many times (maximize arithmetic intensity)
-3. Access memory in coalesced patterns (tile operations do this automatically)
-4. Choose partition sizes wisely
-
----
-
-Continue to [Operations](operations.md) to see what you can do with tiles.
+Continue to [Working with Data](working-with-data.md) to meet the tensor and tile abstractions that sit on top of this hierarchy.
