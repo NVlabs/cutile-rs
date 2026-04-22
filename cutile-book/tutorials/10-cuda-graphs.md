@@ -1,4 +1,4 @@
-# Tutorial 10: CUDA Graphs
+# 10. CUDA Graphs
 
 CUDA graphs let you capture an entire GPU workload once and replay it
 many times, eliminating per-launch overhead. This tutorial builds a
@@ -7,7 +7,7 @@ a CUDA graph, and replays it in a token loop.
 
 ---
 
-## Why CUDA Graphs?
+## Motivation
 
 Every kernel launch involves CPU-side work: selecting a stream, setting up
 arguments, invoking the driver. For workloads that repeat the same graph of
@@ -365,7 +365,7 @@ at compile time because their addresses may change on graph replay.
 
 ---
 
-## When to Use CUDA Graphs
+## Use cases
 
 | Scenario | Use CUDA graphs? | Why |
 |---|---|---|
@@ -426,3 +426,10 @@ The complete working example with benchmarks:
 ```bash
 cargo run -p cutile-examples --example cuda_graphs
 ```
+
+---
+
+## See also
+
+- [Orchestrating Device Operations](../guide/device-operations.md) — where CUDA graphs fit alongside sync and async execution
+- [Host API: CUDA Graph Integration](../reference/host-api.md#cuda-graph-integration) — `.graph_on(stream)` and `CudaGraph::scope` signatures

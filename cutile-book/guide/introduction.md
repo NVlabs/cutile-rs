@@ -1,13 +1,12 @@
-# Introduction to cuTile Rust
+# Introduction
 
-## What is cuTile Rust?
+**cuTile Rust** is a safe tile-based parallel programming model for Rust. It automatically leverages advanced hardware capabilities — Tensor Cores, Tensor Memory Accelerators — while providing portability across NVIDIA GPU architectures, without requiring code changes. On the host side, it provides a safe API for allocating device tensors, partitioning mutable tensors for safe parallel access, wrapping shared immutable tensors in `Arc`, constructing kernel launchers, and JIT-compiling and asynchronously executing tile kernels on the GPU.
 
-**cuTile Rust** is a safe tile-based parallel programming model for Rust. It automatically leverages advanced hardware capabilities, such as Tensor Cores and Tensor Memory Accelerators, while providing portability across different NVIDIA GPU architectures. cuTile Rust enables the latest hardware features without requiring code changes. On the host side, it provides a safe API for allocating device tensors, partitioning mutable tensors for safe parallel access, wrapping shared immutable tensors in `Arc`, constructing kernel launchers, and JIT-compiling and asynchronously executing tile kernels on the GPU.
+---
 
-## Your First cuTile Rust Kernel
+## A First Kernel
 
-cuTile Rust kernels are GPU programs that execute concurrently across a logical grid of tile blocks.
-The `#[cutile::entry()]` attribute marks a Rust function as an *entry point*: a function you can call from your Rust program that executes on the GPU.
+cuTile Rust kernels are GPU programs that execute concurrently across a logical grid of tile blocks. The `#[cutile::entry()]` attribute marks a Rust function as an *entry point*: a function you can call from your Rust program that executes on the GPU.
 
 ```rust
 use cutile::prelude::*;
@@ -44,15 +43,13 @@ fn main() -> Result<(), cuda_async::error::DeviceError> {
 
 Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launches work. The `add` function is device Rust code because it is marked with `#[cutile::entry()]`; when `main` first calls `add(...)`, cuTile Rust JIT-compiles that function into optimized GPU code. The `#[cutile::module]` macro makes `my_module` expose the generated host-side APIs for launching `add`.
 
----
-
-## The Compilation Pipeline
-
 ![The cuTile Rust compilation pipeline from Rust to GPU execution](../_static/images/compilation-pipeline.svg)
 
+At first call, the pipeline transforms the entry function through Rust AST → MLIR → cubin. Subsequent calls reuse the cached binary, so JIT overhead is paid once per unique specialization.
+
 ---
 
-## How Kernel Arguments Map
+## Kernel Arguments and Launching
 
 On the host side, the generated launcher accepts several forms for each kernel parameter:
 
@@ -66,11 +63,7 @@ Partitioning splits a tensor into disjoint regions with a fixed tile shape, such
 
 The borrow-based form (`&Tensor`, `Partition<&mut Tensor>`) lets you pass tensors without moving them. The kernel writes through the borrow — no `unpartition()` or return capture needed.
 
----
-
-## Launching Kernels
-
-The simplest pattern borrows everything:
+The simplest launch pattern borrows everything:
 
 ```rust
 let x = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
@@ -104,7 +97,7 @@ let result = allocate()
 
 ## Tensors and Tiles
 
-Kernels move data between **Tensors** and **Tiles** using operations like `load_tile` and `store`. Both are tensor-like data structures: each has a specific **shape** (the number of elements along each axis) and a **dtype** (the data type of elements). However, there are important differences:
+Kernels move data between **Tensors** and **Tiles** using operations like `load_tile` and `store`. Both are tensor-like data structures: each has a specific **shape** (the number of elements along each axis) and a **dtype** (the data type of elements). The difference is where they live and what you can do with them.
 
 ### Tensors (Global Memory)
 
@@ -142,7 +135,7 @@ output.store(result_tile);                     // Store tile to tensor
 
 ### The Load → Compute → Store Pattern
 
-Every cuTile Rust kernel follows this fundamental pattern:
+Every cuTile Rust kernel follows the same fundamental pattern:
 
 ![Data flow: Load from Tensor to Tile, Compute in registers, Store back to Tensor](../_static/images/data-flow.svg)
 
@@ -150,27 +143,25 @@ Every cuTile Rust kernel follows this fundamental pattern:
 2. **Compute**: Perform operations on tiles
 3. **Store**: Write results from tiles back to global memory (Tensor)
 
-This pattern is key to performance: global memory is slow compared to on-chip resources. By loading once, computing many operations, and storing once, we maximize the compute-to-memory ratio.
+This is key to performance: global memory is slow compared to on-chip resources. By loading once, computing many operations, and storing once, we maximize the compute-to-memory ratio.
 
 ---
 
-## When to Use cuTile Rust
+## Use cases
 
 **Use cuTile Rust when:**
 - You need custom GPU kernels not available in libraries
-- You want to fuse multiple operations for performance  
-- You need Rust's safety guarantees on GPU code
+- You want to fuse multiple operations for performance
 - You're building performance-critical ML infrastructure
+- You need Rust's safety guarantees on GPU code
 
 **Don't use cuTile Rust when:**
 - Standard library operations (cuBLAS, cuDNN) suffice
 - You need maximum portability across GPU *vendors*
 - Your team is deeply invested in the CUDA C++ ecosystem
 
-> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, cuTile Rust provides an [Interoperability](interoperability.md) that lets you integrate pre-compiled kernels into the same async execution model.
+> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, see [Integrating with CUDA C++](interoperability.md); custom kernels can participate in the same `DeviceOp` execution model as your tile kernels.
 
 ---
 
-## Next Steps
-
-Continue to learn about the [Tile Programming Model](tile-programming-model.md) or jump straight to the [Tutorials](../tutorials/01-hello-world.md).
+Continue to [Thinking in Tiles](thinking-in-tiles.md), or jump straight to the [Tutorials](../tutorials/01-hello-world.md).

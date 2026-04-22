@@ -18,11 +18,11 @@ mod kernels {
     use cutile::core::*;
 
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
+                       unchecked_accesses=true,
                        optimization_hints = (
-                         sm_120 = (num_cta_in_cga=1,),
+                         sm_120 = (occupancy=1,),
                        ))]
-    fn fmha_causal<
+    unsafe fn fmha_causal<
         const BM: i32, // Query sequence tile size.
         const BN: i32, // KV sequence tile size.
         const D: i32,  // Head dimension.
