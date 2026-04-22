@@ -1,4 +1,4 @@
-# Tutorial 1: Hello World
+# 1. Hello World
 
 Tile kernels are functions which run as `N` copies concurrently and in parallel when invoked. The primary difference between tile-based kernels and CUDA C++ kernels is the basic unit of execution: a *tile-block*, which expresses the computation performed by a single logical *tile thread* operating over a multi-dimensional *tile of data*.
 
@@ -97,7 +97,7 @@ Host-side code sets up the GPU, specifies the kernel launch grid, and launches t
 
 ---
 
-## How Tiles Identify Themselves
+## Tile IDs
 
 Each tile is assigned an ID corresponding to a coordinate within the 3-dimensional launch grid:
 
@@ -112,7 +112,7 @@ Each tile runs the same code but with different coordinates. This is how tiles d
 
 ---
 
-## What Happens Under the Hood
+## Under the hood
 
 1. **At compile time:** `#[cutile::module]` captures your Rust code as an AST.
 2. **At first kernel launch:** The AST is compiled to MLIR → cubin (GPU binary).

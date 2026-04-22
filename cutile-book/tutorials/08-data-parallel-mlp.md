@@ -1,4 +1,4 @@
-# Tutorial 8: Data Parallel MLP
+# 8. Data Parallel MLP
 
 > Note: While async concepts are taught using the `tokio` runtime, any async runtime can be used.
 
@@ -225,3 +225,10 @@ How might we fuse the above kernels into a single kernel? Would this reduce the 
 ### Exercise 2: Overlapping Data Movement with Computation
 
 What would we need to change to construct a pipeline that overlaps data movement with computation?
+
+---
+
+## See also
+
+- [Orchestrating Device Operations](../guide/device-operations.md) — stream scheduling and the `DeviceOp` lifecycle
+- [Host API](../reference/host-api.md) — `.schedule()`, scheduling policies, and execution methods

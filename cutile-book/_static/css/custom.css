@@ -48,7 +48,7 @@
     color: var(--pst-color-heading);
 }
 
-/* Section captions (Tutorials, User Guide, Appendix) - BIGGER */
+/* Section captions (Tutorials, User Guide, Reference) - BIGGER */
 .sidebar-tree .caption {
     font-weight: 600;
     font-size: 1.05rem;
