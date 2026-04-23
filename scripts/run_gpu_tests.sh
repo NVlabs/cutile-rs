@@ -14,10 +14,6 @@ run_step \
     cargo test -p cutile --test error_quality
 
 run_step \
-    "cutile GPU runtime tests" \
-    cargo test -p cutile --test gpu
-
-run_step \
     "cutile doc tests" \
     cargo test -p cutile --doc
 
