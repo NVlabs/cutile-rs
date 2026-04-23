@@ -12,5 +12,8 @@ repository.workspace = true
 [lib]
 doctest = false
 
+[dependencies]
+libloading = { workspace = true }
+
 [build-dependencies]
 bindgen = "0.69.4"

@@ -10,6 +10,7 @@ extern crate core;
 
 pub mod ast;
 mod bounds;
+pub mod compile_api;
 pub mod cuda_tile_runtime_utils;
 pub mod error;
 pub mod generics;
