@@ -62,9 +62,10 @@
 //! ```
 
 use phf::phf_map;
+use proc_macro2::Span;
 use std::collections::HashMap;
 
-use crate::error::{call_site_error, Error};
+use crate::error::{Error, SpannedError};
 
 /// Generates a suffix string for a variadic type based on its rank.
 ///
@@ -469,7 +470,7 @@ pub fn get_variadic_method_data(
         ]),
         "Tile" => HashMap::from([("reshape", "reshape"), ("broadcast", "broadcast")]),
         "BroadcastScalar" => HashMap::from([("broadcast", "broadcast_scalar")]),
-        _ => return call_site_error(&format!("Unexpected variadic type: {}", vtd.name)),
+        _ => return Span::call_site().err(&format!("Unexpected variadic type: {}", vtd.name)),
     };
     match method2op.get(method_name) {
         Some(op_name) => Ok(Some((
@@ -1161,9 +1162,9 @@ impl Iterator for ConstGenericArrayTypeListIterator {
                         self.state.push(item);
                     }
                     None => {
-                        return Some(call_site_error(
+                        return Some(Span::call_site().err(
                             "ConstGenericArrayTypeListIterator: iterator was empty on first pass.",
-                        ))
+                        ));
                     }
                 }
             }
