@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # The cuTile Rust Book
 
 This directory contains the source for the cuTile Rust Book. To build the book:

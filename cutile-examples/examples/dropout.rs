@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::api::{rand, randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
@@ -36,8 +36,8 @@ mod my_module {
 use my_module::dropout;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     let (m,) = (16,);
     let bm = 4;
     let p: f32 = 0.4;

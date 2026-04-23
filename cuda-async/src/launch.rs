@@ -11,7 +11,7 @@ use crate::device_operation::{DeviceOp, ExecutionContext};
 use crate::error::DeviceError;
 use anyhow::{Context, Result};
 use cuda_core::sys::CUdeviceptr;
-use cuda_core::{launch_kernel, CudaFunction, CudaStream, DType, LaunchConfig};
+use cuda_core::{launch_kernel, DType, Function, LaunchConfig, Stream};
 use std::ffi::c_void;
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -21,7 +21,7 @@ use std::vec::Vec;
 /// A builder for asynchronously launching a CUDA kernel on a stream.
 #[derive(Debug)]
 pub struct AsyncKernelLaunch {
-    pub func: Arc<CudaFunction>,
+    pub func: Arc<Function>,
     pub args: Vec<*mut c_void>,
     cfg: Option<LaunchConfig>,
 }
@@ -43,7 +43,7 @@ impl Drop for AsyncKernelLaunch {
 
 impl AsyncKernelLaunch {
     /// Creates a new kernel launch builder for the given CUDA function.
-    pub fn new(func: Arc<CudaFunction>) -> AsyncKernelLaunch {
+    pub fn new(func: Arc<Function>) -> AsyncKernelLaunch {
         AsyncKernelLaunch {
             func,
             args: Vec::new(),
@@ -88,7 +88,7 @@ impl AsyncKernelLaunch {
     ///
     /// # Safety
     /// The caller must ensure the kernel arguments and launch config are valid.
-    unsafe fn launch(mut self, stream: &Arc<CudaStream>) -> Result<(), DeviceError> {
+    unsafe fn launch(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
         let cfg = self.cfg.ok_or(DeviceError::Launch(
             "Await called before launching the kernel.".to_string(),
         ))?;

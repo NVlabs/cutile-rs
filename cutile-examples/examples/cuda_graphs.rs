@@ -12,7 +12,7 @@
  *   cargo run -p cutile-examples --example cuda_graphs
  */
 
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{Device, Stream};
 use cutile::error::Error;
 use cutile::prelude::*;
 use std::time::Instant;
@@ -132,7 +132,7 @@ struct LayerBuffers {
 }
 
 impl LayerBuffers {
-    fn allocate(d: usize, stream: &Arc<CudaStream>) -> Result<Self, Error> {
+    fn allocate(d: usize, stream: &Arc<Stream>) -> Result<Self, Error> {
         Ok(Self {
             norm: api::zeros(&[1, d]).sync_on(stream)?,
             q: api::zeros(&[d]).sync_on(stream)?,
@@ -153,16 +153,12 @@ struct GraphModel {
 }
 
 impl GraphModel {
-    fn new(
-        cfg: &Config,
-        weights: &[LayerWeights],
-        stream: &Arc<CudaStream>,
-    ) -> Result<Self, Error> {
+    fn new(cfg: &Config, weights: &[LayerWeights], stream: &Arc<Stream>) -> Result<Self, Error> {
         let mut input: Tensor<f32> = api::ones::<f32>(&[cfg.d]).sync_on(stream)?;
         let mut buffers: Vec<_> = (0..cfg.n_layers)
             .map(|_| LayerBuffers::allocate(cfg.d, stream))
             .collect::<Result<_, _>>()?;
-        stream.synchronize()?;
+        unsafe { stream.synchronize() }?;
 
         // Capture the forward pass as a CUDA graph. Each s.record()
         // records a graph node, releasing borrows between kernels.
@@ -236,7 +232,7 @@ fn eager_forward(
     cfg: &Config,
     weights: &[LayerWeights],
     input: &Tensor<f32>,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<Stream>,
 ) -> Result<Vec<f32>, Error> {
     let mut buffers: Vec<_> = (0..cfg.n_layers)
         .map(|_| LayerBuffers::allocate(cfg.d, stream))
@@ -289,8 +285,8 @@ fn eager_forward(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let cfg = Config {
         d: 2048,

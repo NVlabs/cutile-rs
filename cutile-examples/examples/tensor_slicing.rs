@@ -44,8 +44,8 @@ mod my_module {
 use my_module::{add, scale};
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     let block = 128;
 
     // Create a 1024-element tensor: [0, 1, 2, ..., 1023]

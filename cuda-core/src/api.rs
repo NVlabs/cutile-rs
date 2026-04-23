@@ -14,14 +14,13 @@ use cuda_bindings::{
     CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_CLOCK_RATE,
     CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
     CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-    CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
 };
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
 use crate::error::*;
-use crate::CudaStream;
+use crate::runtime::Stream;
 
 /// Initializes the CUDA driver API. Must be called before any other driver call.
 ///
@@ -74,16 +73,17 @@ pub unsafe fn launch_kernel(
 ///
 /// # Safety
 /// `stream` must be a valid, non-destroyed CUDA stream.
-pub unsafe fn malloc_async(num_bytes: usize, stream: &Arc<CudaStream>) -> sys::CUdeviceptr {
-    crate::memory::malloc_async(stream.cu_stream(), num_bytes).expect("Malloc async failed.")
+pub unsafe fn malloc_async(num_bytes: usize, stream: &Arc<Stream>) -> sys::CUdeviceptr {
+    crate::cudarc_shim::memory::malloc_async(stream.cu_stream(), num_bytes)
+        .expect("Malloc async failed.")
 }
 
 /// Asynchronously frees device memory on the given stream.
 ///
 /// # Safety
 /// `dptr` must have been allocated with `malloc_async` and must not be used after this call.
-pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<CudaStream>) {
-    crate::memory::free_async(dptr, stream.cu_stream()).expect("Free async failed.")
+pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<Stream>) {
+    crate::cudarc_shim::memory::free_async(dptr, stream.cu_stream()).expect("Free async failed.")
 }
 
 /// Asynchronously copies `num_elements` of type `T` from host to device memory.
@@ -94,11 +94,13 @@ pub unsafe fn memcpy_htod_async<T>(
     dst: sys::CUdeviceptr,
     src: *const T,
     num_elements: usize,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<Stream>,
 ) {
     let num_bytes = num_elements * mem::size_of::<T>();
-    unsafe { crate::memory::memcpy_htod_async(dst, src, num_bytes, stream.cu_stream()) }
-        .expect("memcpy_htod_async failed.")
+    unsafe {
+        crate::cudarc_shim::memory::memcpy_htod_async(dst, src, num_bytes, stream.cu_stream())
+    }
+    .expect("memcpy_htod_async failed.")
 }
 
 /// Asynchronously copies `num_elements` of type `T` from device to host memory.
@@ -109,11 +111,13 @@ pub unsafe fn memcpy_dtoh_async<T>(
     dst: *mut T,
     src: sys::CUdeviceptr,
     num_elements: usize,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<Stream>,
 ) {
     let num_bytes = num_elements * mem::size_of::<T>();
-    unsafe { crate::memory::memcpy_dtoh_async(dst, src, num_bytes, stream.cu_stream()) }
-        .expect("memcpy_dtoh_async failed.")
+    unsafe {
+        crate::cudarc_shim::memory::memcpy_dtoh_async(dst, src, num_bytes, stream.cu_stream())
+    }
+    .expect("memcpy_dtoh_async failed.")
 }
 
 /// Asynchronously copies `num_elements` of type `T` between device memory regions.
@@ -124,11 +128,13 @@ pub unsafe fn memcpy_dtod_async<T>(
     dst: sys::CUdeviceptr,
     src: sys::CUdeviceptr,
     num_elements: usize,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<Stream>,
 ) {
     let num_bytes = num_elements * mem::size_of::<T>();
-    unsafe { crate::memory::memcpy_dtod_async(dst, src, num_bytes, stream.cu_stream()) }
-        .expect("memcpy_dtod_async failed.")
+    unsafe {
+        crate::cudarc_shim::memory::memcpy_dtod_async(dst, src, num_bytes, stream.cu_stream())
+    }
+    .expect("memcpy_dtod_async failed.")
 }
 
 /// Wrappers around the cuRAND random number generation library.
@@ -302,29 +308,13 @@ pub mod curand {
     }
 }
 
-/// Queries a device attribute value for the given device.
-///
-/// # Safety
-/// `device` must be a valid CUDA device handle.
-pub unsafe fn get_device_attribute(
+unsafe fn get_device_attribute(
     device: CUdevice,
     device_attr: CUdevice_attribute,
 ) -> Result<i32, DriverError> {
     let mut result: MaybeUninit<c_int> = MaybeUninit::uninit();
     assert!(cuDeviceGetAttribute(result.as_mut_ptr(), device_attr, device) == 0);
     Ok(result.assume_init())
-}
-
-/// Returns the device clock rate in MHz.
-///
-/// # Safety
-/// `device` must be a valid CUDA device handle.
-pub unsafe fn get_device_clock_rate_mhz(device: CUdevice) -> Result<f64, DriverError> {
-    let result = get_device_attribute(
-        device,
-        CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_CLOCK_RATE,
-    )?;
-    Ok(f64::from(result) * 1e-3)
 }
 
 /// Returns the device clock rate in kHz.
@@ -335,17 +325,6 @@ pub unsafe fn get_device_clock_rate(device: CUdevice) -> Result<i32, DriverError
     get_device_attribute(
         device,
         CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_CLOCK_RATE,
-    )
-}
-
-/// Returns the number of multiprocessors on the device.
-///
-/// # Safety
-/// `device` must be a valid CUDA device handle.
-pub unsafe fn get_device_multiprocessor_count(device: CUdevice) -> Result<i32, DriverError> {
-    get_device_attribute(
-        device,
-        CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
     )
 }
 

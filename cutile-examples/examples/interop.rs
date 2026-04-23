@@ -21,7 +21,7 @@ use cuda_async::device_operation::DeviceOp;
 use cuda_async::device_operation::ExecutionContext;
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
-use cuda_core::{CudaFunction, LaunchConfig};
+use cuda_core::{Function, LaunchConfig};
 use cutile::api::{arange, zeros};
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec};
 use std::future::IntoFuture;
@@ -108,7 +108,7 @@ $done:
 // ---------------------------------------------------------------------------
 
 struct ScaleKernel {
-    function: Arc<CudaFunction>,
+    function: Arc<Function>,
     n: u32,
     scale: f32,
     input: Arc<Tensor<f32>>,

@@ -28,8 +28,8 @@ mod my_module {
 use my_module::add;
 
 fn main() {
-    let ctx = cuda_core::CudaContext::new(0).unwrap();
-    let stream = ctx.new_stream().unwrap();
+    let device = cuda_core::Device::new(0).unwrap();
+    let stream = device.new_stream().unwrap();
 
     let x = api::ones::<f32>(&[32]).sync_on(&stream).unwrap();
     let y = api::ones::<f32>(&[32]).sync_on(&stream).unwrap();

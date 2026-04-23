@@ -44,7 +44,7 @@ exp(x_i - max) / Σ exp(x_j - max)
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile;
 use cutile::api::arange;
 use cutile::error::Error;
@@ -82,8 +82,8 @@ mod my_module {
 use my_module::softmax;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let (m, n) = (4usize, 8usize);
     let (bm, bn) = (2i32, n as i32);

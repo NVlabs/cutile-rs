@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Operations and Intrinsics
 
 cuTile Rust provides a rich set of operations for GPU computation. All operations work on tiles and leverage GPU parallelism.

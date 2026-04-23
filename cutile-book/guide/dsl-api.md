@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # DSL API Reference
 
 > **Status**: This API is under active development. Expect changes.
