@@ -355,17 +355,38 @@ pub fn extract_string_literal(
 
 /// Helper to resolve compile-time optional argument.
 /// Returns the inner expression if it is Some(expr), or None if it is None.
+///
+/// **Note:** this legacy helper conflates "explicit `None`" with "unparseable"
+/// — both return `None`. New code should prefer
+/// [`resolve_option_arg_checked`], which distinguishes the two so that
+/// callers can fail loudly on unparseable args rather than silently dropping
+/// them.
 pub fn resolve_option_arg(expr: &syn::Expr, ctx: &CompilerContext) -> Option<syn::Expr> {
+    match resolve_option_arg_internal(expr, ctx) {
+        OptionArgOutcome::None => None,
+        OptionArgOutcome::Some(inner) => Some(inner),
+        OptionArgOutcome::Unparseable => None,
+    }
+}
+
+enum OptionArgOutcome {
+    None,
+    Some(syn::Expr),
+    Unparseable,
+}
+
+fn resolve_option_arg_internal(expr: &syn::Expr, ctx: &CompilerContext) -> OptionArgOutcome {
     use syn::Expr;
     if let Expr::Call(call) = expr {
         if let Expr::Path(path) = &*call.func {
             if path.path.segments.last().unwrap().ident == "Some" {
-                return Some(call.args[0].clone());
+                return OptionArgOutcome::Some(call.args[0].clone());
             }
         }
+        return OptionArgOutcome::Unparseable;
     } else if let Expr::Path(path) = expr {
         if path.path.segments.len() == 1 && path.path.segments.last().unwrap().ident == "None" {
-            return None;
+            return OptionArgOutcome::None;
         }
         let var_name = path.path.segments.last().unwrap().ident.to_string();
         if let Some(val) = ctx.vars.get(&var_name) {
@@ -373,20 +394,112 @@ pub fn resolve_option_arg(expr: &syn::Expr, ctx: &CompilerContext) -> Option<syn
                 if let Expr::Call(call) = ast {
                     if let Expr::Path(path) = &*call.func {
                         if path.path.segments.last().unwrap().ident == "Some" {
-                            return Some(call.args[0].clone());
+                            return OptionArgOutcome::Some(call.args[0].clone());
                         }
                     }
                 } else if let Expr::Path(path) = ast {
                     if path.path.segments.len() == 1
                         && path.path.segments.last().unwrap().ident == "None"
                     {
-                        return None;
+                        return OptionArgOutcome::None;
                     }
                 }
+                return OptionArgOutcome::Unparseable;
             }
         }
+        return OptionArgOutcome::Unparseable;
     }
-    None
+    OptionArgOutcome::Unparseable
+}
+
+/// Three-way result of resolving an `Option<T>`-typed DSL argument.
+#[derive(Debug, Clone)]
+pub enum OptionArg {
+    /// Caller passed a literal `None`.
+    None,
+    /// Caller passed `Some(<inner>)`.
+    Some(syn::Expr),
+}
+
+/// Resolve an expression expected to be an `Option<T>` literal.
+///
+/// Unlike [`resolve_option_arg`], this variant rejects unparseable
+/// expressions with a [`JITError`] rather than silently returning `None`.
+/// Use this when a silently-dropped argument would be a correctness bug
+/// (e.g. an optional hint, a mask, an input token).
+pub fn resolve_option_arg_checked(
+    expr: &syn::Expr,
+    ctx: &CompilerContext,
+    param_name: &str,
+) -> Result<OptionArg, JITError> {
+    match resolve_option_arg_internal(expr, ctx) {
+        OptionArgOutcome::None => Ok(OptionArg::None),
+        OptionArgOutcome::Some(inner) => Ok(OptionArg::Some(inner)),
+        OptionArgOutcome::Unparseable => SourceLocation::unknown().jit_error_result(&format!(
+            "`{param_name}` must be `None` or `Some(...)`, got `{}`",
+            expr.to_token_stream().to_string()
+        )),
+    }
+}
+
+/// Resolve an optional integer DSL argument (e.g. `latency: Option<i32>`).
+///
+/// Accepts either an integer literal (`Some(5)`) or a const-generic path
+/// (`Some(L)` where `L` was bound to an i32 in `generic_args`).  Any other
+/// expression shape — including a runtime variable, a binary expression, or
+/// an unresolved path — produces a [`JITError`] instead of being silently
+/// dropped.
+pub fn extract_optional_i32_hint(
+    arg: &syn::Expr,
+    generic_args: &crate::generics::GenericVars,
+    ctx: &CompilerContext,
+    param_name: &str,
+) -> Result<Option<i32>, JITError> {
+    use syn::{Expr, ExprLit, Lit};
+    match resolve_option_arg_checked(arg, ctx, param_name)? {
+        OptionArg::None => Ok(None),
+        OptionArg::Some(inner) => match &inner {
+            Expr::Lit(ExprLit {
+                lit: Lit::Int(n), ..
+            }) => Ok(Some(n.base10_parse::<i32>().map_err(|e| {
+                SourceLocation::unknown().jit_error(&format!(
+                    "`{param_name}`: invalid integer literal `{}`: {e}",
+                    n.to_string()
+                ))
+            })?)),
+            Expr::Path(path_expr) => {
+                let ident = get_ident_from_path_expr(path_expr).to_string();
+                match generic_args.get_i32(&ident) {
+                    Some(v) => Ok(Some(v)),
+                    None => SourceLocation::unknown().jit_error_result(&format!(
+                        "`{param_name}`: const generic `{ident}` has no resolved value"
+                    )),
+                }
+            }
+            _ => SourceLocation::unknown().jit_error_result(&format!(
+                "`{param_name}` must be a literal integer or const generic, got `{}`",
+                inner.to_token_stream().to_string()
+            )),
+        },
+    }
+}
+
+/// Resolve a required boolean DSL argument (e.g. `disallow_tma: bool`,
+/// `scan_reverse: bool`).
+///
+/// Accepts only a bool literal; any other expression shape produces a
+/// [`JITError`].
+pub fn extract_bool_arg(arg: &syn::Expr, param_name: &str) -> Result<bool, JITError> {
+    use syn::{Expr, ExprLit, Lit};
+    match arg {
+        Expr::Lit(ExprLit {
+            lit: Lit::Bool(b), ..
+        }) => Ok(b.value),
+        _ => SourceLocation::unknown().jit_error_result(&format!(
+            "`{param_name}` must be a literal `true` or `false`, got `{}`",
+            arg.to_token_stream().to_string()
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------

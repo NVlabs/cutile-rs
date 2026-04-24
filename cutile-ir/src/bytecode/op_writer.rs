@@ -19,10 +19,20 @@
 //! Ported from generated `Bytecode.inc` in the `cuda-tile` submodule.
 
 use super::encoding::EncodingWriter;
+use super::enums::BytecodeVersion;
 use super::opcode::Opcode;
 use super::writer::WriterCtx;
 use crate::ir::{Attribute, Operation};
 use crate::{Error, Result};
+
+/// The bytecode version that introduced v13.2-era op-field additions
+/// (NegI.overflow, TanH.rounding_mode, For.unsigned_cmp flag,
+/// Print.token result+flags+optional-operand).
+const V_13_2: BytecodeVersion = BytecodeVersion {
+    major: 13,
+    minor: 2,
+    tag: 0,
+};
 
 // =========================================================================
 // Per-op dispatch entry point
@@ -50,15 +60,19 @@ pub(super) fn write_op_body(
         // ----- v13.2: NegI gains overflow attr -----
         NegI => {
             write_result_types(op, w, ctx)?;
-            // overflow defaults to NONE (0) if not set
-            write_inline_attr_or_default(op, "overflow", 0, w, ctx)?;
+            if ctx.version >= V_13_2 {
+                // overflow: DefaultValuedAttr<IntegerOverflow, NONE>
+                write_inline_attr_or_default(op, "overflow", 0, w, ctx)?;
+            }
             write_operands(op, w, ctx, false)?;
         }
         // ----- v13.2: TanH gains rounding_mode attr -----
         TanH => {
             write_result_types(op, w, ctx)?;
-            // rounding_mode defaults to FULL (5) if not set
-            write_inline_attr_or_default(op, "rounding_mode", 5, w, ctx)?;
+            if ctx.version >= V_13_2 {
+                // rounding_mode: DefaultValuedAttr<RoundingMode, FULL>
+                write_inline_attr_or_default(op, "rounding_mode", 5, w, ctx)?;
+            }
             write_operands(op, w, ctx, false)?;
         }
 
@@ -67,10 +81,11 @@ pub(super) fn write_op_body(
             write_result_types(op, w, ctx)?;
         }
 
-        // ----- Required attributes only -----
+        // ----- DefaultValuedAttr: `overflow` defaults to IntegerOverflow::None (0) -----
         AddI | MulI | SubI | ShLI | TruncI => {
             write_result_types(op, w, ctx)?;
-            write_inline_attr(op, "overflow", w, ctx)?;
+            // overflow: DefaultValuedAttr<IntegerOverflow, NONE>
+            write_inline_attr_or_default(op, "overflow", 0, w, ctx)?;
             write_operands(op, w, ctx, false)?;
         }
         ShRI | ExtI => {
@@ -117,12 +132,14 @@ pub(super) fn write_op_body(
         DivI => {
             write_result_types(op, w, ctx)?;
             write_inline_attr(op, "signedness", w, ctx)?;
-            write_inline_attr(op, "rounding", w, ctx)?;
+            // rounding: DefaultValuedAttr<RoundingMode, ZERO>
+            write_inline_attr_or_default(op, "rounding", 1, w, ctx)?;
             write_operands(op, w, ctx, false)?;
         }
         FToF => {
             write_result_types(op, w, ctx)?;
-            write_inline_attr(op, "rounding_mode", w, ctx)?;
+            // rounding_mode: DefaultValuedAttr<RoundingMode, NEAREST_EVEN>
+            write_inline_attr_or_default(op, "rounding_mode", 0, w, ctx)?;
             write_operands(op, w, ctx, false)?;
         }
         FToI => {
@@ -239,7 +256,8 @@ pub(super) fn write_op_body(
             write_result_types(op, w, ctx)?;
             write_inline_attr(op, "sym_name", w, ctx)?;
             write_inline_attr(op, "value", w, ctx)?;
-            write_inline_attr(op, "alignment", w, ctx)?;
+            // alignment: DefaultValuedAttr<I64Attr, "0">
+            write_inline_attr_or_default(op, "alignment", 0, w, ctx)?;
         }
 
         // ----- Module: result types + attr + regions -----
@@ -256,27 +274,74 @@ pub(super) fn write_op_body(
             write_operands(op, w, ctx, true)?;
         }
 
-        // ----- Print: result count + v13.2 flags + attributes + variadic operands -----
+        // ----- Print (v13.1: str + sized-variadic args) -----
+        // ----- Print (v13.2: + optional token result + flags + optional token operand) -----
+        // Operand groups (when `operandSegmentSizes` is set): 0 = args, 1 = token.
+        // Callers that don't set segment sizes have no token operand.
         Print => {
             w.write_varint(op.result_types.len() as u64);
             write_result_types(op, w, ctx)?;
-            // v13.2: flags field (bit 0 = has token operand)
-            // The token is the last operand if present; we check via
-            // the "has_token" attr or by result count (token result).
-            let flags = 0u64; // TODO: set bit 0 if token present
-            w.write_varint(flags);
-            write_inline_attr(op, "str", w, ctx)?;
-            write_operands(op, w, ctx, true)?;
-            // v13.2: optional token operand (not written if flags bit 0 is 0)
+            let has_segments = op
+                .attributes
+                .iter()
+                .any(|(n, _)| n == "operandSegmentSizes");
+            let (args_count, has_token) = if has_segments {
+                let sizes = operand_segment_sizes(op);
+                (
+                    sizes.first().copied().unwrap_or(0) as usize,
+                    sizes.get(1).copied().unwrap_or(0) > 0,
+                )
+            } else {
+                (op.operands.len(), false)
+            };
+            if ctx.version >= V_13_2 {
+                let flags: u64 = if has_token { 1 } else { 0 };
+                w.write_varint(flags);
+                write_inline_attr(op, "str", w, ctx)?;
+                // sized variadic args (group 0)
+                w.write_varint(args_count as u64);
+                for &operand in op.operands.iter().take(args_count) {
+                    let idx =
+                        ctx.value_map.get(&operand).copied().ok_or_else(|| {
+                            Error::BytecodeWrite("Print arg not in value map".into())
+                        })?;
+                    w.write_varint(idx);
+                }
+                // optional token (group 1, one operand if present)
+                if has_token {
+                    let operand = op.operands[args_count];
+                    let idx = ctx.value_map.get(&operand).copied().ok_or_else(|| {
+                        Error::BytecodeWrite("Print token not in value map".into())
+                    })?;
+                    w.write_varint(idx);
+                }
+            } else {
+                if has_token {
+                    return Err(Error::BytecodeWrite(
+                        "Print with token operand requires bytecode v13.2+".into(),
+                    ));
+                }
+                write_inline_attr(op, "str", w, ctx)?;
+                w.write_varint(args_count as u64);
+                for &operand in op.operands.iter().take(args_count) {
+                    let idx =
+                        ctx.value_map.get(&operand).copied().ok_or_else(|| {
+                            Error::BytecodeWrite("Print arg not in value map".into())
+                        })?;
+                    w.write_varint(idx);
+                }
+            }
         }
 
         // ----- Variadic results + regions -----
         For => {
             w.write_varint(op.result_types.len() as u64);
             write_result_types(op, w, ctx)?;
-            // v13.2: flags field for unsignedCmp (bit 0)
-            let flags = flag_if_present(op, "unsigned_cmp", 0);
-            w.write_varint(flags);
+            if ctx.version >= V_13_2 {
+                // v13.2: flags field for unsignedCmp (bit 0)
+                let flags = flag_if_present(op, "unsigned_cmp", 0);
+                w.write_varint(flags);
+            }
             write_operands(op, w, ctx, true)?;
             write_regions(op, w, ctx)?;
         }
