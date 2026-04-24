@@ -10,7 +10,7 @@ use cuda_async::device_operation::{value, DeviceOp};
 use cuda_async::error::DeviceError;
 
 fn has_gpu() -> bool {
-    cuda_core::CudaContext::device_count()
+    cuda_core::Device::device_count()
         .map(|n| n > 0)
         .unwrap_or(false)
 }
@@ -25,8 +25,8 @@ fn scope_empty_closure() {
         return;
     }
     on_fresh_thread(|| {
-        let ctx = cuda_core::CudaContext::new(0).unwrap();
-        let stream = ctx.new_stream().unwrap();
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
 
         let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
         graph.launch().sync_on(&stream).unwrap();
@@ -39,8 +39,8 @@ fn scope_records_value_ops() {
         return;
     }
     on_fresh_thread(|| {
-        let ctx = cuda_core::CudaContext::new(0).unwrap();
-        let stream = ctx.new_stream().unwrap();
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
 
         let mut recorded = Vec::new();
         let graph = CudaGraph::scope(&stream, |s| {
@@ -63,8 +63,8 @@ fn scope_error_propagation() {
         return;
     }
     on_fresh_thread(|| {
-        let ctx = cuda_core::CudaContext::new(0).unwrap();
-        let stream = ctx.new_stream().unwrap();
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
 
         let result = CudaGraph::scope(&stream, |_s| {
             Err(DeviceError::Internal("test error".into()))
@@ -90,8 +90,8 @@ fn scope_panic_safety() {
         return;
     }
     let result = std::thread::spawn(|| {
-        let ctx = cuda_core::CudaContext::new(0).unwrap();
-        let stream = ctx.new_stream().unwrap();
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             CudaGraph::scope(&stream, |_s| {
@@ -100,7 +100,7 @@ fn scope_panic_safety() {
         }));
 
         // Stream should still be usable after the panic.
-        stream.synchronize().unwrap();
+        unsafe { stream.synchronize() }.unwrap();
     })
     .join();
 
@@ -116,8 +116,8 @@ fn scope_multiple_launches() {
         return;
     }
     on_fresh_thread(|| {
-        let ctx = cuda_core::CudaContext::new(0).unwrap();
-        let stream = ctx.new_stream().unwrap();
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
 
         let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
 
@@ -137,9 +137,9 @@ fn scope_nested_execution_rejected() {
         return;
     }
     on_fresh_thread(|| {
-        let ctx = cuda_core::CudaContext::new(0).unwrap();
-        let stream = ctx.new_stream().unwrap();
-        let other_stream = ctx.new_stream().unwrap();
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
+        let other_stream = device.new_stream().unwrap();
 
         // sync_on capture stream — rejected by execution lock.
         let result = CudaGraph::scope(&stream, |_s| {

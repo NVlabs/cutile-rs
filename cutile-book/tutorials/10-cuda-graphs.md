@@ -272,8 +272,8 @@ Each `forward` call:
 
 ```rust
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let cfg = Config { d: 2048, n_layers: 22, block: 128, bn: 16, bk: 16, eps: 1e-5 };
 
@@ -431,5 +431,5 @@ cargo run -p cutile-examples --example cuda_graphs
 
 ## See also
 
-- [Orchestrating Device Operations](../guide/device-operations.md) — where CUDA graphs fit alongside sync and async execution
+- [Device Operations](../guide/device-operations.md) — where CUDA graphs fit alongside sync and async execution
 - [Host API: CUDA Graph Integration](../reference/host-api.md#cuda-graph-integration) — `.graph_on(stream)` and `CudaGraph::scope` signatures

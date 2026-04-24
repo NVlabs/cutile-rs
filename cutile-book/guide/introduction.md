@@ -29,8 +29,8 @@ mod my_module {
 }
 
 fn main() -> Result<(), cuda_async::error::DeviceError> {
-    let ctx = cuda_core::CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = cuda_core::Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let x = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
     let y = api::ones::<f32>(&[32, 32]).sync_on(&stream)?;
@@ -160,7 +160,7 @@ This is key to performance: global memory is slow compared to on-chip resources.
 - You need maximum portability across GPU *vendors*
 - Your team is deeply invested in the CUDA C++ ecosystem
 
-> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, see [Integrating with CUDA C++](interoperability.md); custom kernels can participate in the same `DeviceOp` execution model as your tile kernels.
+> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, see [Interoperability](interoperability.md); custom kernels can participate in the same `DeviceOp` execution model as your tile kernels.
 
 ---
 

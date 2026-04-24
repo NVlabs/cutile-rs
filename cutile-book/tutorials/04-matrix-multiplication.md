@@ -53,7 +53,7 @@ Each element of A is used BN times. Each element of B is used BM times. This **d
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api;
@@ -90,8 +90,8 @@ mod my_module {
 use my_module::gemm;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let (bm, bn, bk): (i32, i32, i32) = (16, 16, 8);
     let (m, n, k) = (64usize, 64usize, 64usize);

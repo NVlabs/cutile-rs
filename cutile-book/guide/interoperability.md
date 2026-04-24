@@ -1,6 +1,12 @@
-# Integrating with CUDA C++
+# Interoperability
 
-The tile model handles dense tensor algebra well — GEMM, element-wise operations, reductions, convolutions — but some algorithms depend on **warp-level primitives** (`__shfl_sync`, `__ballot_sync`, `__reduce_sync`) for things like custom scan/prefix-sum, cooperative groups, or irregular data access patterns. For these, write the kernel in CUDA C++ and integrate it using the approach below. A custom CUDA kernel can participate in the same `DeviceOp` execution model as your tile kernels — sharing streams, chaining with `.then()`, and avoiding unnecessary synchronization.
+cuTile Rust is designed to coexist with existing CUDA infrastructure. This chapter covers three common interop concerns:
+
+- **Integrating custom CUDA C++ kernels** — for algorithms that need warp-level primitives (`__shfl_sync`, `__ballot_sync`, cooperative groups) or irregular access patterns the tile model doesn't cover.
+- **Borrowing foreign CUDA handles** — wrap a `CUcontext` / `CUstream` from another Rust binding crate (cudarc, Candle, hand-rolled FFI) so cuTile kernels can run on handles you already own.
+- **Migrating from other tile DSLs** — conceptual mapping from Triton and cuTile Python.
+
+Custom CUDA kernels participate in the same `DeviceOp` execution model as tile kernels — sharing streams, chaining with `.then()`, and avoiding unnecessary synchronization.
 
 ---
 
@@ -79,11 +85,11 @@ use cuda_async::device_operation::{DeviceOp, ExecutionContext};
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
 use cuda_async::scheduling_policies::SchedulingPolicy;
-use cuda_core::{CudaFunction, LaunchConfig};
+use cuda_core::{Function, LaunchConfig};
 use std::future::IntoFuture;
 
 pub struct ScaleKernel {
-    function: Arc<CudaFunction>,
+    function: Arc<Function>,
     n: u32,
     scale: f32,
     input: Arc<Tensor<f32>>,
@@ -195,6 +201,42 @@ This gives you full access to the CUDA driver API while participating in the `De
 
 ---
 
+## Borrowing Foreign CUDA Handles
+
+If your application already owns CUDA handles through another Rust binding crate — cudarc, Candle, or a hand-rolled `bindgen` wrapper — wrap them into a cuTile `Device`, `Stream`, `Module`, or `Function` without transferring ownership.
+
+The `borrow_raw` constructors take raw C primitives (`*mut c_void` for opaque handles, `c_int` for `CUdevice`) rather than `cuda_bindings` typedefs, so no nominal-type mismatch between binding crates gets in the way:
+
+```rust
+use core::ffi::{c_int, c_void};
+use cuda_core::{Device, Stream};
+
+// `foreign` is a handle bundle from another Rust binding crate (cudarc,
+// Candle, a bindgen wrapper, …). Its `CUcontext` / `CUstream` typedefs are
+// nominally distinct from cuTile's, but the underlying C ABI is identical —
+// cast at the boundary and the handles flow through unchanged.
+
+// Safety: the caller guarantees the handles are valid, outlive the returned
+// wrappers, and are not concurrently destroyed.
+let device = unsafe {
+    Device::borrow_raw(
+        foreign.cu_ctx as *mut c_void,
+        foreign.cu_device as c_int,
+        foreign.ordinal,
+    )
+};
+let stream = unsafe { Stream::borrow_raw(foreign.cu_stream as *mut c_void, &device) };
+
+// cuTile kernels now run on the borrowed stream.
+let result = my_kernel(out, x).sync_on(&stream)?;
+```
+
+Borrowed wrappers skip destruction on drop: `Stream` does not call `cuStreamDestroy`, `Module` does not unload, and `Device` does not release the primary context. The source framework retains full control over handle lifetimes.
+
+`Module::borrow_raw` and `Function::borrow_raw` follow the same pattern for pre-compiled modules and already-resolved functions. See the `cudarc_interop` example in `cutile-examples/examples/` for an end-to-end walkthrough.
+
+---
+
 ## Migrating from Other DSLs
 
 **From Triton.** [Triton](https://triton-lang.org/) and cuTile Rust both let you write kernels in terms of tile-level operations. Many patterns that require explicit warp specialization in Triton are handled implicitly by the cuTile Rust compiler:
@@ -228,4 +270,4 @@ Both front-ends use the same underlying Tile IR compilation pipeline and generat
 
 ---
 
-Continue to [Debugging and Profiling](debugging.md) for troubleshooting. This chapter builds on the `DeviceOp` model introduced in [Orchestrating Device Operations](device-operations.md).
+Continue to [Debugging and Profiling](debugging.md) for troubleshooting. This chapter builds on the `DeviceOp` model introduced in [Device Operations](device-operations.md).

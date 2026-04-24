@@ -1,7 +1,11 @@
+---
+orphan: true
+---
+
 # DeviceOp API Reference
 
 Quick-reference for the `DeviceOp` trait and its combinators. For a
-tutorial-style introduction, see [Orchestrating Device Operations](../guide/device-operations.md).
+tutorial-style introduction, see [Device Operations](../guide/device-operations.md).
 
 ---
 
@@ -260,7 +264,7 @@ Bypasses the policy entirely. All operations given the same stream execute
 in call order:
 
 ```rust
-let stream = ctx.new_stream()?;
+let stream = device.new_stream()?;
 let a = op_a.sync_on(&stream)?;  // Stream X
 let b = op_b.sync_on(&stream)?;  // Stream X — guaranteed after op_a
 ```
@@ -415,6 +419,6 @@ complete walkthrough.
 
 ## See Also
 
-- [Orchestrating Device Operations](../guide/device-operations.md) — tutorial-style guide to streams, scheduling, and composition patterns
+- [Device Operations](../guide/device-operations.md) — tutorial-style guide to streams, scheduling, and composition patterns
 - [Tutorial 10: CUDA Graphs](../tutorials/10-cuda-graphs.md) — end-to-end CUDA graph example
-- [Integrating with CUDA C++](../guide/interoperability.md) — integrating custom CUDA C++ kernels into the DeviceOp model
+- [Interoperability](../guide/interoperability.md) — integrating custom CUDA C++ kernels into the DeviceOp model

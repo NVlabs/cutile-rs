@@ -10,7 +10,7 @@ use cuda_async::device_operation::value;
 use cuda_async::error::DeviceError;
 
 fn has_gpu() -> bool {
-    cuda_core::CudaContext::device_count()
+    cuda_core::Device::device_count()
         .map(|n| n > 0)
         .unwrap_or(false)
 }
@@ -23,9 +23,9 @@ fn concurrent_capture_same_context() {
         return;
     }
 
-    let ctx = cuda_core::CudaContext::new(0).unwrap();
-    let stream_a = ctx.new_stream().unwrap();
-    let stream_b = ctx.new_stream().unwrap();
+    let device = cuda_core::Device::new(0).unwrap();
+    let stream_a = device.new_stream().unwrap();
+    let stream_b = device.new_stream().unwrap();
 
     let handle_a = std::thread::spawn(move || -> Result<(), DeviceError> {
         CudaGraph::scope(&stream_a, |s| {
@@ -57,7 +57,7 @@ fn concurrent_capture_same_context() {
 }
 
 /// Thread A captures while thread B creates a new stream from a
-/// fresh CudaContext::new(0). Previously this failed because
+/// fresh Device::new(0). Previously this failed because
 /// new_stream called cuCtxSynchronize (for event tracking init),
 /// which conflicted with A's active capture.
 #[test]
@@ -66,8 +66,8 @@ fn new_stream_during_capture_on_another_thread() {
         return;
     }
 
-    let ctx_a = cuda_core::CudaContext::new(0).unwrap();
-    let stream_a = ctx_a.new_stream().unwrap();
+    let device_a = cuda_core::Device::new(0).unwrap();
+    let stream_a = device_a.new_stream().unwrap();
 
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let barrier_a = barrier.clone();
@@ -86,8 +86,8 @@ fn new_stream_during_capture_on_another_thread() {
 
     let handle_b = std::thread::spawn(move || -> Result<(), DeviceError> {
         barrier_b.wait();
-        let ctx_b = cuda_core::CudaContext::new(0).unwrap();
-        let _stream = ctx_b.new_stream()?;
+        let device_b = cuda_core::Device::new(0).unwrap();
+        let _stream = device_b.new_stream()?;
         Ok(())
     });
 

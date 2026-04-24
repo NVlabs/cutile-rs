@@ -5,7 +5,7 @@
 extern crate core;
 
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
@@ -213,8 +213,8 @@ fn fmha_ref_cpu(
 }
 
 fn run_attention_fmha(causal: bool) -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let (batch, heads, heads_kv, seq_len, head_dim) = (2usize, 8usize, 8usize, 64usize, 32usize);
     let (bm, bn) = (32, 32);

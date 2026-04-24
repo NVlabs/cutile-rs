@@ -251,5 +251,5 @@ Time a sync version vs. an async version with overlapped work. Use `std::time::I
 
 ## See also
 
-- [Orchestrating Device Operations](../guide/device-operations.md) — full treatment of `DeviceOp`, streams, and scheduling
+- [Device Operations](../guide/device-operations.md) — full treatment of `DeviceOp`, streams, and scheduling
 - [Host API](../reference/host-api.md) — combinator signatures (`.then()`, `.shared()`, `unzip`, `zip!`) and the full host-side API

@@ -7,7 +7,7 @@
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
-use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
+use cuda_core::{Device, Function, Module, Stream};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -66,14 +66,14 @@ pub struct Validator {
     pub params: Vec<ValidParamType>,
 }
 
-type DeviceFunctions = HashMap<String, (Arc<CudaModule>, Arc<CudaFunction>)>;
+type DeviceFunctions = HashMap<String, (Arc<Module>, Arc<Function>)>;
 type DeviceFunctionValidators = HashMap<String, Arc<Validator>>;
 
-/// Per-device state: CUDA context, scheduling policy, and compiled kernel cache.
+/// Per-device state: GPU device, scheduling policy, and compiled kernel cache.
 ///
 /// Each GPU device has one `AsyncDeviceContext` stored in a thread-local map. It holds:
 ///
-/// - A [`CudaContext`] for driver API calls.
+/// - A [`Device`] for driver API calls.
 /// - A [`SchedulingPolicy`] that decides which stream each operation runs on.
 /// - A cache of already-compiled kernel functions (keyed by [`FunctionKey::get_hash_string()`]).
 ///
@@ -85,8 +85,8 @@ pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
     device_id: usize,
     // TODO: (hme): This will hurt perf due to contention. This should at least be static (OnceLock?).
-    context: Arc<CudaContext>,
-    deallocator_stream: Arc<CudaStream>,
+    device: Arc<Device>,
+    deallocator_stream: Arc<Stream>,
     policy: Arc<dyn SchedulingPolicy>,
     functions: DeviceFunctions,
     validators: DeviceFunctionValidators,
@@ -156,11 +156,11 @@ pub fn new_device_context(
     device_id: usize,
     policy: Arc<dyn SchedulingPolicy>,
 ) -> Result<AsyncDeviceContext, DeviceError> {
-    let context = CudaContext::new(device_id)?;
-    let deallocator_stream = context.new_stream()?;
+    let device = Device::new(device_id)?;
+    let deallocator_stream = device.new_stream()?;
     Ok(AsyncDeviceContext {
         device_id,
-        context,
+        device,
         deallocator_stream,
         policy,
         functions: HashMap::new(),
@@ -196,12 +196,12 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let context = CudaContext::new(device_id)?;
-    let policy = StreamPoolRoundRobin::new(&context, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
-    let deallocator_stream = context.new_stream()?;
+    let device = Device::new(device_id)?;
+    let policy = StreamPoolRoundRobin::new(&device, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
+    let deallocator_stream = device.new_stream()?;
     let device_context = AsyncDeviceContext {
         device_id,
-        context,
+        device,
         deallocator_stream,
         policy: Arc::new(policy),
         functions: HashMap::new(),
@@ -281,18 +281,19 @@ pub fn global_policy(device_id: usize) -> Result<Arc<dyn SchedulingPolicy>, Devi
 
 pub unsafe fn with_deallocator_stream<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
-    F: FnOnce(&Arc<CudaStream>) -> R,
+    F: FnOnce(&Arc<Stream>) -> R,
 {
     with_global_device_context(device_id, |device_context| {
         f(&device_context.deallocator_stream)
     })
 }
 
-pub fn with_cuda_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
+/// Run a closure with a reference to the [`Device`] for `device_id`.
+pub fn with_device<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
-    F: FnOnce(&Arc<CudaContext>) -> R,
+    F: FnOnce(&Arc<Device>) -> R,
 {
-    with_global_device_context(device_id, |device_context| f(&device_context.context))
+    with_global_device_context(device_id, |device_context| f(&device_context.device))
 }
 
 // Default device policy.
@@ -331,23 +332,17 @@ where
 // Kernel operations — compile, cache, and retrieve GPU kernels.
 
 /// Load a compiled CUDA module from a `.cubin` file.
-pub fn load_module_from_file(
-    filename: &str,
-    device_id: usize,
-) -> Result<Arc<CudaModule>, DeviceError> {
-    with_cuda_context(device_id, |cuda_ctx| {
-        let module = cuda_ctx.load_module_from_file(filename)?;
+pub fn load_module_from_file(filename: &str, device_id: usize) -> Result<Arc<Module>, DeviceError> {
+    with_device(device_id, |device| {
+        let module = device.load_module_from_file(filename)?;
         Ok(module)
     })?
 }
 
 /// JIT-compile a PTX string into a CUDA module for the given device.
-pub fn load_module_from_ptx(
-    ptx_src: &str,
-    device_id: usize,
-) -> Result<Arc<CudaModule>, DeviceError> {
-    with_cuda_context(device_id, |cuda_ctx| {
-        let module = cuda_ctx.load_module_from_ptx_src(ptx_src)?;
+pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Module>, DeviceError> {
+    with_device(device_id, |device| {
+        let module = device.load_module_from_ptx_src(ptx_src)?;
         Ok(module)
     })?
 }
@@ -357,7 +352,7 @@ pub fn load_module_from_ptx(
 pub fn insert_cuda_function(
     device_id: usize,
     func_key: &impl FunctionKey,
-    value: (Arc<CudaModule>, Arc<CudaFunction>),
+    value: (Arc<Module>, Arc<Function>),
 ) -> Result<(), DeviceError> {
     with_global_device_context_mut(device_id, |device_context| {
         let key = func_key.get_hash_string();
@@ -384,7 +379,7 @@ pub fn contains_cuda_function(device_id: usize, func_key: &impl FunctionKey) -> 
 pub fn get_cuda_function(
     device_id: usize,
     func_key: &impl FunctionKey,
-) -> Result<Arc<CudaFunction>, DeviceError> {
+) -> Result<Arc<Function>, DeviceError> {
     with_global_device_context(device_id, |device_context| {
         let key = func_key.get_hash_string();
         let entry = device_context

@@ -5,7 +5,7 @@
 extern crate core;
 
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::api::DeviceOpReshape;
 use cutile::api::{arange, zeros};
 use cutile::error::Error;
@@ -73,8 +73,8 @@ const N_CTX: usize = 1024;
 const HEAD_DIM: usize = 64;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let b = BATCH; // = batch size.
     let h = N_HEADS; // = number of heads (query).

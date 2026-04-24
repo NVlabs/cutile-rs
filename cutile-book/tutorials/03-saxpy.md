@@ -22,7 +22,7 @@ Broadcasting is conceptual — the GPU doesn't actually allocate memory for all 
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api::arange;
@@ -49,8 +49,8 @@ mod my_module {
 use my_module::saxpy;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     
     let a = 2.0f32;  // Our scalar multiplier
     

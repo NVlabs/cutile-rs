@@ -29,7 +29,7 @@ pub use crate::tensor::{
 pub use crate::tile_kernel::{PartitionOp, TileKernel, ToHostVecOp};
 
 // Common types from cuda-core
-pub use cuda_core::{CudaContext, DType};
+pub use cuda_core::{DType, Device};
 
 // Common dependencies
 pub use std::sync::Arc;

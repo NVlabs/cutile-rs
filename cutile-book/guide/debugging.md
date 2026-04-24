@@ -35,8 +35,8 @@ cuda_tile_assert!(tile[0] > 0.0, "Value must be positive");
 **Read back to the host** to inspect results after kernel execution:
 
 ```rust
-let ctx = CudaContext::new(0)?;
-let stream = ctx.new_stream()?;
+let device = Device::new(0)?;
+let stream = device.new_stream()?;
 
 let x: Arc<Tensor<f32>> = ones(&[32, 32]).map(Into::into).sync_on(&stream)?;
 let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
@@ -203,4 +203,4 @@ Pre-ship debugging checklist: shapes compatible (tile shapes match for operation
 
 ---
 
-Review [Tuning for Performance](performance-tuning.md) for optimization techniques, [Integrating with CUDA C++](interoperability.md) for custom CUDA kernels, the [DSL API](../reference/dsl-api.md) and [Host API](../reference/host-api.md) for API lookups, or the [Tutorials](../tutorials/01-hello-world.md) for worked examples.
+Review [Tuning for Performance](performance-tuning.md) for optimization techniques, [Interoperability](interoperability.md) for custom CUDA kernels, the [DSL API](../reference/dsl-api.md) and [Host API](../reference/host-api.md) for API lookups, or the [Tutorials](../tutorials/01-hello-world.md) for worked examples.

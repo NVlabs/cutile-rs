@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Prelude**: `use cutile::prelude::*` for common imports.
 - **New examples**: `cuda_graphs.rs` (scope-based), `cuda_graphs_deviceop.rs` (combinator-based), `add_refs.rs` (borrow pattern).
 - **cutile-book**: DeviceOp API reference, CUDA Graphs tutorial, tutorials 6-9 in book_examples.rs.
+- **`borrow_raw` on `Device` / `Stream` / `Module` / `Function`**: wrap externally-owned CUDA handles (from cudarc, Candle, or any other CUDA binding crate) without taking ownership. Accepts `*mut c_void` / `c_int` primitives so no `cuda_bindings` typedef is required at the call site; borrowed wrappers skip release/destroy/unload on drop.
 
 ### Changed
 - **`DeviceOperation` renamed to `DeviceOp`**: Shorter, consistent with `DeviceOp` combinators.
@@ -36,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Output-first convention**: `&mut Tensor` is always the first kernel parameter.
 - **Extension trait renames**: `IntoDeviceOperationPartition` → `PartitionOp`, `TensorDeviceOpToHostVec` → `ToHostVecOp`.
 - **`.graph()` / `.graph_on(stream)`**: Follows `sync` / `sync_on` convention.
+- **Renamed types in `cuda_core`**: `CudaContext` → `Device`, `CudaStream` → `Stream`, `CudaModule` → `Module`, `CudaFunction` → `Function`. The `Cuda` prefix was redundant inside the `cuda_core` module path. Variables of type `Arc<Device>` are now named `device` throughout the codebase (previously `ctx` / `cuda_context`).
+- **Renamed methods**: `Stream::context()` → `Stream::device()`, `ExecutionContext::get_cuda_context()` → `ExecutionContext::device()`, `with_cuda_context()` → `with_device()`.
 
 ### Added (cont.)
 - **`api::linspace(start, stop, n)`**: Evenly spaced f32 values between two endpoints.
@@ -46,14 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - **`arange` multi-block correctness**: `arange` used `get_tile_block_id()` where it needed the partition dimension (`S[0]`), producing wrong values at block boundaries. Hidden by uniform-data tests.
 - **`sync_on` error propagation**: `stream.synchronize()` errors are now returned instead of panicking.
-- **Concurrent stream capture**: Removed `cuCtxSynchronize` call in `CudaContext::new_stream` that caused `DriverError(900)` when creating streams while another thread was capturing a CUDA graph.
+- **Concurrent stream capture**: Removed `cuCtxSynchronize` call in `Device::new_stream` that caused `DriverError(900)` when creating streams while another thread was capturing a CUDA graph.
 
 ### Removed
 - `DeviceOperationArc`, `UnwrapArc` struct, `GlobalSchedulingPolicy` enum, `WithDeviceId` trait.
 - `_op()` generated launcher variant (unified launcher replaces it).
 - `num_mb()`, `num_gb()`, `copy_sync()` on Tensor.
 - `DeviceOperationReshape`, `DeviceOperationDynamicReshape`, `DeviceOperationCopyFrom` traits.
-- cudarc event-tracking infrastructure (`num_streams`, `event_tracking` on `CudaContext`). Unused; caused interference with concurrent captures.
+- cudarc event-tracking infrastructure (`num_streams`, `event_tracking` on `Device`). Unused; caused interference with concurrent captures.
 
 ## [0.0.1] - 2026-04-07
 

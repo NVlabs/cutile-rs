@@ -6,15 +6,14 @@
 //! Runtime utilities for compiling Tile IR modules to GPU cubins.
 //! Provides GPU detection and bytecode compilation helpers.
 
-use cuda_core::{device, get_device_sm_name, init};
+use cuda_core::{get_device_sm_name, Device};
 use std::env;
 use std::process::Command;
 use uuid::Uuid;
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 pub fn get_gpu_name(device_id: usize) -> String {
-    unsafe { init(0) }.expect("failed to initialize CUDA driver");
-    let dev = device::get(device_id as i32).expect("failed to get CUDA device");
+    let dev = Device::raw_device(device_id).expect("failed to get CUDA device");
     unsafe { get_device_sm_name(dev) }.expect("failed to get SM name")
 }
 

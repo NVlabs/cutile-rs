@@ -5,7 +5,7 @@
 #![allow(unused_variables)]
 
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::error::Error;
 use cutile::tile_kernel::TileKernel;
 
@@ -33,8 +33,8 @@ mod hello_world_module {
 use hello_world_module::hello_world_kernel;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     let launcher = hello_world_kernel();
     launcher.grid((1, 1, 1)).sync_on(&stream)?;
     Ok(())

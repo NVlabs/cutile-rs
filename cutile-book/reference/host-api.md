@@ -1,6 +1,6 @@
 # Host API
 
-Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Orchestrating Device Operations](../guide/device-operations.md) and [Working with Data](../guide/working-with-data.md).
+Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Device Operations](../guide/device-operations.md) and [Working with Data](../guide/working-with-data.md).
 
 ---
 
@@ -88,25 +88,25 @@ The host-side `Vec` must remain alive until the op completes — the async copy 
 
 ---
 
-## Context and Streams
+## Devices and Streams
 
-Every host program starts with a `CudaContext` bound to a GPU device, plus one or more `CudaStream`s for scheduling GPU work:
+Every host program starts with a `Device`, plus one or more `Stream`s for scheduling GPU work:
 
 ```rust
-use cuda_core::CudaContext;
+use cuda_core::Device;
 
-let ctx = CudaContext::new(0)?;              // Device ordinal 0
-let stream = ctx.new_stream()?;              // A new stream owned by this context
+let device = Device::new(0)?;              // Device ordinal 0
+let stream = device.new_stream()?;         // A new stream owned by this device
 ```
 
 | Method | Returns | Description |
 |---|---|---|
-| `CudaContext::new(ordinal: usize)` | `Result<Arc<CudaContext>, DriverError>` | Create a context bound to a device ordinal |
-| `CudaContext::device_count()` | `Result<i32, DriverError>` | Number of CUDA-capable devices |
-| `ctx.ordinal()` | `usize` | Device ordinal this context binds |
-| `ctx.new_stream()` | `Result<Arc<CudaStream>, DriverError>` | Create a new stream on this context |
+| `Device::new(ordinal: usize)` | `Result<Arc<Device>, DriverError>` | Create a device handle bound to a GPU ordinal |
+| `Device::device_count()` | `Result<i32, DriverError>` | Number of CUDA-capable devices |
+| `device.ordinal()` | `usize` | GPU ordinal this handle represents |
+| `device.new_stream()` | `Result<Arc<Stream>, DriverError>` | Create a new stream on this device |
 
-Contexts are `Arc`-wrapped for sharing across threads; streams are also `Arc`-wrapped and can be passed to `.sync_on(&stream)` for explicit stream scheduling.
+Devices are `Arc`-wrapped for sharing across threads; streams are also `Arc`-wrapped and can be passed to `.sync_on(&stream)` for explicit stream scheduling.
 
 The default round-robin scheduling policy handles stream assignment automatically for most workloads — these APIs are for when you need explicit stream control (debugging, deterministic ordering, paired with `AsyncKernelLaunch`, or overlapping compute with transfers on dedicated streams).
 
@@ -164,7 +164,7 @@ launcher.set_launch_config(LaunchConfig {
 launcher.await?;  // Executes as a DeviceOp
 ```
 
-See [Integrating with CUDA C++](../guide/interoperability.md) for the full walkthrough and the wrapper pattern that hides `unsafe` at the call site.
+See [Interoperability](../guide/interoperability.md) for the full walkthrough and the wrapper pattern that hides `unsafe` at the call site.
 
 **`.generics(Vec<String>)`** — `#[cutile::entry]`-generated launchers accept this method to bind const generics and type parameters at runtime:
 
@@ -438,7 +438,7 @@ Bypasses the policy entirely. All operations given the same stream execute
 in call order:
 
 ```rust
-let stream = ctx.new_stream()?;
+let stream = device.new_stream()?;
 let a = op_a.sync_on(&stream)?;  // Stream X
 let b = op_b.sync_on(&stream)?;  // Stream X — guaranteed after op_a
 ```
@@ -593,6 +593,6 @@ complete walkthrough.
 
 ## See Also
 
-- [Orchestrating Device Operations](../guide/device-operations.md) — tutorial-style guide to streams, scheduling, and composition patterns
+- [Device Operations](../guide/device-operations.md) — tutorial-style guide to streams, scheduling, and composition patterns
 - [Tutorial 10](../tutorials/10-cuda-graphs.md) — end-to-end CUDA graph example
-- [Integrating with CUDA C++](../guide/interoperability.md) — integrating custom CUDA C++ kernels into the DeviceOp model
+- [Interoperability](../guide/interoperability.md) — integrating custom CUDA C++ kernels into the DeviceOp model

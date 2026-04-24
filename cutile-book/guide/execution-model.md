@@ -18,7 +18,7 @@ The abstract machine maps to CUDA like this:
 
 The mapping of the grid and individual tile blocks to underlying hardware threads is abstracted away and handled by the compiler: thread block and cluster configuration, register allocation, shared memory staging, memory coalescing, and Tensor Core utilization.
 
-Execution happens across two spaces: the **host side** (CPU) allocates GPU memory, launches kernels, manages data transfers, and coordinates async operations; the **device side** (GPU) concurrently runs kernel code on tile blocks, operating on tiles in registers and accessing global memory through tensors. See [Orchestrating Device Operations](device-operations.md) for the host-side execution story.
+Execution happens across two spaces: the **host side** (CPU) allocates GPU memory, launches kernels, manages data transfers, and coordinates async operations; the **device side** (GPU) concurrently runs kernel code on tile blocks, operating on tiles in registers and accessing global memory through tensors. See [Device Operations](device-operations.md) for the host-side execution story.
 
 ---
 
@@ -103,4 +103,4 @@ Compile-time constants drive specialization: each unique combination of const ge
 
 ---
 
-Continue to [Orchestrating Device Operations](device-operations.md) for the host-side execution story. For tuning tile sizes and architecture-specific hints, see [Tuning for Performance](performance-tuning.md).
+Continue to [Device Operations](device-operations.md) for the host-side execution story. For tuning tile sizes and architecture-specific hints, see [Tuning for Performance](performance-tuning.md).

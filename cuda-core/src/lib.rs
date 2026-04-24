@@ -6,12 +6,13 @@
 //! Low-level CUDA driver API bindings and safe wrappers.
 
 mod api;
-mod cudarc_shim;
+pub(crate) mod cudarc_shim;
 mod dtype;
 mod error;
+mod runtime;
 
 pub use api::*;
 pub use cuda_bindings as sys;
-pub use cudarc_shim::*;
 pub use dtype::*;
 pub use error::*;
+pub use runtime::*;

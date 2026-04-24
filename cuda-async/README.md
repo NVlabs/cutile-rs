@@ -17,8 +17,8 @@ until `.sync()`, `.sync_on()`, or `.await` is called.
 use cutile::prelude::*;
 
 fn main() -> Result<(), DeviceError> {
-    let ctx = cuda_core::CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = cuda_core::Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let mut z = api::zeros::<f32>(&[16, 16]).sync_on(&stream)?;
     let x = api::ones::<f32>(&[16, 16]).sync_on(&stream)?;

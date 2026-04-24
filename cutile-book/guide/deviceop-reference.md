@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # DeviceOp API Reference
 
 Quick-reference for the `DeviceOp` trait and its combinators. For a
@@ -260,7 +264,7 @@ Bypasses the policy entirely. All operations given the same stream execute
 in call order:
 
 ```rust
-let stream = ctx.new_stream()?;
+let stream = device.new_stream()?;
 let a = op_a.sync_on(&stream)?;  // Stream X
 let b = op_b.sync_on(&stream)?;  // Stream X — guaranteed after op_a
 ```
