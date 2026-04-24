@@ -70,6 +70,14 @@ cuTile Rust supports various numeric types for GPU computation:
 | `bf16` | 2× on Tensor Cores | Medium (better range) | Training |
 | `i32` | Native integer ops | Exact | Indexing, control flow |
 
+:::{note}
+When using `f16` or `bf16` inputs, accumulate in `f32` — for both `mma`
+(the output tile should be `f32`) and long reductions (`convert_tile` to
+`f32` before `reduce_sum`). See the
+[Numerical Choices guide](writing-computations.md#numerical-choices) for
+the full rationale and the `f16` vs `bf16` tradeoff.
+:::
+
 ---
 
 ## Shapes
