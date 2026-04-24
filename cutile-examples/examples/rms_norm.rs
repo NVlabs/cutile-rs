@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec};
@@ -65,9 +65,9 @@ use my_module::rms_norm;
 
 fn main() -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
-    let ctx = CudaContext::new(0)?;
+    let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.
-    let stream = ctx.new_stream()?;
+    let stream = device.new_stream()?;
     let (m, n) = (4, 8);
     let block_size = 2;
     let generics = vec![n.to_string(), block_size.to_string()];

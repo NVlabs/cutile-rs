@@ -403,7 +403,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut padding_count: i64 = 0;
         let mut token_count: i64 = 0;
 
-        if let Some(mask_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[3], ctx) {
+        if let super::shared_utils::OptionArg::Some(mask_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[3], ctx, "mask")?
+        {
             if let Some(mask_value) =
                 self.compile_expression(module, block_id, &mask_arg, generic_args, ctx, None)?
             {
@@ -414,7 +416,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        if let Some(padding_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[4], ctx)
+        if let super::shared_utils::OptionArg::Some(padding_arg) =
+            super::shared_utils::resolve_option_arg_checked(
+                &call_expr.args[4],
+                ctx,
+                "padding_value",
+            )?
         {
             if let Some(padding_value) =
                 self.compile_expression(module, block_id, &padding_arg, generic_args, ctx, None)?
@@ -463,7 +470,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        if let Some(token_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[5], ctx) {
+        if let super::shared_utils::OptionArg::Some(token_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[5], ctx, "token")?
+        {
             if let Some(token_value) =
                 self.compile_expression(module, block_id, &token_arg, generic_args, ctx, None)?
             {
@@ -474,20 +483,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: latency (Option<i32>)
+        // arg[6]: latency (Option<i32>) — accepts Some(literal) or Some(const-generic),
+        // errors on anything else so the hint is never silently dropped.
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
-        {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
+        if let Some(latency) = super::shared_utils::extract_optional_i32_hint(
+            &call_expr.args[6],
+            generic_args,
+            ctx,
+            "latency",
+        )? {
+            hint_params.insert("latency".to_string(), latency);
         }
 
         let operand_segments: Vec<i64> = vec![1, mask_count, padding_count, token_count];
@@ -609,7 +614,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut operands = vec![dest_ptr, tile_value];
         let mut mask_count: i64 = 0;
         let mut token_count: i64 = 0;
-        if let Some(mask_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[4], ctx) {
+        if let super::shared_utils::OptionArg::Some(mask_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[4], ctx, "mask")?
+        {
             if let Some(mask_value) =
                 self.compile_expression(module, block_id, &mask_arg, generic_args, ctx, None)?
             {
@@ -619,7 +626,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        if let Some(token_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[5], ctx) {
+        if let super::shared_utils::OptionArg::Some(token_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[5], ctx, "token")?
+        {
             if let Some(token_value) =
                 self.compile_expression(module, block_id, &token_arg, generic_args, ctx, None)?
             {
@@ -629,20 +638,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        // arg[6]: latency (Option<i32>)
+        // arg[6]: latency (Option<i32>) — accepts Some(literal) or Some(const-generic),
+        // errors on anything else so the hint is never silently dropped.
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
-        {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
+        if let Some(latency) = super::shared_utils::extract_optional_i32_hint(
+            &call_expr.args[6],
+            generic_args,
+            ctx,
+            "latency",
+        )? {
+            hint_params.insert("latency".to_string(), latency);
         }
 
         let operand_segments: Vec<i64> = vec![1, 1, mask_count, token_count];
@@ -786,7 +791,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut operands = vec![ptrs, arg];
         let mut mask_count: i64 = 0;
         let mut token_count: i64 = 0;
-        if let Some(mask_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[5], ctx) {
+        if let super::shared_utils::OptionArg::Some(mask_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[5], ctx, "mask")?
+        {
             if let Some(mask_value) =
                 self.compile_expression(module, block_id, &mask_arg, generic_args, ctx, None)?
             {
@@ -796,7 +803,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        if let Some(token_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx) {
+        if let super::shared_utils::OptionArg::Some(token_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[6], ctx, "token")?
+        {
             if let Some(token_value) =
                 self.compile_expression(module, block_id, &token_arg, generic_args, ctx, None)?
             {
@@ -958,7 +967,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut operands = vec![ptrs, cmp, val];
         let mut mask_count: i64 = 0;
         let mut token_count: i64 = 0;
-        if let Some(mask_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[5], ctx) {
+        if let super::shared_utils::OptionArg::Some(mask_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[5], ctx, "mask")?
+        {
             if let Some(mask_value) =
                 self.compile_expression(module, block_id, &mask_arg, generic_args, ctx, None)?
             {
@@ -968,7 +979,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        if let Some(token_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx) {
+        if let super::shared_utils::OptionArg::Some(token_arg) =
+            super::shared_utils::resolve_option_arg_checked(&call_expr.args[6], ctx, "token")?
+        {
             if let Some(token_value) =
                 self.compile_expression(module, block_id, &token_arg, generic_args, ctx, None)?
             {
@@ -1143,13 +1156,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         // Handle disallow_tma: bool parameter.
         if let Some(i) = fn_params.iter().position(|s| s == "disallow_tma") {
-            if let Expr::Lit(syn::ExprLit {
-                lit: Lit::Bool(b), ..
-            }) = &call_expr.args[i]
-            {
-                if b.value {
-                    hint_params.insert("allow_tma".to_string(), 0);
-                }
+            let disallow =
+                super::shared_utils::extract_bool_arg(&call_expr.args[i], "disallow_tma")?;
+            if disallow {
+                hint_params.insert("allow_tma".to_string(), 0);
             }
         }
         if let Some(load_store_hints_attr) =
@@ -1310,13 +1320,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         // Handle disallow_tma: bool parameter.
         if let Some(i) = fn_params.iter().position(|s| s == "disallow_tma") {
-            if let Expr::Lit(syn::ExprLit {
-                lit: Lit::Bool(b), ..
-            }) = &call_expr.args[i]
-            {
-                if b.value {
-                    hint_params.insert("allow_tma".to_string(), 0);
-                }
+            let disallow =
+                super::shared_utils::extract_bool_arg(&call_expr.args[i], "disallow_tma")?;
+            if disallow {
+                hint_params.insert("allow_tma".to_string(), 0);
             }
         }
         if let Some(load_store_hints_attr) =
@@ -1649,15 +1656,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 cutile_ir::ir::Type::Scalar(elem_scalar_scan),
             )])
         };
-        let reverse_value = if let Expr::Lit(lit_expr) = &call_expr.args[2] {
-            if let syn::Lit::Bool(lit_bool) = &lit_expr.lit {
-                lit_bool.value
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let reverse_value = super::shared_utils::extract_bool_arg(&call_expr.args[2], "reverse")?;
 
         let (op_id, results) = OpBuilder::new(Opcode::Scan, self.ir_location(&call_expr.span()))
             .result(result_ir_ty)

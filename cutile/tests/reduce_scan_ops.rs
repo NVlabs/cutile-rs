@@ -91,6 +91,18 @@ mod reduce_scan_ops_module {
         // Store the result
         output.store(prefix_products);
     }
+
+    /// Regression: pre-fix, `reverse = true` was silently defaulted to
+    /// `false` if the arg came through as anything other than a bool
+    /// literal. With the `extract_bool_arg` helper the literal path is
+    /// preserved; this kernel pins the positive `true` case so a future
+    /// refactor can't silently swap it back.
+    #[cutile::entry()]
+    fn scan_reverse_true_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = load_tile_mut(output);
+        let suffix_sums: Tile<f32, S> = scan_sum(tile, 0i32, true, 0.0f32);
+        output.store(suffix_sums);
+    }
 }
 
 use reduce_scan_ops_module::_module_asts;
@@ -330,5 +342,39 @@ fn compile_scan_closure_test() -> () {
         );
 
         println!("\n✓ scan with closure (prefix product) operation verified");
+    });
+}
+
+/// Regression: ensure `scan(..., reverse=true, ...)` actually lowers to
+/// `reverse=true` in the IR. Before the fix, the special-op handler
+/// would silently default to `false` if the arg was anything but a bool
+/// literal, so we specifically pin the literal-`true` path here.
+#[test]
+fn compile_scan_reverse_true() {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "reduce_scan_ops_module",
+            "scan_reverse_true_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let mlir = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== SCAN REVERSE=TRUE MLIR ===\n{mlir}");
+
+        assert!(
+            mlir.contains("reverse=true") || mlir.contains("reverse = true"),
+            "Expected reverse=true in scan op (was silently dropping non-literal bools \
+             before fix; ensure literal `true` still threads through).\nMLIR:\n{mlir}"
+        );
     });
 }

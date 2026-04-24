@@ -1,8 +1,8 @@
-# Orchestrating Device Operations
+# Device Operations
 
-A `DeviceOp` is the host-side handle for GPU work: it describes a computation lazily, composes with other `DeviceOp`s on the host, and then runs when you choose how. Every host-side API that returns a future (`api::zeros`, kernel launchers, `.then()` / `.shared()` / `unzip`) produces a `DeviceOp`.
+`DeviceOp` is how you describe and compose GPU work on the host. Every host-side API that returns a future — `api::zeros`, kernel launchers, and the `.then()` / `.shared()` / `zip!` / `unzip` combinators — produces one. Composition is decoupled from execution: you build the operation graph with combinators, then run it in one of three peer modes — `.sync()` (blocking), `.await` (async), or `.graph()` (capture once, launch many).
 
-This chapter covers the `DeviceOp` model and the three ways to execute one, how to compose `DeviceOp`s into larger computation graphs, the stream scheduling rules that determine ordering and overlap, and practical patterns for tensor ownership and synchronization.
+This chapter covers the `DeviceOp` model, composition, stream scheduling, CUDA graph capture, and the runtime state worth knowing about.
 
 ---
 
@@ -143,16 +143,7 @@ let result = step1(args)
     .await?;
 ```
 
-**CUDA graph** — `.graph_on(&stream)` records a `DeviceOp` chain as a CUDA graph once and replays with minimal launch overhead. For hot paths like per-token inference loops that run the same pipeline many times.
-
-```rust
-let graph = pipeline(input).graph_on(&stream)?;
-for _ in 0..iterations {
-    graph.launch(&stream)?;  // replay — no per-op dispatch
-}
-```
-
-See [CUDA Graph Integration in the Host API](../reference/host-api.md#cuda-graph-integration) and [Tutorial 10](../tutorials/10-cuda-graphs.md) for the graph API in detail.
+**CUDA graph** — `.graph()` / `.graph_on(&stream)` captures a composed `DeviceOp` into a reusable `CudaGraph<T>`. Best for hot paths that run the same pipeline many times. See [CUDA Graphs](#cuda-graphs) below for the capture/replay pattern.
 
 ---
 
@@ -257,7 +248,7 @@ let tensor = create_tensor().await;
 let result = process(tensor).await;
 
 // Pin to the same stream — CUDA guarantees ordering
-let stream = ctx.new_stream()?;
+let stream = device.new_stream()?;
 let tensor = create_tensor().sync_on(&stream);
 let result = process(tensor).sync_on(&stream);
 ```
@@ -284,6 +275,39 @@ let (a, b) = tokio::join!(future_a, future_b);
 :::{tip}
 Sequential `.await` calls *appear* ordered from the host's perspective (each waits before the next starts), but the GPU work for each `.await` runs on whichever stream the policy assigns. For truly independent operations you want to overlap, use `zip!` or `tokio::join!`.
 :::
+
+---
+
+## CUDA Graphs
+
+A CUDA graph captures a composed `DeviceOp` into a pre-compiled executable. Launching the executable submits the entire graph in a single driver call — no per-op dispatch overhead — and the same graph can be replayed many times. This matters for hot paths like per-token inference loops, where individual kernels run in microseconds and launch overhead dominates.
+
+Two capture APIs, depending on how you want to express the pipeline:
+
+```rust
+// Combinator form — capture what a DeviceOp chain produces.
+let graph = pipeline(input).graph_on(&stream)?;
+
+// Scope form — imperative capture when you need &mut between steps.
+let graph = CudaGraph::scope(&stream, |s| {
+    s.record(kernel_a((&mut out_a).partition([32]), x.clone()))?;
+    s.record(kernel_b((&mut out_b).partition([32]), x))?;
+    Ok(())
+})?;
+```
+
+Once captured, replay with `graph.launch()`, which returns a `DeviceOp` you can sync, await, or compose further. For parameterized replay — the common "change one input per step" case — `graph.update(new_op)` rewrites the graph's inputs in place without re-instantiating:
+
+```rust
+for token in tokens {
+    graph.update(api::memcpy(&mut model.input, &token))?;
+    graph.launch().sync_on(&stream)?;  // no per-op dispatch
+}
+```
+
+Only operations that implement the `GraphNode` trait can be recorded: kernel launches and `memcpy`. Allocation operations (`api::zeros`, `api::ones`, etc.) are not graph-safe — allocate outside the capture closure and pass the tensors in. Inside a `scope` body, calling `.sync_on(...)`, `.sync()`, or `.await` on any `DeviceOp` returns a `DeviceError`: the execution lock rejects nested execution during capture.
+
+See [Tutorial 10: CUDA Graphs](../tutorials/10-cuda-graphs.md) for a walkthrough and [Host API: CUDA Graph Integration](../reference/host-api.md#cuda-graph-integration) for the full API reference.
 
 ---
 
@@ -336,6 +360,16 @@ let data = z.to_host_vec().sync_on(&stream);  // ✅ Waits for completion
 ```
 
 Common pitfalls: syncing per operation in hot paths (build a graph and sync once instead); forgetting to compose for overlap (use `zip!` or `tokio::join!` for independent work); calling `.await` sequentially when operations are actually independent (this effectively serializes them across streams).
+
+---
+
+## Runtime Notes
+
+**Execution lock.** cuTile enforces "only one `DeviceOp` executes per thread at a time." Nesting `.sync_on(...)`, `.sync()`, or `.await` inside a `.then(...)` closure or a `CudaGraph::scope` body returns a `DeviceError`. The lock exists to prevent cross-stream data races: a nested `sync_on(&other_stream)` inside a `.then()` handler would submit work to a second stream without ordering it against the first. For the rare legitimate case, use `unsafe fn then_unchecked`.
+
+**Default device.** The device each `DeviceOp` lands on is thread-local. `set_default_device(id)` changes it for the current thread — the common pattern for one-thread-per-GPU worker pools. For per-op routing without touching the thread default, `with_device(id, |device| …)` runs a closure against a specific device's scheduling policy.
+
+Handles from other frameworks (cudarc, Candle, hand-rolled FFI) can be wrapped into a cuTile `Device` or `Stream` without transferring ownership via `Device::borrow_raw` / `Stream::borrow_raw` — see [Interoperability](interoperability.md).
 
 ---
 

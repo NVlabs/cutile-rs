@@ -22,6 +22,9 @@ myst_enable_extensions = [
     "attrs_inline",
 ]
 
+# Auto-generate anchors for H1–H3 so inline `#slug` links resolve.
+myst_heading_anchors = 3
+
 # Source files can be .rst or .md
 source_suffix = {
     '.rst': 'restructuredtext',

@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Data Model & Types
 
 cuTile Rust leverages Rust's type system to catch errors at compile time. Shape mismatches, type errors, and many common GPU programming bugs are caught before your code even runs.
@@ -505,4 +509,4 @@ let expanded = scalar.broadcast(const_shape![64, 64]);
 
 - See [Operations](operations.md) for available tile operations
 - Learn about [Memory Hierarchy](memory-hierarchy.md) for performance
-- Explore the [Syntax Reference](../appendix/syntax-reference.md) for complete API
+- Explore the [Syntax Reference](../reference/syntax-reference.md) for complete API

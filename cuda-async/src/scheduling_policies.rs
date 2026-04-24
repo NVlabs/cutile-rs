@@ -6,7 +6,7 @@
 //! Stream scheduling policies that control how operations are assigned to CUDA streams.
 
 use crate::error::DeviceError;
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{Device, Stream};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use std::sync::Arc;
 /// Work on **different streams** has no ordering guarantee.
 pub trait SchedulingPolicy: Send + Sync {
     /// Select the next CUDA stream for an operation.
-    fn next_stream(&self) -> Result<Arc<CudaStream>, DeviceError>;
+    fn next_stream(&self) -> Result<Arc<Stream>, DeviceError>;
 }
 
 /// Distributes operations across a fixed-size pool of CUDA streams using round-robin assignment.
@@ -34,15 +34,15 @@ pub trait SchedulingPolicy: Send + Sync {
 /// on **different streams** and may run concurrently on the GPU.
 pub struct StreamPoolRoundRobin {
     next_stream_idx: AtomicUsize,
-    stream_pool: Vec<Arc<CudaStream>>,
+    stream_pool: Vec<Arc<Stream>>,
 }
 
 impl StreamPoolRoundRobin {
-    /// Creates a round-robin pool with `num_streams` streams on the given context.
-    pub fn new(ctx: &Arc<CudaContext>, num_streams: usize) -> Result<Self, DeviceError> {
+    /// Creates a round-robin pool with `num_streams` streams on the given device.
+    pub fn new(device: &Arc<Device>, num_streams: usize) -> Result<Self, DeviceError> {
         let mut stream_pool = Vec::with_capacity(num_streams);
         for _ in 0..num_streams {
-            stream_pool.push(ctx.new_stream()?);
+            stream_pool.push(device.new_stream()?);
         }
         Ok(Self {
             stream_pool,
@@ -52,7 +52,7 @@ impl StreamPoolRoundRobin {
 }
 
 impl SchedulingPolicy for StreamPoolRoundRobin {
-    fn next_stream(&self) -> Result<Arc<CudaStream>, DeviceError> {
+    fn next_stream(&self) -> Result<Arc<Stream>, DeviceError> {
         let idx = self
             .next_stream_idx
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -63,25 +63,25 @@ impl SchedulingPolicy for StreamPoolRoundRobin {
 
 /// Routes every operation to a single CUDA stream, guaranteeing strict sequential execution.
 pub struct SingleStream {
-    stream: Arc<CudaStream>,
+    stream: Arc<Stream>,
 }
 
 impl SingleStream {
-    /// Creates a single-stream policy on the given context.
-    pub fn new(ctx: &Arc<CudaContext>) -> Result<Self, DeviceError> {
+    /// Creates a single-stream policy on the given device.
+    pub fn new(device: &Arc<Device>) -> Result<Self, DeviceError> {
         Ok(Self {
-            stream: ctx.new_stream()?,
+            stream: device.new_stream()?,
         })
     }
 
     /// Returns a reference to the underlying stream.
-    pub fn stream(&self) -> &Arc<CudaStream> {
+    pub fn stream(&self) -> &Arc<Stream> {
         &self.stream
     }
 }
 
 impl SchedulingPolicy for SingleStream {
-    fn next_stream(&self) -> Result<Arc<CudaStream>, DeviceError> {
+    fn next_stream(&self) -> Result<Arc<Stream>, DeviceError> {
         Ok(Arc::clone(&self.stream))
     }
 }

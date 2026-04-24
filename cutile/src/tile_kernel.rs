@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use cuda_async::error::DeviceError;
 use cuda_core::DType;
-use cuda_core::{memcpy_dtoh_async, CudaFunction};
+use cuda_core::{memcpy_dtoh_async, Function};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, get_gpu_name};
@@ -174,7 +174,7 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
     scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
-) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
+) -> Result<(Arc<Function>, Arc<Validator>), Error> {
     let device_id: usize = ctx.get_device_id();
     // Compilation constructs a lookup key.
     let key = TileFunctionKey::new(
@@ -442,7 +442,7 @@ where
         scalar_hints: Vec<(String, DivHint)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
-    ) -> Result<(Arc<CudaFunction>, Arc<Validator>), Error> {
+    ) -> Result<(Arc<Function>, Arc<Validator>), Error> {
         compile_from_context(
             ctx,
             module_asts,

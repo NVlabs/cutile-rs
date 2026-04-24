@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Async Execution
 
 Understanding cuTile Rust's async execution model is essential for writing efficient GPU programs.
@@ -20,8 +24,8 @@ This separation is fundamental: your Rust code runs on the CPU and schedules wor
 A **stream** is a sequence of operations that execute in order on the GPU:
 
 ```rust
-let ctx = CudaContext::new(0)?;      // Connect to GPU device 0
-let stream = ctx.new_stream()?;       // Create a work queue
+let device = Device::new(0)?;      // Connect to GPU device 0
+let stream = device.new_stream()?;       // Create a work queue
 ```
 
 Key properties of streams:
@@ -488,7 +492,7 @@ let result = allocate_tensor()
 When you pass the same stream to multiple `.sync_on()` calls, all operations serialize on that stream:
 
 ```rust
-let stream = ctx.new_stream()?;
+let stream = device.new_stream()?;
 
 let a = op_a.sync_on(&stream);  // Stream X: runs first
 let b = op_b.sync_on(&stream);  // Stream X: waits for op_a
@@ -552,7 +556,7 @@ let tensor = create_tensor().await;
 let result = process(tensor).await;
 
 // Pattern 3: Pin to the same stream — CUDA guarantees ordering
-let stream = ctx.new_stream()?;
+let stream = device.new_stream()?;
 let tensor = create_tensor().sync_on(&stream);
 let result = process(tensor).sync_on(&stream);
 ```
@@ -614,8 +618,8 @@ let (result, next_buffer) = tokio::join!(compute_op, transfer_op);
 For explicit control, create dedicated streams:
 
 ```rust
-let compute_stream = ctx.new_stream()?;
-let transfer_stream = ctx.new_stream()?;
+let compute_stream = device.new_stream()?;
+let transfer_stream = device.new_stream()?;
 
 let result = heavy_kernel(input).sync_on(&compute_stream);
 let next_batch = load_data().sync_on(&transfer_stream); // overlaps!

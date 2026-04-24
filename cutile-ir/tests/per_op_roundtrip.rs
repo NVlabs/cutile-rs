@@ -2069,3 +2069,175 @@ fn roundtrip_make_tensor_view_2d() {
     );
     assert_roundtrip(&module);
 }
+
+// =========================================================================
+// DefaultValuedAttr regression tests.
+//
+// In C++/Python the writer materializes the default for
+// `DefaultValuedAttr<...>` attributes (via `populateDefaultProperties` /
+// caller-side default argument). Our Rust port reads from `op.attributes`
+// at write time, so the writer must tolerate the attr being absent and
+// serialize the TableGen-declared default. Without this support,
+// `write_bytecode` panics on any op produced by a path that doesn't
+// explicitly set the attr (e.g., `exti` → `trunci` conversion that omits
+// `overflow`; a `FToF` that omits `rounding_mode`; a `Global` without
+// alignment; etc.).
+//
+// Each test below builds an op WITHOUT the relevant attr and asserts the
+// write+decode succeeds. They protect against reintroducing the
+// `write_inline_attr` panic that blocked the kernel-generation workflow
+// on AddI/MulI/SubI/ShLI/TruncI (overflow), DivI (rounding), FToF
+// (rounding_mode), and Global (alignment).
+// =========================================================================
+
+#[test]
+fn default_valued_addi_overflow_absent() {
+    let module = build_kernel(
+        "addi_default_ov",
+        &[tile_i32(), tile_i32()],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::AddI, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .result(tile_i32())
+                // NOTE: no .attr("overflow", ...) — should default to NONE (0).
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_muli_overflow_absent() {
+    let module = build_kernel(
+        "muli_default_ov",
+        &[tile_i32(), tile_i32()],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::MulI, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .result(tile_i32())
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_subi_overflow_absent() {
+    let module = build_kernel(
+        "subi_default_ov",
+        &[tile_i32(), tile_i32()],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::SubI, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .result(tile_i32())
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_shli_overflow_absent() {
+    let module = build_kernel(
+        "shli_default_ov",
+        &[tile_i32(), tile_i32()],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::ShLI, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .result(tile_i32())
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_trunci_overflow_absent() {
+    let tile_i64 = Type::Tile(TileType {
+        shape: vec![128],
+        element_type: TileElementType::Scalar(ScalarType::I64),
+    });
+    let module = build_kernel("trunci_default_ov", &[tile_i64], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::TruncI, Location::Unknown)
+            .operand(args[0])
+            .result(tile_i32())
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_divi_rounding_absent() {
+    let module = build_kernel(
+        "divi_default_rm",
+        &[tile_i32(), tile_i32()],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::DivI, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .result(tile_i32())
+                .attr("signedness", Attribute::i32(1)) // required (non-default)
+                // NOTE: no .attr("rounding", ...) — should default to ZERO (1).
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_ftof_rounding_mode_absent() {
+    // f32 → f16 down-cast; rounding_mode omitted should default to NEAREST_EVEN (0).
+    let tile_f16 = Type::Tile(TileType {
+        shape: vec![128],
+        element_type: TileElementType::Scalar(ScalarType::F16),
+    });
+    let module = build_kernel("ftof_default_rm", &[tile_f32()], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::FToF, Location::Unknown)
+            .operand(args[0])
+            .result(tile_f16)
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}
+
+// =========================================================================
+// v13.2 field coverage: ensure NegI / TanH / For / Print all write without
+// panic even if their v13.2 attribute is absent.
+// =========================================================================
+
+#[test]
+fn default_valued_negi_overflow_absent() {
+    let module = build_kernel("negi_default_ov", &[tile_i32()], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::NegI, Location::Unknown)
+            .operand(args[0])
+            .result(tile_i32())
+            // no overflow attr; defaults to NONE (0)
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn default_valued_tanh_rounding_mode_absent() {
+    let module = build_kernel("tanh_default_rm", &[tile_f32()], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::TanH, Location::Unknown)
+            .operand(args[0])
+            .result(tile_f32())
+            // no rounding_mode; defaults to FULL (5)
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}

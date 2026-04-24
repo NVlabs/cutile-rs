@@ -12,7 +12,7 @@ Here is a kernel that prints "hello" from the GPU:
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile;
 use cutile::error::Error;
 use cutile::tile_kernel::TileKernel;
@@ -36,8 +36,8 @@ mod hello_world_module {
 use hello_world_module::hello_world_kernel;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     let launcher = hello_world_kernel();
     launcher.grid((2, 2, 1)).sync_on(&stream)?;
     Ok(())
@@ -85,8 +85,8 @@ The following host-side code will launch the device-side code:
 
 ```rust
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;             // Connect to GPU
-    let stream = ctx.new_stream()?;             // Create a work queue
+    let device = Device::new(0)?;             // Connect to GPU
+    let stream = device.new_stream()?;             // Create a work queue
     let launcher = hello_world_kernel();   // Get the kernel launcher
     launcher.grid((2, 2, 1)).sync_on(&stream)?; // Launch 2×2×1 = 4 tiles
     Ok(())

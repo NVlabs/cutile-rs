@@ -7,7 +7,7 @@ GPU performance optimization balances three concerns: memory bandwidth (moving d
 :alt: The GPU performance triangle showing memory bandwidth, compute utilization, and occupancy
 ```
 
-For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Integrating with CUDA C++](interoperability.md).
+For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Interoperability](interoperability.md).
 
 ---
 
@@ -252,4 +252,4 @@ Pre-ship checklist: tile size appropriate for workload and architecture; memory 
 
 ---
 
-Continue to [Integrating with CUDA C++](interoperability.md) for the escape hatch when tile programming isn't enough, or [Debugging and Profiling](debugging.md) for deeper troubleshooting.
+Continue to [Interoperability](interoperability.md) for the escape hatch when tile programming isn't enough, or [Debugging and Profiling](debugging.md) for deeper troubleshooting.

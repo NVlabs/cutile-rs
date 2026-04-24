@@ -5,7 +5,7 @@
 extern crate core;
 
 use cuda_async::device_operation::{DeviceOp, Unzippable6};
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
@@ -154,9 +154,9 @@ fn fmha(
     bbh: usize, // batch * num_heads part size.
 ) -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
-    let ctx = CudaContext::new(0)?;
+    let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.
-    let stream = ctx.new_stream()?;
+    let stream = device.new_stream()?;
 
     let seed = 123;
     let q: Arc<Tensor<f32>> = randn(0f32, 1., [b, h, m, d], Some(seed))

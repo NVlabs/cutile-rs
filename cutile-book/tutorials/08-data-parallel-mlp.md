@@ -230,5 +230,5 @@ What would we need to change to construct a pipeline that overlaps data movement
 
 ## See also
 
-- [Orchestrating Device Operations](../guide/device-operations.md) — stream scheduling and the `DeviceOp` lifecycle
+- [Device Operations](../guide/device-operations.md) — stream scheduling and the `DeviceOp` lifecycle
 - [Host API](../reference/host-api.md) — `.schedule()`, scheduling policies, and execution methods

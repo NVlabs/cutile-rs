@@ -164,11 +164,11 @@
     
     <g transform="translate(14, 44)" font-family="'RobotoMono', monospace" font-size="10" fill="#374151">
       <text fill="#dc2626">let</text>
-      <text x="22">ctx =</text>
-      <text x="52" fill="#2563eb">CudaContext</text>
-      <text x="118">::new(0)?;</text>
+      <text x="22">device =</text>
+      <text x="76" fill="#2563eb">Device</text>
+      <text x="112">::new(0)?;</text>
       <text y="18" fill="#dc2626">let</text>
-      <text x="22" y="18">stream = ctx.new_stream()?;</text>
+      <text x="22" y="18">stream = device.new_stream()?;</text>
       <text y="38" fill="#dc2626">let</text>
       <text x="22" y="38">launcher =</text>
       <text x="90" y="38" fill="#7c3aed">compute</text>

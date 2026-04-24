@@ -29,9 +29,9 @@ use my_module::softmax;
 
 fn main() -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
-    let ctx = CudaContext::new(0)?;
+    let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.
-    let stream = ctx.new_stream()?;
+    let stream = device.new_stream()?;
     let (m, n) = (4, 8);
     let (bm, bn) = (2, n);
     let input: Arc<Tensor<f32>> = api::arange(m * n).sync_on(&stream)?.into();

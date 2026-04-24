@@ -9,7 +9,7 @@ use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
 use crate::error::{device_error, DeviceError};
 use crate::scheduling_policies::SchedulingPolicy;
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{Device, Stream};
 use std::cell::{Cell, UnsafeCell};
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -54,33 +54,33 @@ pub(crate) fn release_execution_lock() {
     });
 }
 
-pub type Device = usize;
+pub type DeviceOrdinal = usize;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
-    device: Device,
-    cuda_stream: Arc<CudaStream>,
-    cuda_context: Arc<CudaContext>,
+    ordinal: DeviceOrdinal,
+    cuda_stream: Arc<Stream>,
+    device: Arc<Device>,
 }
 
 impl ExecutionContext {
-    pub fn new(cuda_stream: Arc<CudaStream>) -> Self {
-        let cuda_context = cuda_stream.context().clone();
-        let device = cuda_context.ordinal();
+    pub fn new(cuda_stream: Arc<Stream>) -> Self {
+        let device = cuda_stream.device().clone();
+        let ordinal = device.ordinal();
         Self {
             cuda_stream,
-            cuda_context,
             device,
+            ordinal,
         }
     }
-    pub fn get_cuda_stream(&self) -> &Arc<CudaStream> {
+    pub fn get_cuda_stream(&self) -> &Arc<Stream> {
         &self.cuda_stream
     }
-    pub fn get_cuda_context(&self) -> &Arc<CudaContext> {
-        &self.cuda_context
+    pub fn device(&self) -> &Arc<Device> {
+        &self.device
     }
-    pub fn get_device_id(&self) -> Device {
-        self.device
+    pub fn get_device_id(&self) -> DeviceOrdinal {
+        self.ordinal
     }
     #[expect(
         dead_code,
@@ -328,7 +328,7 @@ pub trait DeviceOp:
     /// replayable graph and the initial output.
     fn graph_on(
         self,
-        stream: Arc<CudaStream>,
+        stream: Arc<Stream>,
     ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
         crate::cuda_graph::CudaGraph::capture(stream, self)
     }
@@ -351,7 +351,7 @@ pub trait DeviceOp:
     /// GPU data from the output.
     unsafe fn async_on(
         self,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<Stream>,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let ctx = ExecutionContext::new(stream.clone());
         unsafe { self.execute(&ctx) }
@@ -361,11 +361,11 @@ pub trait DeviceOp:
     /// This bypasses the scheduling policy entirely. All operations `sync_on` the same
     /// stream are guaranteed to execute in call order. Use this when you need deterministic
     /// ordering or are debugging concurrency issues.
-    fn sync_on(self, stream: &Arc<CudaStream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+    fn sync_on(self, stream: &Arc<Stream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         acquire_execution_lock()?;
         let ctx = ExecutionContext::new(stream.clone());
         let res = unsafe { self.execute(&ctx) };
-        let sync_res = stream.synchronize();
+        let sync_res = unsafe { stream.synchronize() };
         release_execution_lock();
         sync_res?;
         res

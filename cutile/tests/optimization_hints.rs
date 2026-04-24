@@ -72,6 +72,33 @@ mod opt_hints_module {
         let idx: [i32; 1] = [0i32];
         let _tile: Tile<f32, S> = load_from_view(&partition, idx, Some(L), false);
     }
+
+    /// load_ptr_tko with const-generic latency. This is the exact shape that
+    /// silently dropped the hint before the `extract_optional_i32_hint` fix
+    /// — the special-op handler only matched `Expr::Lit(Int)` and ignored
+    /// `Expr::Path`.
+    #[cutile::entry()]
+    fn load_ptr_const_latency_kernel<const S: [i32; 1], const L: i32>(output: &mut Tensor<f32, S>) {
+        let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
+        let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
+        let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
+        let (loaded, _tok): (Tile<f32, S>, Token) =
+            load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Some(L));
+        output.store(loaded);
+    }
+
+    /// Mirror of `load_ptr_const_latency_kernel` for `store_ptr_tko`.
+    #[cutile::entry()]
+    fn store_ptr_const_latency_kernel<const S: [i32; 1], const L: i32>(
+        output: &mut Tensor<f32, S>,
+    ) {
+        let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
+        let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
+        let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
+        let vals: Tile<f32, S> = constant(1.0f32, output.shape());
+        let _tok: Token = store_ptr_tko(ptrs, vals, "weak", "tl_blk", None, None, Some(L));
+        output.store(vals);
+    }
 }
 
 use opt_hints_module::_module_asts;
@@ -256,6 +283,75 @@ fn load_view_const_latency_in_mlir() {
         assert!(
             mlir.contains("latency = 5"),
             "Expected latency=5 from const generic L=5.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+/// Regression for the `Some(LATENCY)` drop in `compile_load_ptr_tko`. Before
+/// the fix, the special-op handler matched only `Expr::Lit(Int)` and
+/// silently ignored `Expr::Path` (const generics), so this kernel compiled
+/// without any `optimization_hints` attribute at all.
+#[test]
+fn load_ptr_const_latency_in_mlir() {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "opt_hints_module",
+            "load_ptr_const_latency_kernel",
+            &[128.to_string(), 3.to_string()], // S=128, L=3
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed to create compiler");
+        let module_op = compiler.compile().expect("Failed to compile");
+        let mlir = module_op.to_string();
+        drop(module_op);
+        drop(compiler);
+        println!("{mlir}");
+        assert!(
+            mlir.contains("latency = 3"),
+            "Expected latency=3 from const generic L=3 in load_ptr_tko. \
+             Was previously silently dropped.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+/// Regression mirror of `load_ptr_const_latency_in_mlir` for the store path.
+#[test]
+fn store_ptr_const_latency_in_mlir() {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "opt_hints_module",
+            "store_ptr_const_latency_kernel",
+            &[128.to_string(), 7.to_string()], // S=128, L=7
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed to create compiler");
+        let module_op = compiler.compile().expect("Failed to compile");
+        let mlir = module_op.to_string();
+        drop(module_op);
+        drop(compiler);
+        println!("{mlir}");
+        assert!(
+            mlir.contains("latency = 7"),
+            "Expected latency=7 from const generic L=7 in store_ptr_tko. \
+             Was previously silently dropped.\nMLIR:\n{mlir}"
         );
     });
 }

@@ -66,8 +66,8 @@ mod my_kernels {
 use my_kernels::{apply_relu, apply_relu_square};
 
 fn main() -> Result<(), Error> {
-    let ctx: Arc<CudaContext> = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device: Arc<Device> = Device::new(0)?;
+    let stream = device.new_stream()?;
     let block: usize = 64;
     let n: usize = 128;
 

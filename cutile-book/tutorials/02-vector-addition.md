@@ -8,7 +8,7 @@ In cutile, tile threads run concurrently and each tile knows its coordinates via
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api::{ones, zeros};
@@ -35,8 +35,8 @@ mod my_module {
 use my_module::add;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     
     // Create input tensors: 32×32 matrices filled with 1.0
     let x: Arc<Tensor<f32>> = ones(&[32, 32]).sync_on(&stream)?.into();
