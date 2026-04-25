@@ -384,79 +384,66 @@ no MLIR operation is emitted.
 
 ---
 
-## Variadic expansion macros
+## Rank-polymorphism macros
+
+The DSL is rank-polymorphic via const-generic-array (CGA) generics —
+parameters of the form `const X: [i32; N]`. Items annotated with the macros
+below get specialized over the supported ranks.
 
 ### `#[cuda_tile::variadic_struct(N = 6)]`
 
-Stamps out rank-specific struct definitions for ranks 1 through `N`.
-`Tile<E, {[i32; N]}>` becomes `Tile__1<E, D0>`, `Tile__2<E, D0, D1>`, etc.
+Emits per-rank struct definitions for ranks 0 through `N`.
+`Tile<E, const D: [i32; N]>` produces `Tile_0<E>`, `Tile_1<E, const D_0: i32>`,
+`Tile_2<E, const D_0: i32, const D_1: i32>`, etc.
 
-Optional: `constructor = "new"` generates a constructor function.
-
-### `#[cuda_tile::variadic_op(N = 6)]` / `#[cuda_tile::variadic_op(N = 6, M = 6)]`
-
-Stamps out rank-specific function definitions. A function with one CGA parameter
-produces `N` variants; with two CGA parameters (`N` and `M`), produces `N x M`.
-
-The function name gets a rank suffix: `reshape` with N=2, M=3 becomes `reshape__2_3`.
-
-Each function must have a `VariadicOpData` entry in
-`cutile-macro/src/types.rs:get_variadic_op_data`. This entry tells the macro how
-to map Rust types to const generic array dimensions for name mangling.
+Optional: `constructor = "new"` generates a `const_new()` constructor on
+each per-rank variant. If the struct has a slice-typed `dims` field, the
+macro additionally emits `new_K(dims: &'a [i32; K])` for each `K`.
 
 ### `#[cuda_tile::variadic_impl(N = 6)]`
 
-Stamps out rank-specific impl blocks, applying variadic expansion to all methods.
+For inherent impls on a CGA-bearing struct (`impl<E, const D: [i32; N]> Tile<E, D> { … }`),
+emits one per-rank impl block, with method bodies rewritten so any reference
+to `D`, `Shape<D>`, `Tile<E, D>`, etc. picks up the per-rank concrete form.
+Method names are not suffixed; rustc's receiver-type dispatch already
+disambiguates.
 
-### How variadic expansion interacts with JIT metadata
+### `#[cuda_tile::variadic_op(N = 6)]`
 
-The `#[cuda_tile::op]` and `#[cuda_tile::ty]` attributes survive variadic
-expansion -- they are cloned along with the item. So `make_partition_view_padded`
-with `N = 6` produces `make_partition_view_padded__1` through
-`make_partition_view_padded__6`, each carrying the same `cuda_tile::op`
-annotation. The JIT looks up these concrete names in its function registry.
+For free functions, this emits a single CGA-erased rank-polymorphic **trait** plus
+per-rank `impl`s plus a free-fn wrapper that delegates through the trait.
+The user-facing free-fn name is preserved; rustc resolves call sites via
+normal trait lookup (no rank suffix in user code).
 
-### `VariadicOpData` in `types.rs`
+The emitter recognizes three return-type shapes (case-3a same-shape, case-3b
+bound `Self::Out`, case-3c free `Out` as trait generic). See
+`cutile-macro/README.md` for the worked-out example. Optional parameter:
+`method = "name"` overrides the trait method name when the user-facing
+method should differ from the fn ident (e.g. `reshape_ptr` whose method is
+`reshape`); `trait_name = "Name"` overrides the synthesized trait ident
+when the default `PascalCase(fn_name)` would collide with a user trait of
+the same name.
 
-Every variadic function needs a `VariadicOpData` entry. Multiple function names
-can share one entry if they have the same generic structure:
+### `#[cuda_tile::variadic_trait(N = 6)]` and `#[cuda_tile::variadic_trait_impl()]`
 
-```rust
-"make_partition_view_mut" | "make_partition_view_mut_padded" => Some(VariadicOpData {
-    const_length_vars: &["N"],
-    cga_map: HashMap::from([("TENSOR_SHAPE", "N"), ("TILE_SHAPE", "N")]),
-    input_map: vec![
-        (0, "Tensor", &["TENSOR_SHAPE"]),
-        (1, "Shape", &["TILE_SHAPE"]),
-    ],
-    output_map: ("PartitionMut", &["TILE_SHAPE"]),
-    return_type: ("PartitionMut", &["'_", "_", "TILE_SHAPE"]),
-}),
-```
+For user-defined traits like `BroadcastScalar` that need rank-polymorphism:
+the trait declaration desugars to the same CGA-erased rank-polymorphic form, and
+its impl emits per-rank impls of that trait.
 
-- `const_length_vars`: Names of the array-length variables (here just `"N"`)
-- `cga_map`: Maps type parameter names to their length variable
-- `input_map`: Maps argument positions to expected types and their CGA params
-  (only typed variadic args -- `padding_value: &str` and `token: Token` are
-  skipped because they aren't variadic)
-- `output_map` / `return_type`: Type name and generic args for the output
+### How rank-polymorphism interacts with JIT metadata
 
-The method map in `get_variadic_method_data` connects Rust method syntax to
-variadic functions:
-```rust
-"Tensor" => HashMap::from([
-    ("store", "store_tile"),   // tensor.store(tile) becomes store_tile(tensor, tile)
-    ("load_tile", "load_tile"),
-    ("partition", "make_partition_view"),
-    ...
-]),
-```
+The `#[cuda_tile::op]` and `#[cuda_tile::ty]` attributes survive expansion;
+they are cloned along with each per-rank item. The JIT, however, doesn't
+look at the macro-emitted forms — it works from the *original* generic
+source captured by `_module_asts()`. So the macro and the JIT each
+instantiate per-rank independently: the macro for rustc, the JIT for code
+generation. There is no global registry connecting them.
 
 ---
 
 ## Inlined (composite) functions
 
-Functions with `#[cuda_tile::variadic_op]` but WITHOUT `#[cuda_tile::op]` or
+Free functions with `#[cuda_tile::variadic_op]` but no `#[cuda_tile::op]` /
 `#[cuda_tile::compiler_op]` have real bodies. The JIT inlines them:
 
 ```rust
@@ -475,12 +462,12 @@ pub fn store_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>, resul
 This composes primitive ops (`get_tensor_token`, `make_partition_view_mut_padded`,
 `store_to_view_mut`, etc.) without emitting a single MLIR op of its own.
 
-When the JIT encounters a call to `store_tile__2(...)`:
+When the JIT encounters a call to `store_tile(...)`:
 1. `get_cuda_tile_op_attrs` returns `None` (no `cuda_tile::op`)
 2. `get_function_by_name` returns the function item
 3. No `cuda_tile::compiler_op` -- falls through to `inline_function_call`
-4. The body is compiled in the caller's context, with arguments bound to
-   parameter names
+4. The body is compiled in the caller's context with the call's CGA values
+   bound to the function's CGA generic, and arguments bound to parameter names
 
 ---
 

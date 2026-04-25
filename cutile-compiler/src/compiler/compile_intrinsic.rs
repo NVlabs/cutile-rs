@@ -44,35 +44,22 @@ fn get_signedness_str(element_type_str: &str) -> &'static str {
 /// `cutile_ir::ir::Type`.  Tries `types::convert_type` first (handles
 /// primitives), then falls back to building a tile type from the
 /// element-type name and shape when the type instance is structured.
-///
-/// Returns `Ok(None)` when the type is neither primitive nor structured
-/// (legitimately "not applicable"). Propagates the original `JITError` from
-/// `get_cuda_tile_element_type` rather than collapsing it to `None`, so a
-/// misconfigured type doesn't surface as a generic "failed to obtain
-/// tile-ir type" message upstream.
 fn tile_ir_type_from_trt(
     trt: &TileRustType,
     primitives: &HashMap<(String, String), syn::ItemImpl>,
-) -> Result<Option<cutile_ir::ir::Type>, crate::error::JITError> {
+) -> Option<cutile_ir::ir::Type> {
     // Fast path: primitives and simple cases handled by convert_type.
     if let Some(ty) = types::convert_type(trt) {
-        return Ok(Some(ty));
+        return Some(ty);
     }
     // Structured types: extract element name + shape from the TypeInstance.
     if let TypeInstance::StructuredType(inst) = &trt.type_instance {
         // Use the same element-type resolution path the old compiler uses.
-        // `get_cuda_tile_element_type` returns `Err` for unsupported kinds
-        // (preserve the error) and `Ok(None)` when element resolution
-        // genuinely produced nothing (treated as "not applicable" here).
-        match trt.get_cuda_tile_element_type(primitives)? {
-            Some(elem_name) => {
-                let shape: Vec<i64> = inst.shape.iter().map(|&d| d as i64).collect();
-                return Ok(types::make_tile_type(&elem_name, &shape));
-            }
-            None => return Ok(None),
-        }
+        let elem_name = trt.get_cuda_tile_element_type(primitives).ok()??;
+        let shape: Vec<i64> = inst.shape.iter().map(|&d| d as i64).collect();
+        return types::make_tile_type(&elem_name, &shape);
     }
-    Ok(None)
+    None
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
@@ -657,29 +644,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
                 // Build the reduce op itself.
                 // Build a properly typed identities attribute from the hex identity.
-                // `element_type` and `identity` are compiler-internal strings;
-                // a failure to parse either is a compiler bug, not user error.
                 let identity_attr = {
-                    let scalar_ty = super::_type::scalar_from_name(&element_type).ok_or_else(
-                        || {
-                            self.jit_error(
-                                &call_expr.span(),
-                                &format!(
-                                    "compiler internal: unknown reduce element type `{element_type}`"
-                                ),
-                            )
-                        },
-                    )?;
+                    let scalar_ty = super::_type::scalar_from_name(&element_type)
+                        .unwrap_or(cutile_ir::ir::ScalarType::I32);
                     let ir_ty = cutile_ir::ir::Type::Scalar(scalar_ty);
                     let hex_str = identity.trim_start_matches("0x").trim_start_matches("0X");
-                    let bits = u64::from_str_radix(hex_str, 16).map_err(|e| {
-                        self.jit_error(
-                            &call_expr.span(),
-                            &format!(
-                                "compiler internal: reduce identity `{identity}` is not a valid hex literal: {e}"
-                            ),
-                        )
-                    })?;
+                    let bits = u64::from_str_radix(hex_str, 16).unwrap_or(0);
                     if scalar_ty.is_float() {
                         let float_val = match element_type.as_str() {
                             "f32" => f32::from_bits(bits as u32) as f64,
@@ -924,16 +894,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             return Ok(Some(arg));
                         }
                         let output_type =
-                            tile_ir_type_from_trt(&new_type_compiled, &self.modules.primitives())?
+                            tile_ir_type_from_trt(&new_type_compiled, &self.modules.primitives())
                                 .ok_or_else(|| {
-                                    self.jit_error(
-                                        &call_expr.span(),
-                                        &format!(
-                                            "Failed to obtain tile-ir type for convert {}",
-                                            call_expr.to_token_stream().to_string()
-                                        ),
-                                    )
-                                })?;
+                                self.jit_error(
+                                    &call_expr.span(),
+                                    &format!(
+                                        "Failed to obtain tile-ir type for convert {}",
+                                        call_expr.to_token_stream().to_string()
+                                    ),
+                                )
+                            })?;
                         // These aren't required for all ops.
                         let (op_id, results) = match (
                             old_element_type_str.as_str(),

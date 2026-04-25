@@ -49,6 +49,59 @@ mod binary_math_ops_module {
         let result: Tile<bf16, S> = product / x;
         output.store(result);
     }
+
+    // Exercises the trait-dispatched `addf` — Phase B proof point.
+    // Direct call; resolves via the free-fn wrapper emitted by the
+    // trait-dispatch macro (not the variadic `addf__N_N` rewriter).
+    #[cutile::entry()]
+    fn addf_trait_dispatch_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = addf(x, y, rounding::NearestEven, ftz::Disabled);
+        output.store(result);
+    }
+
+    // Nested addf: inner result flows into outer call without an intermediate
+    // let-binding. This is the exact case today's variadic-expansion rewriter
+    // fails to desugar — under trait dispatch it resolves via rustc inference.
+    #[cutile::entry()]
+    fn addf_trait_dispatch_nested_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let z: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = addf(
+            addf(x, y, rounding::NearestEven, ftz::Disabled),
+            z,
+            rounding::NearestEven,
+            ftz::Disabled,
+        );
+        output.store(result);
+    }
+
+    // Case-3b proof point: reshape has two independent CGAs (S and R), so it
+    // produces a rank-changing return type via an associated `Out`. Verifies
+    // the multi-CGA code path through the trait-dispatch emitter.
+    #[cutile::entry()]
+    fn reshape_trait_dispatch_kernel<const S: [i32; 2]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let target: Shape<{ [128] }> = Shape::<{ [128] }> { dims: &[128i32] };
+        let flat: Tile<f32, { [128] }> = reshape(x, target);
+        let back_shape: Shape<S> = output.shape();
+        let back: Tile<f32, S> = reshape(flat, back_shape);
+        output.store(back);
+    }
+
+    // Case-3c proof point: reduce_sum's return CGA (R) is not in any arg,
+    // so `Out` must be a trait generic inferred from the return-type ascription.
+    #[cutile::entry()]
+    fn reduce_sum_trait_dispatch_kernel<const S: [i32; 2]>(
+        input: &mut Tensor<f32, S>,
+        output: &mut Tensor<f32, { [1, 1] }>,
+    ) {
+        let tile: Tile<f32, S> = load_tile_mut(input);
+        let reduced: Tile<f32, { [1, 1] }> = reduce_sum(tile, 1i32);
+        output.store(reduced);
+    }
 }
 
 use binary_math_ops_module::_module_asts;
@@ -154,6 +207,127 @@ fn compile_bf16_binary_arith() -> () {
         assert!(
             module_op_str.contains("bf16"),
             "Expected bf16 type in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_addf_trait_dispatch() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "binary_math_ops_module",
+            "addf_trait_dispatch_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== ADDF TRAIT DISPATCH MLIR ===\n{}", module_op_str);
+        assert!(
+            module_op_str.contains("= addf"),
+            "Expected addf operation in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_reshape_trait_dispatch() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "binary_math_ops_module",
+            "reshape_trait_dispatch_kernel",
+            &[8.to_string(), 16.to_string()],
+            &[("output", &[8, 16])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== RESHAPE TRAIT DISPATCH MLIR ===\n{}", module_op_str);
+        assert!(
+            module_op_str.contains("reshape"),
+            "Expected reshape operation in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_reduce_sum_trait_dispatch() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "binary_math_ops_module",
+            "reduce_sum_trait_dispatch_kernel",
+            &[8.to_string(), 16.to_string()],
+            &[("input", &[8, 16]), ("output", &[1, 1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!(
+            "\n=== REDUCE_SUM TRAIT DISPATCH MLIR ===\n{}",
+            module_op_str
+        );
+        assert!(
+            module_op_str.contains("reduce"),
+            "Expected reduce operation in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_addf_trait_dispatch_nested() -> () {
+    common::with_test_stack(|| {
+        let modules =
+            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "binary_math_ops_module",
+            "addf_trait_dispatch_nested_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!(
+            "\n=== ADDF TRAIT DISPATCH NESTED MLIR ===\n{}",
+            module_op_str
+        );
+        // Nested call site should lower to two `addf` ops in the MLIR.
+        let addf_count = module_op_str.matches("= addf").count();
+        assert!(
+            addf_count >= 2,
+            "Expected at least 2 addf operations (nested), got {}",
+            addf_count
         );
     });
 }

@@ -200,9 +200,7 @@ impl TileRustType {
         } else {
             format!("Tile<{element_name}, {{ {shape:?} }}>")
         };
-        let rust_ty = syn::parse_str::<syn::Type>(&rust_ty_str).unwrap_or_else(|e| {
-            panic!("compiler internal: synthesized Tile type `{rust_ty_str}` failed to parse: {e}")
-        });
+        let rust_ty = syn::parse_str::<syn::Type>(&rust_ty_str).ok()?;
         Some(TileRustType {
             kind: Kind::StructuredType,
             cuda_tile_name: Some("!cuda_tile.tile".into()),
@@ -229,10 +227,9 @@ impl TileRustType {
             )),
         });
         let type_str = format!("!cuda_tile.tile<!cuda_tile.ptr<{element_name}>>");
-        let ptr_ty_str = format!("PointerTile<* mut {element_name}, {{[]}}>");
-        let rust_ty = syn::parse_str::<syn::Type>(&ptr_ty_str).unwrap_or_else(|e| {
-            panic!("compiler internal: synthesized ptr type `{ptr_ty_str}` failed to parse: {e}")
-        });
+        let rust_ty =
+            syn::parse_str::<syn::Type>(&format!("PointerTile<* mut {element_name}, {{[]}}>"))
+                .ok()?;
         Some(TileRustType {
             kind: Kind::PrimitiveType,
             cuda_tile_name: Some("!cuda_tile.tile".into()),

@@ -340,9 +340,6 @@ impl<T> Drop for CudaGraph<T> {
 /// # Thread safety
 ///
 /// `Scope` is `!Send` — it cannot escape to another thread.
-///
-/// See `.internal/cuda-graph-redesign/SAFETY_PROOF_CUDA_GRAPH.md` for the full
-/// formal proof.
 pub struct Scope {
     ctx: ExecutionContext,
     _not_send: std::marker::PhantomData<*const ()>,

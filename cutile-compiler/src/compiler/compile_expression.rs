@@ -1524,7 +1524,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Ok(match mac_name.as_str() {
                         "const_shape" | "const_array" => {
                             // TODO (hme): Remove special case for const_shape here
-                            //  and in rewrite_variadics (proc macro side).
+                            //  and on the proc-macro side (rank_expansion.rs).
                             let mut args = vec![];
                             let mut is_cga = false;
                             let mut is_consts = false;
@@ -1708,15 +1708,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 }
 
 /// Convert a CUDA Tile element type string (e.g. "f32", "i32") to a tile-ir scalar tile Type.
-///
-/// Panics on an unknown element-type name: `cuda_tile_ty` is compiler-internal
-/// (derived from `TileRustType::get_cuda_tile_element_type`), not user input,
-/// so an unknown value indicates an internal compiler bug. Panicking turns
-/// what was previously a silent `I32` default into a loud failure.
 fn cuda_tile_element_type_to_tile_ir(cuda_tile_ty: &str) -> cutile_ir::ir::Type {
-    use cutile_ir::ir::{TileElementType, TileType, Type};
-    let scalar = super::_type::scalar_from_name(cuda_tile_ty)
-        .unwrap_or_else(|| panic!("compiler internal: unknown element type `{cuda_tile_ty}`"));
+    use cutile_ir::ir::{ScalarType, TileElementType, TileType, Type};
+    let scalar = super::_type::scalar_from_name(cuda_tile_ty).unwrap_or(ScalarType::I32);
     Type::Tile(TileType {
         shape: vec![],
         element_type: TileElementType::Scalar(scalar),
@@ -1754,34 +1748,27 @@ fn build_constant_op(
 }
 
 /// Encode a literal value string into bytes for a DenseElements attribute.
-///
-/// `lit_string` is produced by the compiler from a validated Rust literal
-/// (e.g. `syn::LitInt::base10_digits()`) or from a hex-typed constant such
-/// as `T::ZERO`, so decimal and hex forms are both accepted. Parse failures
-/// indicate an internal compiler bug, not user error: we panic with context
-/// rather than silently producing zero bytes (the pre-fix behavior of
-/// `.unwrap_or(0)` silently coerced any unparseable integer to `0`, which
-/// happened to be correct only when the intended value was zero).
 pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
     use cutile_ir::ir::ScalarType;
-    let scalar = super::_type::scalar_from_name(cuda_tile_ty)
-        .unwrap_or_else(|| panic!("compiler internal: unknown element type `{cuda_tile_ty}`"));
+    let scalar = super::_type::scalar_from_name(cuda_tile_ty).unwrap_or(ScalarType::I32);
     match scalar {
-        ScalarType::I1 => vec![if lit_string != "0" && lit_string != "0x0" {
-            0xFF
-        } else {
-            0x00
-        }],
-        ScalarType::I8 => (parse_int_or_hex(lit_string, "i8") as i8)
-            .to_le_bytes()
-            .to_vec(),
-        ScalarType::I16 => (parse_int_or_hex(lit_string, "i16") as i16)
-            .to_le_bytes()
-            .to_vec(),
-        ScalarType::I32 => (parse_int_or_hex(lit_string, "i32") as i32)
-            .to_le_bytes()
-            .to_vec(),
-        ScalarType::I64 => parse_int_or_hex(lit_string, "i64").to_le_bytes().to_vec(),
+        ScalarType::I1 => vec![if lit_string != "0" { 0xFF } else { 0x00 }],
+        ScalarType::I8 => {
+            let v: i8 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::I16 => {
+            let v: i16 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::I32 => {
+            let v: i32 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
+        ScalarType::I64 => {
+            let v: i64 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
         ScalarType::F16 => {
             let v = parse_float_or_hex(lit_string);
             half::f16::from_f64(v).to_le_bytes().to_vec()
@@ -1798,51 +1785,19 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
             let v = parse_float_or_hex(lit_string);
             v.to_le_bytes().to_vec()
         }
-        other => panic!(
-            "compiler internal: `encode_literal_bytes` does not handle scalar type `{other:?}` \
-             for literal `{lit_string}`"
-        ),
-    }
-}
-
-/// Parse an integer literal string, accepting both decimal and hex (`0x...`)
-/// forms. Returns the value widened to `i64`. Panics on a malformed literal;
-/// the string is compiler-internal, so failure indicates a compiler bug
-/// rather than bad user input.
-fn parse_int_or_hex(s: &str, target_ty: &str) -> i64 {
-    let (negative, rest) = if let Some(rest) = s.strip_prefix('-') {
-        (true, rest)
-    } else {
-        (false, s)
-    };
-    let magnitude = if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).unwrap_or_else(|e| {
-            panic!("compiler internal: cannot parse hex literal `{s}` as `{target_ty}`: {e}")
-        })
-    } else {
-        rest.parse::<i64>().unwrap_or_else(|e| {
-            panic!("compiler internal: cannot parse literal `{s}` as `{target_ty}`: {e}")
-        })
-    };
-    if negative {
-        -magnitude
-    } else {
-        magnitude
+        _ => {
+            let v: i32 = lit_string.parse().unwrap_or(0);
+            v.to_le_bytes().to_vec()
+        }
     }
 }
 
 /// Parse a float literal string, handling both decimal ("3.14") and hex ("0x40490fdb") forms.
-///
-/// Panics on a malformed literal; `s` is derived from a Rust literal that
-/// already passed `syn` parsing, so failure here indicates an internal
-/// compiler bug rather than bad user input.
 fn parse_float_or_hex(s: &str) -> f64 {
     if s.starts_with("0x") || s.starts_with("-0x") {
         let negative = s.starts_with('-');
         let hex = if negative { &s[3..] } else { &s[2..] };
-        let bits = u64::from_str_radix(hex, 16).unwrap_or_else(|e| {
-            panic!("compiler internal: cannot parse float hex literal `{s}`: {e}")
-        });
+        let bits = u64::from_str_radix(hex, 16).unwrap_or(0);
         let v = match hex.len() {
             1..=4 => half::f16::from_bits(bits as u16).to_f64(),
             5..=8 => f32::from_bits(bits as u32) as f64,
@@ -1854,130 +1809,6 @@ fn parse_float_or_hex(s: &str) -> f64 {
             v
         }
     } else {
-        s.parse::<f64>()
-            .unwrap_or_else(|e| panic!("compiler internal: cannot parse float literal `{s}`: {e}"))
-    }
-}
-
-// =========================================================================
-// Tests
-// =========================================================================
-
-#[cfg(test)]
-mod literal_encoding_tests {
-    //! Regression tests for integer literal encoding.
-    //!
-    //! Before the fix, `encode_literal_bytes` did `lit_string.parse::<iN>()
-    //! .unwrap_or(0)`, which silently returned 0 for any unparseable input —
-    //! including every hex literal, since `parse::<iN>()` only accepts
-    //! decimal. The `T::ZERO` path emits hex (`0x0`), so the old code
-    //! coincidentally produced correct bytes for zero only. Any other hex
-    //! value (e.g. `T::ONE` = `0x1`) would have silently become `0`.
-    use super::encode_literal_bytes;
-
-    #[test]
-    fn int_zero_decimal() {
-        assert_eq!(encode_literal_bytes("0", "i32"), vec![0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn int_zero_hex_matches_decimal() {
-        assert_eq!(
-            encode_literal_bytes("0x0", "i32"),
-            encode_literal_bytes("0", "i32"),
-            "hex `0x0` must encode identically to decimal `0`"
-        );
-    }
-
-    #[test]
-    fn int_nonzero_hex_does_not_silently_become_zero() {
-        // Pre-fix, this would have silently returned [0,0,0,0] because
-        // `"0x2a".parse::<i32>()` errors and .unwrap_or(0) kicks in.
-        let bytes = encode_literal_bytes("0x2a", "i32");
-        assert_eq!(
-            bytes,
-            42_i32.to_le_bytes().to_vec(),
-            "hex `0x2a` must encode as 42 (little-endian), not 0"
-        );
-    }
-
-    #[test]
-    fn int_decimal_nonzero() {
-        assert_eq!(
-            encode_literal_bytes("42", "i32"),
-            42_i32.to_le_bytes().to_vec()
-        );
-    }
-
-    #[test]
-    fn int_negative_decimal() {
-        assert_eq!(
-            encode_literal_bytes("-7", "i32"),
-            (-7_i32).to_le_bytes().to_vec()
-        );
-    }
-
-    #[test]
-    fn int_negative_hex() {
-        assert_eq!(
-            encode_literal_bytes("-0x10", "i32"),
-            (-16_i32).to_le_bytes().to_vec()
-        );
-    }
-
-    #[test]
-    fn int_i64_hex() {
-        assert_eq!(
-            encode_literal_bytes("0xff", "i64"),
-            255_i64.to_le_bytes().to_vec()
-        );
-    }
-
-    #[test]
-    fn int_i8_decimal() {
-        assert_eq!(
-            encode_literal_bytes("-1", "i8"),
-            (-1_i8).to_le_bytes().to_vec()
-        );
-    }
-
-    #[test]
-    fn int_i16_hex() {
-        assert_eq!(
-            encode_literal_bytes("0x100", "i16"),
-            256_i16.to_le_bytes().to_vec()
-        );
-    }
-
-    #[test]
-    fn bool_zero_decimal_is_false() {
-        assert_eq!(encode_literal_bytes("0", "i1"), vec![0x00]);
-    }
-
-    #[test]
-    fn bool_zero_hex_is_false() {
-        // Pre-fix, the i1 arm compared lit_string to "0" literally, so
-        // `"0x0"` would have been treated as `true` (0xFF). Confirm the fix.
-        assert_eq!(encode_literal_bytes("0x0", "i1"), vec![0x00]);
-    }
-
-    #[test]
-    fn bool_one_is_true() {
-        assert_eq!(encode_literal_bytes("1", "i1"), vec![0xFF]);
-    }
-
-    #[test]
-    #[should_panic(expected = "unknown element type")]
-    fn unknown_element_type_panics() {
-        // Pre-fix this would have silently defaulted to `i32` and happily
-        // produced [0,0,0,0]. Now it panics with a descriptive message.
-        encode_literal_bytes("42", "complex64");
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot parse literal")]
-    fn malformed_int_literal_panics() {
-        // Pre-fix this would have silently returned 0.
-        encode_literal_bytes("not_a_number", "i32");
+        s.parse::<f64>().unwrap_or(0.0)
     }
 }

@@ -1,148 +1,104 @@
 # cuTile Rust Macros
 
-This crate defines the procedural macros behind `cutile::module`.
-It expands cuTile Rust modules into:
+Procedural macros behind `cutile::module`. They expand cuTile Rust modules into:
 
-- type-checkable Rust items
-- JIT-compilable AST builders
-- generated host-side kernel launch functions
+- Type-checkable Rust items that drive rustc's validation of kernel code.
+- An AST capture (`_module_asts()`) that hands the original generic source to the JIT compiler.
+- Host-side kernel launch functions for `#[entry]` points.
 
-# Debugging
+## Two-track design: macro output is for rustc, not the JIT
 
-Generate backtraces:
-```bash
-export RUSTFLAGS="-Zproc-macro-backtrace -Zmacro-backtrace"; export RUST_BACKTRACE=1;
+The macro runs at Rust compile time and emits three kinds of output:
+
+1. **Per-rank specializations and rank-polymorphic trait dispatch.** Items that use a const-generic-array (CGA) generic — `const X: [i32; N]` — get materialized as concrete Rust that rustc can type-check. See *Per-rank expansion* and *Trait dispatch* below.
+2. **AST capture.** `_module_asts()` stores the pre-expansion source text via `Span::source_text()` and re-parses it at runtime for the JIT compiler. The JIT sees the *original generic* `fn foo<const S: [i32; N]>(...) { … real body … }`, not macro-emitted expansions.
+3. **Kernel launchers** for `#[entry]` functions.
+
+The separation matters: items emitted in (1) exist only to make rustc type-check kernel bodies and give good error messages. The JIT does its own per-rank instantiation from the original source, independent of anything the macro emits. Consequently, the macro never has to grow to support new user-code language features — adding support for (say) user-defined structs or methods is the JIT's job. The macro only has to handle whatever Rust patterns appear in op signatures inside `_core.rs`.
+
+## Per-rank expansion (`rank_expansion.rs`)
+
+For items annotated with `#[cuda_tile::variadic_struct]`, `#[cuda_tile::variadic_impl]`, or `#[cuda_tile::variadic_trait_impl]`, the macro emits one concrete copy per rank, replacing each `const X: [i32; N]` with scalar consts `X_0, X_1, …, X_{R-1}` and suffixing CGA-bearing path segments accordingly.
+
+```rust
+// Source
+#[cuda_tile::variadic_struct(N = 4)]
+pub struct Tile<E: ElementType, const D: [i32; N]> { _type: PhantomData<E> }
+
+// Macro output (abridged):
+pub struct Tile_1<E: ElementType, const D_0: i32> { /* … */ }
+pub struct Tile_2<E: ElementType, const D_0: i32, const D_1: i32> { /* … */ }
+// … through Tile_4
 ```
 
-Dump the generated kernel launch code to a given directory:
+Inherent impls expand the same way; their method bodies get walked by a `syn::visit_mut::VisitMut` pass (`RankExpander`) that substitutes the active CGA bindings into types, expression paths, struct literals, and `const_shape!` / `const_array!` macros.
+
+## Trait dispatch (`trait_dispatch.rs`)
+
+Any function annotated with `#[cuda_tile::variadic_op(...)]`, or any trait declared with `#[cuda_tile::variadic_trait(...)]`, is treated as rank-polymorphic. Instead of emitting per-rank-mangled callables, the macro produces a single CGA-erased rank-polymorphic trait, per-rank `impl`s of it, and (for free fns) a free-fn wrapper that delegates through the trait. User code calls the unsuffixed name and rustc resolves it via normal trait lookup.
+
+Example — `addf` (same-shape case):
+
+```rust
+// Source
+#[cuda_tile::variadic_op(N = 6)]
+pub fn addf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
+    lhs: Tile<E, S>, rhs: Tile<E, S>, rounding: R, ftz: F,
+) -> Tile<E, S>;
+
+// Macro output (abridged — trait + wrapper shown; 7 per-rank impls elided)
+trait Addf<R, F> {
+    fn addf(self, rhs: Self, rounding: R, ftz: F) -> Self;
+}
+impl<E: ElementType, R: rounding::Mode, F: ftz::Mode, const S_0: i32>
+    Addf<R, F> for Tile_1<E, S_0>
+{ fn addf(self, rhs: Self, rounding: R, ftz: F) -> Self { unreachable!() } }
+// ... ranks 0..=6
+
+pub fn addf<__T, R, F>(lhs: __T, rhs: __T, rounding: R, ftz: F) -> __T
+where __T: Addf<R, F> { lhs.addf(rhs, rounding, ftz) }
+```
+
+User code writes the call naturally; rustc resolves it through the trait:
+
+```rust
+fn kernel<const S: [i32; 2]>(x: Tile<f32, S>, y: Tile<f32, S>) -> Tile<f32, S> {
+    addf(x, y, rounding::NearestEven, ftz::Disabled)
+}
+```
+
+### Signature patterns the emitter handles
+
+The emitter recognizes three shapes for the return type and emits the right trait form for each:
+
+- **Same-shape (case 3a).** Return matches the first shape-bearing arg. Method returns `Self`. Examples: `addf`, `subf`, unary math, `fma`, comparisons that preserve shape.
+- **Bound return (case 3b).** Return differs from `Self` but every generic in the return is also referenced by some argument. Method returns `Self::Out` with an associated type. Examples: `reshape`, `broadcast`, `constant`, comparisons with `bool` return.
+- **Free return (case 3c).** Return contains a generic not present in any argument (an associated type would break coherence). `Out` becomes a trait generic that the caller ascribes at the return site. Examples: `permute`, `reduce_sum`, `bitcast`, `exti`.
+
+The emitter also handles: nested-type recursion (`Option<Tile<bool, S>>`), reborrow on reference receivers (`&Tensor`, `&mut Tensor`), return-only lifetimes (lifted to trait generics), rank-dependent argument types (`idx: [i32; N]` promoted to a trait generic), and literal-CGA patterns (`Tile<E, {[]}>` → `Tile_0<E>`).
+
+## Debugging
+
+Generate backtraces on macro panics:
+
+```bash
+export RUSTFLAGS="-Zproc-macro-backtrace -Zmacro-backtrace"
+export RUST_BACKTRACE=1
+```
+
+Dump generated kernel launcher code to a directory:
+
 ```bash
 export DUMP_KERNEL_LAUNCHER_DIR="temp"
 ```
-# Description and Limitations
 
-This crate does the following:
-- Generates concrete items for structs and functions which take const generic arrays (CGAs).
-- Rewrites struct types and calls to functions which take CGAs.
+Inspect macro-emitted code for a specific module:
 
-The procedural macro has only syntax available to it. Functions which take CGAs require the length of the CGA
-to be known during macro expansion.
-
-For example:
-```rust
-fn f<const S: [i32; N]>(param1: Type1<S>) -> Type2<S> {...}
-
-fn kernel<const S: [i32; 2]>(shape: Shape<S>) {
-    let x: Type1<S> =  type_1_constructor(shape);
-    let y: Type2<S> = f(x);
-}
+```bash
+cargo expand -p cutile --lib
 ```
 
-`f` takes a type parameterized by a variable length const generic array. During macro expansion, 
-const generic arrays of each length up to `N=x`, where `x` is a known literal during macro expansion,
-are generated as follows:
-
-```rust
-// CGA instance generation.
-fn f__0<const S: [i32; 0]>(param1: Type1__0<S>) -> Type2__0<S> {...}
-fn f__1<const S: [i32; 1]>(param1: Type1__1<S>) -> Type2__1<S> {...}
-fn f__2<const S: [i32; 2]>(param1: Type1__2<S>) -> Type2__2<S> {...}
-```
-
-Const generic arrays are then desugared and emitted as follows:
-```rust
-// CGA desugaring.
-fn f__0(param1: Type1__0) -> Type2__0 {...}
-fn f__1<const S1: i32>(param1: Type1__1<S1>) -> Type2__1<S1> {...}
-fn f__2<const S1: i32, const S2: i32>(param1: Type1__2<S1, S2>) -> Type2__2<S1, S2> {...}
-```
-
-Defining and expanding variable length CGAs is only available in the core module.
-Programmers are otherwise free to use const generic arrays with known lengths in their own cuTile Rust modules.
-
-For example: 
-
-```rust
-fn user_function<const S: [i32; 2]>(x: f32, shape: Shape<S>) -> Tile<f32, S> {
-    let ones_shape: Shape<{[1, 1]}> = Shape::<{[1, 1]}>{dims: &[]};
-    let tile_x: Tile<f32, {[]}> = scalar_to_tile(x);
-    tile_x.reshape(ones_shape).broadcast(shape)
-}
-```
-
-The cuTile Rust macro will desugar this into the following function:
-```rust
-fn user_function<const S1: i32, const S2: i32>(x: f32, shape: Shape__2<S1, S2>) -> Tile__2<f32, S1, S2> {
-    let ones_shape: Shape__2<1, 1> = Shape__2::<1, 1>{dims: &[]};
-    let tile_x: Tile__0<f32> = scalar_to_tile(x);
-    tile_x.reshape__0__2(ones_shape).broadcast(shape)
-}
-```
-
-The reshape method requires distinct implementations due to its use of multiple CGAs of different rank.
-
-A current limitation of this solution is that the types of expressions which return types which are generic over 
-const arrays must be known during macro expansion. 
-In some cases, this is only possible if the type information for the expression
-is named before providing the expression to a function which supports variable length const generic arrays.
-
-For example:
-```rust
-fn kernel<const S: [i32; 2]>(a: f32, y: Type<S>) {
-    let ones_shape: Shape<{[1, 1]}> = Shape::<{[1, 1]}>{dims: &[]};
-    let tile_a: Tile<f32, {[1, 1]}> = reshape(scalar_to_tile(a), ones_shape);
-}
-```
-
-The above function needs to be desugared to Rust:
-```rust
-fn kernel<const S1: i32, const S2: i32>(a: f32, y: Type__2<S1, S2>) {
-    let ones_shape: Shape__2<1, 1> = Shape__2::<1, 1>{dims: &[]};
-    let tile_a: Tile__2<f32, {[1, 1]}> = reshape__0__2(scalar_to_tile(a), ones_shape);
-}
-```
-
-We are able to infer the rank of the shape (2), but we are unable to infer the rank of the input tile (0).
-The macro only has the syntax `scalar_to_tile(a)`. For many built-in functions, we provide hints to the macro to
-infer the types of these kinds of expressions, but inference of return types more generally
-is not supported.
-
-For the above kernel function, the compiler provides the source of the problem:
-```
-> Unable to infer type for argument 0 for call to reshape. Expected Tile. Required by calls to variadic functions and methods.
-```
-
-These error messages can be improved to provide explicit solutions to the problem. The solution in this case is to
-bind the result of `scalar_to_tile(a)` to a variable with static type:
-```rust
-fn kernel<const S: [i32; 2]>(a: f32, y: Type<S>) {
-    let ones_shape: Shape<{[1, 1]}> = Shape::<{[1, 1]}>{dims: &[1i32; 2]};
-    let tile_a: Tile<f32, {[]}> = scalar_to_tile(a);
-    let tile_a: Tile<f32, {[1, 1]}> = reshape(a, ones_shape);
-}
-```
-
-Since variable length const generic arrays are only available to the core module,
-this is not a major limitation to programmers who write their own functions. 
-
-For example:
-```rust
-fn user_function<const S: [i32; 2]>(x: f32, shape: Shape<S>) -> Tile<f32, S> {
-    let ones_shape: Shape<{[1, 1]}> = Shape::<{[1, 1]}>{dims: &[1i32, 1i32]};
-    let tile_x: Tile<f32, {[]}> = scalar_to_tile(x);
-    tile_x.reshape(ones_shape).broadcast(shape)
-}
-
-fn kernel<const S: [i32; 2]>(a: f32, y: Type<S>) {
-    let tile_a: Tile<f32, S> = user_function(a, y.shape());
-}
-```
-
-Since `user_function` does not take a variable length CGA, the cuTile Rust macro does not need to rewrite it.
-In other words, the expression `user_function(a, y.shape())` compiles because there is only one `user_function`.
-
-# Testing
-
-Run the macro crate tests with:
+## Testing
 
 ```bash
 cargo test -p cutile-macro

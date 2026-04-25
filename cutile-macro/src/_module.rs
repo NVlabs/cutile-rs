@@ -3,56 +3,54 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Main module macro implementation and orchestration.
+//! Module-macro orchestration.
 //!
-//! This module orchestrates the entire macro expansion pipeline,
-//! including validation, AST generation, and launcher creation.
+//! Walks the items inside `#[cutile::module]`, dispatches each to the right
+//! transformer, and stitches the result back into a `pub mod` body.
 //!
-//! ## Module Processing
+//! ## Two-track design: macro output is for rustc; the JIT re-parses original source
 //!
-//! The `module` function is the main entry point that:
+//! The macro emits Rust code (per-rank struct/impl specializations,
+//! rank-polymorphic traits + per-rank impls + free-fn wrappers, kernel
+//! launchers) that **only rustc consumes**. None of this expanded code is
+//! visible to the JIT compiler at kernel-compilation time.
 //!
-//! 1. **Parses** the module and its attributes
-//! 2. **Validates** syntax and type constraints
-//! 3. **Transforms** items (functions, structs, traits, impls)
-//! 4. **Generates** MLIR AST builders
-//! 5. **Creates** kernel launchers for entry points
-//! 6. **Emits** the expanded code
+//! Instead, [`module_asts`] (below) captures the **original pre-expansion
+//! source text** via `Span::source_text()` and stores it as a string literal.
+//! At runtime, `_module_asts()` re-parses that string with `syn::parse_str`
+//! and hands the resulting AST to the JIT. The JIT works from the user's
+//! original generic functions (e.g. `pub fn store_tile<E, const S: [i32; N]>(...)`),
+//! not from the macro-emitted per-rank specializations.
 //!
-//! ## Item Processing
+//! Implications:
 //!
-//! Different item types are processed differently:
+//! - Anything emitted by the macro affects only rustc's type-checking and
+//!   call resolution. It does not change what the JIT sees or how it
+//!   instantiates.
+//! - The rank-polymorphic-trait emitter ([`crate::trait_dispatch`]) and the per-rank
+//!   expander ([`crate::rank_expansion`]) both serve rustc's needs (correct
+//!   types and ergonomic call resolution); the JIT does its own per-rank
+//!   instantiation from the original generic source.
+//! - When reasoning about JIT behavior, look at the user-source AST as
+//!   captured — not at `cargo expand` output.
 //!
-//! - **Functions** - Generate concrete functions, AST builders, and launchers (if `#[entry]`)
-//! - **Structs** - Handle variadic expansion and desugaring of const generics
-//! - **Traits** - Process variadic traits and type metadata
-//! - **Impls** - Expand variadic implementations
-//! - **Use statements** - Track module dependencies for AST building
+//! ## Per-item routing
 //!
-//! ## Variadic Expansion
+//! - **`fn`** — entry kernels (`#[entry]`) get a launcher generated; ops
+//!   tagged `#[cuda_tile::variadic_op]` go through trait-dispatch emission;
+//!   everything else is per-rank-expanded for any literal CGAs in its
+//!   signature.
+//! - **`struct`** — `#[cuda_tile::variadic_struct]` produces the per-rank
+//!   variants (`Tile_0..Tile_6`); plain structs pass through.
+//! - **`trait`** — `#[cuda_tile::variadic_trait]` desugars to a single
+//!   CGA-erased rank-polymorphic trait.
+//! - **`impl`** — `#[cuda_tile::variadic_impl]` (with or without
+//!   `#[variadic_trait_impl]`) emits per-rank impl variants of the rank-polymorphic trait
+//!   trait or of the inherent type.
+//! - **`use`** statements feed the cross-module AST aggregation.
 //!
-//! Items marked with variadic attributes are expanded into multiple versions:
-//!
-//! ```rust,ignore
-//! // Input:
-//! #[cuda_tile::variadic_struct(N=4)]
-//! pub struct Tile<E, const D: [i32; N]> { }
-//!
-//! // Output: Tile_1, Tile_2, Tile_3, Tile_4 structs
-//! ```
-//!
-//! ## AST Generation
-//!
-//! For each module, a `_module_asts()` function is generated that returns a vector
-//! of MLIR AST modules. This is used during compilation to build the CUDA code.
-//!
-//! ## Kernel Launchers
-//!
-//! For each `#[entry]` function, launchers are generated that:
-//! - Compiles the kernel to CUDA
-//! - Manages kernel invocation
-//! - Support direct calls with `IntoDeviceOp` arguments
-//! - Provides type-safe parameter passing
+//! [`module_asts`] generates the runtime hook that returns the captured
+//! source AST for the JIT.
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
@@ -71,7 +69,10 @@ use syn::{
 
 use crate::error::{Error, SpannedError};
 use crate::kernel_launcher_generator::generate_kernel_launcher;
-use crate::rewrite_variadics::*;
+use crate::rank_expansion::*;
+use crate::trait_dispatch::{
+    desugar_variadic_trait_decl, desugar_variadic_trait_impl, emit_trait_dispatch,
+};
 use crate::validate_dsl_syntax::validate_entry_point_parameters;
 use cutile_compiler::kernel_naming::KernelNaming;
 use cutile_compiler::syn_utils::*;
@@ -388,22 +389,14 @@ pub fn trait_(mut item: ItemTrait) -> Result<TokenStream, Error> {
         &mut item.attrs,
     );
     let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
-            "cuda_tile :: variadic_trait" => {
-                let items = variadic_trait(&attributes, item)?;
-                quote! {
-                    #(#items)*
-                }
-            }
-            _ => {
-                let item = desugar_trait_cgas(&item)?;
-                quote! { #item }
-            }
-        },
-        None => {
-            let item = desugar_trait_cgas(&item)?;
-            quote! { #item }
+        Some(attributes)
+            if attributes.name_as_str().as_deref() == Some("cuda_tile :: variadic_trait") =>
+        {
+            desugar_variadic_trait_decl(&item)?
         }
+        // Non-variadic traits pass through untouched — there's no per-rank
+        // expansion to do.
+        _ => quote! { #item },
     };
     Ok(res.into())
 }
@@ -439,12 +432,16 @@ pub fn trait_(mut item: ItemTrait) -> Result<TokenStream, Error> {
 /// }
 /// ```
 pub fn implementation(mut item: ItemImpl) -> Result<TokenStream, Error> {
-    // println!("implementation {ident}: {attributes:#?}");
     let attributes = get_meta_list("cuda_tile :: variadic_impl", &item.attrs);
     let is_unchecked = get_meta_list("cuda_tile :: unchecked", &item.attrs);
     if is_unchecked.is_some() {
         return Ok(quote! {}.into());
     }
+    // Capture trait-impl marker before clear_attributes wipes it. When this
+    // marker is present alongside `#[variadic_impl]`, route to the rank-polymorphic trait-
+    // trait desugaring instead of the per-rank-mangled `variadic_impl` path.
+    let is_variadic_trait_impl =
+        get_meta_list("cuda_tile :: variadic_trait_impl", &item.attrs).is_some();
     clear_attributes(
         HashSet::from([
             "cuda_tile :: variadic_trait_impl",
@@ -456,18 +453,22 @@ pub fn implementation(mut item: ItemImpl) -> Result<TokenStream, Error> {
     let res = match attributes {
         Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
             "cuda_tile :: variadic_impl" => {
-                let items = variadic_impl(&attributes, item)?;
-                quote! {
-                    #(#items)*
+                if is_variadic_trait_impl {
+                    desugar_variadic_trait_impl(&item)?
+                } else {
+                    let items = variadic_impl(&attributes, item)?;
+                    quote! {
+                        #(#items)*
+                    }
                 }
             }
             _ => {
-                let item = desugar_impl_cgas(&item)?;
+                let item = expand_impl_per_rank(&item)?;
                 quote! { #item }
             }
         },
         None => {
-            let item = desugar_impl_cgas(&item)?;
+            let item = expand_impl_per_rank(&item)?;
             quote! { #item }
         }
     };
@@ -529,12 +530,12 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
                 }
             }
             _ => {
-                let item = desugar_structure_cgas(&item)?;
+                let item = expand_struct_per_rank(&item)?;
                 quote! { #item }
             }
         },
         None => {
-            let item = desugar_structure_cgas(&item)?;
+            let item = expand_struct_per_rank(&item)?;
             quote! { #item }
         }
     };
@@ -577,6 +578,29 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         validate_entry_point_parameters(&item)?
     }
     let attributes = get_meta_list("cuda_tile :: variadic_op", &item.attrs);
+    // Any function annotated with `#[cuda_tile::variadic_op(...)]` is
+    // rank-polymorphic and gets trait-dispatch emission (trait + per-rank
+    // impls + free-fn wrapper). The rank arguments (`N = 6`, `M = 6`) are
+    // retained for documentation but the emitter uses `MAX_RANK` internally.
+    let emit_trait = attributes.is_some();
+    // Optional `method = "..."` attribute lets the trait method name differ
+    // from the fn name (e.g. `reshape_ptr` → method `reshape` so callers
+    // write `ptr_tile.reshape(shape)`). Default: use the fn's own ident.
+    let method_override: Option<Ident> = attributes
+        .as_ref()
+        .and_then(|a| a.parse_string("method"))
+        .map(|s| Ident::new(&s, Span::call_site()));
+    // Optional `trait_name = "..."` lets the synthesized rank-polymorphic trait name
+    // differ from PascalCase(fn_ident). Used to dodge collisions with user-
+    // defined traits of the same name (e.g. `broadcast_scalar` whose synth
+    // `BroadcastScalar` collides with the user's `BroadcastScalar` trait).
+    let trait_name_override: Option<Ident> = attributes
+        .as_ref()
+        .and_then(|a| a.parse_string("trait_name"))
+        .map(|s| Ident::new(&s, Span::call_site()));
+    // Snapshot the original ItemFn before any mutations, for the trait-dispatch
+    // emitter which needs the CGA-form signature.
+    let original_item_for_trait_dispatch = if emit_trait { Some(item.clone()) } else { None };
     clear_attributes(
         HashSet::from([
             "cuda_tile :: variadic_op",
@@ -594,15 +618,22 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         let internal_name = kernel_naming.user_impl_name();
         item.sig.ident = Ident::new(internal_name.as_str(), item.sig.ident.span());
     }
-    let concrete_items = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
-            "cuda_tile :: variadic_op" => variadic_op(&attributes, item.clone())?,
-            _ => vec![desugar_function_cgas(&item)?],
-        },
-        None => vec![desugar_function_cgas(&item)?],
+    // Rank-polymorphic fns (`#[cuda_tile::variadic_op(...)]`) are handled
+    // entirely by trait dispatch — no per-rank free-fn specializations are
+    // emitted. Non-variadic fns fall through to CGA desugaring for any stray
+    // const-array generics.
+    let concrete_items = if emit_trait {
+        vec![]
+    } else {
+        vec![expand_function_per_rank(&item)?]
+    };
+    let trait_dispatch_tokens = match original_item_for_trait_dispatch {
+        Some(orig) => emit_trait_dispatch(&orig, method_override, trait_name_override)?,
+        None => TokenStream2::new(),
     };
     let result = quote! {
         #(#concrete_items)*
+        #trait_dispatch_tokens
     };
     Ok(result)
 }

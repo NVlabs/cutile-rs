@@ -81,8 +81,6 @@ fn tiled_gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const
     let part_y = y.partition(const_shape![BK, BN]);
     let pid: (i32, i32, i32) = get_tile_block_id();
 
-    // Accumulator is `f32` regardless of input element type `E` — see
-    // "Numerical Choices" below for why this matters when `E` is `f16`/`bf16`.
     let mut acc = constant(0.0f32, const_shape![BM, BN]);
     for i in 0i32..(K / BK) {
         let tile_x = part_x.load([pid.0, i]);
@@ -93,78 +91,6 @@ fn tiled_gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const
     z.store(acc);
 }
 ```
-
----
-
-## Numerical Choices
-
-A handful of small but important habits for getting correct results with
-floating-point tiles. None of these are cuTile-specific — they apply to
-GPU numerics broadly — but they show up often enough that the patterns
-are worth calling out.
-
-### Accumulate in wider precision than the inputs
-
-For `f16`/`bf16` inputs, accumulate into an `f32` tile. The tiled matmul
-above is the canonical example: `E` can be `f16`/`bf16`, but `acc` is
-always `f32`. `mma` is designed for this — its hardware path reads
-16-bit operands and accumulates into a 32-bit register — so this
-configuration is also the fastest on recent GPUs.
-
-The same rule applies to manual reductions. Summing a large `f16` tile
-directly loses bits; convert first:
-
-```rust
-let x_f16: Tile<f16, S> = load_tile_mut(input);
-let x_f32: Tile<f32, S> = convert_tile(x_f16);
-let sum: f32 = reduce_sum(x_f32, 0);
-```
-
-`reduce_sum` over `f16` compiles, but repeated `f16 + f16` across a
-long reduction accumulates rounding error linearly in the tile size.
-Converting to `f32` first bounds the error to the precision of the
-converted inputs.
-
-### `f16` vs `bf16`
-
-Both are 16-bit, but the bit budgets differ:
-
-| Type | Exponent bits | Mantissa bits | Range |
-|---|---|---|---|
-| `f16` | 5 | 10 | ±65504 (overflows at moderately large magnitudes) |
-| `bf16` | 8 | 7 | Same dynamic range as `f32` |
-
-- Prefer `bf16` for values that can span many orders of magnitude —
-  gradients, intermediate activations before normalization, anything
-  that might exceed ~65k.
-- Prefer `f16` for values already within a bounded range — normalized
-  activations, probabilities, quantized weights — where the extra
-  mantissa bit helps.
-
-### Subtract the max before `exp` (softmax)
-
-Large positive inputs overflow `exp` to `+inf` even in `f32`
-(`exp(89) ≈ 4.5e38`, the f32 max). Subtracting the per-row max first
-keeps every `exp` argument `≤ 0` and every result in `[0, 1]`. The
-[numerically stable softmax](#numerically-stable-softmax) pattern above
-shows this.
-
-### Prefer `fma(a, b, c)` to `a * b + c`
-
-`a * b + c` rounds twice — once for the product, once for the sum.
-`fma` produces a single correctly-rounded result in one step, giving
-you roughly an extra bit of accuracy per call. Use it in inner
-accumulation loops and anywhere small residuals matter.
-
-### Rounding modes
-
-IEEE float operations (`addf`, `subf`, `mulf`, `divf`, `sqrt`, `fma`,
-…) take an explicit rounding-mode type parameter. `rounding::NearestEven`
-is the right choice for essentially every numerical algorithm and is
-what IEEE 754 specifies as the default; the directed modes
-(`rounding::Zero`, `rounding::PositiveInf`, `rounding::NegativeInf`)
-exist for numerical-methods work that needs to maintain interval
-bounds.
 
 ---
 

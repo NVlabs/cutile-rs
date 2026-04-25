@@ -93,7 +93,7 @@ mod basics_and_inlining_module {
             let _some_tensor: Tensor<f32, { [-1, -1] }> =
                 make_tensor_view(ptr_tile, dynamic_shape, stride, token);
             let mut partition: PartitionMut<f32, { [128, 256] }> =
-                make_partition_view_mut(&y, shape, token);
+                make_partition_view_mut(y, shape, token);
             let idx: [i32; 2] = [0i32, 0i32];
             let some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
             store_to_view_mut(&mut partition, some_tile, idx, None, false);
@@ -181,7 +181,7 @@ mod basics_and_inlining_module {
             let _some_tensor: Tensor<f32, { [-1, -1] }> =
                 make_tensor_view(ptr_tile, dynamic_shape, stride, token);
             let mut partition: PartitionMut<f32, { [128, 256] }> =
-                make_partition_view_mut(&y, shape, token);
+                make_partition_view_mut(y, shape, token);
             let idx: [i32; 2] = [0i32, 0i32];
             let mut some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
             store_to_view_mut(&mut partition, some_tile, idx, None, false);

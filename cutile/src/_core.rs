@@ -4,9 +4,6 @@
  */
 /*
  Notes:
- - Any variadic macro requires a corresponding meta data entry in ::types.
-   e.g. a variadic struct requires a VARIADIC_TYPES entry.
-   This is required to enable desugared type inference at macro expansion time.
  - Parameter names should not be changed without careful refactoring.
    They are sometimes used to generate corresponding Rust functions for cuda_tile operations.
 */
@@ -775,7 +772,7 @@ pub mod core {
     ///
     /// Dimensions of size 1 in the source can be broadcast to any size in the result.
     #[cuda_tile::op(name="cuda_tile.broadcast", params=["source"])]
-    #[cuda_tile::variadic_op(N = 6)]
+    #[cuda_tile::variadic_op(N = 6, method = "broadcast")]
     pub fn broadcast_ptr<P: Pointer, const S: [i32; N], const R: [i32; N]>(
         source: PointerTile<P, S>,
         shape: Shape<R>,
@@ -787,7 +784,7 @@ pub mod core {
     ///
     /// The total number of elements must remain the same.
     #[cuda_tile::op(name="cuda_tile.reshape", params=["source"])]
-    #[cuda_tile::variadic_op(N = 6, M = 6)]
+    #[cuda_tile::variadic_op(N = 6, M = 6, method = "reshape")]
     pub fn reshape_ptr<P: Pointer, const S: [i32; N], const R: [i32; M]>(
         source: PointerTile<P, S>,
         shape: Shape<R>,
@@ -3783,7 +3780,10 @@ pub mod core {
     /// let tile = broadcast_scalar(3.14f32, const_shape![128]);
     /// // tile contains 128 copies of 3.14
     /// ```
-    #[cuda_tile::variadic_op(N = 6)]
+    // `trait_name = "BroadcastScalarFn"` keeps emit_trait_dispatch's synth
+    // trait from colliding with the user-defined `BroadcastScalar` trait
+    // (PascalCase(broadcast_scalar) = BroadcastScalar otherwise).
+    #[cuda_tile::variadic_op(N = 6, trait_name = "BroadcastScalarFn")]
     pub fn broadcast_scalar<E: ElementType, const S: [i32; N]>(
         x: E,
         shape: Shape<S>,

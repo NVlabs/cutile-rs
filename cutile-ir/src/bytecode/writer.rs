@@ -45,7 +45,6 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
     // Initialize writer context with all managers.
     let mut ctx = WriterCtx {
         module,
-        version,
         value_map: HashMap::new(),
         next_idx: 0,
         strings: StringManager::new(),
@@ -814,9 +813,6 @@ fn write_function_body(ctx: &mut WriterCtx, func_op: OpId) -> Result<Vec<u8>> {
 /// `&mut` to per-op writers and recursive region/block writers.
 pub(super) struct WriterCtx<'a> {
     pub module: &'a Module,
-    /// Target bytecode version. Per-op writers consult this to gate
-    /// fields that were added in specific minor versions.
-    pub version: BytecodeVersion,
     pub value_map: HashMap<Value, u64>,
     pub next_idx: u64,
     pub strings: StringManager,
