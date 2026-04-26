@@ -7,7 +7,7 @@
 //!
 //! ## Architecture
 //!
-//! - **Global (process-wide)**: [`CudaContext`] per device and compiled kernel cache are shared
+//! - **Global (process-wide)**: [`Device`] per device and compiled kernel cache are shared
 //!   across all threads via [`OnceLock`] and [`DashMap`]. This allows compilation results from
 //!   one thread (e.g. warmup) to be visible to all worker threads.
 //!
@@ -92,30 +92,30 @@ pub struct Validator {
     pub params: Vec<ValidParamType>,
 }
 
-// ── Global CudaContext (process-wide, per-device singleton) ─────────────────
+// ── Global Device (process-wide, per-device singleton) ─────────────────────
 
-/// Global per-device CUDA contexts. Shared across all threads so that
-/// `Module`/`Function` loaded against a context can be used from any thread.
-static CUDA_CONTEXTS: OnceLock<Mutex<HashMap<usize, Arc<Device>>>> = OnceLock::new();
+/// Global per-device handles. Shared across all threads so that
+/// `Module`/`Function` loaded against a device can be used from any thread.
+static DEVICES: OnceLock<Mutex<HashMap<usize, Arc<Device>>>> = OnceLock::new();
 
-fn cuda_contexts() -> &'static Mutex<HashMap<usize, Arc<Device>>> {
-    CUDA_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()))
+fn devices() -> &'static Mutex<HashMap<usize, Arc<Device>>> {
+    DEVICES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Get or create the global [`CudaContext`] for a device.
+/// Get or create the global [`Device`] for a device ordinal.
 ///
-/// The first call for a given `device_id` creates the context; subsequent calls
-/// return the same `Arc<CudaContext>`.
-fn get_or_init_cuda_context(device_id: usize) -> Result<Arc<CudaContext>, DeviceError> {
-    let mut contexts = cuda_contexts()
+/// The first call for a given `device_id` creates the device handle; subsequent
+/// calls return the same `Arc<Device>`.
+fn get_or_init_device(device_id: usize) -> Result<Arc<Device>, DeviceError> {
+    let mut devices = devices()
         .lock()
-        .map_err(|_| device_error(device_id, "CUDA context lock poisoned"))?;
-    if let Some(ctx) = contexts.get(&device_id) {
-        return Ok(Arc::clone(ctx));
+        .map_err(|_| device_error(device_id, "device map lock poisoned"))?;
+    if let Some(device) = devices.get(&device_id) {
+        return Ok(Arc::clone(device));
     }
-    let ctx = CudaContext::new(device_id)?;
-    contexts.insert(device_id, Arc::clone(&ctx));
-    Ok(ctx)
+    let device = Device::new(device_id)?;
+    devices.insert(device_id, Arc::clone(&device));
+    Ok(device)
 }
 
 // ── Global kernel cache (process-wide, cross-thread) ────────────────────────
@@ -123,8 +123,8 @@ fn get_or_init_cuda_context(device_id: usize) -> Result<Arc<CudaContext>, Device
 /// A compiled kernel: module, function handle, and parameter validator.
 #[derive(Debug)]
 pub struct CompiledKernel {
-    pub module: Arc<CudaModule>,
-    pub function: Arc<CudaFunction>,
+    pub module: Arc<Module>,
+    pub function: Arc<Function>,
     pub validator: Arc<Validator>,
 }
 
@@ -238,7 +238,7 @@ pub fn new_device_context(
     device_id: usize,
     policy: Arc<dyn SchedulingPolicy>,
 ) -> Result<AsyncDeviceContext, DeviceError> {
-    let device = get_or_init_cuda_context(device_id)?;
+    let device = get_or_init_device(device_id)?;
     let deallocator_stream = device.new_stream()?;
     Ok(AsyncDeviceContext {
         device_id,
@@ -278,12 +278,11 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let device = get_or_init_cuda_context(device_id)?;
+    let device = get_or_init_device(device_id)?;
     let policy = StreamPoolRoundRobin::new(&device, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
     let deallocator_stream = device.new_stream()?;
     let device_context = AsyncDeviceContext {
         device_id,
-        device,
         deallocator_stream,
         policy: Arc::new(policy),
         pool: None,
@@ -376,8 +375,8 @@ pub fn with_device<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&Arc<Device>) -> R,
 {
-    let ctx = get_or_init_cuda_context(device_id)?;
-    Ok(f(&ctx))
+    let device = get_or_init_device(device_id)?;
+    Ok(f(&device))
 }
 
 // Default device policy.
@@ -500,7 +499,7 @@ pub fn load_module_from_file(filename: &str, device_id: usize) -> Result<Arc<Mod
 pub fn load_module_from_bytes(
     data: &[u8],
     device_id: usize,
-) -> Result<Arc<CudaModule>, DeviceError> {
+) -> Result<Arc<Module>, DeviceError> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
