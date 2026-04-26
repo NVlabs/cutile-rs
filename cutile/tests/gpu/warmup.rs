@@ -541,6 +541,7 @@ fn load_module_from_bytes_concurrent() {
                 ("y", &[1i32][..]),
             ],
             &[],
+            &[],
             None,
             gpu_name.clone(),
             &CompileOptions::default(),
@@ -548,7 +549,7 @@ fn load_module_from_bytes_concurrent() {
         .unwrap();
         let module_op = compiler.compile().unwrap();
         let cubin_filename =
-            cutile_compiler::cuda_tile_runtime_utils::compile_module(&module_op, &gpu_name);
+            cutile_compiler::cuda_tile_runtime_utils::compile_tile_ir_module(&module_op, &gpu_name);
         let cubin_bytes = std::fs::read(&cubin_filename).expect("failed to read cubin");
 
         // Spawn multiple threads, each loading the same cubin bytes.
