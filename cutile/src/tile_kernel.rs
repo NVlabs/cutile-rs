@@ -215,7 +215,7 @@ impl TileFunctionKey {
 impl FunctionKey for TileFunctionKey {
     fn get_disk_hash_string(&self) -> String {
         let canonical = format!(
-            "{}:{}:{}:{}:{}:{:?}:{:?}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{:?}:{:?}:{}:{}:{}:{}",
             self.module_name,
             self.function_name,
             self.function_generics.join(","),
@@ -225,6 +225,11 @@ impl FunctionKey for TileFunctionKey {
                 .collect::<Vec<_>>()
                 .join(";"),
             self.spec_args
+                .iter()
+                .map(|(k, v)| format!("{}={:?}", k, v))
+                .collect::<Vec<_>>()
+                .join(";"),
+            self.scalar_hints
                 .iter()
                 .map(|(k, v)| format!("{}={:?}", k, v))
                 .collect::<Vec<_>>()
@@ -297,22 +302,256 @@ fn try_load_from_jit_store(disk_key: &str) -> Option<Vec<u8>> {
     store.get(disk_key).ok().flatten()
 }
 
-// ── Single-flight compilation dedup is handled by once_cell::sync::OnceLock ──
+// ── Shared compilation pipeline (used by compile_from_context + compile_warmup) ──
+
+/// Get (or insert) the cache slot for a key.
+///
+/// The DashMap shard lock is released before the slot is returned, so the
+/// expensive `OnceCell` initialization happens without holding it.
+fn get_or_create_slot(key_str: &str) -> Arc<OnceCell<CompiledKernel>> {
+    let cache = get_kernel_cache();
+    let entry = cache
+        .entry(key_str.to_string())
+        .or_insert_with(|| Arc::new(OnceCell::new()));
+    Arc::clone(entry.value())
+    // entry dropped here — releases DashMap shard lock.
+}
+
+/// Build a `CUDATileFunctionCompiler` from a `TileFunctionKey`.
+///
+/// Borrows from `modules`; the returned compiler must not outlive it.
+fn build_function_compiler<'m>(
+    modules: &'m CUDATileModules,
+    key: &TileFunctionKey,
+) -> Result<CUDATileFunctionCompiler<'m>, Error> {
+    let stride_args: Vec<(&str, &[i32])> = key
+        .stride_args
+        .iter()
+        .map(|x| (x.0.as_str(), x.1.as_slice()))
+        .collect();
+    let spec_args: Vec<(&str, &SpecializationBits)> =
+        key.spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
+    #[allow(unused_variables)]
+    let scalar_hints: Vec<(&str, &DivHint)> = key
+        .scalar_hints
+        .iter()
+        .map(|x| (x.0.as_str(), &x.1))
+        .collect();
+    let compiler = CUDATileFunctionCompiler::new(
+        modules,
+        &key.module_name,
+        &key.function_name,
+        &key.function_generics,
+        &stride_args,
+        &spec_args,
+        &scalar_hints,
+        key.grid,
+        key.gpu_name.clone(),
+        &key.compile_options,
+    )?;
+    Ok(compiler)
+}
+
+/// Compile a kernel from scratch: try the disk cache first, then full JIT.
+///
+/// On disk hit, loads the persisted cubin and rebuilds the validator. On a
+/// corrupted/incompatible cubin, deletes the bad entry and falls through to
+/// JIT recompile. After a successful JIT, persists the cubin to disk if a
+/// `JitStore` is configured.
+fn compile_kernel_uncached(
+    key: &TileFunctionKey,
+    modules: &CUDATileModules,
+    function_entry: &str,
+    device_id: usize,
+    disk_key: &str,
+    key_str: &str,
+) -> Result<CompiledKernel, Error> {
+    let module_name = key.module_name.as_str();
+    let function_name = key.function_name.as_str();
+    let gpu_name = key.gpu_name.as_str();
+
+    // Try disk cache first.
+    if let Some(cubin_bytes) = try_load_from_jit_store(disk_key) {
+        jit_log!(
+            "{module_name}::{function_name} → disk cache hit ({} bytes)",
+            cubin_bytes.len()
+        );
+        let compiler = build_function_compiler(modules, key)?;
+        let validator = Arc::new(compiler.get_validator());
+        match load_module_from_bytes(&cubin_bytes, device_id) {
+            Ok(module) => {
+                let function = Arc::new(module.load_function(function_entry).map_err(|e| {
+                    Error::KernelLaunch(KernelLaunchError(format!(
+                        "failed to load '{function_entry}' from cached cubin: {e}"
+                    )))
+                })?);
+                return Ok(CompiledKernel {
+                    module,
+                    function,
+                    validator,
+                });
+            }
+            Err(e) => {
+                // Corrupted/incompatible cubin (e.g. disk error, partial write,
+                // architecture mismatch). Delete the bad entry and fall through
+                // to full JIT recompilation so the caller is not permanently
+                // blocked.
+                jit_log!(
+                    "{module_name}::{function_name} → corrupted disk cubin, \
+                     deleting and recompiling (error: {e})"
+                );
+                if let Some(store) = cuda_async::jit_store::get_jit_store() {
+                    let _ = store.delete(disk_key);
+                }
+            }
+        }
+    }
+
+    // Full JIT compilation.
+    jit_log!("{module_name}::{function_name} → JIT compiling...");
+    let t0 = std::time::Instant::now();
+    let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
+        module_name,
+        function_name,
+        "use_debug_mlir",
+    )?;
+    // TODO (hme): Re-enable some debug support for internal.
+    // let mlir = if let Some(debug_mlir_path) = &debug_mlir_path {
+    //     println!("USING DEBUG MLIR: {debug_mlir_path}");
+    //     let mlir = read_ir(debug_mlir_path.to_string()).expect("Failed to read debug MLIR.");
+    //     mlir
+    // } else {
+    //     let module_op: ModuleOperation = compiler.compile(
+    //         module_name,
+    //         function_name,
+    //         &key.function_generics,
+    //         &key.stride_args
+    //             .iter()
+    //             .map(|x| (x.0.as_str(), x.1.as_slice()))
+    //             .collect::<Vec<_>>(),
+    //         const_grid,
+    //         gpu_name.clone(),
+    //     );
+    //     let mlir = module_op.as_operation().to_string();
+    //     mlir
+    // };
+    let compiler = build_function_compiler(modules, key)?;
+    let validator = Arc::new(compiler.get_validator());
+    let tile_module = compiler.compile()?;
+
+    // Optional debug output (controlled by `#[entry(...)]` attributes).
+    if modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")? {
+        println!(
+            "COMPILED IR: {module_name}::{function_name}\n{}",
+            tile_module.to_mlir_text()
+        );
+    }
+    if let Some(path) =
+        modules.get_entry_arg_string_by_function_name(module_name, function_name, "dump_mlir_dir")?
+    {
+        write_ir(
+            module_name,
+            function_name,
+            key_str,
+            "mlir",
+            path.as_str(),
+            tile_module.to_mlir_text().as_str(),
+        );
+    }
+
+    let cubin_filename = compile_tile_ir_module(&tile_module, gpu_name);
+    // if let Some(path) = compiler.get_entry_arg_string_by_function_name(
+    //     module_name,
+    //     function_name,
+    //     "dump_ptx_dir",
+    // ) {
+    //     write_ir(
+    //         module_name,
+    //         function_name,
+    //         cache_hash_str.as_str(),
+    //         "ptx",
+    //         path.as_str(),
+    //         ptx.as_str(),
+    //     );
+    // }
+    // if compiler.get_entry_arg_bool_by_function_name(module_name, function_name,"print_ir") {
+    //     println!("COMPILED PTX: {module_name}::{function_name}");
+    //     println!("{ptx}");
+    //     println!();
+    // }
+    let jit_elapsed = t0.elapsed();
+
+    // Persist to disk cache if a JitStore is configured.
+    if let Some(store) = cuda_async::jit_store::get_jit_store() {
+        if let Ok(cubin_bytes) = std::fs::read(&cubin_filename) {
+            if store.put(disk_key, &cubin_bytes).is_ok() {
+                jit_log!(
+                    "{module_name}::{function_name} → saved to disk cache ({} bytes)",
+                    cubin_bytes.len()
+                );
+            }
+        }
+    }
+
+    let module = load_module_from_file(&cubin_filename, device_id)?;
+    let function = Arc::new(module.load_function(function_entry).map_err(|e| {
+        Error::KernelLaunch(KernelLaunchError(format!(
+            "failed to load '{function_entry}' from compiled cubin: {e}"
+        )))
+    })?);
+    jit_log!(
+        "{module_name}::{function_name} → JIT compiled in {:.1?}",
+        jit_elapsed
+    );
+    Ok(CompiledKernel {
+        module,
+        function,
+        validator,
+    })
+}
+
+/// Cache-aware kernel compilation with single-flight dedup.
+///
+/// Returns the cache slot, guaranteed initialized on success. Concurrent
+/// callers requesting the same key block on a single `OnceCell` so only
+/// one performs JIT while the rest see the same cached result.
+///
+/// `cached_modules` lets callers (e.g. [`compile_warmup`]) pre-build a
+/// [`CUDATileModules`] once and reuse it across many specs. Pass `None`
+/// for lazy per-call construction (only built on cache miss).
+fn get_or_compile_kernel(
+    key: &TileFunctionKey,
+    cached_modules: Option<&CUDATileModules>,
+    module_asts: &dyn Fn() -> Vec<Module>,
+    function_entry: &str,
+    device_id: usize,
+) -> Result<Arc<OnceCell<CompiledKernel>>, Error> {
+    let key_str = key.get_hash_string();
+    let disk_key = key.get_disk_hash_string();
+    let slot = get_or_create_slot(&key_str);
+
+    slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
+        let owned;
+        let modules: &CUDATileModules = match cached_modules {
+            Some(m) => m,
+            None => {
+                owned = CUDATileModules::new(module_asts())?;
+                &owned
+            }
+        };
+        compile_kernel_uncached(key, modules, function_entry, device_id, &disk_key, &key_str)
+    })?;
+
+    Ok(slot)
+}
 
 /// Compiles a tile function to CUDA and caches it for reuse.
 ///
-/// Handles the complete compilation pipeline from Rust/MLIR to CUDA:
-/// 1. Checks the global kernel cache (process-wide, cross-thread)
-/// 2. Checks the disk cache (JitStore) for a previously persisted cubin
-/// 3. If not cached, compiles the module AST to MLIR, then to PTX/CUBIN
-/// 4. Stores the result in the global cache and optionally persists to disk
+/// The runtime kernel-launch entry point. Builds a `TileFunctionKey` from
+/// the call site and dispatches to [`get_or_compile_kernel`] which handles
+/// memory cache lookup, single-flight dedup, disk cache load, and JIT.
 ///
-/// **Compilation dedup**: When multiple threads need the same kernel, `OnceLock::get_or_try_init`
-/// ensures only one thread performs compilation while others block. Once initialization completes,
-/// all threads see the same cached result.
-///
-/// The caching key is based on the module name, function name, type generics, stride arguments,
-/// and compile-time grid dimensions, ensuring correct reuse across different specializations.
+/// Module ASTs are built lazily — only on cache miss — via the closure.
 ///
 /// ## Arguments
 ///
@@ -323,7 +562,11 @@ fn try_load_from_jit_store(disk_key: &str) -> Option<Vec<u8>> {
 /// * `function_entry` - Entry point name in the compiled CUDA code
 /// * `function_generics` - Type and const generic arguments (e.g., `["f32", "256"]`)
 /// * `stride_args` - Stride information for tensor arguments
+/// * `spec_args` - Per-tensor specialization bits
+/// * `scalar_hints` - Per-scalar divisibility hints
 /// * `const_grid` - Optional compile-time constant grid dimensions
+/// * `compile_options` - Per-call compile options (occupancy, cga, divisibility)
+/// * `source_hash` - SHA-256 of the module source (from the macro-generated `_SOURCE_HASH`)
 ///
 /// ## Examples
 ///
@@ -360,9 +603,6 @@ pub fn compile_from_context<F: Fn() -> Module>(
     cuda_async::jit_store::ensure_default_jit_store();
 
     let device_id: usize = ctx.get_device_id();
-    let gpu_name = get_gpu_name(device_id);
-    let compiler_version = get_compiler_version();
-    let cuda_toolkit_version = get_cuda_toolkit_version();
     let key = TileFunctionKey::new(
         module_name.to_string(),
         function_name.to_string(),
@@ -373,209 +613,13 @@ pub fn compile_from_context<F: Fn() -> Module>(
         const_grid,
         compile_options,
         source_hash.to_string(),
-        gpu_name.clone(),
-        compiler_version,
-        cuda_toolkit_version,
+        get_gpu_name(device_id),
+        get_compiler_version(),
+        get_cuda_toolkit_version(),
     );
-    let key_str = key.get_hash_string();
-    let disk_key = key.get_disk_hash_string();
 
-    let cache = get_kernel_cache();
-    let slot = {
-        let entry = cache
-            .entry(key_str.clone())
-            .or_insert_with(|| Arc::new(OnceCell::new()));
-        Arc::clone(entry.value())
-    }; // entry dropped here — releases DashMap shard lock.
-
-    // Use OnceCell::get_or_try_init for single-flight compilation dedup.
-    // Only one thread executes the closure; others block and see the result.
-    let compiled = slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
-        // Try disk cache first.
-        if let Some(cubin_bytes) = try_load_from_jit_store(&disk_key) {
-            jit_log!(
-                "{module_name}::{function_name} → disk cache hit ({} bytes)",
-                cubin_bytes.len()
-            );
-            let modules = CUDATileModules::new(module_asts())?;
-            let compiler = CUDATileFunctionCompiler::new(
-                &modules,
-                module_name,
-                function_name,
-                &key.function_generics,
-                &key.stride_args
-                    .iter()
-                    .map(|x| (x.0.as_str(), x.1.as_slice()))
-                    .collect::<Vec<_>>(),
-                &key.spec_args
-                    .iter()
-                    .map(|x| (x.0.as_str(), &x.1))
-                    .collect::<Vec<_>>(),
-                const_grid,
-                gpu_name.clone(),
-                &key.compile_options,
-            )?;
-            let validator = Arc::new(compiler.get_validator());
-            match load_module_from_bytes(&cubin_bytes, device_id) {
-                Ok(module) => {
-                    let function =
-                        Arc::new(module.load_function(function_entry).map_err(|e| {
-                            Error::KernelLaunch(KernelLaunchError(format!(
-                                "failed to load '{function_entry}' from cached cubin: {e}"
-                            )))
-                        })?);
-                    return Ok(CompiledKernel {
-                        module,
-                        function,
-                        validator,
-                    });
-                }
-                Err(e) => {
-                    // Corrupted or incompatible cubin (e.g. disk error, partial write,
-                    // architecture mismatch). Delete the bad entry and fall through to
-                    // full JIT recompilation so the caller is not permanently blocked.
-                    jit_log!(
-                        "{module_name}::{function_name} → corrupted disk cubin, \
-                         deleting and recompiling (error: {e})"
-                    );
-                    if let Some(store) = cuda_async::jit_store::get_jit_store() {
-                        let _ = store.delete(&disk_key);
-                    }
-                }
-            }
-        }
-
-        // Full JIT compilation.
-        jit_log!("{module_name}::{function_name} → JIT compiling...");
-        let t0 = std::time::Instant::now();
-        let modules = CUDATileModules::new(module_asts())?;
-        let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
-            module_name,
-            function_name,
-            "use_debug_mlir",
-        )?;
-        // TODO (hme): Re-enable some debug support for internal.
-        // let mlir = if let Some(debug_mlir_path) = &debug_mlir_path {
-        //     println!("USING DEBUG MLIR: {debug_mlir_path}");
-        //     let mlir = read_ir(debug_mlir_path.to_string()).expect("Failed to read debug MLIR.");
-        //     mlir
-        // } else {
-        //     let module_op: ModuleOperation = compiler.compile(
-        //         module_name,
-        //         function_name,
-        //         &key.function_generics,
-        //         &key.stride_args
-        //             .iter()
-        //             .map(|x| (x.0.as_str(), x.1.as_slice()))
-        //             .collect::<Vec<_>>(),
-        //         const_grid,
-        //         gpu_name.clone(),
-        //     );
-        //     let mlir = module_op.as_operation().to_string();
-        //     mlir
-        // };
-        let stride_args_refs: Vec<(&str, &[i32])> = key
-            .stride_args
-            .iter()
-            .map(|x| (x.0.as_str(), x.1.as_slice()))
-            .collect();
-        let spec_args_refs: Vec<(&str, &SpecializationBits)> =
-            key.spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
-        #[allow(unused_variables)]
-        let scalar_hints_refs: Vec<(&str, &DivHint)> = key
-            .scalar_hints
-            .iter()
-            .map(|x| (x.0.as_str(), &x.1))
-            .collect();
-        let (cubin_filename, validator) = {
-            let compiler = CUDATileFunctionCompiler::new(
-                &modules,
-                module_name,
-                function_name,
-                &key.function_generics,
-                &stride_args_refs,
-                &spec_args_refs,
-                &scalar_hints_refs,
-                const_grid,
-                gpu_name.clone(),
-                &key.compile_options,
-            )?;
-            let validator: Validator = compiler.get_validator();
-            let validator = Arc::new(validator);
-            let tile_module = compiler.compile()?;
-            let mlir = tile_module.to_mlir_text();
-            if modules.get_entry_arg_bool_by_function_name(
-                module_name,
-                function_name,
-                "print_ir",
-            )? {
-                println!("COMPILED IR: {module_name}::{function_name}\n{}", mlir);
-            }
-            if let Some(path) = modules.get_entry_arg_string_by_function_name(
-                module_name,
-                function_name,
-                "dump_mlir_dir",
-            )? {
-                write_ir(
-                    module_name,
-                    function_name,
-                    key_str.as_str(),
-                    "mlir",
-                    path.as_str(),
-                    mlir.as_str(),
-                );
-            }
-            let cubin_filename = compile_tile_ir_module(&tile_module, &gpu_name);
-            (cubin_filename, validator)
-        };
-        // if let Some(path) = compiler.get_entry_arg_string_by_function_name(
-        //     module_name,
-        //     function_name,
-        //     "dump_ptx_dir",
-        // ) {
-        //     write_ir(
-        //         module_name,
-        //         function_name,
-        //         cache_hash_str.as_str(),
-        //         "ptx",
-        //         path.as_str(),
-        //         ptx.as_str(),
-        //     );
-        // }
-        // if compiler.get_entry_arg_bool_by_function_name(module_name, function_name,"print_ir") {
-        //     println!("COMPILED PTX: {module_name}::{function_name}");
-        //     println!("{ptx}");
-        //     println!();
-        // }
-        let jit_elapsed = t0.elapsed();
-        // Persist to disk cache if a JitStore is configured.
-        if let Some(store) = cuda_async::jit_store::get_jit_store() {
-            if let Ok(cubin_bytes) = std::fs::read(&cubin_filename) {
-                if store.put(&disk_key, &cubin_bytes).is_ok() {
-                    jit_log!(
-                        "{module_name}::{function_name} → saved to disk cache ({} bytes)",
-                        cubin_bytes.len()
-                    );
-                }
-            }
-        }
-        let module = load_module_from_file(&cubin_filename, device_id)?;
-        let function = Arc::new(module.load_function(function_entry).map_err(|e| {
-            Error::KernelLaunch(KernelLaunchError(format!(
-                "failed to load '{function_entry}' from compiled cubin: {e}"
-            )))
-        })?);
-        jit_log!(
-            "{module_name}::{function_name} → JIT compiled in {:.1?}",
-            jit_elapsed
-        );
-        Ok(CompiledKernel {
-            module,
-            function,
-            validator,
-        })
-    })?;
-
+    let slot = get_or_compile_kernel(&key, None, &module_asts, function_entry, device_id)?;
+    let compiled = slot.get().expect("OnceCell initialized by get_or_compile_kernel");
     Ok((
         Arc::clone(&compiled.function),
         Arc::clone(&compiled.validator),
@@ -601,6 +645,7 @@ pub struct WarmupSpec {
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
     pub spec_args: Vec<(String, SpecializationBits)>,
+    pub scalar_hints: Vec<(String, DivHint)>,
     pub const_grid: Option<(u32, u32, u32)>,
 }
 
@@ -612,6 +657,7 @@ impl WarmupSpec {
             function_generics: generics,
             stride_args: vec![],
             spec_args: vec![],
+            scalar_hints: vec![],
             const_grid: None,
         }
     }
@@ -625,6 +671,16 @@ impl WarmupSpec {
     /// Set specialization arguments for this spec.
     pub fn with_spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
         self.spec_args = spec_args;
+        self
+    }
+
+    /// Set scalar divisibility hints for this spec.
+    ///
+    /// Cache key includes scalar hints, so a kernel warmed up with hints
+    /// will only be reused at launch time when the launcher passes the
+    /// same hints. Omit this to warm up the no-hints variant.
+    pub fn with_scalar_hints(mut self, scalar_hints: Vec<(String, DivHint)>) -> Self {
+        self.scalar_hints = scalar_hints;
         self
     }
 
@@ -674,7 +730,6 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
     let modules = CUDATileModules::new(module_asts())?;
 
     for spec in specs {
-        // Find matching entry metadata.
         let entry = entries
             .iter()
             .find(|e| e.function_name == spec.function_name)
@@ -691,6 +746,7 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
             spec.function_generics.clone(),
             spec.stride_args.clone(),
             spec.spec_args.clone(),
+            spec.scalar_hints.clone(),
             spec.const_grid,
             CompileOptions::default(),
             source_hash.to_string(),
@@ -699,140 +755,13 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
             cuda_toolkit_version.clone(),
         );
 
-        let key_str = key.get_hash_string();
-        let disk_key = key.get_disk_hash_string();
-        let cache = get_kernel_cache();
-        let slot = {
-            let entry = cache
-                .entry(key_str.clone())
-                .or_insert_with(|| Arc::new(OnceCell::new()));
-            Arc::clone(entry.value())
-        }; // entry dropped — releases DashMap shard lock.
-
-        // Use OnceCell::get_or_try_init for single-flight compilation dedup.
-        // Only one thread executes the closure; others block and see the result.
-        let _ = slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
-            jit_log!(
-                "warmup: {module_name}::{} <{}> → compiling...",
-                spec.function_name,
-                spec.function_generics.join(", ")
-            );
-
-            // Try disk cache first.
-            if let Some(cubin_bytes) = try_load_from_jit_store(&disk_key) {
-                jit_log!(
-                    "warmup: {module_name}::{} → disk cache hit ({} bytes)",
-                    spec.function_name,
-                    cubin_bytes.len()
-                );
-                let compiler = CUDATileFunctionCompiler::new(
-                    &modules,
-                    module_name,
-                    &spec.function_name,
-                    &spec.function_generics,
-                    &spec
-                        .stride_args
-                        .iter()
-                        .map(|x| (x.0.as_str(), x.1.as_slice()))
-                        .collect::<Vec<_>>(),
-                    &spec
-                        .spec_args
-                        .iter()
-                        .map(|x| (x.0.as_str(), &x.1))
-                        .collect::<Vec<_>>(),
-                    spec.const_grid,
-                    gpu_name.clone(),
-                    &key.compile_options,
-                )?;
-                let validator = Arc::new(compiler.get_validator());
-                match load_module_from_bytes(&cubin_bytes, device_id) {
-                    Ok(module) => {
-                        let function = Arc::new(
-                            module.load_function(entry.function_entry).map_err(|e| {
-                                Error::KernelLaunch(KernelLaunchError(format!(
-                                    "failed to load '{}' from cached cubin: {e}",
-                                    entry.function_entry
-                                )))
-                            })?,
-                        );
-                        return Ok(CompiledKernel {
-                            module,
-                            function,
-                            validator,
-                        });
-                    }
-                    Err(e) => {
-                        // Corrupted or incompatible cubin. Delete and fall through to JIT.
-                        jit_log!(
-                            "warmup: {module_name}::{} → corrupted disk cubin, \
-                             deleting and recompiling (error: {e})",
-                            spec.function_name
-                        );
-                        if let Some(store) = cuda_async::jit_store::get_jit_store() {
-                            let _ = store.delete(&disk_key);
-                        }
-                    }
-                }
-            }
-
-            // Full JIT compilation.
-            let t0 = std::time::Instant::now();
-            let compiler = CUDATileFunctionCompiler::new(
-                &modules,
-                module_name,
-                &spec.function_name,
-                &spec.function_generics,
-                &spec
-                    .stride_args
-                    .iter()
-                    .map(|x| (x.0.as_str(), x.1.as_slice()))
-                    .collect::<Vec<_>>(),
-                &spec
-                    .spec_args
-                    .iter()
-                    .map(|x| (x.0.as_str(), &x.1))
-                    .collect::<Vec<_>>(),
-                spec.const_grid,
-                gpu_name.clone(),
-                &key.compile_options,
-            )?;
-            let validator = Arc::new(compiler.get_validator());
-            let module_op = compiler.compile()?;
-            let cubin_filename = compile_module(&module_op, &gpu_name);
-            let jit_elapsed = t0.elapsed();
-
-            // Persist to disk cache.
-            if let Some(store) = cuda_async::jit_store::get_jit_store() {
-                if let Ok(cubin_bytes) = std::fs::read(&cubin_filename) {
-                    if store.put(&disk_key, &cubin_bytes).is_ok() {
-                        jit_log!(
-                            "warmup: {module_name}::{} → saved to disk cache ({} bytes)",
-                            spec.function_name,
-                            cubin_bytes.len()
-                        );
-                    }
-                }
-            }
-
-            let module = load_module_from_file(&cubin_filename, device_id)?;
-            let function =
-                Arc::new(module.load_function(entry.function_entry).map_err(|e| {
-                    Error::KernelLaunch(KernelLaunchError(format!(
-                        "failed to load '{}' from compiled cubin: {e}",
-                        entry.function_entry
-                    )))
-                })?);
-            jit_log!(
-                "warmup: {module_name}::{} → JIT compiled in {:.1?}",
-                spec.function_name,
-                jit_elapsed
-            );
-            Ok(CompiledKernel {
-                module,
-                function,
-                validator,
-            })
-        })?;
+        get_or_compile_kernel(
+            &key,
+            Some(&modules),
+            &module_asts,
+            entry.function_entry,
+            device_id,
+        )?;
     }
 
     Ok(())
