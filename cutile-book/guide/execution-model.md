@@ -70,9 +70,9 @@ fn kernel<const S: [i32; 2]>(
     let pid: (i32, i32, i32) = get_tile_block_id();    // This block's (x, y, z)
     let grid: (i32, i32, i32) = get_num_tile_blocks();  // Grid dimensions
 
-    // For element-wise ops, load_tile_like_2d uses the output's
+    // For element-wise ops, load_tile_like uses the output's
     // partition to determine which region this block processes:
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
     output.store(tile);
 }
 ```
@@ -91,7 +91,7 @@ fn kernel<const TILE_SIZE: [i32; 2]>(
     output: &mut Tensor<f32, TILE_SIZE>,  // Tile shape: compile-time constant
     input: &Tensor<f32, {[-1, -1]}>       // Tensor shape: runtime
 ) {
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     let max_vals = reduce_max(tile, 1i32);  // Reduction axis: compile-time constant
 

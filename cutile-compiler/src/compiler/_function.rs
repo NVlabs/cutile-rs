@@ -34,6 +34,7 @@ use cutile_ir::ir::{
 use anyhow::Context as AnyhowContext;
 use quote::ToTokens;
 use std::any::type_name;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
@@ -52,6 +53,7 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) generic_vars: GenericVars,
     pub(crate) validator: Validator,
     pub(crate) module_name_stack: Vec<String>,
+    pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
@@ -176,6 +178,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             generic_vars,
             stride_args,
             module_name_stack: vec![module_name.to_string()],
+            typeck_results: RefCell::new(None),
         })
     }
 
@@ -315,9 +318,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
+        let mut initial_types = var_names
+            .iter()
+            .cloned()
+            .zip(cuda_tile_argument_types.iter().cloned())
+            .collect::<HashMap<_, _>>();
+
         // Add const generics as variables.
         for (key, value) in &generic_vars.inst_i32 {
             let tr_val = self.compile_constant(module, block_id, generic_vars, *value)?;
+            initial_types.insert(key.clone(), tr_val.ty.clone());
             ctx.vars.insert(key.clone(), tr_val);
         }
 
@@ -331,26 +341,41 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let tr_val = self
                 .compile_expression(module, block_id, &arr_expr, generic_vars, &mut ctx, ty)?
                 .expect("Failed to compile CGA as var.");
+            initial_types.insert(key.clone(), tr_val.ty.clone());
             ctx.vars.insert(key.clone(), tr_val);
         }
 
         ctx.default_terminator = Some(BlockTerminator::Return);
 
+        let mut typed_fn_item = fn_item.clone();
+        crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);
+        let typeck_results = crate::passes::type_inference::infer_function(
+            self,
+            &typed_fn_item,
+            generic_vars,
+            initial_types,
+        )?;
+        let lowered_fn_item =
+            crate::passes::typed_dispatch_lowering::lower_function(&typed_fn_item, &typeck_results);
+        let previous_typeck_results = self.typeck_results.replace(Some(typeck_results));
+
         if std::env::var("CUTILE_DEBUG_COMPILER2").is_ok() {
             eprintln!(
-                "compiler2: entry function body:\n{}",
-                quote::quote!(#fn_item).to_string()
+                "compiler2: lowered entry function body:\n{}",
+                quote::quote!(#lowered_fn_item).to_string()
             );
         }
 
         let return_value = self.compile_block(
             module,
             block_id,
-            &*fn_item.block,
+            &*lowered_fn_item.block,
             generic_vars,
             &mut ctx,
             None,
-        )?;
+        );
+        self.typeck_results.replace(previous_typeck_results);
+        let return_value = return_value?;
         if return_value.is_some() {
             return self.jit_error_result(
                 &fn_item.block.span(),
@@ -528,6 +553,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         match expr {
             Expr::MethodCall(method_call_expr) => {
                 let ident = &method_call_expr.method;
+                if let Some(return_type) = self
+                    .typeck_results
+                    .borrow()
+                    .as_ref()
+                    .and_then(|results| results.method_selection(method_call_expr).cloned())
+                    .and_then(|selection| selection.return_type)
+                {
+                    return Ok(Some(return_type));
+                }
                 let mut args = method_call_expr.args.clone();
                 args.insert(0, *method_call_expr.receiver.clone());
                 let call_arg_values = self.compile_call_args_no_side_effect(
@@ -537,11 +571,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     generic_vars,
                     ctx,
                 )?;
-                let receiver_rust_ty = &call_arg_values[0].ty.rust_ty;
+                let call_arg_rust_tys = call_arg_values
+                    .iter()
+                    .map(|arg| arg.ty.rust_ty.clone())
+                    .collect::<Vec<_>>();
+                let receiver_rust_ty = &call_arg_rust_tys[0];
                 let Some((_, impl_item, impl_method)) = self.modules.get_impl_item_fn(
                     receiver_rust_ty,
                     method_call_expr,
                     generic_vars,
+                    &call_arg_rust_tys,
                 )?
                 else {
                     return self.jit_error_result(
@@ -564,18 +603,27 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 }
 
-                let mut call_arg_rust_tys = vec![];
                 let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
                 let mut arg_string_values: HashMap<String, String> = HashMap::new();
+                let mut arg_zst_values: HashMap<String, String> = HashMap::new();
                 for (i, param_name) in get_sig_param_names(&impl_method.sig).iter().enumerate() {
                     if i < call_arg_values.len() {
                         let call_arg_val = &call_arg_values[i];
                         let call_arg_ty = call_arg_val.ty.clone();
-                        call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
                         if let Some(ref string_lit_expr) = call_arg_val.string_literal {
+                            if let Some(value) = super::shared_utils::zst_type_name(string_lit_expr)
+                            {
+                                arg_zst_values.insert(param_name.to_string(), value);
+                            }
                             if let Expr::Lit(lit_expr) = string_lit_expr {
                                 if let syn::Lit::Str(s) = &lit_expr.lit {
                                     arg_string_values.insert(param_name.to_string(), s.value());
+                                }
+                            } else if param_name == "padding_value" {
+                                if let Some(value) =
+                                    super::shared_utils::padding_zst_value(string_lit_expr)
+                                {
+                                    arg_string_values.insert(param_name.to_string(), value);
                                 }
                             }
                         }
@@ -620,6 +668,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         op_attrs.parse_string_arr("output_type_params")
                     {
                         for type_param_name in output_type_params {
+                            if should_skip_optional_output_type_param(
+                                &type_param_name,
+                                &arg_zst_values,
+                            ) {
+                                continue;
+                            }
                             match arg_types.get(&type_param_name) {
                                 Some(arg_type) => {
                                     let cuda_tile_type_str = arg_type.get_cuda_tile_type_str();
@@ -693,15 +747,27 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let mut call_arg_rust_tys = vec![];
                     let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
                     let mut arg_string_values: HashMap<String, String> = HashMap::new();
+                    let mut arg_zst_values: HashMap<String, String> = HashMap::new();
                     for (i, param_name) in get_sig_param_names(&fn_item.sig).iter().enumerate() {
                         if i < call_arg_values.len() {
                             let call_arg_val = &call_arg_values[i];
                             let call_arg_ty = call_arg_val.ty.clone();
                             call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
                             if let Some(ref string_lit_expr) = call_arg_val.string_literal {
+                                if let Some(value) =
+                                    super::shared_utils::zst_type_name(string_lit_expr)
+                                {
+                                    arg_zst_values.insert(param_name.to_string(), value);
+                                }
                                 if let Expr::Lit(lit_expr) = string_lit_expr {
                                     if let syn::Lit::Str(s) = &lit_expr.lit {
                                         arg_string_values.insert(param_name.to_string(), s.value());
+                                    }
+                                } else if param_name == "padding_value" {
+                                    if let Some(value) =
+                                        super::shared_utils::padding_zst_value(string_lit_expr)
+                                    {
+                                        arg_string_values.insert(param_name.to_string(), value);
                                     }
                                 }
                             }
@@ -746,6 +812,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             op_attrs.parse_string_arr("output_type_params")
                         {
                             for type_param_name in output_type_params {
+                                if should_skip_optional_output_type_param(
+                                    &type_param_name,
+                                    &arg_zst_values,
+                                ) {
+                                    continue;
+                                }
                                 match arg_types.get(&type_param_name) {
                                     Some(arg_type) => {
                                         let cuda_tile_type_str = arg_type.get_cuda_tile_type_str();
@@ -849,4 +921,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             _ => Ok(None),
         }
     }
+}
+
+fn should_skip_optional_output_type_param(
+    type_param_name: &str,
+    arg_zst_values: &HashMap<String, String>,
+) -> bool {
+    matches!(
+        (
+            type_param_name,
+            arg_zst_values.get(type_param_name).map(String::as_str)
+        ),
+        ("padding_value", Some("None")) | ("dim_map", Some("Identity"))
+    )
 }

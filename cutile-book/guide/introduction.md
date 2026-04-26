@@ -22,8 +22,8 @@ mod my_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x = load_tile_like_2d(x, z);
-        let tile_y = load_tile_like_2d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
@@ -127,8 +127,8 @@ fn kernel(
 
 ```rust
 // Tiles are created and transformed, never mutated
-let tile_a = load_tile_like_2d(a, output);    // Load creates a tile
-let tile_b = load_tile_like_2d(b, output);    // Another tile
+let tile_a = load_tile_like(a, output);    // Load creates a tile
+let tile_b = load_tile_like(b, output);    // Another tile
 let result_tile = tile_a + tile_b;            // New tile from operation
 output.store(result_tile);                     // Store tile to tensor
 ```

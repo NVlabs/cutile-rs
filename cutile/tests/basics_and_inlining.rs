@@ -93,12 +93,34 @@ mod basics_and_inlining_module {
             let _some_tensor: Tensor<f32, { [-1, -1] }> =
                 make_tensor_view(ptr_tile, dynamic_shape, stride, token);
             let mut partition: PartitionMut<f32, { [128, 256] }> =
-                make_partition_view_mut(y, shape, token);
+                make_partition_view_mut(y, shape, padding::None, token);
             let idx: [i32; 2] = [0i32, 0i32];
-            let some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
-            store_to_view_mut(&mut partition, some_tile, idx, None, false);
-            let _store_token_2: Token =
-                store_to_view_mut(&mut partition, some_tile, idx, None, false);
+            let some_tile: Tile<f32, { [128, 256] }> = load_view_tko_mut(
+                &partition,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            let _store_token_2: Token = store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
         }
 
         let shape: Shape<{ [1, 1] }> = Shape::<{ [1, 1] }> {
@@ -181,19 +203,58 @@ mod basics_and_inlining_module {
             let _some_tensor: Tensor<f32, { [-1, -1] }> =
                 make_tensor_view(ptr_tile, dynamic_shape, stride, token);
             let mut partition: PartitionMut<f32, { [128, 256] }> =
-                make_partition_view_mut(y, shape, token);
+                make_partition_view_mut(y, shape, padding::None, token);
             let idx: [i32; 2] = [0i32, 0i32];
-            let mut some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
-            store_to_view_mut(&mut partition, some_tile, idx, None, false);
-            store_to_view_mut(&mut partition, some_tile, idx, None, false);
+            let mut some_tile: Tile<f32, { [128, 256] }> = load_view_tko_mut(
+                &partition,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
             for _i in 0i32..10i32 {
                 let some_tile_2: Tile<f32, { [128, 256] }> = constant(2.0, shape);
                 some_tile = some_tile + some_tile_2;
-                store_to_view_mut(&mut partition, some_tile, idx, None, false);
+                store_view_tko_mut(
+                    &mut partition,
+                    some_tile,
+                    idx,
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                );
                 continue;
             }
             let some_3: Tile<f32, { [128, 256] }> = some_tile + some_tile;
-            store_to_view_mut(&mut partition, some_3, idx, None, false);
+            store_view_tko_mut(
+                &mut partition,
+                some_3,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
         }
 
         let _basic_string = "a string.";
@@ -230,13 +291,13 @@ mod basics_and_inlining_module {
     }
 }
 
-use basics_and_inlining_module::_module_asts;
+use basics_and_inlining_module::__module_ast_self;
 
 #[test]
 fn compile_inlining() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -266,8 +327,8 @@ fn compile_inlining() -> () {
 #[test]
 fn compile_basics() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -290,8 +351,8 @@ fn compile_basics() -> () {
 #[test]
 fn compile_negative_constant() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -318,8 +379,8 @@ fn compile_negative_constant() -> () {
 #[test]
 fn compile_ptr_tile_reshape() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,

@@ -202,9 +202,9 @@ where
 // ---------------------------------------------------------------------------
 // load_tile_like: rank-specific BODIES per impl
 //
-// This is the case that motivated the TODO in _core.rs for load_tile_like_1d /
-// load_tile_like_2d. The body genuinely differs per rank (different number of
-// pid components in the index) — not a simple substitution. Each rank impl is
+// This is the case that motivated the old rank-specific load_tile_like helpers
+// in _core.rs. The body genuinely differs per rank (different number of pid
+// components in the index) — not a simple substitution. Each rank impl is
 // hand-written with the rank-appropriate body.
 //
 // The call site uses one name (`load_tile_like`) and rustc dispatches to the
@@ -216,26 +216,26 @@ pub trait LoadTileLike<Y> {
     fn load_tile_like(x: &Self, y: &Y) -> Self::Out;
 }
 
-// Rank 1: dynamic-shape input `Tensor_1<E, -1>`, specific-shape output
-// `Tensor_1<E, S0>`. Body indexes with a single pid component.
-impl<E: Copy, const S0: i32> LoadTileLike<Tensor_1<E, S0>> for Tensor_1<E, -1> {
-    type Out = Tile_1<E, S0>;
-    fn load_tile_like(_x: &Self, _y: &Tensor_1<E, S0>) -> Tile_1<E, S0> {
+// Rank 1: dynamic-shape input `Tensor_1<E1, -1>`, specific-shape reference
+// `Tensor_1<E2, S0>`. Body indexes with a single pid component.
+impl<E1: Copy, E2: Copy, const S0: i32> LoadTileLike<Tensor_1<E2, S0>> for Tensor_1<E1, -1> {
+    type Out = Tile_1<E1, S0>;
+    fn load_tile_like(_x: &Self, _y: &Tensor_1<E2, S0>) -> Tile_1<E1, S0> {
         let _pid = get_tile_block_id();
-        // In the real DSL this would call `load_from_view(&partition, [_pid.0], None, false)`.
+        // In the real DSL this would call `load_view_tko(&partition, [_pid.0], ordering::Weak, scope::TileBlock, None, tma::Enabled)`.
         // The rank-1 body uses a 1-element index array.
         let _idx: [i32; 1] = [_pid.0];
         Tile_1::new()
     }
 }
 
-// Rank 2: dynamic `Tensor_2<E, -1, -1>`, specific `Tensor_2<E, S0, S1>`.
+// Rank 2: dynamic `Tensor_2<E1, -1, -1>`, specific `Tensor_2<E2, S0, S1>`.
 // Body indexes with two pid components.
-impl<E: Copy, const S0: i32, const S1: i32> LoadTileLike<Tensor_2<E, S0, S1>>
-    for Tensor_2<E, -1, -1>
+impl<E1: Copy, E2: Copy, const S0: i32, const S1: i32> LoadTileLike<Tensor_2<E2, S0, S1>>
+    for Tensor_2<E1, -1, -1>
 {
-    type Out = Tile_2<E, S0, S1>;
-    fn load_tile_like(_x: &Self, _y: &Tensor_2<E, S0, S1>) -> Tile_2<E, S0, S1> {
+    type Out = Tile_2<E1, S0, S1>;
+    fn load_tile_like(_x: &Self, _y: &Tensor_2<E2, S0, S1>) -> Tile_2<E1, S0, S1> {
         let _pid = get_tile_block_id();
         // Rank-2 body uses a 2-element index array — different from rank 1.
         let _idx: [i32; 2] = [_pid.0, _pid.1];
@@ -244,11 +244,11 @@ impl<E: Copy, const S0: i32, const S1: i32> LoadTileLike<Tensor_2<E, S0, S1>>
 }
 
 // Rank 3: body indexes with three pid components.
-impl<E: Copy, const S0: i32, const S1: i32, const S2: i32> LoadTileLike<Tensor_3<E, S0, S1, S2>>
-    for Tensor_3<E, -1, -1, -1>
+impl<E1: Copy, E2: Copy, const S0: i32, const S1: i32, const S2: i32>
+    LoadTileLike<Tensor_3<E2, S0, S1, S2>> for Tensor_3<E1, -1, -1, -1>
 {
-    type Out = Tile_3<E, S0, S1, S2>;
-    fn load_tile_like(_x: &Self, _y: &Tensor_3<E, S0, S1, S2>) -> Tile_3<E, S0, S1, S2> {
+    type Out = Tile_3<E1, S0, S1, S2>;
+    fn load_tile_like(_x: &Self, _y: &Tensor_3<E2, S0, S1, S2>) -> Tile_3<E1, S0, S1, S2> {
         let _pid = get_tile_block_id();
         let _idx: [i32; 3] = [_pid.0, _pid.1, _pid.2];
         Tile_3::new()
@@ -362,22 +362,12 @@ fn load_tile_like_rank_3() {
 }
 
 #[test]
-fn load_tile_like_different_element_types_rejected() {
-    // Positive side: element types match → resolves.
+fn load_tile_like_different_element_types_resolve() {
+    // Element types may differ; output tile uses the source tensor element.
     let input: Tensor_2<f32, -1, -1> = Tensor_2::new();
-    let output: Tensor_2<f32, 64, 128> = Tensor_2::new();
-    let _ = load_tile_like(&input, &output);
-
-    // Negative side (would fail to compile — documented, not exercised):
-    //
-    //   let input: Tensor_2<f32, -1, -1> = Tensor_2::new();
-    //   let output: Tensor_2<i32, 64, 128> = Tensor_2::new();
-    //   let _ = load_tile_like(&input, &output);
-    //   // error: the trait `LoadTileLike<Tensor_2<i32, 64, 128>>`
-    //   // is not implemented for `Tensor_2<f32, -1, -1>`
-    //
-    // The per-rank impls have matching E on both positions, so mismatched
-    // element types have no impl and rustc rejects.
+    let output: Tensor_2<i32, 64, 128> = Tensor_2::new();
+    let tile = load_tile_like(&input, &output);
+    let _: Tile_2<f32, 64, 128> = tile;
 }
 
 #[test]

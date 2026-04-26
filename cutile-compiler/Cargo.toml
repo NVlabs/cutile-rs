@@ -26,3 +26,4 @@ stacker = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 cutile-ir = { workspace = true }
+linkme = { workspace = true }

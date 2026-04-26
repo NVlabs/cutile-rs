@@ -117,7 +117,7 @@ impl ExecutionContext {
 /// | `.into_future()`    | Default device's [`SchedulingPolicy`] | No (returns future) |
 /// | `.schedule(policy)` | The `policy` you provide              | No (returns future) |
 ///
-/// With the default [`StreamPoolRoundRobin`] policy (4 streams), consecutive `.await` or
+/// With the default [`StreamPoolRoundRobin`](crate::scheduling_policies::StreamPoolRoundRobin) policy (4 streams), consecutive `.await` or
 /// `.sync()` calls rotate through streams, so independent operations can overlap on the GPU.
 /// Operations chained with [`.then()`](DeviceOp::then) share a single stream
 /// and always execute in order.
@@ -382,7 +382,7 @@ pub trait DeviceOp:
 ///
 /// Implementors:
 /// - Macro-generated kernel launchers (kernel launch only)
-/// - [`Memcpy`](crate::Memcpy) (copy between pre-allocated buffers)
+/// - Memcpy operations between pre-allocated buffers
 /// - [`Value<T>`] (no GPU work)
 ///
 /// Non-implementors (allocate device memory):

@@ -40,9 +40,9 @@ pub(super) fn write_op_body(
     use Opcode::*;
     match op.opcode {
         // ----- Simple: result types + operands (no size) -----
-        AbsF | AbsI | AndI | Bitcast | Broadcast | Ceil | Cos | CosH | Exp | Floor | IntToPtr
-        | Log | Log2 | MmaF | MulhiI | NegF | Offset | OrI | Pow | PtrToInt | PtrToPtr | RemF
-        | Reshape | Select | Sin | SinH | Tan | XOrI => {
+        AbsF | AbsI | AndI | Atan2 | Bitcast | Broadcast | Ceil | Cos | CosH | Exp | Floor
+        | IntToPtr | Log | Log2 | MmaF | MulhiI | NegF | Offset | OrI | Pow | PtrToInt
+        | PtrToPtr | RemF | Reshape | Select | Sin | SinH | Tan | XOrI => {
             write_result_types(op, w, ctx)?;
             write_operands(op, w, ctx, false)?;
         }

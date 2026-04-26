@@ -112,8 +112,12 @@ pub struct Partition<'a, E: ElementType, const D: [i32; N]> { .. }
 
 The required param `tile` is always present (derived from `D`). The optional
 params appear only when set by the constructor op:
-- `make_partition_view` sets `tensor_view` -- type includes `tensor_view`
-- `make_partition_view_padded` sets `tensor_view` + `padding_value` -- type includes both
+- `make_partition_view(..., padding::None, dim_map::Identity, ...)` sets
+  `tensor_view`
+- `make_partition_view(..., padding::Zero, dim_map::Identity, ...)` sets
+  `tensor_view` + `padding_value`
+- `make_partition_view(..., padding::None, dim_map, ...)` sets
+  `tensor_view` + `dim_map`
 
 Resulting MLIR types:
 ```
@@ -158,12 +162,13 @@ whose *types* and *values* are forwarded into the output type:
 // Constructor op:
 #[cuda_tile::op(name="cuda_tile.make_partition_view",
                 params=["tensor_view"],
-                output_type_params=["tensor_view", "padding_value"],
+                output_type_params=["tensor_view", "padding_value", "dim_map"],
                 output_type_meta=["token", "tensor_view.shape()"])]
-fn make_partition_view_padded(
+fn make_partition_view(
     tensor_view: &Tensor<E, TENSOR_SHAPE>,  // forwarded as type param
     tile: Shape<TILE_SHAPE>,
-    padding_value: &str,                     // forwarded as type param
+    padding_value: impl padding::Mode,       // forwarded as type param
+    dim_map: impl dim_map::Mode,             // forwarded as type param
     token: Token,
 ) -> Partition<'a, E, TILE_SHAPE> { unreachable!() }
 ```
@@ -171,12 +176,15 @@ fn make_partition_view_padded(
 When the JIT compiles a call to this function:
 
 1. It compiles each argument and records the parameter name to compiled type
-   mapping (`arg_types` HashMap) and string literal values (`arg_string_values`).
+   mapping (`arg_types` HashMap) plus normalized metadata values for marker
+   arguments such as `padding::Zero`.
 
 2. For each name in `output_type_params`:
    - Looks up the corresponding argument type from `arg_types`
    - Calls `TypeParam::derive_param_from_type` to create a type parameter
-   - For `padding_value` specifically: if the derived `TypeParam` is a
+   - For `padding_value` and `dim_map` specifically: if the marker is
+     `padding::None` or `dim_map::Identity`, skip the optional type param.
+   - For real `padding_value` specifically: if the derived `TypeParam` is a
      `TypeParam::Padding` variant, sets its value from `arg_string_values`
      (i.e., the `"zero"` string literal from the call site)
 
@@ -247,8 +255,8 @@ Emits `%result = cuda_tile.cos %x : !cuda_tile.tile<128xf32>`.
 
 **Op with hint parameter:**
 ```rust
-#[cuda_tile::op(name="load_view_tko", params=["view", "index"], hint_params=["latency"])]
-fn load_from_view(view: &Partition<E, D>, index: [i32; N], latency: Option<i32>, ..) { .. }
+#[cuda_tile::op(name="load_view_tko", params=["view", "index"])]
+fn load_view_tko(view: &Partition<E, D>, index: [i32; N], latency: Option<i32>, tma: T, ..) { .. }
 ```
 `latency` guides TMA vs non-TMA lowering but doesn't appear as an MLIR operand.
 
@@ -267,10 +275,10 @@ pub struct PartitionMut<'a, E: ElementType, const D: [i32; N]> { .. }
                 params=["tensor_view"],
                 output_type_params=["tensor_view", "padding_value"],
                 output_type_meta=["token"])]
-fn make_partition_view_mut_padded(
+fn make_partition_view_mut(
     tensor_view: &Tensor<E, TENSOR_SHAPE>,
     shape: Shape<TILE_SHAPE>,
-    padding_value: &str,
+    padding_value: impl padding::Mode,
     token: Token,
 ) -> PartitionMut<'a, E, TILE_SHAPE> { unreachable!() }
 ```
@@ -278,7 +286,7 @@ fn make_partition_view_mut_padded(
 Call site:
 ```rust
 let pv: PartitionMut<E, S> =
-    unsafe { make_partition_view_mut_padded(y, tile_shape, "zero", token) };
+    unsafe { make_partition_view_mut(y, tile_shape, padding::Zero, token) };
 ```
 
 Compilation flow:
@@ -293,7 +301,7 @@ Compilation flow:
 
 3. `compile_general_op` calls `derive_type`, which invokes the type derivation
    path in `compile_type.rs`. This path:
-   - Looks up `make_partition_view_mut_padded`'s `output_type_params`
+   - Looks up `make_partition_view_mut`'s `output_type_params`
    - Finds `["tensor_view", "padding_value"]`
    - Inserts `tensor_view` as the compiled tensor arg type, `padding_value` as
      `TypeParam::Padding { padding_value: Some("zero") }` into the HashMap.
@@ -305,27 +313,32 @@ Compilation flow:
 
 5. Result: `!cuda_tile.partition_view<tile=(64x64), padding_value = zero, tensor_view<?x?xf32, strides=[?,1]>>`
 
-### Multiple ops sharing the same MLIR op name
+### One Rust op surface for optional MLIR type params
 
-Several Rust functions can map to the same MLIR op, distinguished by their
-`output_type_params`:
+The partition-view constructor has a single read-only Rust function and one
+mutable Rust function. Marker arguments determine which optional MLIR type
+parameters appear:
 
 ```rust
-// No padding:
-#[cuda_tile::op(name="cuda_tile.make_partition_view", output_type_params=["tensor_view"])]
-fn make_partition_view(..) -> Partition { .. }
+fn make_partition_view(
+    tensor,
+    shape,
+    padding_value: impl padding::Mode,
+    dim_map: impl dim_map::Mode,
+    token,
+) -> Partition { .. }
 
-// With padding:
-#[cuda_tile::op(name="cuda_tile.make_partition_view", output_type_params=["tensor_view", "padding_value"])]
-fn make_partition_view_padded(.., padding_value: &str, ..) -> Partition { .. }
-
-// With dim_map:
-#[cuda_tile::op(name="cuda_tile.make_partition_view", output_type_params=["tensor_view", "dim_map"])]
-fn make_partition_view_permuted(.., dim_map: Array<P>, ..) -> Partition { .. }
+unsafe fn make_partition_view_mut(
+    tensor,
+    shape,
+    padding_value: impl padding::Mode,
+    token,
+) -> PartitionMut { .. }
 ```
 
-All emit the same `make_partition_view` MLIR op, but the output type includes
-different optional parameters.
+Both emit the same `cuda_tile.make_partition_view` MLIR op. The output type
+includes `padding_value` only for real padding markers such as `padding::Zero`,
+and includes `dim_map` only for non-identity mappings.
 
 ---
 
@@ -452,15 +465,25 @@ pub fn store_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>, resul
     let tile_shape: Shape<S> = y.shape();
     let tensor_token: Token = get_tensor_token(y);
     let mut y_partition: PartitionMut<E, S> =
-        unsafe { make_partition_view_mut_padded(y, tile_shape, "zero", tensor_token) };
-    unsafe { store_to_view_mut(&mut y_partition, result, [0i32; N], None, false) };
+        unsafe { make_partition_view_mut(y, tile_shape, padding::Zero, tensor_token) };
+    unsafe {
+        store_view_tko_mut(
+            &mut y_partition,
+            result,
+            [0i32; N],
+            ordering::Weak,
+            scope::TileBlock,
+            None,
+            tma::Enabled,
+        )
+    };
     let new_token: Token = get_partition_token_mut(&y_partition);
     set_tensor_token(y, new_token);
 }
 ```
 
-This composes primitive ops (`get_tensor_token`, `make_partition_view_mut_padded`,
-`store_to_view_mut`, etc.) without emitting a single MLIR op of its own.
+This composes primitive ops (`get_tensor_token`, `make_partition_view_mut`,
+`store_view_tko_mut`, etc.) without emitting a single MLIR op of its own.
 
 When the JIT encounters a call to `store_tile(...)`:
 1. `get_cuda_tile_op_attrs` returns `None` (no `cuda_tile::op`)

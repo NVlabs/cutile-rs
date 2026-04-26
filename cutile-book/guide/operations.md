@@ -24,8 +24,8 @@ Load from a dynamic tensor at the position matching another tile:
 
 ```rust
 // Load from x at the same position as output tile z
-let tile_x = load_tile_like_2d(x, z);
-let tile_y = load_tile_like_2d(y, z);
+let tile_x = load_tile_like(x, z);
+let tile_y = load_tile_like(y, z);
 ```
 
 This is the most common pattern for element-wise operations.
@@ -105,7 +105,7 @@ let y = absf(x);             // Absolute value (float)
 let y = absi(x);             // Absolute value (integer)
 let y = negf(x);             // Negation (float)
 let y = negi(x);             // Negation (integer)
-let y = ceil(x, "rn");       // Ceiling (requires rounding mode)
+let y = ceil(x);             // Ceiling
 let y = floor(x);            // Floor
 ```
 
@@ -387,7 +387,7 @@ fn tiled_gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const
 
 | Category | Key Operations |
 |----------|---------------|
-| **Load/Store** | `load_tile_mut`, `load_tile_like_2d`, `partition().load()`, `store` |
+| **Load/Store** | `load_tile_mut`, `load_tile_like`, `partition().load()`, `store` |
 | **Arithmetic** | `+`, `-`, `*`, `/`, `fma`, `true_div` |
 | **Math** | `exp`, `exp2`, `log`, `log2`, `sqrt`, `rsqrt`, `sin`, `cos`, `tanh` |
 | **Reduction** | `reduce_max`, `reduce_sum`, `reduce_min`, `reduce_prod` |

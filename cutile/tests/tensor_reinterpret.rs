@@ -18,7 +18,7 @@ mod tensor_reinterpret_module {
 
     #[cutile::entry()]
     fn passthrough_f32(output: &mut Tensor<f32, { [4] }>, input: &Tensor<f32, { [-1] }>) {
-        let tile: Tile<f32, { [4] }> = load_tile_like_1d(input, output);
+        let tile: Tile<f32, { [4] }> = load_tile_like(input, output);
         output.store(tile);
     }
 }

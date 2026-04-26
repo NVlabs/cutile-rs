@@ -41,7 +41,7 @@ mod unary_math_ops_module {
         let t13: Tile<f32, S> = tanh(t12); // hyperbolic tangent
 
         // Rounding
-        let t14: Tile<f32, S> = ceil(t13, rounding::NearestEven); // ceiling
+        let t14: Tile<f32, S> = ceil(t13); // ceiling
         let result: Tile<f32, S> = floor(t14); // floor
 
         output.store(result);
@@ -54,7 +54,7 @@ mod unary_math_ops_module {
 
         // Integer arithmetic operations
         let t1: Tile<i64, S> = absi(x); // absolute value (int)
-        let result: Tile<i64, S> = negi(t1); // negation (int)
+        let result: Tile<i64, S> = negi(t1, overflow::None); // negation (int)
 
         output.store(result);
     }
@@ -83,6 +83,14 @@ mod unary_math_ops_module {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
         let result: Tile<f32, S> = pow(x, y); // x^y
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn atan2_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let y: Tile<f32, S> = load_tile_mut(output);
+        let result: Tile<f32, S> = atan2(x, y);
         output.store(result);
     }
 
@@ -176,13 +184,13 @@ mod unary_math_ops_module {
     }
 }
 
-use unary_math_ops_module::_module_asts;
+use unary_math_ops_module::__module_ast_self;
 
 #[test]
 fn compile_unary_math_ops() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -222,8 +230,8 @@ fn compile_unary_math_ops() -> () {
 #[test]
 fn compile_integer_unary_ops() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -260,8 +268,8 @@ fn compile_integer_unary_ops() -> () {
 #[test]
 fn compile_sqrt() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -291,8 +299,8 @@ fn compile_sqrt() -> () {
 #[test]
 fn compile_fma() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -322,8 +330,8 @@ fn compile_fma() -> () {
 #[test]
 fn compile_pow() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -351,10 +359,39 @@ fn compile_pow() -> () {
 }
 
 #[test]
+fn compile_atan2() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "unary_math_ops_module",
+            "atan2_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== ATAN2 MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= atan2"),
+            "Expected atan2 operation in MLIR output"
+        );
+    });
+}
+
+#[test]
 fn compile_exp2_ftz() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -386,8 +423,8 @@ fn compile_exp2_ftz() -> () {
 #[test]
 fn compile_maxf_ftz() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -419,8 +456,8 @@ fn compile_maxf_ftz() -> () {
 #[test]
 fn compile_minf_ftz() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -452,8 +489,8 @@ fn compile_minf_ftz() -> () {
 /// Helper: compile a kernel and assert it contains the expected op name and flush_to_zero.
 fn assert_ftz_in_mlir(kernel_name: &'static str, expected_op: &'static str) {
     common::with_test_stack(move || {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -520,8 +557,8 @@ fn compile_sqrt_ftz() {
 #[test]
 fn compile_unary_math_ops_bf16() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,

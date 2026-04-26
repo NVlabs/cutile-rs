@@ -23,7 +23,7 @@ mod my_module {
         let zeros: Tile<f32, S> = constant(0.0, out.shape());
         let ones: Tile<f32, S> = constant(1.0, out.shape());
         let p_tile = p.broadcast(out.shape());
-        let x_keep_tile = load_tile_like_1d(x_keep, out);
+        let x_keep_tile = load_tile_like(x_keep, out);
         // x_keep_tile is the probability of keeping (higher is more likely).
         // p_tile is the probability of dropout (lower keeps more values).
         let out_tile = select(gt_tile(x_keep_tile, p_tile), x_keep_tile, zeros);

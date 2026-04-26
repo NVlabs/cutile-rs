@@ -40,7 +40,7 @@ mod my_module {
         y: &mut Tensor<f32, S>            // Vector input AND output (in-place)
     ) {
         let tile_a = a.broadcast(y.shape());  // Scalar → Tile
-        let tile_x = load_tile_like_2d(x, y);
+        let tile_x = load_tile_like(x, y);
         let tile_y = y.load();                // Load current y values
         y.store(tile_a * tile_x + tile_y);    // y = a*x + y
     }
@@ -157,7 +157,7 @@ fn saxpy_extended<const S: [i32; 2]>(
 ) {
     let tile_a = a.broadcast(y.shape());
     let tile_b = b.broadcast(y.shape());
-    let tile_x = load_tile_like_2d(x, y);
+    let tile_x = load_tile_like(x, y);
     let tile_y = y.load();
     y.store(tile_a * tile_x + tile_b * tile_y);
 }

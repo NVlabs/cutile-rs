@@ -63,8 +63,8 @@ mod vector_add_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x = load_tile_like_2d(x, z);
-        let tile_y = load_tile_like_2d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
@@ -101,7 +101,7 @@ mod saxpy_module {
     #[cutile::entry()]
     fn saxpy<const S: [i32; 2]>(a: f32, x: &Tensor<f32, { [-1, -1] }>, y: &mut Tensor<f32, S>) {
         let tile_a = a.broadcast(y.shape());
-        let tile_x = load_tile_like_2d(x, y);
+        let tile_x = load_tile_like(x, y);
         let tile_y = y.load();
         y.store(tile_a * tile_x + tile_y);
     }
@@ -216,7 +216,7 @@ mod softmax_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &mut Tensor<f32, { [BM, BN] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
             tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());

@@ -19,7 +19,8 @@ mod binary_math_ops_module {
         // Test min and max operations
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
-        let max_result: Tile<f32, S> = maxf(x, y, nan::Disabled, ftz::Disabled);
+        let rem_result: Tile<f32, S> = remf(x, y);
+        let max_result: Tile<f32, S> = maxf(rem_result, y, nan::Disabled, ftz::Disabled);
         let min_result: Tile<f32, S> = minf(max_result, y, nan::Disabled, ftz::Disabled);
         output.store(min_result);
     }
@@ -30,11 +31,8 @@ mod binary_math_ops_module {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
 
-        let _zero: Tile<f32, S> = constant(0.0, output.shape());
-        let _one: Tile<f32, S> = constant(1.0, output.shape());
-
-        // Simplified to avoid bool literal issue
-        let result: Tile<f32, S> = maxf(x, y, nan::Disabled, ftz::Disabled);
+        let mask: Tile<bool, S> = cmpf(x, y, predicate::LessThan, cmp_ordering::Ordered);
+        let result: Tile<f32, S> = select(mask, x, y);
         output.store(result);
     }
 
@@ -54,7 +52,7 @@ mod binary_math_ops_module {
     // Direct call; resolves via the free-fn wrapper emitted by the
     // trait-dispatch macro (not the variadic `addf__N_N` rewriter).
     #[cutile::entry()]
-    fn addf_trait_dispatch_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+    fn addf_shadow_dispatch_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
         let result: Tile<f32, S> = addf(x, y, rounding::NearestEven, ftz::Disabled);
@@ -65,7 +63,7 @@ mod binary_math_ops_module {
     // let-binding. This is the exact case today's variadic-expansion rewriter
     // fails to desugar — under trait dispatch it resolves via rustc inference.
     #[cutile::entry()]
-    fn addf_trait_dispatch_nested_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+    fn addf_shadow_dispatch_nested_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let x: Tile<f32, S> = load_tile_mut(output);
         let y: Tile<f32, S> = load_tile_mut(output);
         let z: Tile<f32, S> = load_tile_mut(output);
@@ -82,7 +80,7 @@ mod binary_math_ops_module {
     // produces a rank-changing return type via an associated `Out`. Verifies
     // the multi-CGA code path through the trait-dispatch emitter.
     #[cutile::entry()]
-    fn reshape_trait_dispatch_kernel<const S: [i32; 2]>(output: &mut Tensor<f32, S>) {
+    fn reshape_shadow_dispatch_kernel<const S: [i32; 2]>(output: &mut Tensor<f32, S>) {
         let x: Tile<f32, S> = load_tile_mut(output);
         let target: Shape<{ [128] }> = Shape::<{ [128] }> { dims: &[128i32] };
         let flat: Tile<f32, { [128] }> = reshape(x, target);
@@ -94,7 +92,7 @@ mod binary_math_ops_module {
     // Case-3c proof point: reduce_sum's return CGA (R) is not in any arg,
     // so `Out` must be a trait generic inferred from the return-type ascription.
     #[cutile::entry()]
-    fn reduce_sum_trait_dispatch_kernel<const S: [i32; 2]>(
+    fn reduce_sum_shadow_dispatch_kernel<const S: [i32; 2]>(
         input: &mut Tensor<f32, S>,
         output: &mut Tensor<f32, { [1, 1] }>,
     ) {
@@ -104,13 +102,13 @@ mod binary_math_ops_module {
     }
 }
 
-use binary_math_ops_module::_module_asts;
+use binary_math_ops_module::__module_ast_self;
 
 #[test]
 fn compile_minmax() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -128,7 +126,7 @@ fn compile_minmax() -> () {
         let module_op_str = compiler.compile().expect("Failed.").to_string();
         println!("\n=== MIN/MAX MLIR ===\n{}", module_op_str);
 
-        let expected_ops = ["maxf", "minf"];
+        let expected_ops = ["remf", "maxf", "minf"];
         for op in expected_ops {
             assert!(
                 module_op_str.contains(format!("= {}", op).as_str()),
@@ -147,8 +145,8 @@ fn compile_minmax() -> () {
 #[test]
 fn compile_select() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -167,8 +165,12 @@ fn compile_select() -> () {
         println!("\n=== SELECT MLIR ===\n{}", module_op_str);
 
         assert!(
-            module_op_str.contains("maxf"),
-            "Kernel compiled but select test needs comparison ops"
+            module_op_str.contains("= cmpf"),
+            "Expected cmpf operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("select"),
+            "Expected select operation in MLIR output"
         );
 
         println!("\n✓ select operation verified in MLIR output");
@@ -178,8 +180,8 @@ fn compile_select() -> () {
 #[test]
 fn compile_bf16_binary_arith() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -212,15 +214,15 @@ fn compile_bf16_binary_arith() -> () {
 }
 
 #[test]
-fn compile_addf_trait_dispatch() -> () {
+fn compile_addf_shadow_dispatch() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             "binary_math_ops_module",
-            "addf_trait_dispatch_kernel",
+            "addf_shadow_dispatch_kernel",
             &[128.to_string()],
             &[("output", &[1])],
             &[],
@@ -240,15 +242,15 @@ fn compile_addf_trait_dispatch() -> () {
 }
 
 #[test]
-fn compile_reshape_trait_dispatch() -> () {
+fn compile_reshape_shadow_dispatch() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             "binary_math_ops_module",
-            "reshape_trait_dispatch_kernel",
+            "reshape_shadow_dispatch_kernel",
             &[8.to_string(), 16.to_string()],
             &[("output", &[8, 16])],
             &[],
@@ -268,15 +270,15 @@ fn compile_reshape_trait_dispatch() -> () {
 }
 
 #[test]
-fn compile_reduce_sum_trait_dispatch() -> () {
+fn compile_reduce_sum_shadow_dispatch() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             "binary_math_ops_module",
-            "reduce_sum_trait_dispatch_kernel",
+            "reduce_sum_shadow_dispatch_kernel",
             &[8.to_string(), 16.to_string()],
             &[("input", &[8, 16]), ("output", &[1, 1])],
             &[],
@@ -299,15 +301,15 @@ fn compile_reduce_sum_trait_dispatch() -> () {
 }
 
 #[test]
-fn compile_addf_trait_dispatch_nested() -> () {
+fn compile_addf_shadow_dispatch_nested() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             "binary_math_ops_module",
-            "addf_trait_dispatch_nested_kernel",
+            "addf_shadow_dispatch_nested_kernel",
             &[128.to_string()],
             &[("output", &[1])],
             &[],

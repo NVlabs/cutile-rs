@@ -282,4 +282,17 @@ impl TileRustType {
             kind: Kind::String,
         }
     }
+
+    pub(crate) fn new_enum(type_instance: TypeInstance) -> TileRustType {
+        let rust_ty = type_instance.get_source_type().clone();
+        TileRustType {
+            cuda_tile_ty_str: None,
+            tile_ir_ty: None,
+            cuda_tile_name: None,
+            params: vec![],
+            rust_ty,
+            type_instance,
+            kind: Kind::Enum,
+        }
+    }
 }

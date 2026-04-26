@@ -15,7 +15,7 @@ fn debug_kernel<const S: [i32; 2]>(
     input: &Tensor<f32, {[-1, -1]}>
 ) {
     let pid: (i32, i32, i32) = get_tile_block_id();
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     cuda_tile_print!("Block ({}, {}): loaded tile\n", pid.0, pid.1);
 
@@ -28,7 +28,7 @@ GPU printing is slow and serializes tile block execution — use it only for sma
 **`cuda_tile_assert!`** asserts conditions inside a kernel:
 
 ```rust
-let tile = load_tile_like_2d(input, output);
+let tile = load_tile_like(input, output);
 cuda_tile_assert!(tile[0] > 0.0, "Value must be positive");
 ```
 

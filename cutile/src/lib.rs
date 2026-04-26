@@ -48,8 +48,8 @@
 //!         x: &Tensor<T, {[-1]}>,
 //!         y: &Tensor<T, {[-1]}>,
 //!     ) {
-//!         let tile_x = load_tile_like_1d(x, z);
-//!         let tile_y = load_tile_like_1d(y, z);
+//!         let tile_x = load_tile_like(x, z);
+//!         let tile_y = load_tile_like(y, z);
 //!         z.store(tile_x + tile_y);
 //!     }
 //! }
@@ -90,7 +90,7 @@
 //! - [`core`] - Core GPU types: `Tile`, `Tensor`, `Partition`, and tile operations
 //! - [`api`] - High-level tensor creation and manipulation functions
 //! - [`tensor`] - GPU tensor type, partitioning, and memory management
-//! - [`tile_async`] - Async execution primitives and kernel compilation infrastructure
+//! - [`tile_kernel`] - Async execution primitives and kernel compilation infrastructure
 //! - [`kernels`] - Pre-built optimized kernels (GEMM, creation ops, etc.)
 //!
 //! ## Key Concepts
@@ -107,7 +107,7 @@
 //!
 //! ### Tiles
 //!
-//! Within kernels, you work with [`Tile`](core::Tile) values that represent data in registers
+//! Within kernels, you work with `Tile` values that represent data in registers
 //! or shared memory. Tiles support efficient element-wise operations and broadcasting:
 //!
 //! ```rust,ignore
@@ -162,6 +162,22 @@
 pub mod _core;
 pub mod error;
 pub use _core::core;
+
+// LINKING Phase B: register an additional registry entry at the public
+// `cutile::core` path so kernel `use cutile::core::*` statements resolve
+// to the same module that `cutile::_core::core::__module_ast_self()`
+// builds. Without this alias, the registry-driven JIT path misses the
+// cutile DSL core module when kernels use the public re-export name.
+//
+// Per-`pub use ...::module` re-exports of cuTile modules will need a
+// similar alias entry. A future macro could generate these automatically;
+// for now the cutile crate's single re-export is hand-registered here.
+#[linkme::distributed_slice(cutile_compiler::registry::CUTILE_MODULES)]
+static __CUTILE_REEXPORT_CORE: cutile_compiler::registry::CutileModuleEntry =
+    cutile_compiler::registry::CutileModuleEntry {
+        absolute_path: "cutile::core",
+        build: _core::core::__module_ast_self,
+    };
 pub mod api;
 pub mod kernels;
 pub mod prelude;

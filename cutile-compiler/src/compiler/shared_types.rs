@@ -28,6 +28,8 @@ pub enum Kind {
     Struct,
     /// String literal type; requires special handling.
     String,
+    /// Compile-time enum value; currently used for `Option<T>` optional operands.
+    Enum,
 }
 
 // ---------------------------------------------------------------------------

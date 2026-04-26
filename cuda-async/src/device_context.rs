@@ -319,8 +319,10 @@ pub fn set_default_device(default_device_id: usize) {
 
 /// Run a closure with the scheduling policy of the current thread's default device.
 ///
-/// This is the function called internally by [`DeviceOp::sync()`] and by the
-/// [`IntoFuture`] implementation to schedule operations when no explicit device is given.
+/// This is the function called internally by
+/// [`DeviceOp::sync()`](crate::device_operation::DeviceOp::sync) and by the
+/// [`IntoFuture`](std::future::IntoFuture) implementation to schedule operations
+/// when no explicit device is given.
 pub fn with_default_device_policy<F, R>(f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&Arc<dyn SchedulingPolicy>) -> R,

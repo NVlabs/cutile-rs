@@ -42,7 +42,7 @@ mod spec_test_module {
     }
 }
 
-use spec_test_module::{_module_asts, scalar_kernel};
+use spec_test_module::{__module_ast_self, scalar_kernel};
 
 fn compile_with_spec(
     name: &str,
@@ -58,7 +58,8 @@ fn compile_with_spec_and_options(
     specs: &[(&str, &SpecializationBits)],
     options: &CompileOptions,
 ) -> String {
-    let modules = CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+    let modules = CUDATileModules::from_kernel(__module_ast_self())
+        .expect("Failed to create CUDATileModules");
     let gpu_name = get_gpu_name(0);
     let compiler = CUDATileFunctionCompiler::new(
         &modules,

@@ -60,7 +60,7 @@ mod my_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &mut Tensor<f32, { [BM, BN] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
 
         // Find max per row (for numerical stability)
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
@@ -146,7 +146,7 @@ Fused kernels load once, compute everything in registers, and store once:
 
 ```rust
 // 1. LOAD once
-let tile = load_tile_like_2d(input, output);
+let tile = load_tile_like(input, output);
 
 // 2. ALL COMPUTATION in registers
 let step1 = reduce_max(tile, axis);
@@ -194,7 +194,7 @@ fn softmax_with_temp<const BM: i32, const BN: i32>(
     y: &mut Tensor<f32, {[BM, BN]}>,
     temperature: f32,  // Higher = more uniform, Lower = more peaked
 ) {
-    let tile_x = load_tile_like_2d(x, y);
+    let tile_x = load_tile_like(x, y);
     let scaled = tile_x / temperature.broadcast(y.shape());
     // ... rest of softmax ...
 }

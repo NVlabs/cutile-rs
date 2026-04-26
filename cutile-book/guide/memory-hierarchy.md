@@ -55,7 +55,7 @@ In the tile programming model, **you never manage shared memory directly**. You 
 In cuTile Rust, `Tile<E, S>` data lives in registers during computation. You load data from global memory (HBM) into tiles, compute on tiles, and store results back:
 
 ```rust
-let tile: Tile<f32, {[16, 16]}> = load_tile_like_2d(input, output);
+let tile: Tile<f32, {[16, 16]}> = load_tile_like(input, output);
 // 'tile' lives in registers — loaded from HBM, computed on in registers
 ```
 
@@ -82,7 +82,7 @@ You only interact with global memory — the [Tile IR](https://docs.nvidia.com/c
 #[cutile::entry()]
 fn kernel(output: &mut Tensor<f32, S>, input: &Tensor<f32, {[-1, -1]}>) {
     // 1. Load: HBM → Tile
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     // 2. Compute on tile
     let result = tile * 2.0 + 1.0;
@@ -149,8 +149,8 @@ fn add<const S: [i32; 2]>(
     x: &Tensor<f32, {[-1, -1]}>,
     y: &Tensor<f32, {[-1, -1]}>
 ) {
-    let tx = load_tile_like_2d(x, z);  // 1 read
-    let ty = load_tile_like_2d(y, z);  // 1 read
+    let tx = load_tile_like(x, z);  // 1 read
+    let ty = load_tile_like(y, z);  // 1 read
     z.store(tx + ty);                  // 1 write, 1 add
 }
 // Arithmetic intensity: 1 FLOP / 12 bytes = 0.08 FLOPS/byte

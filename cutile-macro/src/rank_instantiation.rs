@@ -2,12 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! Per-rank expansion of CGA-bearing items.
+//! Rank-instance instantiation of CGA-bearing items.
 //!
 //! Items that use a const-generic-array generic — `const X: [i32; N]` — are
 //! rank-polymorphic at the source level but Rust can't compile them as such
 //! (the array length `N` is variable across instantiations). This module
-//! turns each such item into one concrete copy per rank, with `X` replaced
+//! turns each such item into one concrete copy per rank instance, with `X` replaced
 //! by individual scalar consts `X_0, X_1, …, X_{R-1}` and every type whose
 //! generic args reference the CGA suffixed accordingly.
 //!
@@ -15,24 +15,24 @@
 //!
 //! For a struct annotated `#[cuda_tile::variadic_struct(N = 4)]`:
 //!
-//! ```rust,ignore
-//! pub struct Tile<E, const D: [i32; N]> { /* … */ }
+//! ```text
+//! pub struct Tile<E, const D: [i32; N]> { /* ... */ }
 //!
-//! //  →  per-rank specializations:
-//! pub struct Tile_1<E, const D_0: i32> { /* … */ }
-//! pub struct Tile_2<E, const D_0: i32, const D_1: i32> { /* … */ }
-//! pub struct Tile_3<E, const D_0: i32, const D_1: i32, const D_2: i32> { /* … */ }
-//! pub struct Tile_4<E, …> { /* … */ }
+//! // rank-instance specializations:
+//! pub struct Tile_1<E, const D_0: i32> { /* ... */ }
+//! pub struct Tile_2<E, const D_0: i32, const D_1: i32> { /* ... */ }
+//! pub struct Tile_3<E, const D_0: i32, const D_1: i32, const D_2: i32> { /* ... */ }
+//! pub struct Tile_4<E, ...> { /* ... */ }
 //! ```
 //!
 //! Inherent impls on a CGA-bearing struct expand the same way, with their
 //! method bodies rewritten so any reference to `D`, `Shape<D>`, `Tile<E, D>`,
-//! etc. picks up the per-rank form. Rust then sees concrete `Tile_R` types
+//! etc. picks up the rank-instance form. Rust then sees concrete `Tile_R` types
 //! and resolves everything normally; the macro doesn't do any type inference
-//! or call-site rewriting beyond that — see [`crate::trait_dispatch`] for
+//! or call-site rewriting beyond that — see [`crate::shadow_dispatch`] for
 //! how rank-polymorphic *operations* (`#[variadic_op]` fns and
 //! `#[variadic_trait]` declarations) are emitted as a single rank-polymorphic trait
-//! plus per-rank impls so user calls resolve via rustc's normal trait
+//! plus rank-instance impls so user calls resolve via rustc's normal trait
 //! lookup.
 //!
 //! ## How it's wired
@@ -41,13 +41,13 @@
 //!
 //! - [`variadic_struct`] / [`variadic_impl`] — produce the multi-rank
 //!   specializations from a single source item.
-//! - [`expand_struct_per_rank`] / [`expand_function_per_rank`] /
-//!   [`expand_impl_per_rank`] — apply the per-rank substitution to a single
+//! - [`instantiate_struct_for_rank`] / [`instantiate_function_for_rank`] /
+//!   [`instantiate_impl_for_rank`] — apply the rank-instance substitution to a single
 //!   item already constrained to one rank (e.g. an `#[entry]` kernel with
 //!   `const S: [i32; 1]`).
 //!
 //! Each path builds a [`RankBindings`] (the active CGA → length mapping
-//! for the rank being emitted) and walks the item with a [`RankExpander`]
+//! for the rank being emitted) and walks the item with a [`RankInstantiator`]
 //! that implements [`syn::visit_mut::VisitMut`]. The visitor handles:
 //!
 //! - **Type paths** — `Tile<E, S>` → `Tile_R<E, S_0, …>`.
@@ -66,7 +66,7 @@ use crate::error::{syn_err, Error};
 use cutile_compiler::syn_utils::*;
 use cutile_compiler::types::parse_signed_literal_as_i32;
 use proc_macro2::{Ident, Span, TokenTree};
-use quote::ToTokens;
+use quote::{format_ident, ToTokens};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use syn::{
@@ -87,7 +87,7 @@ pub fn rank_suffix(n: &[u32]) -> String {
         .join("_")
 }
 
-/// Build a concrete per-rank type name by appending the rank suffix:
+/// Build a concrete rank-instance type name by appending the rank suffix:
 /// `concrete_name("Tile", &[2])` → `"Tile_2"`.
 pub fn concrete_name(name: &str, n: &[u32]) -> String {
     format!("{}_{}", name, rank_suffix(n))
@@ -441,7 +441,7 @@ pub fn variadic_struct(
             concrete.ident.span(),
         );
         concrete.ident = concrete_ident;
-        rewrite_generics_per_rank(&mut concrete.generics, &const_instances)?;
+        rewrite_generics_for_rank(&mut concrete.generics, &const_instances)?;
         let concrete_impl = if maybe_constructor_name.is_some() {
             let mut type_params: Vec<String> = vec![];
             let mut type_args: Vec<String> = vec![];
@@ -565,33 +565,33 @@ pub fn variadic_impl(attributes: &SingleMetaList, item: ItemImpl) -> Result<Vec<
     let mut result: Vec<ItemImpl> = vec![];
     for n_list in cga_iter {
         let bindings = RankBindings::from_variadic(&n_list, &cgas)?;
-        result.push(RankExpander::new(bindings).rewrite_impl(&item)?);
+        result.push(RankInstantiator::new(bindings).rewrite_impl(&item)?);
     }
     Ok(result)
 }
 
 /// Desugars const generic arrays in a function signature's generics, inputs, and output.
 fn rewrite_fn_sig(sig: &mut Signature, const_instances: &RankBindings) -> Result<(), Error> {
-    rewrite_generics_per_rank(&mut sig.generics, const_instances)?;
+    rewrite_generics_for_rank(&mut sig.generics, const_instances)?;
     for input in sig.inputs.iter_mut() {
         match input {
             FnArg::Receiver(_receiver) => {
                 // Leave this.
             }
             FnArg::Typed(fn_param) => {
-                let fn_param_type = rewrite_type_per_rank(&fn_param.ty, const_instances)?;
+                let fn_param_type = rewrite_type_for_rank(&fn_param.ty, const_instances)?;
                 *fn_param.ty = fn_param_type;
             }
         }
     }
     if let ReturnType::Type(_, return_type) = &mut sig.output {
-        **return_type = rewrite_type_per_rank(&return_type.clone(), const_instances)?;
+        **return_type = rewrite_type_for_rank(&return_type.clone(), const_instances)?;
     }
     Ok(())
 }
 
 /// Expands const generic array params in a `Generics` clause into individual const params.
-fn rewrite_generics_per_rank(
+fn rewrite_generics_for_rank(
     generics: &mut Generics,
     const_instances: &RankBindings,
 ) -> Result<(), Error> {
@@ -645,7 +645,7 @@ fn rewrite_generics_per_rank(
 }
 
 /// Expands a CGA path into angle-bracketed individual const generic arguments.
-fn expand_cga(
+fn instantiate_cga(
     path: &Path,
     instances: &RankBindings,
 ) -> Result<AngleBracketedGenericArguments, Error> {
@@ -653,7 +653,7 @@ fn expand_cga(
     let last_seg = path.segments.last().ok_or_else(|| {
         syn_err(
             path.span(),
-            "Expected at least one path segment in expand_cga",
+            "Expected at least one path segment in instantiate_cga",
         )
     })?;
     let param_name = last_seg.ident.to_string();
@@ -689,7 +689,7 @@ fn expand_cga(
 }
 
 /// Where in the AST a path is being desugared. Drives whether the *last*
-/// segment's ident gets per-rank-suffixed when it carries a CGA arg.
+/// segment's ident gets rank-instance-suffixed when it carries a CGA arg.
 ///
 /// In a **type** position every segment whose generic args reference a CGA
 /// is a variadic type by construction — `Tile<E, S>` is `Tile_R<E, S_0, …>`,
@@ -697,7 +697,7 @@ fn expand_cga(
 ///
 /// In an **expression-path** position, the last segment names a function or
 /// associated item (e.g. `iota::<i32, S>`, `Tile::<E, S>::method`); rustc
-/// resolves it through the rank-polymorphic trait-trait wrapper or inherent impl, which
+/// resolves it through the shadow-trait wrapper or inherent impl, which
 /// keeps the unsuffixed name. Earlier segments in the same path are still
 /// type-like (UFCS uses them that way) and still get suffixed.
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -707,7 +707,7 @@ enum PathContext {
 }
 
 /// Desugars variadic types in a path, replacing CGA syntax with concrete type names and args.
-fn rewrite_path_per_rank(
+fn rewrite_path_for_rank(
     path: &Path,
     instances: &RankBindings,
     context: PathContext,
@@ -723,7 +723,7 @@ fn rewrite_path_per_rank(
             return Err(syn_err(
                 seg.ident.span(),
                 &format!(
-                    "Unexpected use of rewrite_path_per_rank for {}",
+                    "Unexpected use of rewrite_path_for_rank for {}",
                     path.to_token_stream()
                 ),
             ));
@@ -735,7 +735,7 @@ fn rewrite_path_per_rank(
             let (last_type_ident, last_seg_args) = match &seg.arguments {
                 PathArguments::AngleBracketed(type_params) => {
                     let (type_ident, last_seg_args) =
-                        expand_cga_args(instances, &seg.ident, type_params, skip_suffix)?;
+                        instantiate_cga_args(instances, &seg.ident, type_params, skip_suffix)?;
                     (
                         type_ident.clone(),
                         PathArguments::AngleBracketed(last_seg_args),
@@ -755,29 +755,48 @@ fn rewrite_path_per_rank(
 }
 
 /// Desugars variadic types within angle-bracketed generic arguments.
-fn rewrite_generic_args_per_rank(
+///
+/// Handles two CGA-arg shapes:
+/// - **Bare CGA name** (e.g. `<E, D>` where `D: [i32; N]`): expand to the
+///   per-rank scalar dim refs `D_0, D_1, …, D_{K-1}` so the outer generic
+///   accepts them as const args.
+/// - **Type referencing a CGA** (e.g. `<E, Tile<E, D>>`): recurse into
+///   `rewrite_type_for_rank` which suffixes / expands as appropriate.
+fn rewrite_generic_args_for_rank(
     generic_args: &mut AngleBracketedGenericArguments,
     const_instances: &RankBindings,
 ) -> Result<(), Error> {
-    let span = generic_args.span();
-    for arg in &mut generic_args.args {
+    let mut new_args: syn::punctuated::Punctuated<GenericArgument, syn::Token![,]> =
+        syn::punctuated::Punctuated::new();
+    for arg in &generic_args.args {
         match arg {
             GenericArgument::Type(ty) => {
-                *arg = GenericArgument::Type(rewrite_type_per_rank(ty, const_instances)?);
+                if let Type::Path(type_path) = ty {
+                    if let Some(ident) = type_path.path.get_ident() {
+                        let ident_str = ident.to_string();
+                        if let Some(cga) = const_instances.inst_array.get(&ident_str) {
+                            for j in 0..cga.length {
+                                let dim = format_ident!("{}{}", cga.name, j);
+                                new_args.push(parse_quote! { #dim });
+                            }
+                            continue;
+                        }
+                    }
+                }
+                new_args.push(GenericArgument::Type(rewrite_type_for_rank(
+                    ty,
+                    const_instances,
+                )?));
             }
-            _ => {
-                return Err(syn_err(
-                    span,
-                    &format!("Unsupported generic argument {}", arg.to_token_stream()),
-                ))
-            }
+            other => new_args.push(other.clone()),
         }
     }
+    generic_args.args = new_args;
     Ok(())
 }
 
 /// Recursively desugars const generic array syntax within a type.
-fn rewrite_type_per_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Error> {
+fn rewrite_type_for_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Error> {
     // Desugar const generic arrays as they appear as const generic arguments.
     Ok(match ty {
         Type::Path(type_path) => {
@@ -786,7 +805,7 @@ fn rewrite_type_per_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
             let last_segment = type_path.path.segments.last().ok_or_else(|| {
                 syn_err(
                     type_path.span(),
-                    "Expected at least one path segment in rewrite_type_per_rank",
+                    "Expected at least one path segment in rewrite_type_for_rank",
                 )
             })?;
             if last_segment.ident == "Option" {
@@ -796,7 +815,7 @@ fn rewrite_type_per_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
                     // Recursively desugar the type inside Option
                     for arg in &mut new_args.args {
                         if let GenericArgument::Type(inner_ty) = arg {
-                            *inner_ty = rewrite_type_per_rank(inner_ty, instances)?;
+                            *inner_ty = rewrite_type_for_rank(inner_ty, instances)?;
                         }
                     }
                     let last_idx = result_type.path.segments.len() - 1;
@@ -807,14 +826,14 @@ fn rewrite_type_per_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
             }
 
             let mut result_type = type_path.clone();
-            let path = rewrite_path_per_rank(&result_type.path, instances, PathContext::Type)?;
+            let path = rewrite_path_for_rank(&result_type.path, instances, PathContext::Type)?;
             result_type.path = path;
-            // println!("rewrite_type_per_rank: ")
+            // println!("rewrite_type_for_rank: ")
             result_type.into()
         }
         Type::Array(type_array) => {
             let mut result = type_array.clone();
-            *result.elem = rewrite_type_per_rank(&type_array.elem, instances)?;
+            *result.elem = rewrite_type_for_rank(&type_array.elem, instances)?;
             let arr_len = result.len.to_token_stream().to_string();
             if instances.inst_u32.contains_key(&arr_len) {
                 let n = instances.inst_u32.get(&arr_len).unwrap();
@@ -835,14 +854,14 @@ fn rewrite_type_per_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
         }
         Type::Reference(ref_type) => {
             let mut result = ref_type.clone();
-            *result.elem = rewrite_type_per_rank(&ref_type.elem, instances)?;
+            *result.elem = rewrite_type_for_rank(&ref_type.elem, instances)?;
             result.into()
             // unimplemented!("Type::Reference not implemented: {:#?}", ref_type)
         }
         Type::Tuple(tuple_type) => {
             let mut result = tuple_type.clone();
             for elem in &mut result.elems {
-                *elem = rewrite_type_per_rank(elem, instances)?;
+                *elem = rewrite_type_for_rank(elem, instances)?;
             }
             Type::Tuple(result)
         }
@@ -850,16 +869,16 @@ fn rewrite_type_per_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
     })
 }
 
-/// Expand a path segment's generic args per rank: substitute each CGA arg
+/// Expand a path segment's generic args per rank instance: substitute each CGA arg
 /// for its scalar dim refs (e.g. `S` → `S_0, S_1, …`) and (unless
 /// `skip_suffix`) suffix the path's ident with the rank.
-fn expand_cga_args(
+fn instantiate_cga_args(
     instances: &RankBindings,
     type_ident: &Ident,
     generic_args: &AngleBracketedGenericArguments,
     skip_suffix: bool,
 ) -> Result<(Ident, AngleBracketedGenericArguments), Error> {
-    let mut expanded_param_name = type_ident.to_string();
+    let mut instantiated_param_name = type_ident.to_string();
     let mut generic_args_result: Vec<String> = vec![];
 
     for generic_arg in &generic_args.args {
@@ -878,13 +897,13 @@ fn expand_cga_args(
                             .to_string();
                         if instances.inst_array.contains_key(&last_ident) {
                             // Shape<D> / Tile<E, S> / etc. — substitute the
-                            // CGA into per-rank scalar dims, and (for type
+                            // CGA into rank-instance scalar dims, and (for type
                             // segments) suffix the path ident with the rank.
                             let cga = instances.inst_array.get(&last_ident).unwrap();
                             for j in 0..cga.length {
                                 generic_args_result.push(format!("{}{}", cga.name, j));
                             }
-                            expanded_param_name = if skip_suffix {
+                            instantiated_param_name = if skip_suffix {
                                 type_ident.to_string()
                             } else {
                                 concrete_name(&type_ident.to_string(), &[cga.length])
@@ -932,7 +951,7 @@ fn expand_cga_args(
                                     let val = elem.to_token_stream().to_string();
                                     generic_args_result.push(val);
                                 }
-                                expanded_param_name = if skip_suffix {
+                                instantiated_param_name = if skip_suffix {
                                     type_ident.to_string()
                                 } else {
                                     concrete_name(&type_ident.to_string(), &[rank as u32])
@@ -988,7 +1007,7 @@ fn expand_cga_args(
                                         ))
                                     }
                                 };
-                                expanded_param_name = if skip_suffix {
+                                instantiated_param_name = if skip_suffix {
                                     type_ident.to_string()
                                 } else {
                                     concrete_name(&type_ident.to_string(), &[num_repetitions])
@@ -1015,10 +1034,10 @@ fn expand_cga_args(
             }
         }
     }
-    let expanded_param_ident = Ident::new(expanded_param_name.as_str(), type_ident.span());
+    let instantiated_param_ident = Ident::new(instantiated_param_name.as_str(), type_ident.span());
     let formatted = format!("<{}>", generic_args_result.join(","));
     Ok((
-        expanded_param_ident,
+        instantiated_param_ident,
         syn::parse::<AngleBracketedGenericArguments>(formatted.parse().map_err(|_| {
             syn_err(
                 type_ident.span(),
@@ -1038,12 +1057,12 @@ fn expand_cga_args(
 // Per-rank AST rewriter
 // ---------------------------------------------------------------------------
 //
-// `RankExpander` carries a [`RankBindings`] (the active CGA → length
+// `RankInstantiator` carries a [`RankBindings`] (the active CGA → length
 // mapping for the rank we're specializing to) and walks an item via
 // [`syn::visit_mut::VisitMut`], rewriting:
 //
 //   * **Type paths** (`Tile<E, S>` → `Tile_R<E, S_0, …>`) via
-//     [`rewrite_type_per_rank`] in `visit_type_mut`.
+//     [`rewrite_type_for_rank`] in `visit_type_mut`.
 //   * **Expression paths** (`iota::<i32, S>` → `iota::<i32, S_0, …>`) — the
 //     final segment's ident is preserved (it names a fn / associated item)
 //     while CGA args get expanded.
@@ -1057,12 +1076,12 @@ fn expand_cga_args(
 // Errors during traversal are accumulated in `self.error` (since `VisitMut`
 // methods can't return `Result`) and surfaced by `into_result` at the end.
 
-pub struct RankExpander {
+pub struct RankInstantiator {
     bindings: RankBindings,
     error: Option<Error>,
 }
 
-impl RankExpander {
+impl RankInstantiator {
     pub fn new(bindings: RankBindings) -> Self {
         Self {
             bindings,
@@ -1077,7 +1096,7 @@ impl RankExpander {
         }
     }
 
-    /// Rewrite a struct's field types per rank. The struct's ident and
+    /// Rewrite a struct's field types per rank instance. The struct's ident and
     /// generics are the caller's responsibility.
     pub fn rewrite_struct(mut self, item: &ItemStruct) -> Result<ItemStruct, Error> {
         let mut item = item.clone();
@@ -1102,11 +1121,11 @@ impl RankExpander {
     pub fn rewrite_impl(mut self, item: &ItemImpl) -> Result<ItemImpl, Error> {
         let mut item = item.clone();
         let original_self_ty = (*item.self_ty).clone();
-        match rewrite_type_per_rank(&item.self_ty, &self.bindings) {
+        match rewrite_type_for_rank(&item.self_ty, &self.bindings) {
             Ok(t) => *item.self_ty = t,
             Err(e) => return Err(e),
         }
-        if let Err(e) = rewrite_generics_per_rank(&mut item.generics, &self.bindings) {
+        if let Err(e) = rewrite_generics_for_rank(&mut item.generics, &self.bindings) {
             return Err(e);
         }
         if let Some(trait_) = &mut item.trait_ {
@@ -1119,7 +1138,7 @@ impl RankExpander {
             }
             let last_seg = path.segments.last_mut().unwrap();
             if let PathArguments::AngleBracketed(path_args) = &mut last_seg.arguments {
-                if let Err(e) = rewrite_generic_args_per_rank(path_args, &self.bindings) {
+                if let Err(e) = rewrite_generic_args_for_rank(path_args, &self.bindings) {
                     return Err(e);
                 }
             }
@@ -1130,7 +1149,7 @@ impl RankExpander {
             match item_in_impl {
                 ImplItem::Type(type_impl) => {
                     let mut result = type_impl.clone();
-                    match rewrite_type_per_rank(&type_impl.ty, &self.bindings) {
+                    match rewrite_type_for_rank(&type_impl.ty, &self.bindings) {
                         Ok(t) => result.ty = t,
                         Err(e) => return Err(e),
                     }
@@ -1179,7 +1198,7 @@ impl RankExpander {
 
     /// Build `Shape_R::<{[…]}>::const_new()` (or the `Array` equivalent)
     /// from a `const_shape!` / `const_array!` token list. Idents inside the
-    /// macro that name an in-scope CGA expand to per-rank dim refs.
+    /// macro that name an in-scope CGA expand to rank-instance dim refs.
     fn expand_shape_macro(&self, mac: &Macro, kind: &str) -> Result<Expr, Error> {
         let mut args: Vec<String> = Vec::new();
         for token in mac.tokens.clone() {
@@ -1189,7 +1208,7 @@ impl RankExpander {
                     let name = ident.to_string();
                     if self.bindings.inst_array.contains_key(&name) {
                         let path: Path = parse_quote! { #ident };
-                        let expanded = expand_cga(&path, &self.bindings)?;
+                        let expanded = instantiate_cga(&path, &self.bindings)?;
                         for arg in &expanded.args {
                             args.push(arg.to_token_stream().to_string());
                         }
@@ -1218,7 +1237,7 @@ impl RankExpander {
     }
 }
 
-impl VisitMut for RankExpander {
+impl VisitMut for RankInstantiator {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         if self.error.is_some() {
             return;
@@ -1297,10 +1316,10 @@ impl VisitMut for RankExpander {
         }
         // Don't fall through to the default visitor — its recursion would
         // visit each path arg as a `Type` (and our `visit_type_mut` would
-        // then route a bare-CGA arg like `S` through `rewrite_path_per_rank`,
-        // which rejects it). Instead, let `rewrite_path_per_rank` handle the
-        // whole path including its args via `expand_cga_args`.
-        match rewrite_path_per_rank(&e.path, &self.bindings, PathContext::ExprPath) {
+        // then route a bare-CGA arg like `S` through `rewrite_path_for_rank`,
+        // which rejects it). Instead, let `rewrite_path_for_rank` handle the
+        // whole path including its args via `instantiate_cga_args`.
+        match rewrite_path_for_rank(&e.path, &self.bindings, PathContext::ExprPath) {
             Ok(p) => e.path = p,
             Err(err) => self.error = Some(err),
         }
@@ -1319,7 +1338,7 @@ impl VisitMut for RankExpander {
         if let Some(rest) = &mut s.rest {
             self.visit_expr_mut(rest);
         }
-        match rewrite_path_per_rank(&s.path, &self.bindings, PathContext::Type) {
+        match rewrite_path_for_rank(&s.path, &self.bindings, PathContext::Type) {
             Ok(p) => s.path = p,
             Err(err) => self.error = Some(err),
         }
@@ -1329,10 +1348,10 @@ impl VisitMut for RankExpander {
         if self.error.is_some() {
             return;
         }
-        // `rewrite_type_per_rank` handles its own recursion (Array length
+        // `rewrite_type_for_rank` handles its own recursion (Array length
         // substitution, Reference/Tuple traversal, Option<T> pass-through,
-        // and Type::Path delegation to `rewrite_path_per_rank`).
-        match rewrite_type_per_rank(ty, &self.bindings) {
+        // and Type::Path delegation to `rewrite_path_for_rank`).
+        match rewrite_type_for_rank(ty, &self.bindings) {
             Ok(t) => *ty = t,
             Err(e) => self.error = Some(e),
         }
@@ -1343,9 +1362,9 @@ impl VisitMut for RankExpander {
 ///
 /// Transforms const generic array parameters (e.g., `const D: [i32; N]`) into
 /// individual const generic parameters (e.g., `const D_0: i32, const D_1: i32, ...`).
-pub fn expand_struct_per_rank(item: &ItemStruct) -> Result<ItemStruct, Error> {
+pub fn instantiate_struct_for_rank(item: &ItemStruct) -> Result<ItemStruct, Error> {
     let bindings = RankBindings::from_generics(&item.generics)?;
-    RankExpander::new(bindings).rewrite_struct(item)
+    RankInstantiator::new(bindings).rewrite_struct(item)
 }
 
 /// Desugars const generic array syntax in a function definition.
@@ -1362,15 +1381,15 @@ pub fn expand_struct_per_rank(item: &ItemStruct) -> Result<ItemStruct, Error> {
 /// // Output:
 /// fn my_fn<const S_0: i32, const S_1: i32>(x: Tile_2<f32, S_0, S_1>) -> Shape_2<S_0, S_1> { }
 /// ```
-pub fn expand_function_per_rank(item: &ItemFn) -> Result<ItemFn, Error> {
+pub fn instantiate_function_for_rank(item: &ItemFn) -> Result<ItemFn, Error> {
     let bindings = RankBindings::from_generics(&item.sig.generics)?;
-    RankExpander::new(bindings).rewrite_function(item)
+    RankInstantiator::new(bindings).rewrite_function(item)
 }
 
 /// Desugars const generic array syntax in an impl block.
 ///
 /// Transforms impl blocks to use desugared const generic parameters.
-pub fn expand_impl_per_rank(item: &ItemImpl) -> Result<ItemImpl, Error> {
+pub fn instantiate_impl_for_rank(item: &ItemImpl) -> Result<ItemImpl, Error> {
     let bindings = RankBindings::from_generics(&item.generics)?;
-    RankExpander::new(bindings).rewrite_impl(item)
+    RankInstantiator::new(bindings).rewrite_impl(item)
 }

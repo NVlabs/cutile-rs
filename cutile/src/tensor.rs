@@ -197,7 +197,7 @@
 //! ## See Also
 //!
 //! - [`api`](crate::api) - High-level tensor creation functions
-//! - [`tile_async`](crate::tile_async) - Async execution infrastructure
+//! - [`tile_kernel`](crate::tile_kernel) - Async execution infrastructure
 //! - [`core`](crate::core) - GPU kernel DSL types
 
 use crate::api::{copy_device_to_host_vec, copy_host_vec_to_device};
@@ -805,7 +805,7 @@ impl<T: DType> ToHostVec<T> for &Arc<Tensor<T>> {
 
 // ── Reshape trait ────────────────────────────────────────────────────────────
 
-/// Reshape a tensor or Arc<Tensor> to a new shape.
+/// Reshape a tensor or `Arc<Tensor>` to a new shape.
 ///
 /// - On `Tensor<T>`: consumes and returns a reshaped `Tensor<T>`.
 /// - On `&Arc<Tensor<T>>`: creates a new `Arc` sharing device memory.

@@ -10,8 +10,8 @@
 //!
 //! ## Two-track design: macro output is for rustc; the JIT re-parses original source
 //!
-//! The macro emits Rust code (per-rank struct/impl specializations,
-//! rank-polymorphic traits + per-rank impls + free-fn wrappers, kernel
+//! The macro emits Rust code (rank-instance struct/impl specializations,
+//! shadow traits + rank-instance impls + free-fn wrappers, kernel
 //! launchers) that **only rustc consumes**. None of this expanded code is
 //! visible to the JIT compiler at kernel-compilation time.
 //!
@@ -20,16 +20,16 @@
 //! At runtime, `_module_asts()` re-parses that string with `syn::parse_str`
 //! and hands the resulting AST to the JIT. The JIT works from the user's
 //! original generic functions (e.g. `pub fn store_tile<E, const S: [i32; N]>(...)`),
-//! not from the macro-emitted per-rank specializations.
+//! not from the macro-emitted rank-instance specializations.
 //!
 //! Implications:
 //!
 //! - Anything emitted by the macro affects only rustc's type-checking and
 //!   call resolution. It does not change what the JIT sees or how it
 //!   instantiates.
-//! - The rank-polymorphic-trait emitter ([`crate::trait_dispatch`]) and the per-rank
-//!   expander ([`crate::rank_expansion`]) both serve rustc's needs (correct
-//!   types and ergonomic call resolution); the JIT does its own per-rank
+//! - The shadow-trait synthesizer ([`crate::shadow_dispatch`]) and the rank-instance
+//!   expander ([`crate::rank_instantiation`]) both serve rustc's needs (correct
+//!   types and ergonomic call resolution); the JIT does its own rank-instance
 //!   instantiation from the original generic source.
 //! - When reasoning about JIT behavior, look at the user-source AST as
 //!   captured — not at `cargo expand` output.
@@ -37,15 +37,15 @@
 //! ## Per-item routing
 //!
 //! - **`fn`** — entry kernels (`#[entry]`) get a launcher generated; ops
-//!   tagged `#[cuda_tile::variadic_op]` go through trait-dispatch emission;
-//!   everything else is per-rank-expanded for any literal CGAs in its
+//!   tagged `#[cuda_tile::variadic_op]` go through shadow-dispatch synthesis;
+//!   everything else is rank-instantiated for any literal CGAs in its
 //!   signature.
-//! - **`struct`** — `#[cuda_tile::variadic_struct]` produces the per-rank
+//! - **`struct`** — `#[cuda_tile::variadic_struct]` produces the rank-instance
 //!   variants (`Tile_0..Tile_6`); plain structs pass through.
 //! - **`trait`** — `#[cuda_tile::variadic_trait]` desugars to a single
-//!   CGA-erased rank-polymorphic trait.
+//!   CGA-erased shadow trait.
 //! - **`impl`** — `#[cuda_tile::variadic_impl]` (with or without
-//!   `#[variadic_trait_impl]`) emits per-rank impl variants of the rank-polymorphic trait
+//!   `#[variadic_trait_impl]`) emits rank-instance impl variants of the shadow trait
 //!   trait or of the inherent type.
 //! - **`use`** statements feed the cross-module AST aggregation.
 //!
@@ -56,22 +56,21 @@ use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::{env, fs};
 
 use syn::{
     parse_file, parse_macro_input, parse_quote, AngleBracketedGenericArguments, GenericArgument,
-    GenericParam, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, ItemUse, Macro, Path,
-    UseTree,
+    GenericParam, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, Path,
 };
 
 use crate::error::{Error, SpannedError};
 use crate::kernel_launcher_generator::generate_kernel_launcher;
-use crate::rank_expansion::*;
-use crate::trait_dispatch::{
-    desugar_variadic_trait_decl, desugar_variadic_trait_impl, emit_trait_dispatch,
+use crate::rank_instantiation::*;
+use crate::shadow_dispatch::{
+    desugar_variadic_trait_decl, desugar_variadic_trait_impl, emit_shadow_dispatch,
 };
 use crate::validate_dsl_syntax::validate_entry_point_parameters;
 use cutile_compiler::kernel_naming::KernelNaming;
@@ -126,11 +125,23 @@ pub fn get_ast_path(tile_rust_crate_root: &Ident) -> Path {
     syn::parse::<Path>(s.parse().unwrap()).unwrap()
 }
 
-/// Returns the identifier for the module AST builder function.
+/// Returns the path to the linker-registry module on `cutile-compiler`.
 ///
-/// Each module generates a function with this name that builds its AST.
-pub fn get_asts_ident() -> Ident {
-    Ident::new("_module_asts", Span::call_site())
+/// LINKING Phase A: each module registers itself in `CUTILE_MODULES` as well
+/// as emitting the legacy `_module_asts()`. This path lets macro-emitted code
+/// name the registry without each downstream crate depending on `linkme`
+/// directly.
+pub fn get_registry_path(tile_rust_crate_root: &Ident) -> Path {
+    let s = format!("{tile_rust_crate_root}::cutile_compiler::registry");
+    syn::parse::<Path>(s.parse().unwrap()).unwrap()
+}
+
+/// Returns the identifier for the per-module self-only AST builder.
+///
+/// Per-module entry that returns *just this module's* [`Module`]. Called
+/// by the linker-registry entry's `build` closure.
+pub fn get_self_ast_ident() -> Ident {
+    Ident::new("__module_ast_self", Span::call_site())
 }
 
 /// Main entry point for the module macro.
@@ -142,19 +153,17 @@ pub fn get_asts_ident() -> Ident {
 ///
 /// ## Processing Pipeline
 ///
-/// 1. Parse module attributes (`core`, `tile_rust_crate`)
+/// 1. Parse module attributes (`tile_rust_crate`)
 /// 2. Iterate through module items
 /// 3. For each item:
 ///    - Validate syntax (for functions)
 ///    - Generate AST representation
 ///    - Handle variadic expansion if needed
 ///    - Generate kernel launchers if `#[entry]` function
-/// 4. Generate module AST builder function
-/// 5. Emit expanded code with all dependencies
+/// 4. Emit per-module AST builder + linker-registry entry
 ///
 /// ## Attributes
 ///
-/// - `core=true` - This is a core DSL module (allows more item types)
 /// - `tile_rust_crate=true` - This module is within the cutile crate
 ///
 /// ## Generated Structure
@@ -163,10 +172,14 @@ pub fn get_asts_ident() -> Ident {
 /// pub mod my_module {
 ///     // Imports and dependencies
 ///     use cutile_compiler::ast;
-///     use cutile::tile_async::*;
+///     use cutile::tile_kernel::*;
 ///
-///     // Module AST builder
-///     pub fn _module_asts() -> Vec<Module> { ... }
+///     // Per-module AST builder used by the linker-registry entry below.
+///     pub fn __module_ast_self() -> Module { ... }
+///
+///     // Self-registers this module into the global linker-registry slice.
+///     #[linkme::distributed_slice(CUTILE_MODULES)]
+///     static __CUTILE_MODULE_ENTRY_FOO: CutileModuleEntry = ...;
 ///
 ///     // Concrete items (functions, structs, etc.)
 ///     fn __cutile_user_impl_my_kernel(...) { ... }
@@ -182,7 +195,6 @@ pub fn get_asts_ident() -> Ident {
 // TODO (hme): Validate supported modules.
 pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = parse_macro_input!(attributes as SingleMetaList);
-    let is_core = attrs.parse_bool("core").unwrap_or(false);
     let is_tile_rust_crate = attrs.parse_bool("tile_rust_crate").unwrap_or(false);
     let tile_rust_crate_root = Ident::new(
         if is_tile_rust_crate {
@@ -202,59 +214,41 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let mut module_item = parse_macro_input!(item as ItemMod);
     module_item.attrs = attrs.into();
 
-    match module_inner(
-        &module_item,
-        is_core,
-        &tile_rust_crate_root,
-        raw_item_source,
-    ) {
+    match module_inner(&module_item, &tile_rust_crate_root, raw_item_source) {
         Ok(ts) => ts.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-/// Fallible inner implementation of the `module` macro.
-fn module_inner(
-    module_item: &ItemMod,
-    is_core: bool,
+/// Process the items inside a `#[cutile::module]` (or a submodule of one)
+/// and return the macro-emitted code for rustc.
+///
+/// Returns `(concrete_items, entry_functions)`:
+/// - `concrete_items` are the rustc-emitted item tokens (functions,
+///   structs, impls, etc.) in their declaration order.
+/// - `entry_functions` are kernel launcher tokens generated for each
+///   `#[cutile::entry]` fn found at this nesting level.
+///
+/// Submodules (`mod inner { ... }`) are processed recursively: the
+/// submodule's items go through the same item walker, then are wrapped
+/// back into the original `mod inner { ... }` shell so the namespace is
+/// preserved in the rustc-emitted output. The JIT side captures the
+/// entire pre-expansion source text via `__module_ast_self`, so the
+/// submodule body is automatically available to the JIT's name resolver
+/// as part of the captured AST — no separate registry registration per
+/// submodule.
+fn process_items(
+    items: &[syn::Item],
+    parent_name: &Ident,
     tile_rust_crate_root: &Ident,
-    raw_item_source: String,
-) -> Result<TokenStream2, Error> {
-    let mut ast_content: Vec<Item> = vec![];
-    let Some(content) = &module_item.content else {
-        return module_item.err("Non-empty module expected.");
-    };
+) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
-    let name = &module_item.ident;
-    let mut module_ast_calls: Vec<String> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
 
-    for item in &content.1 {
+    for item in items {
         match item {
             syn::Item::Use(use_item) => {
                 concrete_items.push(use_item.to_token_stream());
-                // Include module_ast dependency as part of the export.
-                if !is_core {
-                    // println!("{use_item:#?}");
-                    let mut use_tree = &use_item.tree;
-                    let mut module_ast_use_path = vec![];
-                    while let UseTree::Path(path) = use_tree {
-                        let path_ident_str = path.ident.to_string();
-                        module_ast_use_path.push(path_ident_str);
-                        use_tree = &path.tree;
-                    }
-                    let module_ast_call_str = format!(
-                        "{}::{}()",
-                        module_ast_use_path.last().unwrap(),
-                        get_asts_ident()
-                    );
-                    module_ast_calls.push(module_ast_call_str);
-                    let module_ast_use_path_str =
-                        format!("use {};", module_ast_use_path.join("::"));
-                    let module_ast_use_path_item =
-                        syn::parse::<ItemUse>(module_ast_use_path_str.parse().unwrap()).unwrap();
-                    concrete_items.push(module_ast_use_path_item.to_token_stream());
-                }
             }
             syn::Item::Fn(function_item) => {
                 let entry_attrs = get_meta_list(
@@ -262,21 +256,15 @@ fn module_inner(
                     &function_item.attrs,
                 );
                 if entry_attrs.is_some() {
-                    entry_functions.push(kernel_launcher(name, function_item)?);
+                    entry_functions.push(kernel_launcher(parent_name, function_item)?);
                 };
-                ast_content.push(Item::Fn(function_item.clone()));
                 concrete_items.push(function(function_item.clone(), tile_rust_crate_root)?);
             }
             syn::Item::Struct(struct_item) => {
-                ast_content.push(Item::Struct(struct_item.clone()));
                 let item_clone = struct_item.clone();
                 concrete_items.push(structure(item_clone)?.into());
             }
             syn::Item::Trait(trait_item) => {
-                if !is_core {
-                    return trait_item.err("Unsupported item type in non-core module: trait definitions are only allowed in core modules.");
-                }
-                ast_content.push(Item::Trait(trait_item.clone()));
                 let item_clone = trait_item.clone();
                 concrete_items.push(trait_(item_clone)?.into());
             }
@@ -284,31 +272,64 @@ fn module_inner(
                 concrete_items.push(type_item.to_token_stream());
             }
             syn::Item::Impl(impl_item) => {
-                if !is_core {
-                    return impl_item.err("Unsupported item type in non-core module: impl blocks are only allowed in core modules.");
-                }
-                ast_content.push(Item::Impl(impl_item.clone()));
                 let item_clone = impl_item.clone();
                 concrete_items.push(implementation(item_clone)?.into());
             }
             syn::Item::Macro(macro_item) => {
-                if !is_core {
-                    return macro_item.err("Unsupported item type in non-core module: macro invocations are only allowed in core modules.");
-                }
-                ast_content.push(Item::Macro(macro_item.clone()));
                 let item_clone = macro_item.clone();
                 concrete_items.push(item_clone.to_token_stream());
+            }
+            syn::Item::Const(const_item) => {
+                concrete_items.push(const_item.to_token_stream());
+            }
+            syn::Item::Static(static_item) => {
+                concrete_items.push(static_item.to_token_stream());
+            }
+            syn::Item::Mod(submod) => {
+                let Some(sub_content) = &submod.content else {
+                    return submod.err(
+                        "Submodule inside `#[cutile::module]` must have an inline body \
+                         (`mod foo { ... }`); file-loaded submodules (`mod foo;`) are \
+                         not supported because the macro needs the body at expansion time.",
+                    );
+                };
+                let (sub_concrete, sub_entries) =
+                    process_items(&sub_content.1, &submod.ident, tile_rust_crate_root)?;
+                let sub_name = &submod.ident;
+                let sub_attrs = &submod.attrs;
+                let sub_vis = &submod.vis;
+                let sub_module = quote! {
+                    #(#sub_attrs)*
+                    #sub_vis mod #sub_name {
+                        #(#sub_concrete)*
+                        #(#sub_entries)*
+                    }
+                };
+                concrete_items.push(sub_module);
             }
             other => {
                 return other.err("Unsupported item type in module.");
             }
         }
     }
+    Ok((concrete_items, entry_functions))
+}
+
+/// Fallible inner implementation of the `module` macro.
+fn module_inner(
+    module_item: &ItemMod,
+    tile_rust_crate_root: &Ident,
+    raw_item_source: String,
+) -> Result<TokenStream2, Error> {
+    let Some(content) = &module_item.content else {
+        return module_item.err("Non-empty module expected.");
+    };
+    let name = &module_item.ident;
+    let (concrete_items, entry_functions) = process_items(&content.1, name, tile_rust_crate_root)?;
     let ast_path = get_ast_path(tile_rust_crate_root);
     let ast_module_item: ItemMod = module_item.clone();
-    let ast_module_tokens = module_asts(
+    let ast_module_tokens = emit_module_ast_self_and_registry_entry(
         ast_module_item,
-        module_ast_calls,
         tile_rust_crate_root,
         raw_item_source,
     );
@@ -357,11 +378,11 @@ fn module_inner(
 /// Processes trait definitions.
 ///
 /// Handles trait definitions that may be variadic (rank-polymorphic). Traits marked
-/// with `#[cuda_tile::variadic_trait]` are expanded into multiple versions.
+/// with `#[cuda_tile::variadic_trait]` are instantiated into one rank-instance per rank.
 ///
 /// ## Variadic Traits
 ///
-/// Variadic traits are expanded into separate traits for each rank (1D through 4D):
+/// Variadic traits are instantiated into one trait per rank (1D through 4D):
 ///
 /// ```rust,ignore
 /// // Input:
@@ -394,7 +415,7 @@ pub fn trait_(mut item: ItemTrait) -> Result<TokenStream, Error> {
         {
             desugar_variadic_trait_decl(&item)?
         }
-        // Non-variadic traits pass through untouched — there's no per-rank
+        // Non-variadic traits pass through untouched — there are no rank-instance
         // expansion to do.
         _ => quote! { #item },
     };
@@ -404,11 +425,11 @@ pub fn trait_(mut item: ItemTrait) -> Result<TokenStream, Error> {
 /// Processes trait and inherent implementations.
 ///
 /// Handles `impl` blocks that may be variadic. Implementations marked with
-/// `#[cuda_tile::variadic_impl]` are expanded into multiple rank-specific versions.
+/// `#[cuda_tile::variadic_impl]` are instantiated into one rank-instance per rank.
 ///
 /// ## Variadic Implementations
 ///
-/// Variadic implementations are expanded to match their corresponding variadic types:
+/// Variadic implementations are instantiated alongside their corresponding variadic types:
 ///
 /// ```rust,ignore
 /// // Input:
@@ -438,8 +459,9 @@ pub fn implementation(mut item: ItemImpl) -> Result<TokenStream, Error> {
         return Ok(quote! {}.into());
     }
     // Capture trait-impl marker before clear_attributes wipes it. When this
-    // marker is present alongside `#[variadic_impl]`, route to the rank-polymorphic trait-
-    // trait desugaring instead of the per-rank-mangled `variadic_impl` path.
+    // marker is present we route to the shadow-trait desugaring (which
+    // handles its own rank-instance enumeration via the trait's CGAs).
+    // `#[variadic_impl]` is optional in that case.
     let is_variadic_trait_impl =
         get_meta_list("cuda_tile :: variadic_trait_impl", &item.attrs).is_some();
     clear_attributes(
@@ -450,26 +472,22 @@ pub fn implementation(mut item: ItemImpl) -> Result<TokenStream, Error> {
         ]),
         &mut item.attrs,
     );
-    let res = match attributes {
-        Some(attributes) => match attributes.name_as_str().unwrap().as_str() {
-            "cuda_tile :: variadic_impl" => {
-                if is_variadic_trait_impl {
-                    desugar_variadic_trait_impl(&item)?
-                } else {
-                    let items = variadic_impl(&attributes, item)?;
-                    quote! {
-                        #(#items)*
-                    }
+    let res = if is_variadic_trait_impl {
+        // `variadic_trait_impl` owns the dispatch — `variadic_impl(N=…)` is
+        // accepted alongside it (and ignored) for ergonomics.
+        desugar_variadic_trait_impl(&item)?
+    } else {
+        match attributes {
+            Some(attributes) => {
+                let items = variadic_impl(&attributes, item)?;
+                quote! {
+                    #(#items)*
                 }
             }
-            _ => {
-                let item = expand_impl_per_rank(&item)?;
+            None => {
+                let item = instantiate_impl_for_rank(&item)?;
                 quote! { #item }
             }
-        },
-        None => {
-            let item = expand_impl_per_rank(&item)?;
-            quote! { #item }
         }
     };
     Ok(res.into())
@@ -478,7 +496,7 @@ pub fn implementation(mut item: ItemImpl) -> Result<TokenStream, Error> {
 /// Processes struct definitions.
 ///
 /// Handles struct definitions that may be variadic. Structs marked with
-/// `#[cuda_tile::variadic_struct]` are expanded into multiple rank-specific versions.
+/// `#[cuda_tile::variadic_struct]` are instantiated into one rank-instance per rank.
 ///
 /// ## Variadic Structs
 ///
@@ -530,12 +548,12 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
                 }
             }
             _ => {
-                let item = expand_struct_per_rank(&item)?;
+                let item = instantiate_struct_for_rank(&item)?;
                 quote! { #item }
             }
         },
         None => {
-            let item = expand_struct_per_rank(&item)?;
+            let item = instantiate_struct_for_rank(&item)?;
             quote! { #item }
         }
     };
@@ -579,7 +597,7 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
     }
     let attributes = get_meta_list("cuda_tile :: variadic_op", &item.attrs);
     // Any function annotated with `#[cuda_tile::variadic_op(...)]` is
-    // rank-polymorphic and gets trait-dispatch emission (trait + per-rank
+    // rank-polymorphic and gets shadow-dispatch synthesis (trait + rank-instance
     // impls + free-fn wrapper). The rank arguments (`N = 6`, `M = 6`) are
     // retained for documentation but the emitter uses `MAX_RANK` internally.
     let emit_trait = attributes.is_some();
@@ -590,7 +608,7 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         .as_ref()
         .and_then(|a| a.parse_string("method"))
         .map(|s| Ident::new(&s, Span::call_site()));
-    // Optional `trait_name = "..."` lets the synthesized rank-polymorphic trait name
+    // Optional `trait_name = "..."` lets the synthesized shadow-trait name
     // differ from PascalCase(fn_ident). Used to dodge collisions with user-
     // defined traits of the same name (e.g. `broadcast_scalar` whose synth
     // `BroadcastScalar` collides with the user's `BroadcastScalar` trait).
@@ -598,9 +616,9 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         .as_ref()
         .and_then(|a| a.parse_string("trait_name"))
         .map(|s| Ident::new(&s, Span::call_site()));
-    // Snapshot the original ItemFn before any mutations, for the trait-dispatch
+    // Snapshot the original ItemFn before any mutations, for the shadow-dispatch
     // emitter which needs the CGA-form signature.
-    let original_item_for_trait_dispatch = if emit_trait { Some(item.clone()) } else { None };
+    let original_item_for_shadow_dispatch = if emit_trait { Some(item.clone()) } else { None };
     clear_attributes(
         HashSet::from([
             "cuda_tile :: variadic_op",
@@ -619,21 +637,21 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
         item.sig.ident = Ident::new(internal_name.as_str(), item.sig.ident.span());
     }
     // Rank-polymorphic fns (`#[cuda_tile::variadic_op(...)]`) are handled
-    // entirely by trait dispatch — no per-rank free-fn specializations are
+    // entirely by shadow dispatch — no rank-instance free-fn specializations are
     // emitted. Non-variadic fns fall through to CGA desugaring for any stray
     // const-array generics.
     let concrete_items = if emit_trait {
         vec![]
     } else {
-        vec![expand_function_per_rank(&item)?]
+        vec![instantiate_function_for_rank(&item)?]
     };
-    let trait_dispatch_tokens = match original_item_for_trait_dispatch {
-        Some(orig) => emit_trait_dispatch(&orig, method_override, trait_name_override)?,
+    let shadow_dispatch_tokens = match original_item_for_shadow_dispatch {
+        Some(orig) => emit_shadow_dispatch(&orig, method_override, trait_name_override)?,
         None => TokenStream2::new(),
     };
     let result = quote! {
         #(#concrete_items)*
-        #trait_dispatch_tokens
+        #shadow_dispatch_tokens
     };
     Ok(result)
 }
@@ -893,64 +911,23 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
 /// when the span doesn't map to real source), we fall back to
 /// `TokenStream::to_string()`.  This produces comment-free text, so line
 /// numbers may be shifted earlier by the number of stripped comment lines.
-pub fn module_asts(
+pub fn emit_module_ast_self_and_registry_entry(
     item: ItemMod,
-    module_ast_calls: Vec<String>,
     tile_rust_crate_root: &Ident,
     raw_item_source: String,
 ) -> TokenStream2 {
-    // TODO (hme): Double check Rust will handle circular dependencies and report them.
-    let ast_path = get_ast_path(tile_rust_crate_root);
-    let name_string = item.ident.to_string();
-    let vec_expr_str = format!("vec![{}]", module_ast_calls.join(","));
-    let vec_expr = syn::parse::<Macro>(vec_expr_str.parse().unwrap()).unwrap();
-    let asts_ident = get_asts_ident();
-
-    // --- Capture span base at proc macro time --------------------------------
-    //
-    // The first token's span tells us where the module lives in the original
-    // source file.  We record (file, line, col) so that at runtime we can
-    // convert any string-relative span position produced by `syn::parse_str`
-    // into an absolute file:line:col.
-    // Use the `mod` keyword's span as the anchor — NOT `item.span()`.
-    //
-    // `item.span()` (via syn's `Spanned`) joins the spans of *all* child
-    // tokens including `attrs`.  Because `module_item.attrs` was replaced
-    // earlier with the parsed proc-macro attributes (whose spans point at
-    // the attribute invocation site), `item.span()` may start at the
-    // `#[cutile::module(...)]` attribute rather than the `mod` keyword.
-    // That causes `source_text()` to return the attribute text instead of
-    // the module body.
-    //
-    // The `mod_token` span always points to the `mod` keyword in the
-    // original source, but we prefer the visibility span (e.g. `pub`) when
-    // present since it comes first and `source_text()` must cover the
-    // complete `pub mod foo { … }` text for `syn::parse_str` to succeed.
+    // Use the visibility's span when present (so `pub mod foo { ... }`
+    // covers the full text), otherwise fall back to `mod`.
     let item_start_span = match &item.vis {
         syn::Visibility::Public(vis_pub) => vis_pub.span,
         syn::Visibility::Restricted(vis_r) => vis_r.pub_token.span,
         syn::Visibility::Inherited => item.mod_token.span,
     };
-    let source_file = item_start_span.file();
+    let source_file = item_start_span.file().to_string();
     let base_line = item_start_span.start().line;
     let base_col = item_start_span.start().column;
 
-    // --- Source text ----------------------------------------------------------
-    //
-    // We need the **verbatim** source text of the module — including comments,
-    // whitespace, and all — so that when `syn::parse_str` re-parses it at
-    // runtime, the resulting line/column numbers map 1-to-1 with the original
-    // file layout.
-    //
-    // `Span::source_text()` returns exactly this: the slice of the original
-    // source file that the span covers, comments and all.  We construct a
-    // span covering the entire `ItemMod` by joining the span of the opening
-    // `mod` keyword with the span of the closing `}`.
-    //
-    // If `source_text()` is unavailable (for example on a stable compiler),
-    // we reconstruct the exact source slice from the original file using the
-    // span start/end positions. Only if that fails do we fall back to
-    // `TokenStream::to_string()`.
+    // Verbatim source text of the parent module.
     let source_text = {
         let full_span = item
             .content
@@ -958,7 +935,7 @@ pub fn module_asts(
             .and_then(|(brace, _)| item_start_span.join(brace.span.close()));
         let file_slice = item.content.as_ref().and_then(|(brace, _)| {
             source_slice_from_file(
-                &source_file.to_string(),
+                &source_file,
                 item_start_span.start(),
                 brace.span.close().end(),
             )
@@ -970,20 +947,49 @@ pub fn module_asts(
             .unwrap_or(raw_item_source)
     };
 
-    let result = quote! {
-        pub fn #asts_ident() -> Vec<#ast_path::Module> {
+    emit_ast_self_and_registry(
+        &item.ident,
+        &source_text,
+        &source_file,
+        base_line,
+        base_col,
+        tile_rust_crate_root,
+    )
+}
+
+/// Emit `__module_ast_self()` + linker-registry entry given pre-computed
+/// source text and span anchor.
+///
+/// The parent-module path computes these from the macro invocation; the
+/// file-loaded-submodule path computes them from the file on disk
+/// (`source_text` = file contents, `source_file` = file path,
+/// `base_line` = 1, `base_col` = 0). In both cases, spans on the parsed
+/// AST map back to real `(file, line, col)` triples.
+fn emit_ast_self_and_registry(
+    name: &Ident,
+    source_text: &str,
+    source_file: &str,
+    base_line: usize,
+    base_col: usize,
+    tile_rust_crate_root: &Ident,
+) -> TokenStream2 {
+    let ast_path = get_ast_path(tile_rust_crate_root);
+    let registry_path = get_registry_path(tile_rust_crate_root);
+    let self_ast_ident = get_self_ast_ident();
+    let name_string = name.to_string();
+    let registry_static_ident =
+        format_ident!("__CUTILE_MODULE_ENTRY_{}", name_string.to_uppercase());
+
+    quote! {
+        // Per-module self-only AST builder. Builds *just* this module's
+        // `Module` value. Called by the linker-registry entry's `build`
+        // closure at JIT time.
+        pub fn #self_ast_ident() -> #ast_path::Module {
             use #ast_path::syn;
 
-            // Re-parse the source text that was captured at proc macro time.
-            // When `Span::source_text()` was available, this is the verbatim
-            // original source (with comments), so `syn::parse_str` produces
-            // spans whose line/column correspond 1-to-1 with the original
-            // file layout. When `source_text()` is unavailable, the macro
-            // reconstructs the exact source slice from the original file so
-            // stable builds preserve line numbers too.
             let source_text: &str = #source_text;
             let parsed_mod: syn::ItemMod = syn::parse_str(source_text)
-                .expect("module_asts: failed to re-parse captured source text");
+                .expect("__module_ast_self: failed to re-parse captured source text");
 
             let span_base = #ast_path::SpanBase::new(
                 #source_file.to_string(),
@@ -997,21 +1003,18 @@ pub fn module_asts(
                 span_base,
             );
             this_ast.set_absolute_path(module_path!().to_string());
-            let mut module_asts: Vec<#ast_path::Module> = vec![];
-            let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let other_module_asts_asts: Vec<Vec<#ast_path::Module>> = #vec_expr;
-            for other_module_asts in other_module_asts_asts {
-                for module_ast in other_module_asts {
-                    if seen_paths.insert(module_ast.absolute_path().to_string()) {
-                        module_asts.push(module_ast);
-                    }
-                }
-            }
-            if seen_paths.insert(this_ast.absolute_path().to_string()) {
-                module_asts.push(this_ast);
-            }
-            module_asts
+            this_ast
         }
-    };
-    result
+
+        // Linker-registry entry. Self-registers this module into the
+        // global `CUTILE_MODULES` distributed slice at link time so the
+        // JIT can discover it via `CUDATileModules::from_kernel`.
+        #[#registry_path::linkme::distributed_slice(#registry_path::CUTILE_MODULES)]
+        #[linkme(crate = #registry_path::linkme)]
+        static #registry_static_ident: #registry_path::CutileModuleEntry =
+            #registry_path::CutileModuleEntry {
+                absolute_path: ::std::module_path!(),
+                build: #self_ast_ident,
+            };
+    }
 }

@@ -343,8 +343,7 @@ Trait implemented by all scalar types usable in tiles:
 | `tensor.store(tile)` | `(&mut Tensor<E, S>, Tile<E, S>)` | Store a tile to the tensor |
 | `tensor.load_tile(shape, idx)` | `(&Tensor<E, S>, Shape<R>, [i32; N]) -> Tile<E, R>` | Load at a partition index |
 | `load_tile_mut(tensor)` | `(&mut Tensor<E, S>) -> Tile<E, S>` | Load output tile (convenience) |
-| `load_tile_like_1d(src, dst)` | `(&Tensor, &mut Tensor) -> Tile` | Load from src at dst's position (1D) |
-| `load_tile_like_2d(src, dst)` | `(&Tensor, &mut Tensor) -> Tile` | Load from src at dst's position (2D) |
+| `load_tile_like(src, dst)` | `(&Tensor, &Tensor) -> Tile` | Load from src at dst's tile-block position (rank 1-3) |
 
 ```rust
 // Pattern 1: Direct load/store on mutable tensor
@@ -356,7 +355,7 @@ let pid: (i32, i32, i32) = get_tile_block_id();
 let tile: Tile<f32, { [128] }> = input.load_tile(const_shape![128], [pid.0]);
 
 // Pattern 3: Load-like (positional)
-let tile_x: Tile<f32, { [16, 16] }> = load_tile_like_2d(x, output);
+let tile_x: Tile<f32, { [16, 16] }> = load_tile_like(x, output);
 ```
 
 ### Grid and Block
@@ -554,8 +553,8 @@ for k in 0i32..(K/BK) {
 
 | Function | Signature | Description |
 |---|---|---|
-| `load_ptr_tko(ptrs, ordering, scope, mask, fill, hint)` | `-> (Tile<E, S>, Token)` | Scatter-gather load via pointers |
-| `store_ptr_tko(tile, ptrs, ordering, scope, mask, hint)` | `-> Token` | Scatter-gather store via pointers |
+| `load_ptr_tko(ptrs, ordering, Option<scope>, mask, fill, token, Latency<N>)` | `-> (Tile<E, S>, Token)` | Scatter-gather load via pointers |
+| `store_ptr_tko(ptrs, values, ordering, Option<scope>, mask, token, Latency<N>)` | `-> Token` | Scatter-gather store via pointers |
 | `pointer_to_tile(ptr)` | `P -> PointerTile<P, {[]}>` | Convert raw pointer to scalar pointer tile |
 | `tile_to_pointer(ptile)` | `PointerTile<P, {[]}> -> P` | Convert back |
 | `addptr(ptile, offset)` | Offset a pointer tile by a scalar |
@@ -564,25 +563,26 @@ for k in 0i32..(K/BK) {
 ```rust
 let base: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
 let ptrs: PointerTile<*mut f32, { [128] }> = base.broadcast(const_shape![128]).offset_tile(offsets);
-let (values, token): (Tile<f32, { [128] }>, Token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None);
+let (values, token): (Tile<f32, { [128] }>, Token) =
+    load_ptr_tko(ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 ```
 
 ### Memory: Atomics
 
 | Function | Signature | Description |
 |---|---|---|
-| `atomic_rmw_tko(ptrs, vals, op, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic read-modify-write |
+| `atomic_rmw_tko(ptrs, vals, mode, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic read-modify-write |
 | `atomic_cas_tko(ptrs, cmp, new, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic compare-and-swap |
 
-**RMW operations:** `"add"`, `"addf"`, `"and"`, `"or"`, `"xor"`, `"max"`, `"min"`, `"xchg"`
+**RMW modes:** `atomic::{Add, AddF, And, Or, Xor, Max, Min, Umax, Umin, Xchg}`
 
-**Memory orderings:** `"relaxed"`, `"acquire"`, `"release"`, `"acq_rel"`
+**Memory orderings:** `ordering::{Relaxed, Acquire, Release, AcqRel}` (atomics; load/store also accept `Weak`)
 
-**Scopes:** `"device"`, `"sys"` (system)
+**Scopes:** `scope::{TileBlock, Device, System}`
 
 ```rust
-atomic_rmw_tko(ptrs, increments, "add", "relaxed", "device", None, None);
-atomic_cas_tko(ptrs, expected, desired, "acq_rel", "sys", None, None);
+atomic_rmw_tko(ptrs, increments, atomic::Add, ordering::Relaxed, scope::Device, None, None);
+atomic_cas_tko(ptrs, expected, desired, ordering::AcqRel, scope::System, None, None);
 ```
 
 ### Memory: Tokens
@@ -602,27 +602,28 @@ let token: Token = new_token_unordered();
 
 // Load returns a new token guaranteeing the load completed
 let (data, load_token): (Tile<f32, { [128] }>, Token) =
-    load_ptr_tko(src_ptrs, "weak", "tl_blk", None, None, None);
+    load_ptr_tko(src_ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 
 // Compute on the loaded data
 let result: Tile<f32, { [128] }> = data * data;
 
 // Store uses the load token: waits for the load before writing
 let store_token: Token =
-    store_ptr_tko(result, dst_ptrs, "weak", "tl_blk", None, None);
+    store_ptr_tko(dst_ptrs, result, ordering::Weak, None::<scope::TileBlock>, None, Some(load_token), Latency::<0>);
 ```
 
 ```rust
 // Join tokens from two independent loads before a dependent store:
 let (a_data, a_token): (Tile<f32, { [128] }>, Token) =
-    load_ptr_tko(a_ptrs, "weak", "tl_blk", None, None, None);
+    load_ptr_tko(a_ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 let (b_data, b_token): (Tile<f32, { [128] }>, Token) =
-    load_ptr_tko(b_ptrs, "weak", "tl_blk", None, None, None);
+    load_ptr_tko(b_ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 
 // Both loads must complete before the store
 let combined: Token = join_tokens(&[a_token, b_token]);
 let result: Tile<f32, { [128] }> = a_data + b_data;
-let _: Token = store_ptr_tko(result, out_ptrs, "weak", "tl_blk", None, None);
+let _: Token =
+    store_ptr_tko(out_ptrs, result, ordering::Weak, None::<scope::TileBlock>, None, Some(combined), Latency::<0>);
 ```
 
 ### Bitwise
@@ -715,4 +716,3 @@ cuda_tile_assert!(len > 0, "Length must be positive");
 // Print scalars for debugging (runs on every block, so output may interleave)
 cuda_tile_print!("offset = {}\n", pid.0 * 128);
 ```
-

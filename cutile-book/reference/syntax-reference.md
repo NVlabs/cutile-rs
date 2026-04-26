@@ -152,8 +152,8 @@ Load from a dynamic tensor at the position matching another tile:
 
 ```rust
 // Load from x at the same grid position as output tile z
-let tile_x = load_tile_like_2d(x, z);  // 2D tensors
-let tile_y = load_tile_like_2d(y, z);
+let tile_x = load_tile_like(x, z);  // 2D tensors
+let tile_y = load_tile_like(y, z);
 ```
 
 ### Partitioned Loading
@@ -307,7 +307,7 @@ let y = tanh(x);      // Hyperbolic tangent
 ### Rounding and Absolute Value
 
 ```rust
-let y = ceil(x, "nearest_even");   // Ceiling
+let y = ceil(x);                    // Ceiling
 let y = floor(x);                   // Floor
 let y = absf(x);                    // Absolute value (float)
 let y = absi(x);                    // Absolute value (int)
@@ -357,11 +357,11 @@ Cumulative operations along an axis:
 
 ```rust
 // Prefix sum (cumulative sum)
-let prefix_sums: Tile<f32, S> = scan_sum(tile, 0i32, false, 0.0f32);
-//                                              axis   reverse  init
+let prefix_sums: Tile<f32, S> = scan_sum(tile, 0i32, reverse::Forward, 0.0f32);
+//                                              axis   direction         init
 
 // Custom scan with closure (prefix product)
-let prefix_products = scan(tile, 0i32, false, 1.0f32, |acc, x| acc * x);
+let prefix_products = scan(tile, 0i32, reverse::Forward, 1.0f32, |acc, x| acc * x);
 ```
 
 ---
@@ -653,11 +653,11 @@ let result: Tile<f32, {[8]}> = cat(tile_a, tile_b, 0i32);
 unsafe {
     let token: Token = new_token_unordered();
     let partition: PartitionMut<f32, {[128, 256]}> =
-        make_partition_view_mut(&tensor, shape, token);
+        make_partition_view_mut(&tensor, shape, padding::None, token);
     
     let idx: [i32; 2] = [0i32, 0i32];
-    let tile = load_from_view_mut(&partition, idx);
-    store_to_view_mut(&mut partition, tile, idx, None, false);
+    let tile = load_view_tko_mut(&partition, idx, ordering::Weak, scope::TileBlock, None, tma::Enabled);
+    store_view_tko_mut(&mut partition, tile, idx, ordering::Weak, scope::TileBlock, None, tma::Enabled);
 }
 ```
 
@@ -670,19 +670,19 @@ let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(int_to_ptr(ptr_seed));
 
 // Load with memory ordering
 let (values, token): (Tile<f32, S>, Token) =
-    load_ptr_tko(ptrs, "relaxed", "device", None, None, None, None);
+    load_ptr_tko(ptrs, ordering::Relaxed, Some(scope::Device), None, None, None, Latency::<0>);
 
 // Store with memory ordering
 let token: Token =
-    store_ptr_tko(ptrs, values, "relaxed", "device", None, None, None);
+    store_ptr_tko(ptrs, values, ordering::Relaxed, Some(scope::Device), None, None, Latency::<0>);
 
 // Per-op latency hint
 let (values, token): (Tile<f32, S>, Token) =
-    load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Some(4));
+    load_ptr_tko(ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<4>);
 ```
 
-Memory orderings: `"relaxed"`, `"weak"`, `"acquire"`, `"release"`, `"acq_rel"`
-Scopes: `"device"`, `"sys"`, `"tl_blk"`
+Memory orderings: `ordering::Weak / Relaxed / Acquire / Release / AcqRel`
+Scopes: `scope::TileBlock / Device / System`
 
 ---
 
@@ -692,10 +692,11 @@ Scopes: `"device"`, `"sys"`, `"tl_blk"`
 
 ```rust
 // Atomic add
-let (old_values, token): (Tile<f32, S>, Token) =
-    atomic_rmw_tko(ptrs, increments, "addf", "relaxed", "device", None, None);
+let (old_values, token): (Tile<f32, S>, Token) = atomic_rmw_tko(
+    ptrs, increments, atomic::AddF, ordering::Relaxed, scope::Device, None, None,
+);
 
-// Operations: "add", "addf", "and", "or", "xor", "max", "min", "xchg"
+// Modes: atomic::{Add, AddF, And, Or, Xor, Max, Min, Umax, Umin, Xchg}
 ```
 
 ### Atomic Compare-and-Swap
@@ -703,12 +704,12 @@ let (old_values, token): (Tile<f32, S>, Token) =
 ```rust
 let (old_values, token): (Tile<f32, S>, Token) = atomic_cas_tko(
     ptrs,
-    cmp_values,      // Expected value
-    new_values,      // New value if match
-    "relaxed",       // Memory ordering
-    "device",        // Scope
-    None,            // Optional mask
-    None,            // Optional input token
+    cmp_values,         // Expected value
+    new_values,         // New value if match
+    ordering::Relaxed,  // Memory ordering
+    scope::Device,      // Scope
+    None,               // Optional mask
+    None,               // Optional input token
 );
 ```
 
@@ -742,7 +743,7 @@ fn softmax<const BM: i32, const BN: i32>(
     x: &Tensor<f32, {[-1, -1]}>,
     y: &mut Tensor<f32, {[BM, BN]}>,
 ) {
-    let tile_x: Tile<f32, {[BM, BN]}> = load_tile_like_2d(x, y);
+    let tile_x: Tile<f32, {[BM, BN]}> = load_tile_like(x, y);
 
     // Subtract max for stability
     let tile_max: Tile<f32, {[BM]}> = reduce_max(tile_x, 1i32);
@@ -876,7 +877,7 @@ let z_host: Vec<f32> = z.unpartition().await?.to_host_vec().await?;
 |----------|----------|
 | `load_tile_mut(tensor)` | Load entire output tile |
 | `tensor.load()` | Same as above (method form) |
-| `load_tile_like_2d(src, ref)` | Load from src at ref's position |
+| `load_tile_like(src, ref)` | Load from src at ref's tile-block position (rank 1-3) |
 | `part.load([i, j])` | Load specific partition tile |
 
 ### Store Functions

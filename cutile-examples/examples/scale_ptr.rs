@@ -52,14 +52,29 @@ mod my_module {
             let mask: Tile<bool, { [128] }> = lt_tile(offsets, len_tile);
 
             let src: PointerTile<*mut f32, { [128] }> = in_ptrs.offset_tile(offsets);
-            let result: (Tile<f32, { [128] }>, Token) =
-                load_ptr_tko(src, "weak", "tl_blk", Some(mask), Some(0.0f32), None, None);
+            let result: (Tile<f32, { [128] }>, Token) = load_ptr_tko(
+                src,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                Some(mask),
+                Some(0.0f32),
+                None,
+                Latency::<0>,
+            );
             let tile: Tile<f32, { [128] }> = result.0;
 
             let scaled: Tile<f32, { [128] }> = tile * scale_tile;
 
             let dst: PointerTile<*mut f32, { [128] }> = out_ptrs.offset_tile(offsets);
-            store_ptr_tko(dst, scaled, "weak", "tl_blk", Some(mask), None, None);
+            store_ptr_tko(
+                dst,
+                scaled,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                Some(mask),
+                None,
+                Latency::<0>,
+            );
         }
     }
 }

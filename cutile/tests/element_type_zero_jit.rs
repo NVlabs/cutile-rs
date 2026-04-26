@@ -28,10 +28,11 @@ mod zero_kernel_module {
     }
 }
 
-use zero_kernel_module::_module_asts;
+use zero_kernel_module::__module_ast_self;
 
 fn compile_zero_fill(ty: &str) -> String {
-    let modules = CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+    let modules = CUDATileModules::from_kernel(__module_ast_self())
+        .expect("Failed to create CUDATileModules");
     let gpu_name = get_gpu_name(0);
     let compiler = CUDATileFunctionCompiler::new(
         &modules,

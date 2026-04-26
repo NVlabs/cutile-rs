@@ -47,12 +47,27 @@ mod num_tiles_kernels {
         let tile: Tile<i32, { [1] }> = broadcast_scalar(nk, const_shape![1]);
         out.store(tile);
     }
+
+    /// Directly exercises the raw Tile IR view-shape query surfaces.
+    #[cutile::entry()]
+    fn raw_view_shape_queries<const BM: i32, const BN: i32>(
+        input: &Tensor<f32, { [-1, -1] }>,
+        out: &mut Tensor<i32, { [1] }>,
+    ) {
+        let tensor_shape: [i32; 2] = get_tensor_shape(input);
+        let part = input.partition(const_shape![BM, BN]);
+        let index_shape: [i32; 2] = get_index_space_shape(&part);
+        let combined: i32 = tensor_shape[0] + tensor_shape[1] + index_shape[0] + index_shape[1];
+        let tile: Tile<i32, { [1] }> = broadcast_scalar(combined, const_shape![1]);
+        out.store(tile);
+    }
 }
 
-use num_tiles_kernels::_module_asts;
+use num_tiles_kernels::__module_ast_self;
 
 fn compile(kernel: &str, gen_args: &[String], strides: &[(&str, &[i32])]) -> String {
-    let modules = CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+    let modules = CUDATileModules::from_kernel(__module_ast_self())
+        .expect("Failed to create CUDATileModules");
     let gpu_name = get_gpu_name(0);
     let compiler = CUDATileFunctionCompiler::new(
         &modules,
@@ -98,6 +113,25 @@ fn rank3_emits_get_index_space_shape() {
             "num_tiles_3d_axis2",
             &[32.to_string(), 32.to_string(), 32.to_string()],
             &[("input", &[-1, -1, -1]), ("out", &[1])],
+        );
+        assert!(
+            mlir.contains("get_index_space_shape"),
+            "expected `get_index_space_shape` op in emitted MLIR"
+        );
+    });
+}
+
+#[test]
+fn raw_view_shape_queries_emit_view_ops() {
+    common::with_test_stack(|| {
+        let mlir = compile(
+            "raw_view_shape_queries",
+            &[64.to_string(), 32.to_string()],
+            &[("input", &[-1, -1]), ("out", &[1])],
+        );
+        assert!(
+            mlir.contains("get_tensor_shape"),
+            "expected `get_tensor_shape` op in emitted MLIR"
         );
         assert!(
             mlir.contains("get_index_space_shape"),

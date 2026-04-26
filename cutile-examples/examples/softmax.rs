@@ -13,7 +13,7 @@ mod my_module {
         y: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
             tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());

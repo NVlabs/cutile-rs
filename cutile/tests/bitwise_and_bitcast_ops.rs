@@ -24,7 +24,7 @@ mod bitwise_and_bitcast_ops_module {
         let t1: Tile<i64, S> = andi(x, y); // AND
         let t2: Tile<i64, S> = ori(t1, y); // OR
         let t3: Tile<i64, S> = xori(t2, y); // XOR
-        let t4: Tile<i64, S> = shli(t3, y); // left shift
+        let t4: Tile<i64, S> = shli(t3, y, overflow::None); // left shift
         let result: Tile<i64, S> = shri(t4, y); // right shift
 
         output.store(result);
@@ -49,13 +49,13 @@ mod bitwise_and_bitcast_ops_module {
     }
 }
 
-use bitwise_and_bitcast_ops_module::_module_asts;
+use bitwise_and_bitcast_ops_module::__module_ast_self;
 
 #[test]
 fn compile_bitwise_ops() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -92,8 +92,8 @@ fn compile_bitwise_ops() -> () {
 #[test]
 fn compile_bitcast() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -123,8 +123,8 @@ fn compile_bitcast() -> () {
 #[test]
 fn compile_shri_unsigned() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,

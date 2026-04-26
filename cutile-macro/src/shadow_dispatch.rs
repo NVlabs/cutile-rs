@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Trait-dispatch emission for rank-polymorphic ops.
+//! Shadow-dispatch synthesis for rank-polymorphic ops.
 //!
 //! For a rank-polymorphic op like:
 //!
@@ -13,18 +13,21 @@
 //! ) -> Tile<E, S>
 //! ```
 //!
-//! this module emits a single CGA-erased rank-polymorphic trait, per-rank impls of
-//! that trait, and a free-fn wrapper. User call sites resolve through rustc's
-//! normal trait resolution against the rank-polymorphic trait — no macro-time call-site
-//! rewriting, no name-keyed registry consulted.
+//! this module synthesizes auxiliary scaffolding — a *shadow trait* (CGA-erased
+//! and rank-polymorphic), one rank-instance impl per rank, and a free-fn wrapper —
+//! that exists alongside the user's source for the sole purpose of letting
+//! rustc's normal trait resolution dispatch each call site to the correct
+//! rank-instance impl. None of these items are user-authored; they "shadow"
+//! the user's variadic op, mirroring its semantics in a form rustc can resolve.
+//! No macro-time call-site rewriting, no name-keyed registry consulted.
 //!
 //! ## Coverage
 //!
-//! The emitter supports three patterns of rank-polymorphic ops:
+//! The synthesizer supports three patterns of rank-polymorphic ops:
 //!
 //! - **Same-shape (case 3a).** All shape-bearing args and the return share a
 //!   single CGA and the same type. Examples: `addf`, `subf`, `maxf`, `fma`,
-//!   unary math. Emits `trait Op<...> { fn op(...) -> Self; }` with per-rank
+//!   unary math. Emits `trait Op<...> { fn op(...) -> Self; }` with rank-instance
 //!   impls on `Tile_N<E, S_0, ..., S_{N-1}>`.
 //!
 //! - **Different shape, bound (case 3b).** The return type differs from Self
@@ -35,8 +38,8 @@
 //! - **Different shape, free (case 3c).** The return type contains a generic
 //!   param (type param or CGA) not present in any argument. Associated-type
 //!   dispatch would violate coherence because multiple return shapes share the
-//!   same Self + arg types, so `Out` is promoted to a trait generic and the
-//!   caller ascribes the return type. Examples: `permute`, `reduce_sum`,
+//!   same Self + arg types, so `Out` is promoted to a shadow-trait generic and
+//!   the caller ascribes the return type. Examples: `permute`, `reduce_sum`,
 //!   `bitcast`, `exti`.
 //!
 //! Rank-linked multi-CGA ops (e.g. `broadcast` where `S` and `R` share length
@@ -45,7 +48,9 @@
 //!
 //! The trait+impl entry points ([`desugar_variadic_trait_decl`],
 //! [`desugar_variadic_trait_impl`]) handle the same three cases for user-
-//! authored variadic traits like `BroadcastScalar`.
+//! authored variadic traits like `BroadcastScalar`. Here the user's trait
+//! is the source of truth; the macro synthesizes a shadow rank-polymorphic
+//! trait that the user's variadic trait desugars into.
 
 use std::collections::BTreeMap;
 
@@ -59,7 +64,7 @@ use syn::{
 
 use crate::error::{syn_err, syn_error_at, Error};
 
-/// Maximum rank the emitter produces per-rank impls for. Must match the
+/// Maximum rank the emitter produces rank-instance impls for. Must match the
 /// range of `Tile_N` variants produced by `#[cuda_tile::variadic_struct]`.
 pub const MAX_RANK: usize = 6;
 
@@ -74,7 +79,7 @@ pub const MAX_RANK: usize = 6;
 /// something other than `PascalCase(fn_ident)`. Used to avoid collisions with
 /// user-defined traits in the same module (e.g. `broadcast_scalar` → synth
 /// `BroadcastScalar` would collide with the user's `BroadcastScalar` trait).
-pub fn emit_trait_dispatch(
+pub fn emit_shadow_dispatch(
     item: &ItemFn,
     method_override: Option<Ident>,
     trait_name_override: Option<Ident>,
@@ -185,7 +190,7 @@ impl RankPolyOpSpec {
         if cgas.is_empty() {
             return syn_error_at(
                 fn_ident.span(),
-                "trait_dispatch: no `const X: [i32; N]` generic found \
+                "shadow_dispatch: no `const X: [i32; N]` generic found \
                  (is this op rank-polymorphic?)",
             );
         }
@@ -202,7 +207,7 @@ impl RankPolyOpSpec {
                         _ => {
                             return syn_error_at(
                                 pat_type.pat.span(),
-                                "trait_dispatch: unsupported argument pattern",
+                                "shadow_dispatch: unsupported argument pattern",
                             );
                         }
                     };
@@ -232,7 +237,7 @@ impl RankPolyOpSpec {
                 FnArg::Receiver(r) => {
                     return syn_error_at(
                         r.span(),
-                        "trait_dispatch: free fns only (no `self` receiver)",
+                        "shadow_dispatch: free fns only (no `self` receiver)",
                     );
                 }
             }
@@ -241,7 +246,7 @@ impl RankPolyOpSpec {
         if first_shape_bearing_ty.is_none() {
             return syn_error_at(
                 fn_ident.span(),
-                "trait_dispatch: no shape-bearing argument found",
+                "shadow_dispatch: no shape-bearing argument found",
             );
         }
 
@@ -522,7 +527,7 @@ impl RankPolyOpSpec {
         let dim_params: Vec<TokenStream2> = combo.dim_params_tokens().into_iter().collect();
 
         // Compute the Self type: rewrite the first shape-bearing arg's type
-        // using the per-rank dim names.
+        // using the rank-instance dim names.
         let first_shape_bearing = self.args.iter().find(|a| a.cga.is_some()).unwrap();
         let self_type = rewrite_ty_for_rank(&first_shape_bearing.ty, combo, &self.cgas);
 
@@ -1367,7 +1372,7 @@ fn replace_lifetimes_with(ty: &Type, dead: &[String], replacement: &syn::Lifetim
 
 /// Base names of variadic-struct types that carry an `'a` lifetime parameter.
 /// When `rewrite_ty_for_rank` rewrites `Shape<...>` → `Shape_N<...>`, we must
-/// prepend `'_` to the per-rank form because `Shape_N<'a, const D_0: i32, ...>`
+/// prepend `'_` to the rank-instance form because `Shape_N<'a, const D_0: i32, ...>`
 /// has a lifetime that is NOT elidable in impl header positions (E0726).
 const LIFETIME_BEARING_BASES: &[&str] = &["Shape", "Array", "Partition", "PartitionMut"];
 
@@ -1376,7 +1381,7 @@ fn base_has_lifetime(base: &Ident) -> bool {
     LIFETIME_BEARING_BASES.iter().any(|b| *b == s)
 }
 
-/// Rewrite a type referencing CGAs to use per-rank `Tile_N<E, S_0, ..., S_{N-1}>` form.
+/// Rewrite a type referencing CGAs to use rank-instance `Tile_N<E, S_0, ..., S_{N-1}>` form.
 ///
 /// Handles nested paths and references. For each path segment, if it has
 /// generic args that reference a CGA, we:
@@ -1573,7 +1578,7 @@ fn match_arg_to_cga<'a>(arg: &GenericArgument, cgas: &'a [CgaInfo]) -> Option<&'
 //         fn broadcast(self, shape: Shape<D>) -> Tile<E, D>;
 //     }
 //
-// `desugar_variadic_trait_decl` emits a single CGA-erased rank-polymorphic trait:
+// `desugar_variadic_trait_decl` emits a single CGA-erased shadow trait:
 //
 //     pub trait BroadcastScalar<E, Sh0> where Self: ElementType {
 //         type Out;
@@ -1581,7 +1586,7 @@ fn match_arg_to_cga<'a>(arg: &GenericArgument, cgas: &'a [CgaInfo]) -> Option<&'
 //     }
 //
 // And `desugar_variadic_trait_impl`, applied to the matching impl, emits one
-// concrete impl per rank. At call sites rustc's normal trait resolution picks
+// concrete impl per rank instance. At call sites rustc's normal trait resolution picks
 // the right impl based on the receiver's element type and the shape arg's
 // concrete type — no macro-time call-site rewriting needed.
 //
@@ -1601,15 +1606,15 @@ fn match_arg_to_cga<'a>(arg: &GenericArgument, cgas: &'a [CgaInfo]) -> Option<&'
 #[derive(Clone, Debug)]
 enum CgaRole {
     /// Referenced by some method argument — gets a synthesized `Sh<i>` type
-    /// generic in the rank-polymorphic trait.
+    /// generic in the shadow trait.
     ShapeBound { sh_ident: Ident },
     /// Only in return type(s) — collapses into the case-3c `Out` trait
-    /// generic. The rank-polymorphic trait has no `type Out;`; impls bind `Out` via the
+    /// generic. The shadow trait has no `type Out;`; impls bind `Out` via the
     /// trait reference.
     Free,
 }
 
-/// Per-CGA classification + the rank-polymorphic trait's overall return-type shape.
+/// Per-CGA classification + the shadow trait's overall return-type shape.
 struct RankPolyShape {
     /// Aligned to the trait's CGA list — `roles[i]` describes what to
     /// substitute for `cgas[i]` in trait references.
@@ -1672,7 +1677,7 @@ where
 }
 
 /// Desugar a `#[cuda_tile::variadic_trait]`-annotated trait declaration into
-/// a single CGA-erased rank-polymorphic trait.
+/// a single CGA-erased shadow trait.
 pub fn desugar_variadic_trait_decl(item: &ItemTrait) -> Result<TokenStream2, Error> {
     let cgas = find_cgas(&item.generics, item.ident.span())?;
     if cgas.is_empty() {
@@ -1775,8 +1780,8 @@ pub fn desugar_variadic_trait_decl(item: &ItemTrait) -> Result<TokenStream2, Err
 }
 
 /// Desugar a `#[cuda_tile::variadic_trait_impl]`-annotated impl block into
-/// per-rank impls of the rank-polymorphic trait. CGA args in the trait reference
-/// are substituted with concrete per-rank types — shape-bound CGAs to the
+/// rank-instance impls of the shadow trait. CGA args in the trait reference
+/// are substituted with concrete rank-instance types — shape-bound CGAs to the
 /// arg type that uses them (e.g. `Shape_R<'lt, …>`); free CGAs (case-3c) to
 /// the rewritten return type. Case-3b impls bind `type Out = …`; case-3c
 /// impls bind `Out` via the trait reference's last generic arg.
@@ -1799,7 +1804,7 @@ pub fn desugar_variadic_trait_impl(item: &ItemImpl) -> Result<TokenStream2, Erro
 
     // Walk every method to:
     //  - find, per shape-bound CGA, the first arg type that uses it (used
-    //    as the substitute in trait reference + method signature per rank);
+    //    as the substitute in trait reference + method signature per rank instance);
     //  - capture the first CGA-using return type for `Out` binding (case-3b)
     //    or as the substitute for the free CGA's trait-arg slot (case-3c).
     let mut cga_shape_types: Vec<Option<Type>> = vec![None; cgas.len()];
@@ -1828,7 +1833,7 @@ pub fn desugar_variadic_trait_impl(item: &ItemImpl) -> Result<TokenStream2, Erro
         }
     }
 
-    // Classify CGAs to match the trait-decl side's rank-polymorphic trait shape.
+    // Classify CGAs to match the trait-decl side's shadow-trait shape.
     let arg_types: Vec<&Type> = item
         .items
         .iter()
@@ -1896,7 +1901,7 @@ fn emit_variadic_trait_impl_for_rank(
     let cga_idents: Vec<Ident> = cgas.iter().map(|c| c.cga_ident.clone()).collect();
 
     // Decide whether the impl needs the synthesized receiver lifetime. It's
-    // load-bearing when the per-rank trait/Self/return form pulls in a
+    // load-bearing when the rank-instance trait/Self/return form pulls in a
     // lifetime-bearing variadic (Shape_R, Array_R, …) or a reference;
     // declaring it unconditionally on impls that don't would be unconstrained
     // (E0207). Heuristic: if any of the source types we substitute into the
@@ -1907,7 +1912,7 @@ fn emit_variadic_trait_impl_for_rank(
         || return_type_for_out.as_ref().is_some_and(type_uses_lifetime)
         || type_uses_lifetime(&item.self_ty);
 
-    // Trait reference: substitute each CGA position with its per-rank
+    // Trait reference: substitute each CGA position with its rank-instance
     // concrete type (shape-bound → arg type; free → return type).
     let (_, trait_path_orig, _) = item.trait_.as_ref().unwrap();
     let trait_path = rewrite_trait_path_args_for_rank(
@@ -1920,14 +1925,14 @@ fn emit_variadic_trait_impl_for_rank(
         &recv_lt,
     );
 
-    // Self type: rewrite per rank (e.g. `for E` stays as `E`; `for Tile<E, D>`
+    // Self type: rewrite per rank instance (e.g. `for E` stays as `E`; `for Tile<E, D>`
     // becomes `for Tile_R<E, D_0, …>`). Bind any elided lifetimes that the
     // rewrite introduced — `'_` is not allowed in impl trait positions.
     let self_ty_rewritten = rewrite_ty_for_rank(&item.self_ty, combo, cgas);
     let self_ty_rewritten = bind_anon_lifetimes_to(&self_ty_rewritten, &recv_lt);
 
     // Impl generics: drop CGAs (and their `[i32; N]` length usage), keep
-    // others, append per-rank scalar dim consts. Prepend the receiver lifetime
+    // others, append rank-instance scalar dim consts. Prepend the receiver lifetime
     // only when at least one substituted form actually uses it.
     let dim_params = combo.dim_params_tokens();
     let mut all_impl_params: Vec<TokenStream2> = Vec::new();
@@ -1962,7 +1967,7 @@ fn emit_variadic_trait_impl_for_rank(
         }
     };
 
-    // Rewrite each method: signature uses concrete per-rank types, body becomes
+    // Rewrite each method: signature uses concrete rank-instance types, body becomes
     // unreachable!() (the JIT works from original source, not macro output).
     let mut method_tokens: Vec<TokenStream2> = Vec::new();
     for ii in &item.items {
@@ -1990,7 +1995,7 @@ fn emit_variadic_trait_impl_for_rank(
     }
 }
 
-/// Rewrite a trait method signature for the rank-polymorphic trait: shape-bearing
+/// Rewrite a trait method signature for the shadow trait: shape-bearing
 /// arg types become their corresponding `Sh<i>`; CGA-using return types
 /// become `Self::Out` (case-3b) or the trait-generic `Out` (case-3c).
 fn rewrite_trait_method_for_rank_poly(
@@ -2032,12 +2037,12 @@ fn rewrite_trait_method_for_rank_poly(
 }
 
 /// Rewrite a trait reference's generic args. Each CGA arg is substituted
-/// with its per-rank concrete type:
+/// with its rank-instance concrete type:
 ///   - shape-bound CGA → the corresponding `cga_shape_types[i]` rewritten
 ///     for `combo` (e.g. `BroadcastScalar<E, D>` → `BroadcastScalar<E,
 ///     Shape_R<'lt, D_0, …>>`);
 ///   - free CGA (case-3c) → the captured return type rewritten for `combo`
-///     (the `Out` slot in the rank-polymorphic trait).
+///     (the `Out` slot in the shadow trait).
 fn rewrite_trait_path_args_for_rank(
     path: &syn::Path,
     cgas: &[CgaInfo],
@@ -2089,8 +2094,8 @@ fn rewrite_trait_path_args_for_rank(
     new_path
 }
 
-/// Rewrite an impl method's signature for a per-rank impl: arg and return
-/// types become concrete per-rank forms; body is replaced with `unreachable!()`.
+/// Rewrite an impl method's signature for a rank-instance impl: arg and return
+/// types become concrete rank-instance forms; body is replaced with `unreachable!()`.
 /// The concrete return type works for both case-3b (matches the trait's
 /// `Self::Out` after the impl's `type Out = …` binding) and case-3c
 /// (matches the trait's `Out` after the trait reference's binding).

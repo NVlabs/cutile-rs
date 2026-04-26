@@ -188,6 +188,7 @@ impl Default for SpanBase {
 
 /// A parsed module AST together with the information needed to recover source
 /// locations for any node inside it.
+#[derive(Clone)]
 pub struct Module {
     /// Short name of the module (e.g. `"core"`, `"my_kernels"`).
     name: &'static str,
@@ -255,7 +256,7 @@ impl Module {
         &self.span_base
     }
 
-    /// Resolve any `proc_macro2::Span` (from a node inside [`self.ast()`]) to
+    /// Resolve any `proc_macro2::Span` (from a node inside `self.ast()`) to
     /// an absolute [`SourceLocation`].
     ///
     /// This is the primary entry point used by the JIT compiler: given *any*

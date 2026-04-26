@@ -81,6 +81,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             syn::Type::Path(_) => match get_type_ident(ty) {
                 Some(ident) => {
                     let type_name = ident.to_string();
+                    if type_name == "Option" {
+                        let option_type_instance = TypeInstanceUserType::instantiate(
+                            &ty,
+                            generic_vars,
+                            &self.modules.primitives(),
+                        )
+                        .unwrap();
+                        return Ok(Some(TileRustType::new_enum(TypeInstance::UserType(
+                            option_type_instance,
+                        ))));
+                    }
                     if let Some(item_struct) = self.modules.structs().get(type_name.as_str()) {
                         ty_attrs = self.modules.get_cuda_tile_type_attrs(type_name.as_str());
                         if ty_attrs.is_none() {

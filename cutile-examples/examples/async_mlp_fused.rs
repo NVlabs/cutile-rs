@@ -58,7 +58,7 @@ fn load_data<const RANK: usize>(batch_size: [usize; RANK]) -> impl DeviceOp<Outp
     api::randn(0.0, 1.0, batch_size, None)
 }
 
-use my_kernels::_module_asts;
+use my_kernels::__module_ast_self;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), Error> {
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Error> {
     let function_name = "fused_mlp";
     let function_entry = "fused_mlp_entry";
 
-    let modules = CUDATileModules::new(_module_asts())?;
+    let modules = CUDATileModules::from_kernel(__module_ast_self())?;
     let generics = [
         bm.to_string(),
         bn.to_string(),

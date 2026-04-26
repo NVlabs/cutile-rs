@@ -259,7 +259,7 @@ mod control_flow_ops_module {
 }
 
 use control_flow_ops_module::{
-    _module_asts, break_test_kernel, if_else_tile_expr_kernel, if_for_carry_const_kernel,
+    __module_ast_self, break_test_kernel, if_else_tile_expr_kernel, if_for_carry_const_kernel,
     if_for_carry_kernel, if_return_test_kernel, nested_for_in_if_const_kernel,
     nested_for_in_if_kernel, nested_if_for_if_kernel,
 };
@@ -267,8 +267,8 @@ use control_flow_ops_module::{
 #[test]
 fn compile_control_flow_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -348,8 +348,8 @@ fn execute_break_test() -> () {
 #[test]
 fn compile_break_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -380,8 +380,8 @@ fn compile_break_test() -> () {
 #[test]
 fn compile_while_loop_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -412,8 +412,8 @@ fn compile_while_loop_test() -> () {
 #[test]
 fn compile_loop_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -444,8 +444,8 @@ fn compile_loop_test() -> () {
 #[test]
 fn compile_step_by_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -477,8 +477,8 @@ fn compile_step_by_test() -> () {
 #[test]
 fn compile_assume_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -517,8 +517,8 @@ fn compile_assume_test() -> () {
 #[test]
 fn compile_assume_non_negative_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -552,8 +552,8 @@ fn compile_assume_non_negative_test() -> () {
 #[test]
 fn compile_assume_div_by_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -587,8 +587,8 @@ fn compile_assume_div_by_test() -> () {
 #[test]
 fn compile_assume_same_elements_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,

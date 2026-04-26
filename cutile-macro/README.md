@@ -3,22 +3,79 @@
 Procedural macros behind `cutile::module`. They expand cuTile Rust modules into:
 
 - Type-checkable Rust items that drive rustc's validation of kernel code.
-- An AST capture (`_module_asts()`) that hands the original generic source to the JIT compiler.
+- An AST capture (`__module_ast_self()`) plus a linker-registry entry that hands the original generic source to the JIT compiler.
 - Host-side kernel launch functions for `#[entry]` points.
 
 ## Two-track design: macro output is for rustc, not the JIT
 
 The macro runs at Rust compile time and emits three kinds of output:
 
-1. **Per-rank specializations and rank-polymorphic trait dispatch.** Items that use a const-generic-array (CGA) generic — `const X: [i32; N]` — get materialized as concrete Rust that rustc can type-check. See *Per-rank expansion* and *Trait dispatch* below.
-2. **AST capture.** `_module_asts()` stores the pre-expansion source text via `Span::source_text()` and re-parses it at runtime for the JIT compiler. The JIT sees the *original generic* `fn foo<const S: [i32; N]>(...) { … real body … }`, not macro-emitted expansions.
+1. **Rank-instance instantiation and shadow-trait dispatch.** Items that use a const-generic-array (CGA) generic — `const X: [i32; N]` — get materialized as concrete Rust that rustc can type-check. See *Rank-instance instantiation* and *Shadow dispatch* below.
+2. **AST capture and registry registration.** `__module_ast_self()` stores the pre-expansion source text via `Span::source_text()` and re-parses it at runtime; a `linkme::distributed_slice` entry registers the module into a global registry the JIT consults. The JIT sees the *original generic* `fn foo<const S: [i32; N]>(...) { … real body … }`, not macro-emitted expansions. See *Linker-registry module discovery* below.
 3. **Kernel launchers** for `#[entry]` functions.
 
-The separation matters: items emitted in (1) exist only to make rustc type-check kernel bodies and give good error messages. The JIT does its own per-rank instantiation from the original source, independent of anything the macro emits. Consequently, the macro never has to grow to support new user-code language features — adding support for (say) user-defined structs or methods is the JIT's job. The macro only has to handle whatever Rust patterns appear in op signatures inside `_core.rs`.
+The separation matters: items emitted in (1) exist only to make rustc type-check kernel bodies and give good error messages. The JIT does its own rank-instance specialization from the original source, independent of anything the macro emits. Consequently, the macro never has to grow to support new user-code language features — adding support for (say) user-defined structs or methods is the JIT's job. The macro only has to handle whatever Rust patterns appear in op signatures inside `_core.rs`.
 
-## Per-rank expansion (`rank_expansion.rs`)
+## Linker-registry module discovery
 
-For items annotated with `#[cuda_tile::variadic_struct]`, `#[cuda_tile::variadic_impl]`, or `#[cuda_tile::variadic_trait_impl]`, the macro emits one concrete copy per rank, replacing each `const X: [i32; N]` with scalar consts `X_0, X_1, …, X_{R-1}` and suffixing CGA-bearing path segments accordingly.
+`#[cutile::module]` emits two items used by the JIT to discover this module at runtime:
+
+```rust
+// Per-module AST builder. Returns just *this* module's `Module` value
+// (re-parsed source text + span base). No recursive dep aggregation.
+pub fn __module_ast_self() -> cutile_compiler::ast::Module { /* … */ }
+
+// Self-registers this module into the global registry at link time.
+#[linkme::distributed_slice(cutile_compiler::registry::CUTILE_MODULES)]
+static __CUTILE_MODULE_ENTRY_FOO: cutile_compiler::registry::CutileModuleEntry =
+    cutile_compiler::registry::CutileModuleEntry {
+        absolute_path: ::std::module_path!(),
+        build: __module_ast_self,
+    };
+```
+
+`linkme`'s `#[distributed_slice]` exploits linker-section concatenation: each registration emits a `static` value tagged with a platform-specific section attribute (`#[link_section = "..."]`). At link time the linker concatenates every object file's same-named sections into one contiguous region; at runtime `CUTILE_MODULES` iterates that region as a slice of entries. The contract is between the macro and the linker, not Rust's module system — every crate that emits cuTile module entries with the agreed slice name participates in the same registry, regardless of visibility, semver, or path hierarchy.
+
+### JIT-time dep discovery
+
+`CUDATileModules::from_kernel(kernel)` walks the kernel's `use` statements iteratively against the registry:
+
+1. Seed the working set with the kernel module.
+2. For each `use path::*;` (or `use path::item;`) in the kernel, find the longest prefix that's registered in `CUTILE_MODULES`. If found and not yet visited, call its `build` closure to produce that module's AST, add it to the working set, recurse on its own `use` statements.
+3. Continue until the working set stabilizes (cycle detection by visited absolute paths).
+4. Build a `NameResolver` from the final working set.
+
+`crate::*` paths are resolved against the owning module's crate-root segment (extracted from its `module_path!()`-derived absolute path). Unregistered paths (`std::`, `half::{bf16, f16}`, plain Rust submodules) are skipped silently.
+
+### Re-exports need manual aliases
+
+The registry uses string paths and can't follow Rust re-exports. If a crate exposes a module at a public path different from its canonical `module_path!()`, e.g.:
+
+```rust
+pub mod _core;             // canonical: `cutile::_core::core`
+pub use _core::core;       // public:    `cutile::core`
+```
+
+then a `use cutile::core::*;` in user code won't match the registered `cutile::_core::core` entry. Until macro support lands, register an alias entry by hand next to the `pub use`:
+
+```rust
+#[linkme::distributed_slice(cutile_compiler::registry::CUTILE_MODULES)]
+static __CUTILE_REEXPORT_CORE: cutile_compiler::registry::CutileModuleEntry =
+    cutile_compiler::registry::CutileModuleEntry {
+        absolute_path: "cutile::core",
+        build: _core::core::__module_ast_self,
+    };
+```
+
+### Caveats
+
+- **Static linking only.** Modules inside a `dlopen`ed `.so` aren't reachable from the host's `CUTILE_MODULES` iteration.
+- **Platform coverage.** `linkme` supports Linux, macOS, Windows, and Wasm. Currently verified on Linux only.
+- **Mis-registered paths are silent misses.** A wrong `absolute_path` produces a JIT-time lookup miss rather than a link-time error. Mitigated by deriving the path from `module_path!()` at the static's location, which matches what the JIT looks up by construction.
+
+## Rank-instance instantiation (`rank_instantiation.rs`)
+
+For items annotated with `#[cuda_tile::variadic_struct]`, `#[cuda_tile::variadic_impl]`, or `#[cuda_tile::variadic_trait_impl]`, the macro emits one rank instance per rank, replacing each `const X: [i32; N]` with scalar consts `X_0, X_1, …, X_{R-1}` and suffixing CGA-bearing path segments accordingly.
 
 ```rust
 // Source
@@ -31,11 +88,11 @@ pub struct Tile_2<E: ElementType, const D_0: i32, const D_1: i32> { /* … */ }
 // … through Tile_4
 ```
 
-Inherent impls expand the same way; their method bodies get walked by a `syn::visit_mut::VisitMut` pass (`RankExpander`) that substitutes the active CGA bindings into types, expression paths, struct literals, and `const_shape!` / `const_array!` macros.
+Inherent impls instantiate the same way; their method bodies get walked by a `syn::visit_mut::VisitMut` pass (`RankInstantiator`) that substitutes the active CGA bindings into types, expression paths, struct literals, and `const_shape!` / `const_array!` macros.
 
-## Trait dispatch (`trait_dispatch.rs`)
+## Shadow dispatch (`shadow_dispatch.rs`)
 
-Any function annotated with `#[cuda_tile::variadic_op(...)]`, or any trait declared with `#[cuda_tile::variadic_trait(...)]`, is treated as rank-polymorphic. Instead of emitting per-rank-mangled callables, the macro produces a single CGA-erased rank-polymorphic trait, per-rank `impl`s of it, and (for free fns) a free-fn wrapper that delegates through the trait. User code calls the unsuffixed name and rustc resolves it via normal trait lookup.
+Any function annotated with `#[cuda_tile::variadic_op(...)]`, or any trait declared with `#[cuda_tile::variadic_trait(...)]`, is treated as rank-polymorphic. Instead of emitting rank-suffixed callables that the user has to spell out, the macro synthesizes a *shadow trait* — a single CGA-erased rank-polymorphic trait that doesn't exist in user source — together with one `impl` per rank instance and (for free fns) a free-fn wrapper that delegates through the shadow trait. User code calls the unsuffixed name and rustc resolves it via normal trait lookup against the shadow's impls. The "shadow" framing captures the synthesis: the trait and impls are auxiliary scaffolding mirroring the user's variadic op, not part of the user's declared API.
 
 Example — `addf` (same-shape case):
 
@@ -46,7 +103,7 @@ pub fn addf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
     lhs: Tile<E, S>, rhs: Tile<E, S>, rounding: R, ftz: F,
 ) -> Tile<E, S>;
 
-// Macro output (abridged — trait + wrapper shown; 7 per-rank impls elided)
+// Macro output (abridged — trait + wrapper shown; 7 rank-instance impls elided)
 trait Addf<R, F> {
     fn addf(self, rhs: Self, rounding: R, ftz: F) -> Self;
 }

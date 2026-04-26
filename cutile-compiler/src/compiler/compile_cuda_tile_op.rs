@@ -148,6 +148,67 @@ fn get_signedness_attr(key: &str, element_type_str: &str) -> Result<(String, Att
     Ok(signedness_attr(key, signedness_str))
 }
 
+fn memory_scope_value(scope: &str) -> Option<i64> {
+    match scope {
+        "TileBlock" => Some(0),
+        "Device" => Some(1),
+        "System" => Some(2),
+        _ => None,
+    }
+}
+
+fn extract_optional_zst_type_name(
+    expr: &Expr,
+    ctx: &CompilerContext,
+    param_name: &str,
+) -> Result<Option<String>, JITError> {
+    match super::shared_utils::resolve_option_arg(expr, ctx) {
+        Some(inner) => super::shared_utils::extract_zst_type_name(&inner, param_name).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn extract_latency_cycles(expr: &Expr, generic_args: &GenericVars) -> Result<i32, JITError> {
+    let Expr::Path(path_expr) = expr else {
+        return JITError::generic(&format!(
+            "`latency` must be a Latency<N> unit-struct path, got `{}`",
+            expr.to_token_stream()
+        ));
+    };
+    let Some(segment) = path_expr.path.segments.last() else {
+        return JITError::generic("`latency` path has no segments");
+    };
+    if segment.ident != "Latency" {
+        return JITError::generic(&format!(
+            "`latency` must use `Latency<N>`, got `{}`",
+            expr.to_token_stream()
+        ));
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return JITError::generic("`latency` must specify a const generic, e.g. `Latency::<4>`");
+    };
+    let Some(syn::GenericArgument::Const(cycles_expr)) = args.args.first() else {
+        return JITError::generic("`latency` must specify a const generic cycle count");
+    };
+    match cycles_expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Int(int_lit),
+            ..
+        }) => int_lit
+            .base10_parse::<i32>()
+            .map_err(|e| JITError::Generic(format!("invalid latency value: {e}"))),
+        Expr::Path(path_expr) => {
+            let ident = crate::syn_utils::get_ident_from_path_expr(path_expr);
+            generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "`latency`: const generic `{ident}` has no resolved value"
+                ))
+            })
+        }
+        _ => JITError::generic("`latency` const generic must be an integer literal or const param"),
+    }
+}
+
 impl<'m> CUDATileFunctionCompiler<'m> {
     pub fn compile_cuda_tile_op_call(
         &self,
@@ -171,10 +232,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .modules
             .get_function_by_name(rust_function_name.as_str());
         if fn_item.is_none() {
-            return self.jit_error_result(
-                &call_expr.func.span(),
-                &format!("undefined function `{rust_function_name}"),
-            );
+            // If the name was brought into scope by a use statement that
+            // points to an unsupported source (stdlib, third-party crate,
+            // or an unannotated user module), append a hint pointing back
+            // to the import. Falls through to the bare error otherwise.
+            let primary = format!("undefined function `{rust_function_name}`");
+            let msg = match self.modules.unresolved_name_hint(&rust_function_name) {
+                Some(hint) => format!("{primary}: {hint}"),
+                None => primary,
+            };
+            return self.jit_error_result(&call_expr.func.span(), &msg);
         }
         let (_, fn_item) = fn_item.unwrap();
 
@@ -316,6 +383,27 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 generic_args,
                 ctx,
             ),
+            "cuda_tile.print_tko" => {
+                self.compile_print_tko(module, block_id, call_expr, generic_args, ctx)
+            }
+            "cuda_tile.get_index_space_shape" => self.compile_shape_query_op(
+                module,
+                block_id,
+                call_expr,
+                generic_args,
+                ctx,
+                return_type,
+                Opcode::GetIndexSpaceShape,
+            ),
+            "cuda_tile.get_tensor_shape" => self.compile_shape_query_op(
+                module,
+                block_id,
+                call_expr,
+                generic_args,
+                ctx,
+                return_type,
+                Opcode::GetTensorShape,
+            ),
             "cuda_tile.reduce" => {
                 self.compile_reduce_op(module, block_id, call_expr, generic_args, ctx, return_type)
             }
@@ -374,28 +462,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
 
-        let memory_ordering = super::shared_utils::extract_string_literal(
-            &call_expr.args[1],
-            "memory_ordering",
-            ctx,
-        )?;
-        let memory_ordering_value: i64 = match memory_ordering.as_str() { "weak" => 0, "relaxed" => 1, "acquire" => 2, _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `load_ptr_tko: '{}'. Valid: weak, relaxed, acquire", memory_ordering)) };
+        let memory_ordering =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[1], "memory_ordering")?;
+        let memory_ordering_value: i64 = match memory_ordering.as_str() { "Weak" => 0, "Relaxed" => 1, "Acquire" => 2, _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `load_ptr_tko: '{}'. Valid: Weak, Relaxed, Acquire", memory_ordering)) };
 
-        let memory_scope =
-            super::shared_utils::extract_string_literal(&call_expr.args[2], "memory_scope", ctx)?;
-        let memory_scope_value: i64 = match memory_scope.as_str() {
-            "tl_blk" => 0,
-            "device" => 1,
-            "sys" => 2,
-            _ => {
-                return self.jit_error_result(
+        let memory_scope = extract_optional_zst_type_name(&call_expr.args[2], ctx, "memory_scope")?;
+        let memory_scope_value = match memory_scope.as_deref() {
+            Some(scope) => Some(memory_scope_value(scope).ok_or_else(|| {
+                self.jit_error(
                     &call_expr.span(),
-                    &format!(
-                        "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
-                        memory_scope
-                    ),
+                    &format!("invalid `memory_scope`: '{scope}'. Valid: TileBlock, Device, System"),
                 )
-            }
+            })?),
+            None => None,
         };
 
         let mut operands = vec![source_ptr];
@@ -474,20 +553,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        // arg[6]: latency (Option<i32>)
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
-        {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
+        let latency = extract_latency_cycles(&call_expr.args[6], generic_args)?;
+        if latency > 0 {
+            hint_params.insert("latency".to_string(), latency);
         }
 
         let operand_segments: Vec<i64> = vec![1, mask_count, padding_count, token_count];
@@ -500,8 +569,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     "memory_ordering_semantics",
                     Attribute::i32(memory_ordering_value),
                 );
-        if memory_ordering != "weak" {
-            op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+        if memory_ordering != "Weak" {
+            if let Some(memory_scope_value) = memory_scope_value {
+                op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+            }
         }
         if let Some(hints_attr) =
             super::optimization_hints::build_load_store_hints(&self.optimization_hints, hint_params)
@@ -582,28 +653,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .jit_error_result(&call_expr.args[1].span(), "unable to compile tile value");
         };
 
-        let memory_ordering = super::shared_utils::extract_string_literal(
-            &call_expr.args[2],
-            "memory_ordering",
-            ctx,
-        )?;
-        let memory_ordering_value: i64 = match memory_ordering.as_str() { "weak" => 0, "relaxed" => 1, "release" => 3, _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `store_ptr_tko: '{}'. Valid: weak, relaxed, release", memory_ordering)) };
+        let memory_ordering =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[2], "memory_ordering")?;
+        let memory_ordering_value: i64 = match memory_ordering.as_str() { "Weak" => 0, "Relaxed" => 1, "Release" => 3, _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `store_ptr_tko: '{}'. Valid: Weak, Relaxed, Release", memory_ordering)) };
 
-        let memory_scope =
-            super::shared_utils::extract_string_literal(&call_expr.args[3], "memory_scope", ctx)?;
-        let memory_scope_value: i64 = match memory_scope.as_str() {
-            "tl_blk" => 0,
-            "device" => 1,
-            "sys" => 2,
-            _ => {
-                return self.jit_error_result(
+        let memory_scope = extract_optional_zst_type_name(&call_expr.args[3], ctx, "memory_scope")?;
+        let memory_scope_value = match memory_scope.as_deref() {
+            Some(scope) => Some(memory_scope_value(scope).ok_or_else(|| {
+                self.jit_error(
                     &call_expr.span(),
-                    &format!(
-                        "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
-                        memory_scope
-                    ),
+                    &format!("invalid `memory_scope`: '{scope}'. Valid: TileBlock, Device, System"),
                 )
-            }
+            })?),
+            None => None,
         };
 
         let mut operands = vec![dest_ptr, tile_value];
@@ -629,20 +691,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
             }
         }
-        // arg[6]: latency (Option<i32>)
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        if let Some(latency_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[6], ctx)
-        {
-            if let Expr::Lit(ExprLit {
-                lit: Lit::Int(int_lit),
-                ..
-            }) = latency_arg
-            {
-                hint_params.insert(
-                    "latency".to_string(),
-                    int_lit.base10_parse::<i32>().unwrap(),
-                );
-            }
+        let latency = extract_latency_cycles(&call_expr.args[6], generic_args)?;
+        if latency > 0 {
+            hint_params.insert("latency".to_string(), latency);
         }
 
         let operand_segments: Vec<i64> = vec![1, 1, mask_count, token_count];
@@ -654,8 +706,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     "memory_ordering_semantics",
                     Attribute::i32(memory_ordering_value),
                 );
-        if memory_ordering != "weak" {
-            op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+        if memory_ordering != "Weak" {
+            if let Some(memory_scope_value) = memory_scope_value {
+                op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+            }
         }
         if let Some(hints_attr) =
             super::optimization_hints::build_load_store_hints(&self.optimization_hints, hint_params)
@@ -753,25 +807,22 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
 
-        let mode = super::shared_utils::extract_string_literal(&call_expr.args[2], "mode", ctx)?;
-        let memory_ordering = super::shared_utils::extract_string_literal(
-            &call_expr.args[3],
-            "memory_ordering",
-            ctx,
-        )?;
+        let mode = super::shared_utils::extract_zst_type_name(&call_expr.args[2], "mode")?;
+        let memory_ordering =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[3], "memory_ordering")?;
         let memory_scope =
-            super::shared_utils::extract_string_literal(&call_expr.args[4], "memory_scope", ctx)?;
+            super::shared_utils::extract_zst_type_name(&call_expr.args[4], "memory_scope")?;
 
-        let memory_ordering_value: i64 = match memory_ordering.as_str() { "relaxed" => 1, "acquire" => 2, "release" => 3, "acq_rel" => 4, "weak" => return self.jit_error_result(&call_expr.span(), "atomic_rmw_tko does not support 'weak' memory ordering. Valid: relaxed, acquire, release, acq_rel"), _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `atomic_rmw_tko: '{}'. Valid: relaxed, acquire, release, acq_rel", memory_ordering)) };
+        let memory_ordering_value: i64 = match memory_ordering.as_str() { "Relaxed" => 1, "Acquire" => 2, "Release" => 3, "AcqRel" => 4, "Weak" => return self.jit_error_result(&call_expr.span(), "atomic_rmw_tko does not support `Weak` memory ordering. Valid: Relaxed, Acquire, Release, AcqRel"), _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `atomic_rmw_tko: '{}'. Valid: Relaxed, Acquire, Release, AcqRel", memory_ordering)) };
         let memory_scope_value: i64 = match memory_scope.as_str() {
-            "tl_blk" => 0,
-            "device" => 1,
-            "sys" => 2,
+            "TileBlock" => 0,
+            "Device" => 1,
+            "System" => 2,
             _ => {
                 return self.jit_error_result(
                     &call_expr.span(),
                     &format!(
-                        "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
+                        "invalid `memory_scope`: `'{}'. Valid: TileBlock, Device, System",
                         memory_scope
                     ),
                 )
@@ -932,23 +983,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return self.jit_error_result(&call_expr.args[2].span(), "unable to compile value");
         };
 
-        let memory_ordering = super::shared_utils::extract_string_literal(
-            &call_expr.args[3],
-            "memory_ordering",
-            ctx,
-        )?;
+        let memory_ordering =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[3], "memory_ordering")?;
         let memory_scope =
-            super::shared_utils::extract_string_literal(&call_expr.args[4], "memory_scope", ctx)?;
-        let memory_ordering_value: i64 = match memory_ordering.as_str() { "relaxed" => 1, "acquire" => 2, "release" => 3, "acq_rel" => 4, "weak" => return self.jit_error_result(&call_expr.span(), "atomic_cas_tko does not support 'weak' memory ordering. Valid: relaxed, acquire, release, acq_rel"), _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `atomic_cas_tko: '{}'. Valid: relaxed, acquire, release, acq_rel", memory_ordering)) };
+            super::shared_utils::extract_zst_type_name(&call_expr.args[4], "memory_scope")?;
+        let memory_ordering_value: i64 = match memory_ordering.as_str() { "Relaxed" => 1, "Acquire" => 2, "Release" => 3, "AcqRel" => 4, "Weak" => return self.jit_error_result(&call_expr.span(), "atomic_cas_tko does not support `Weak` memory ordering. Valid: Relaxed, Acquire, Release, AcqRel"), _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `atomic_cas_tko: '{}'. Valid: Relaxed, Acquire, Release, AcqRel", memory_ordering)) };
         let memory_scope_value: i64 = match memory_scope.as_str() {
-            "tl_blk" => 0,
-            "device" => 1,
-            "sys" => 2,
+            "TileBlock" => 0,
+            "Device" => 1,
+            "System" => 2,
             _ => {
                 return self.jit_error_result(
                     &call_expr.span(),
                     &format!(
-                        "invalid `memory_scope`: `'{}'. Valid: tl_blk, device, sys",
+                        "invalid `memory_scope`: `'{}'. Valid: TileBlock, Device, System",
                         memory_scope
                     ),
                 )
@@ -1015,13 +1063,149 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
+    /// Reads `memory_ordering`, `memory_scope` ZST args from a view op call.
+    /// Returns `(ordering_i32, scope_i32, ordering_ident)`. `is_load = true`
+    /// restricts ordering to `Weak/Relaxed/Acquire`; `false` restricts to
+    /// `Weak/Relaxed/Release`.
+    fn read_view_ordering_scope(
+        &self,
+        fn_params: &[String],
+        call_expr: &ExprCall,
+        op_name: &str,
+        is_load: bool,
+    ) -> Result<(i64, i64, String), JITError> {
+        let ord_idx = fn_params
+            .iter()
+            .position(|s| s == "memory_ordering")
+            .expect("view op missing `memory_ordering` parameter");
+        let scope_idx = fn_params
+            .iter()
+            .position(|s| s == "memory_scope")
+            .expect("view op missing `memory_scope` parameter");
+
+        let memory_ordering = super::shared_utils::extract_zst_type_name(
+            &call_expr.args[ord_idx],
+            "memory_ordering",
+        )?;
+        let memory_ordering_value: i64 = if is_load {
+            match memory_ordering.as_str() {
+                "Weak" => 0,
+                "Relaxed" => 1,
+                "Acquire" => 2,
+                _ => {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "invalid `memory_ordering` for `{op_name}: '{memory_ordering}'. Valid: Weak, Relaxed, Acquire"
+                        ),
+                    )
+                }
+            }
+        } else {
+            match memory_ordering.as_str() {
+                "Weak" => 0,
+                "Relaxed" => 1,
+                "Release" => 3,
+                _ => {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "invalid `memory_ordering` for `{op_name}: '{memory_ordering}'. Valid: Weak, Relaxed, Release"
+                        ),
+                    )
+                }
+            }
+        };
+
+        let memory_scope =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[scope_idx], "memory_scope")?;
+        let memory_scope_value: i64 = match memory_scope.as_str() {
+            "TileBlock" => 0,
+            "Device" => 1,
+            "System" => 2,
+            _ => {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    &format!(
+                        "invalid `memory_scope`: '{memory_scope}'. Valid: TileBlock, Device, System"
+                    ),
+                )
+            }
+        };
+        Ok((memory_ordering_value, memory_scope_value, memory_ordering))
+    }
+
+    /// Reads `latency: Option<i32>` and `tma: T` ZST args from a view op call
+    /// and converts them to optimization-hint key/value pairs.
+    fn read_view_hint_params(
+        &self,
+        fn_params: &[String],
+        call_expr: &ExprCall,
+        ctx: &CompilerContext,
+        generic_args: &GenericVars,
+    ) -> Result<HashMap<String, i32>, JITError> {
+        let mut hint_params: HashMap<String, i32> = HashMap::new();
+
+        if let Some(i) = fn_params.iter().position(|s| s == "latency") {
+            if let Some(inner) = super::shared_utils::resolve_option_arg(&call_expr.args[i], ctx) {
+                let val: i32 = match &inner {
+                    Expr::Lit(lit_expr) => {
+                        let Lit::Int(int_lit) = &lit_expr.lit else {
+                            return self.jit_error_result(
+                                &lit_expr.span(),
+                                "non-integer literal for `latency`",
+                            );
+                        };
+                        int_lit.base10_parse::<i32>().unwrap()
+                    }
+                    Expr::Path(path_expr) => {
+                        let ident = crate::syn_utils::get_ident_from_path_expr(path_expr);
+                        generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
+                            self.jit_error(
+                                &call_expr.args[i].span(),
+                                &format!(
+                                    "`latency`: const generic `{ident}` has no resolved value"
+                                ),
+                            )
+                        })?
+                    }
+                    _ => {
+                        return self.jit_error_result(
+                            &call_expr.args[i].span(),
+                            "`latency` must be a literal or const generic",
+                        );
+                    }
+                };
+                hint_params.insert("latency".to_string(), val);
+            }
+        }
+
+        if let Some(i) = fn_params.iter().position(|s| s == "tma") {
+            let ident = super::shared_utils::extract_zst_type_name(&call_expr.args[i], "tma")?;
+            match ident.as_str() {
+                "Enabled" => {} // no hint
+                "Disabled" => {
+                    hint_params.insert("allow_tma".to_string(), 0);
+                }
+                _ => {
+                    return self.jit_error_result(
+                        &call_expr.args[i].span(),
+                        &format!("invalid `tma`: '{ident}'. Valid: Enabled, Disabled"),
+                    )
+                }
+            }
+        }
+
+        Ok(hint_params)
+    }
+
     fn compile_load_view_tko(
         &self,
         module: &mut Module,
         block_id: BlockId,
         call_expr: &ExprCall,
         fn_item: &ItemFn,
-        cuda_tile_op_hint_params: &[String],
+        _cuda_tile_op_hint_params: &[String],
         generic_args: &GenericVars,
         ctx: &mut CompilerContext,
         return_type: Option<TileRustType>,
@@ -1094,64 +1278,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         let index_values = index_values_vec;
 
-        let mut opt_hint_attrs: Vec<(String, Attribute)> = vec![];
-        let mut hint_params: HashMap<String, i32> = HashMap::new();
         let fn_params = get_sig_param_names(&fn_item.sig);
-        for hint_param in cuda_tile_op_hint_params {
-            let Some(i) = fn_params.iter().position(|s| *s == *hint_param) else {
-                return self.jit_error_result(
-                    &call_expr.span(),
-                    &format!("Failed to compile hint param {hint_param}"),
-                );
-            };
-            // Handle Option<i32> hint params (e.g. latency: Option<i32>).
-            // The inner value can be a literal (Some(5)) or a const generic (Some(L)).
-            if let Some(inner) = super::shared_utils::resolve_option_arg(&call_expr.args[i], ctx) {
-                let hint_val: i32 = match &inner {
-                    Expr::Lit(lit_expr) => {
-                        let Lit::Int(int_lit) = &lit_expr.lit else {
-                            return self.jit_error_result(
-                                &lit_expr.span(),
-                                &format!("non-integer literal for hint param `{hint_param}`"),
-                            );
-                        };
-                        int_lit.base10_parse::<i32>().unwrap()
-                    }
-                    Expr::Path(path_expr) => {
-                        // Const generic: look up its resolved value.
-                        let ident = crate::syn_utils::get_ident_from_path_expr(path_expr);
-                        generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
-                            self.jit_error(
-                                &call_expr.args[i].span(),
-                                &format!(
-                                    "hint param `{hint_param}`: const generic `{ident}` has no resolved value"
-                                ),
-                            )
-                        })?
-                    }
-                    _ => {
-                        return self.jit_error_result(
-                            &call_expr.args[i].span(),
-                            &format!(
-                                "hint param `{hint_param}` must be a literal or const generic"
-                            ),
-                        );
-                    }
-                };
-                hint_params.insert(hint_param.to_string(), hint_val);
-            }
-        }
-        // Handle disallow_tma: bool parameter.
-        if let Some(i) = fn_params.iter().position(|s| s == "disallow_tma") {
-            if let Expr::Lit(syn::ExprLit {
-                lit: Lit::Bool(b), ..
-            }) = &call_expr.args[i]
-            {
-                if b.value {
-                    hint_params.insert("allow_tma".to_string(), 0);
-                }
-            }
-        }
+        let (memory_ordering_value, memory_scope_value, memory_ordering) =
+            self.read_view_ordering_scope(&fn_params, call_expr, "load_view_tko", true)?;
+        let hint_params = self.read_view_hint_params(&fn_params, call_expr, ctx, generic_args)?;
+        let mut opt_hint_attrs: Vec<(String, Attribute)> = vec![];
         if let Some(load_store_hints_attr) =
             super::optimization_hints::build_load_store_hints(&self.optimization_hints, hint_params)
         {
@@ -1163,21 +1294,28 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         all_operands.push(cuda_tile_token);
         let operand_segments: Vec<i64> = vec![1, index_values.len() as i64, 1];
 
-        let op_builder = OpBuilder::new(Opcode::LoadViewTko, self.ir_location(&call_expr.span()))
-            .result(tile_result_ir_ty)
-            .result(token_result_ir_ty)
-            .operands(all_operands.iter().copied())
-            .attrs(opt_hint_attrs.into_iter())
-            .attr("memory_ordering_semantics", Attribute::i32(0))
-            .attr(
-                "operandSegmentSizes",
-                Attribute::Array(
-                    operand_segments
-                        .iter()
-                        .map(|&x| Attribute::i32(x))
-                        .collect(),
-                ),
-            );
+        let mut op_builder =
+            OpBuilder::new(Opcode::LoadViewTko, self.ir_location(&call_expr.span()))
+                .result(tile_result_ir_ty)
+                .result(token_result_ir_ty)
+                .operands(all_operands.iter().copied())
+                .attrs(opt_hint_attrs.into_iter())
+                .attr(
+                    "memory_ordering_semantics",
+                    Attribute::i32(memory_ordering_value),
+                );
+        if memory_ordering != "Weak" {
+            op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+        }
+        op_builder = op_builder.attr(
+            "operandSegmentSizes",
+            Attribute::Array(
+                operand_segments
+                    .iter()
+                    .map(|&x| Attribute::i32(x))
+                    .collect(),
+            ),
+        );
         let (op_id, results) = op_builder.build(module);
         append_op(module, block_id, op_id);
         let _old = super::shared_utils::update_token(&call_expr.args[0], results[1], ctx);
@@ -1194,7 +1332,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         block_id: BlockId,
         call_expr: &ExprCall,
         fn_item: &ItemFn,
-        cuda_tile_op_hint_params: &[String],
+        _cuda_tile_op_hint_params: &[String],
         generic_args: &GenericVars,
         ctx: &mut CompilerContext,
     ) -> Result<Option<TileRustValue>, JITError> {
@@ -1263,62 +1401,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         let index_values = index_values_vec;
 
-        let mut opt_hint_attrs: Vec<(String, Attribute)> = vec![];
-        let mut hint_params: HashMap<String, i32> = HashMap::new();
         let fn_params = get_sig_param_names(&fn_item.sig);
-        for hint_param in cuda_tile_op_hint_params {
-            let Some(i) = fn_params.iter().position(|s| *s == *hint_param) else {
-                return self.jit_error_result(
-                    &call_expr.span(),
-                    &format!("Failed to compile hint param {hint_param}"),
-                );
-            };
-            // Handle Option<i32> hint params (e.g. latency: Option<i32>).
-            if let Some(inner) = super::shared_utils::resolve_option_arg(&call_expr.args[i], ctx) {
-                let hint_val: i32 = match &inner {
-                    Expr::Lit(lit_expr) => {
-                        let Lit::Int(int_lit) = &lit_expr.lit else {
-                            return self.jit_error_result(
-                                &lit_expr.span(),
-                                &format!("non-integer literal for hint param `{hint_param}`"),
-                            );
-                        };
-                        int_lit.base10_parse::<i32>().unwrap()
-                    }
-                    Expr::Path(path_expr) => {
-                        let ident = crate::syn_utils::get_ident_from_path_expr(path_expr);
-                        generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
-                            self.jit_error(
-                                &call_expr.args[i].span(),
-                                &format!(
-                                    "hint param `{hint_param}`: const generic `{ident}` has no resolved value"
-                                ),
-                            )
-                        })?
-                    }
-                    _ => {
-                        return self.jit_error_result(
-                            &call_expr.args[i].span(),
-                            &format!(
-                                "hint param `{hint_param}` must be a literal or const generic"
-                            ),
-                        );
-                    }
-                };
-                hint_params.insert(hint_param.to_string(), hint_val);
-            }
-        }
-        // Handle disallow_tma: bool parameter.
-        if let Some(i) = fn_params.iter().position(|s| s == "disallow_tma") {
-            if let Expr::Lit(syn::ExprLit {
-                lit: Lit::Bool(b), ..
-            }) = &call_expr.args[i]
-            {
-                if b.value {
-                    hint_params.insert("allow_tma".to_string(), 0);
-                }
-            }
-        }
+        let (memory_ordering_value, memory_scope_value, memory_ordering) =
+            self.read_view_ordering_scope(&fn_params, call_expr, "store_view_tko", false)?;
+        let hint_params = self.read_view_hint_params(&fn_params, call_expr, ctx, generic_args)?;
+        let mut opt_hint_attrs: Vec<(String, Attribute)> = vec![];
         if let Some(load_store_hints_attr) =
             super::optimization_hints::build_load_store_hints(&self.optimization_hints, hint_params)
         {
@@ -1332,20 +1419,27 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         all_operands.push(cuda_tile_token_val);
         let operand_segments: Vec<i64> = vec![1, 1, index_values.len() as i64, 1];
 
-        let op_builder = OpBuilder::new(Opcode::StoreViewTko, self.ir_location(&call_expr.span()))
-            .result(token_result_ir_ty)
-            .operands(all_operands.iter().copied())
-            .attrs(opt_hint_attrs.into_iter())
-            .attr("memory_ordering_semantics", Attribute::i32(0))
-            .attr(
-                "operandSegmentSizes",
-                Attribute::Array(
-                    operand_segments
-                        .iter()
-                        .map(|&x| Attribute::i32(x))
-                        .collect(),
-                ),
-            );
+        let mut op_builder =
+            OpBuilder::new(Opcode::StoreViewTko, self.ir_location(&call_expr.span()))
+                .result(token_result_ir_ty)
+                .operands(all_operands.iter().copied())
+                .attrs(opt_hint_attrs.into_iter())
+                .attr(
+                    "memory_ordering_semantics",
+                    Attribute::i32(memory_ordering_value),
+                );
+        if memory_ordering != "Weak" {
+            op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+        }
+        op_builder = op_builder.attr(
+            "operandSegmentSizes",
+            Attribute::Array(
+                operand_segments
+                    .iter()
+                    .map(|&x| Attribute::i32(x))
+                    .collect(),
+            ),
+        );
         let (op_id, results) = op_builder.build(module);
         append_op(module, block_id, op_id);
         let _old = super::shared_utils::update_token(view_arg, results[0], ctx);
@@ -1359,6 +1453,158 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
         Ok(Some(result.clone()))
+    }
+
+    fn compile_print_tko(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 3 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "`print_tko` expects 3 arguments, got {}",
+                    call_expr.args.len()
+                ),
+            );
+        }
+        let str_literal =
+            super::shared_utils::extract_string_literal(&call_expr.args[0], "str", ctx)?;
+        let Some(arg_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[1],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(&call_expr.args[1].span(), "failed to compile print arg");
+        };
+        let Some(arg) = arg_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[1].span(),
+                "`print_tko` argument must be a scalar or tile value",
+            );
+        };
+
+        let mut operands = vec![arg];
+        let mut token_count = 0;
+        if let Some(token_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[2], ctx) {
+            if let Some(token_value) =
+                self.compile_expression(module, block_id, &token_arg, generic_args, ctx, None)?
+            {
+                if let Some(token_val) = token_value.value {
+                    operands.push(token_val);
+                    token_count = 1;
+                }
+            }
+        }
+
+        let token_type = self
+            .compile_type(&syn::parse_quote!(Token), generic_args, &HashMap::new())?
+            .unwrap();
+        let (op_id, results) = OpBuilder::new(Opcode::Print, self.ir_location(&call_expr.span()))
+            .attr("str", Attribute::String(str_literal))
+            .attr(
+                "operandSegmentSizes",
+                Attribute::Array(vec![Attribute::i32(1), Attribute::i32(token_count)]),
+            )
+            .operands(operands.iter().copied())
+            .result(TileIrType::Token)
+            .build(module);
+        append_op(module, block_id, op_id);
+        Ok(Some(TileRustValue::new_primitive(
+            results[0], token_type, None,
+        )))
+    }
+
+    fn compile_shape_query_op(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+        opcode: Opcode,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 1 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "shape query op expects 1 argument, got {}",
+                    call_expr.args.len()
+                ),
+            );
+        }
+        let Some(src_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[0],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "failed to compile shape query source",
+            );
+        };
+        let Some(src) = src_value.value else {
+            return self
+                .jit_error_result(&call_expr.args[0].span(), "shape query source has no value");
+        };
+        let src_ty = module.value_type(src).clone();
+        let rank = match (&opcode, &src_ty) {
+            (Opcode::GetIndexSpaceShape, TileIrType::PartitionView(pv)) => pv.tile_shape.len(),
+            (Opcode::GetTensorShape, TileIrType::TensorView(tv)) => tv.shape.len(),
+            (Opcode::GetIndexSpaceShape, other) => {
+                return self.jit_error_result(
+                    &call_expr.args[0].span(),
+                    &format!("get_index_space_shape expects a partition view, got {other:?}"),
+                )
+            }
+            (Opcode::GetTensorShape, other) => {
+                return self.jit_error_result(
+                    &call_expr.args[0].span(),
+                    &format!("get_tensor_shape expects a tensor view, got {other:?}"),
+                )
+            }
+            _ => unreachable!(),
+        };
+
+        let scalar_result_ty = TileIrType::Tile(cutile_ir::ir::TileType {
+            shape: vec![],
+            element_type: cutile_ir::ir::TileElementType::Scalar(cutile_ir::ir::ScalarType::I32),
+        });
+        let mut op_builder =
+            OpBuilder::new(opcode, self.ir_location(&call_expr.span())).operand(src);
+        for _ in 0..rank {
+            op_builder = op_builder.result(scalar_result_ty.clone());
+        }
+        let (op_id, results) = op_builder.build(module);
+        append_op(module, block_id, op_id);
+
+        let return_type = return_type.ok_or_else(|| {
+            self.jit_error(
+                &call_expr.span(),
+                "shape query return type could not be inferred",
+            )
+        })?;
+        let elem_type = self
+            .compile_type(&syn::parse_quote!(i32), generic_args, &HashMap::new())?
+            .unwrap();
+        let values = results
+            .into_iter()
+            .map(|value| TileRustValue::new_primitive(value, elem_type.clone(), None))
+            .collect();
+        Ok(Some(TileRustValue::new_compound(values, return_type)))
     }
 
     fn compile_reduce_op(
@@ -1649,14 +1895,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 cutile_ir::ir::Type::Scalar(elem_scalar_scan),
             )])
         };
-        let reverse_value = if let Expr::Lit(lit_expr) = &call_expr.args[2] {
-            if let syn::Lit::Bool(lit_bool) = &lit_expr.lit {
-                lit_bool.value
-            } else {
-                false
+        let reverse = super::shared_utils::extract_zst_type_name(&call_expr.args[2], "reverse")?;
+        let reverse_value = match reverse.as_str() {
+            "Forward" => false,
+            "Reverse" => true,
+            _ => {
+                return self.jit_error_result(
+                    &call_expr.args[2].span(),
+                    &format!("invalid `reverse`: '{reverse}'. Valid: Forward, Reverse"),
+                )
             }
-        } else {
-            false
         };
 
         let (op_id, results) = OpBuilder::new(Opcode::Scan, self.ir_location(&call_expr.span()))
@@ -1903,6 +2151,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         "nearest_int_to_zero" => 3,
                         "zero" => 4,
                         "approx" => 5,
+                        "full" => 6,
                         other => {
                             return self.jit_error_result(
                                 &call_expr.span(),
@@ -1911,6 +2160,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                     };
                     Attribute::i32(rm)
+                } else if val_str.starts_with("#cuda_tile.overflow<") {
+                    let inner = val_str
+                        .trim_start_matches("#cuda_tile.overflow<")
+                        .trim_end_matches('>');
+                    overflow_attr(inner).1
+                } else if val_str.starts_with("#cuda_tile.cmp_predicate<") {
+                    let inner = val_str
+                        .trim_start_matches("#cuda_tile.cmp_predicate<")
+                        .trim_end_matches('>');
+                    cmp_pred_attr(inner).1
+                } else if val_str.starts_with("#cuda_tile.comparison_ordering<") {
+                    let inner = val_str
+                        .trim_start_matches("#cuda_tile.comparison_ordering<")
+                        .trim_end_matches('>');
+                    cmp_ordering_attr(inner).1
+                } else if val_str.starts_with("#cuda_tile.signedness<") {
+                    let inner = val_str
+                        .trim_start_matches("#cuda_tile.signedness<")
+                        .trim_end_matches('>');
+                    signedness_attr(name, inner).1
                 } else {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -2273,7 +2542,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     values.push(TileRustValue::new_primitive(op_value, elem_ty.clone(), maybe_bounds));
                                 }
                                 Kind::StructuredType => { values.push(TileRustValue::new_structured_type(results[i], elem_ty.clone(), None)); }
-                                Kind::Compound | Kind::Struct | Kind::String => return self.jit_error_result(&call_expr.span(), &format!("this operation returned an unsupported element type ({:?}); only scalar and structured types are supported", elem_ty.kind)),
+                                Kind::Compound | Kind::Struct | Kind::String | Kind::Enum => return self.jit_error_result(&call_expr.span(), &format!("this operation returned an unsupported element type ({:?}); only scalar and structured types are supported", elem_ty.kind)),
                             }
                         }
                         Ok(Some(TileRustValue::new_compound(values, return_type)))
@@ -2281,6 +2550,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 Kind::Struct => self.jit_error_result(&call_expr.span(), "this operation cannot return a struct; only scalar and structured (tile) types are supported as return types"),
                 Kind::String => self.jit_error_result(&call_expr.span(), "this operation cannot return a string; only scalar and structured (tile) types are supported as return types"),
+                Kind::Enum => self.jit_error_result(&call_expr.span(), "this operation cannot return an enum; only scalar and structured (tile) types are supported as return types"),
             }
         } else {
             let (op_id, _) = op_builder.build(module);
@@ -2501,6 +2771,7 @@ fn op_name_to_opcode(op_name: &str) -> Result<Opcode, JITError> {
         "negi" => Ok(Opcode::NegI),
         "absf" => Ok(Opcode::AbsF),
         "absi" => Ok(Opcode::AbsI),
+        "atan2" => Ok(Opcode::Atan2),
         "maxf" => Ok(Opcode::MaxF),
         "maxi" => Ok(Opcode::MaxI),
         "minf" => Ok(Opcode::MinF),
@@ -2542,7 +2813,7 @@ fn op_name_to_opcode(op_name: &str) -> Result<Opcode, JITError> {
         "mmai" => Ok(Opcode::MmaI),
         "assert" => Ok(Opcode::Assert),
         "assume" => Ok(Opcode::Assume),
-        "print" => Ok(Opcode::Print),
+        "print" | "print_tko" => Ok(Opcode::Print),
         "get_global" => Ok(Opcode::GetGlobal),
         "global" => Ok(Opcode::Global),
         "get_index_space_shape" => Ok(Opcode::GetIndexSpaceShape),

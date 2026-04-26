@@ -17,9 +17,9 @@
 //!       ↓
 //! [_module]              ← orchestration: route each item by attribute
 //!       ↓ ↓ ↓
-//!   [rank_expansion]     [trait_dispatch]      [kernel_launcher_generator]
-//!   per-rank specialize  CGA-erased trait      emit `#[entry]` launchers
-//!   structs / impls /    + per-rank impls      (host-side glue)
+//!   [rank_instantiation]     [shadow_dispatch]      [kernel_launcher_generator]
+//!   rank-instance specialize  CGA-erased trait      emit `#[entry]` launchers
+//!   structs / impls /    + rank-instance impls      (host-side glue)
 //!   inherent fn bodies   + free-fn wrappers
 //!       ↓
 //! Emitted Rust (consumed only by rustc)
@@ -29,11 +29,11 @@
 //!
 //! Two emitters carry the rank-polymorphism:
 //!
-//! - [`rank_expansion`] handles items whose generics include a CGA
-//!   (`const X: [i32; N]`) by producing one concrete copy per rank.
-//! - [`trait_dispatch`] handles `#[variadic_op]` fns and `#[variadic_trait]`
-//!   declarations by emitting a single CGA-erased rank-polymorphic trait plus
-//!   per-rank impls; user call sites resolve through rustc's normal trait
+//! - `rank_instantiation` handles items whose generics include a CGA
+//!   (`const X: [i32; N]`) by producing one concrete copy per rank instance.
+//! - `shadow_dispatch` handles `#[variadic_op]` fns and `#[variadic_trait]`
+//!   declarations by emitting a single CGA-erased shadow trait plus
+//!   rank-instance impls; user call sites resolve through rustc's normal trait
 //!   dispatch.
 //!
 //! The JIT path is independent: at proc-macro time `_module` captures the
@@ -54,14 +54,14 @@
 //!         x: &Tensor<T, {[-1]}>,
 //!         y: &Tensor<T, {[-1]}>,
 //!     ) {
-//!         let tile_x = load_tile_like_1d(x, z);
-//!         let tile_y = load_tile_like_1d(y, z);
+//!         let tile_x = load_tile_like(x, z);
+//!         let tile_y = load_tile_like(y, z);
 //!         z.store(tile_x + tile_y);
 //!     }
 //! }
 //! ```
 //!
-//! Expands to: per-rank specializations of `vector_add` for rustc, a
+//! Expands to: rank-instance specializations of `vector_add` for rustc, a
 //! launcher (`VectorAdd { … }` + `vector_add(…)`) for host code, and
 //! `_module_asts()` returning the captured source AST for JIT compilation.
 //!
@@ -81,8 +81,8 @@ use proc_macro::TokenStream;
 mod _module;
 mod error;
 mod kernel_launcher_generator;
-mod rank_expansion;
-mod trait_dispatch;
+mod rank_instantiation;
+mod shadow_dispatch;
 mod validate_dsl_syntax;
 
 /// Transforms a Rust module into GPU kernel code with kernel launchers.
@@ -114,7 +114,6 @@ mod validate_dsl_syntax;
 ///
 /// ## Attributes
 ///
-/// - `core=true` - Marks this as a core DSL module (for `cutile::core`)
 /// - `tile_rust_crate=true` - Indicates this is within the cutile crate
 ///
 /// ## Generated Code
@@ -128,7 +127,7 @@ mod validate_dsl_syntax;
 /// ## See Also
 ///
 /// - Main crate documentation for usage examples
-/// - [`_module::module`] for implementation details
+/// - `_module::module` for implementation details
 #[proc_macro_attribute]
 pub fn module(attr: TokenStream, input: TokenStream) -> TokenStream {
     _module::module(attr, input)
