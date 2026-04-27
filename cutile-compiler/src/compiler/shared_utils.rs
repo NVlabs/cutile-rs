@@ -330,7 +330,7 @@ pub fn extract_zst_type_name(expr: &syn::Expr, param_name: &str) -> Result<Strin
         Expr::Path(path) => Ok(path.path.segments.last().unwrap().ident.to_string()),
         _ => SourceLocation::unknown().jit_error_result(&format!(
             "`{param_name}` must be a unit-struct type-as-value path, got `{}`",
-            expr.to_token_stream().to_string()
+            expr.to_token_stream()
         )),
     }
 }

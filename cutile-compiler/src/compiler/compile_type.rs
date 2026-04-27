@@ -83,9 +83,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let type_name = ident.to_string();
                     if type_name == "Option" {
                         let option_type_instance = TypeInstanceUserType::instantiate(
-                            &ty,
+                            ty,
                             generic_vars,
-                            &self.modules.primitives(),
+                            self.modules.primitives(),
                         )
                         .unwrap();
                         return Ok(Some(TileRustType::new_enum(TypeInstance::UserType(
