@@ -21,6 +21,10 @@ pub enum DynLoadError {
         names: &'static [&'static str],
         source: libloading::Error,
     },
+    RuntimeTooOld {
+        compile_version: u32,
+        runtime_version: u32,
+    },
 }
 
 impl std::fmt::Display for DynLoadError {
@@ -28,6 +32,19 @@ impl std::fmt::Display for DynLoadError {
         match self {
             DynLoadError::LoadFailed { names, source } => {
                 write!(f, "failed to load any of {names:?}: {source}")
+            }
+            DynLoadError::RuntimeTooOld {
+                compile_version,
+                runtime_version,
+            } => {
+                write!(
+                    f,
+                    "CUDA driver too old: built against {}.{} but runtime is {}.{}",
+                    compile_version / 1000,
+                    (compile_version % 1000) / 10,
+                    runtime_version / 1000,
+                    (runtime_version % 1000) / 10,
+                )
             }
         }
     }
@@ -37,6 +54,7 @@ impl std::error::Error for DynLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             DynLoadError::LoadFailed { source, .. } => Some(source),
+            DynLoadError::RuntimeTooOld { .. } => None,
         }
     }
 }
@@ -51,11 +69,11 @@ const CUDA_LIB_NAMES: &[&str] = &["nvcuda.dll"];
 const CUDA_LIB_NAMES: &[&str] = &["libcuda.so"];
 
 #[cfg(target_os = "linux")]
-const CURAND_LIB_NAMES: &[&str] = &["libcurand.so", "libcurand.so.10"];
+const CURAND_LIB_NAMES: &[&str] = &["libcurand.so.10", "libcurand.so"];
 #[cfg(target_os = "macos")]
 const CURAND_LIB_NAMES: &[&str] = &["libcurand.dylib"];
 #[cfg(target_os = "windows")]
-const CURAND_LIB_NAMES: &[&str] = &["curand64_10.dll", "curand64_12.dll"];
+const CURAND_LIB_NAMES: &[&str] = &["curand64_10.dll"];
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 const CURAND_LIB_NAMES: &[&str] = &["libcurand.so"];
 
@@ -100,8 +118,33 @@ fn cached_api<T: GeneratedApi>(
 static CUDA_DRIVER: OnceLock<Result<GeneratedCudaDriverApi, DynLoadError>> = OnceLock::new();
 static CURAND: OnceLock<Result<GeneratedCurandApi, DynLoadError>> = OnceLock::new();
 
+fn load_and_verify_cuda_driver() -> Result<GeneratedCudaDriverApi, DynLoadError> {
+    let api = load_api::<GeneratedCudaDriverApi>(CUDA_LIB_NAMES)?;
+
+    // Since CUDA 11, minor-version compatibility allows newer toolkits on
+    // older same-major drivers, so only reject on a major-version mismatch.
+    // https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
+    if let Ok(get_version) = &api.cuDriverGetVersion {
+        let mut runtime_version: std::ffi::c_int = 0;
+        if unsafe { get_version(&mut runtime_version) } == 0 {
+            let compile_major = crate::CUDA_VERSION / 1000;
+            let runtime_major = (runtime_version as u32) / 1000;
+            if runtime_major < compile_major {
+                return Err(DynLoadError::RuntimeTooOld {
+                    compile_version: crate::CUDA_VERSION,
+                    runtime_version: runtime_version as u32,
+                });
+            }
+        }
+    }
+
+    Ok(api)
+}
+
 fn cuda_driver() -> Result<&'static GeneratedCudaDriverApi, &'static DynLoadError> {
-    cached_api(&CUDA_DRIVER, CUDA_LIB_NAMES)
+    CUDA_DRIVER
+        .get_or_init(load_and_verify_cuda_driver)
+        .as_ref()
 }
 
 fn curand_api() -> Result<&'static GeneratedCurandApi, &'static DynLoadError> {
