@@ -1495,6 +1495,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Ok(hint_params)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_load_view_tko(
         &self,
         module: &mut Module,
@@ -1854,6 +1855,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_shape_query_op(
         &self,
         module: &mut Module,

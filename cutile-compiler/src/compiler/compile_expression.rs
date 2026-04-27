@@ -2330,7 +2330,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             }
                             let ident = get_ident_from_path_expr(path_expr);
                             // Handle Some(...) specially - it's a Rust Option constructor, not a function call
-                            if ident.to_string() == "Some" {
+                            if ident == "Some" {
                                 if call_expr.args.len() != 1 {
                                     return self.jit_error_result(
                                         &call_expr.span(),
