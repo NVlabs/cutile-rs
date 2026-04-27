@@ -1109,9 +1109,7 @@ impl RankInstantiator {
     /// Rewrite a free-fn signature (generics, args, return) and its body.
     pub fn rewrite_function(mut self, item: &ItemFn) -> Result<ItemFn, Error> {
         let mut item = item.clone();
-        if let Err(e) = rewrite_fn_sig(&mut item.sig, &self.bindings) {
-            return Err(e);
-        }
+        rewrite_fn_sig(&mut item.sig, &self.bindings)?;
         self.visit_block_mut(&mut item.block);
         self.into_result(item)
     }
@@ -1125,9 +1123,7 @@ impl RankInstantiator {
             Ok(t) => *item.self_ty = t,
             Err(e) => return Err(e),
         }
-        if let Err(e) = rewrite_generics_for_rank(&mut item.generics, &self.bindings) {
-            return Err(e);
-        }
+        rewrite_generics_for_rank(&mut item.generics, &self.bindings)?;
         if let Some(trait_) = &mut item.trait_ {
             let path = &mut trait_.1;
             if path.segments.is_empty() {
@@ -1138,9 +1134,7 @@ impl RankInstantiator {
             }
             let last_seg = path.segments.last_mut().unwrap();
             if let PathArguments::AngleBracketed(path_args) = &mut last_seg.arguments {
-                if let Err(e) = rewrite_generic_args_for_rank(path_args, &self.bindings) {
-                    return Err(e);
-                }
+                rewrite_generic_args_for_rank(path_args, &self.bindings)?
             }
         }
 
@@ -1164,8 +1158,8 @@ impl RankInstantiator {
                     }
                     let mut result = fn_impl.clone();
                     self.rewrite_impl_method(&original_self_ty, &mut result);
-                    if self.error.is_some() {
-                        return Err(self.error.unwrap());
+                    if let Some(error) = self.error {
+                        return Err(error);
                     }
                     impl_items.push(ImplItem::Fn(result));
                 }

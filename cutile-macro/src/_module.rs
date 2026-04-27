@@ -411,7 +411,7 @@ pub fn trait_(mut item: ItemTrait) -> Result<TokenStream, Error> {
     );
     let res = match attributes {
         Some(attributes)
-            if attributes.name_as_str().as_deref() == Some("cuda_tile :: variadic_trait") =>
+            if attributes.name_as_str() == Some("cuda_tile :: variadic_trait".into()) =>
         {
             desugar_variadic_trait_decl(&item)?
         }
