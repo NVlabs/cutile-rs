@@ -401,6 +401,10 @@ version = "0.0.1"
 dependencies = [
  "bindgen 0.69.5",
  "libloading",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

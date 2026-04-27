@@ -27,7 +27,7 @@
 use crate::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use crate::error::JITError;
 use crate::hints::CompileOptions;
-use crate::specialization::{DivHint, SpecializationBits};
+use crate::specialization::SpecializationBits;
 
 /// Compiled kernel artifacts: IR, bytecode, and optional cubin.
 ///
@@ -82,7 +82,6 @@ pub struct KernelCompiler<F: Fn() -> Vec<crate::ast::Module>> {
     generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
     spec_args: Vec<(String, SpecializationBits)>,
-    scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
 }
@@ -102,7 +101,6 @@ impl<F: Fn() -> Vec<crate::ast::Module>> KernelCompiler<F> {
             generics: Vec::new(),
             stride_args: Vec::new(),
             spec_args: Vec::new(),
-            scalar_hints: Vec::new(),
             const_grid: None,
             compile_options: CompileOptions::default(),
         }
@@ -170,12 +168,6 @@ impl<F: Fn() -> Vec<crate::ast::Module>> KernelCompiler<F> {
             .map(|(name, s)| (name.as_str(), s))
             .collect();
 
-        let scalar_refs: Vec<(&str, &DivHint)> = self
-            .scalar_hints
-            .iter()
-            .map(|(name, h)| (name.as_str(), h))
-            .collect();
-
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             &self.module_name,
@@ -183,7 +175,7 @@ impl<F: Fn() -> Vec<crate::ast::Module>> KernelCompiler<F> {
             &self.generics,
             &stride_refs,
             &spec_refs,
-            &scalar_refs,
+            &[],
             self.const_grid,
             self.gpu_name,
             &self.compile_options,
