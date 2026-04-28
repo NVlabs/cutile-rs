@@ -196,6 +196,7 @@ A few environment variables help during debugging:
 | `CUTILE_DEBUG` | Enable debug output | `0` |
 | `CUDA_VISIBLE_DEVICES` | Select GPU device | All GPUs |
 | `CUDA_HOME` | Path to CUDA toolkit | `/usr/local/cuda` |
+| `CUTILE_TILEIRAS_PATH` | Override the `tileiras` binary used by the JIT | `tileiras` from `PATH` |
 
 The JIT kernel cache is in-memory per process — restart the process to force recompilation.
 

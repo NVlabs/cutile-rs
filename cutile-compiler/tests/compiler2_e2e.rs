@@ -12,8 +12,9 @@ use cutile_ir::ir::{
     TileElementType, TileType, Type, DYNAMIC,
 };
 
-use cutile_compiler::cuda_tile_runtime_utils::compile_tile_ir_module;
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
+use cutile_compiler::cuda_tile_runtime_utils::{
+    compile_tile_ir_module, get_gpu_name, tileiras_binary,
+};
 
 /// Build the simplest possible kernel: an entry that just returns.
 fn build_empty_kernel() -> Module {
@@ -106,7 +107,7 @@ fn test_empty_kernel_bytecode_roundtrip() {
 #[test]
 fn test_empty_kernel_tileiras() {
     // Skip if no GPU or tileiras available.
-    if std::process::Command::new("tileiras")
+    if std::process::Command::new(tileiras_binary())
         .arg("--version")
         .output()
         .is_err()
@@ -152,7 +153,7 @@ fn test_empty_kernel_tileiras() {
 // =========================================================================
 
 fn try_get_gpu_name() -> Option<String> {
-    if std::process::Command::new("tileiras")
+    if std::process::Command::new(tileiras_binary())
         .arg("--version")
         .output()
         .is_err()

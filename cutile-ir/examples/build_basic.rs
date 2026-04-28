@@ -219,7 +219,8 @@ fn main() {
     // -- Compile with tileiras --
     let cubin = tmp.join("add_kernel.cubin");
     let cubin = cubin.to_str().unwrap();
-    match Command::new("tileiras")
+    let tileiras = tileiras_binary();
+    match Command::new(&tileiras)
         .args(["--gpu-name", "sm_120", "--opt-level", "3", "-o", cubin, bc])
         .output()
     {
@@ -234,7 +235,17 @@ fn main() {
             std::process::exit(1);
         }
         Err(_) => {
-            println!("tileiras not found — skipping GPU compilation");
+            println!(
+                "{} not found — skipping GPU compilation",
+                tileiras.display()
+            );
         }
     }
+}
+
+fn tileiras_binary() -> std::path::PathBuf {
+    std::env::var_os("CUTILE_TILEIRAS_PATH")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("tileiras"))
 }
