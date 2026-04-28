@@ -17,6 +17,11 @@ use uuid::Uuid;
 ///
 /// Set this to an absolute path such as `/opt/cuda-tile/bin/tileiras` to use
 /// that binary instead of the `tileiras` found on `PATH`.
+///
+/// The selected `tileiras` must be compatible with the CUDA Toolkit and
+/// driver/runtime used to load the generated cubin. For example, a cubin
+/// assembled with a CUDA 13.3 `tileiras` binary may fail to assemble, load, or
+/// run on a CUDA 13.2 driver/runtime stack.
 pub const TILEIRAS_PATH_ENV: &str = "CUTILE_TILEIRAS_PATH";
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.

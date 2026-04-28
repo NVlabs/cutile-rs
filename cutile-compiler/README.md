@@ -12,6 +12,30 @@ CUTILE_TILEIRAS_PATH=/opt/cuda-tile/bin/tileiras \
     cargo test -p cutile-compiler
 ```
 
+The override should point to a `tileiras` binary that is compatible with the
+CUDA Toolkit and driver/runtime used to load the generated cubin. Mixing a newer
+standalone assembler with an older runtime is not guaranteed to work. For
+example, kernels assembled with a CUDA 13.3 `tileiras` binary can fail when run
+with a CUDA 13.2 driver/runtime stack, either during assembly with:
+
+```text
+tileiras failed ... error: failed to compile Tile IR program
+```
+
+or later when loading/running the generated cubin. If this happens, use the
+`tileiras` from the same CUDA installation as the runtime, or remove the
+override.
+
+Cargo config files can also set this environment variable:
+
+```toml
+[env]
+CUTILE_TILEIRAS_PATH = { value = "/opt/cuda-tile/bin/tileiras", relative = false }
+```
+
+When set this way, Cargo injects the variable into `cargo test` and `cargo run`
+even if it is not present in the shell environment.
+
 ## Testing
 
 ```bash
