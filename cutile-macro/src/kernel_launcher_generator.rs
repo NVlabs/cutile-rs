@@ -583,6 +583,9 @@ pub fn generate_kernel_launcher(
                 builder_statements.push(parse_stmt(format!(
                     "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
                 )));
+                scalar_hint_exprs.push(format!(
+                    r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
+                ));
                 param_element_types.push(None);
             }
             _ => {
@@ -823,7 +826,7 @@ pub fn generate_kernel_launcher(
         spec_args.join(",")
     )));
 
-    // Emit scalar_hints (populated for integer scalar params).
+    // Emit scalar_hints (populated for integer scalar and raw pointer params).
     launcher_method.block.stmts.push(parse_stmt(format!(
         "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")

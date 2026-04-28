@@ -557,6 +557,15 @@ pub fn generate_entry_point(
                         )
                         .unwrap();
                         fn_entry.sig.inputs.push(var_arg);
+                        // Emit assume_div_by for raw pointer params with DivHints.
+                        if let Some(hint) = scalar_hints.get(&var_name) {
+                            if hint.divisor > 1 {
+                                statements.push(TensorInput::get_assume_div_by(
+                                    var_name.clone(),
+                                    hint.divisor,
+                                ));
+                            }
+                        }
                         fn_params_concrete_types.push(ValidParamType::Pointer(PointerParamType {
                             mutable: ptr_type_inst.is_mutable,
                             element_type: var_type,

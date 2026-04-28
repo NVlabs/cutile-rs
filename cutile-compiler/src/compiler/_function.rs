@@ -64,7 +64,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         function_generic_args: &[String],
         stride_args: &[(&str, &[i32])],
         spec_args: &[(&str, &crate::specialization::SpecializationBits)],
-        _scalar_hints: &[(&str, &crate::specialization::DivHint)],
+        scalar_hints: &[(&str, &crate::specialization::DivHint)],
         const_grid: Option<(u32, u32, u32)>,
         gpu_name: String,
         compile_options: &crate::hints::CompileOptions,
@@ -131,7 +131,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .iter()
             .map(|(k, v)| (k.to_string(), (*v).clone()))
             .collect();
-        let scalar_hints_map: HashMap<String, crate::specialization::DivHint> = HashMap::new();
+        let scalar_max_divisibility = optimization_hints
+            .target_gpu_name
+            .as_ref()
+            .and_then(|target| optimization_hints.tile_as_hints.get(target))
+            .and_then(|hints| hints.max_divisibility);
+        let scalar_hints_map: HashMap<String, crate::specialization::DivHint> = scalar_hints
+            .iter()
+            .map(|&(name, hint)| {
+                let hint = scalar_max_divisibility.map_or(*hint, |max| hint.with_max(max));
+                (name.to_string(), hint)
+            })
+            .collect();
         let (entry, validator) = generate_entry_point(
             &function,
             &generic_vars,
