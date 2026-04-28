@@ -6,7 +6,7 @@ The sync API blocks the CPU until the GPU finishes:
 
 ```rust
 let launcher = hello_world_kernel();
-launcher.grid((2, 2, 1)).sync_on(&stream);  // CPU waits here!
+launcher.grid((2, 2, 1)).sync_on(&stream)?;  // CPU waits here!
 // CPU blocked until GPU finishes
 ```
 
@@ -26,7 +26,7 @@ With async, the CPU can do other work while the GPU computes:
 In cutile, GPU work is represented as a `DeviceOp` — a description of work to be done, not yet executed:
 
 - `DeviceOp` describes the work.
-- `.await`, `tokio::spawn(.)`, or `.sync_on(.)` executes it.
+- `.await` or `.sync_on(.)` executes it directly; `tokio::spawn` can run the future produced by `into_future()` or `.schedule(...)`.
 
 ```rust
 // This creates a DeviceOp, but doesn't execute yet!
@@ -35,9 +35,9 @@ let tensor_op = api::ones(&[1024, 1024]);  // Returns impl DeviceOp
 // Nothing has happened on the GPU yet...
 
 // NOW it executes:
-let tensor: Tensor<f32> = tensor_op.sync_on(&stream);  // Sync API
+let tensor: Tensor<f32> = tensor_op.sync_on(&stream)?;  // Sync API
 // or
-let tensor: Tensor<f32> = tensor_op.await;             // Async API
+let tensor: Tensor<f32> = tensor_op.await?;             // Async API
 ```
 
 ---
@@ -51,7 +51,7 @@ In cutile, a `DeviceOp` can be executed with either sync or async APIs. Given a 
 | `op.sync()` | Immediately executes `op` on the default GPU device (device 0). Blocking. Callable outside of async context. |
 | `op.sync_on(&stream)` | Immediately executes `op` on `stream`. Blocking. Callable outside of async context. |
 | `op.await` | Immediately executes `op` as part of the async context from which it is invoked. Blocks the enclosing async context but frees the executing thread, allowing the runtime to schedule other tasks on it. Can only be called from within an async context. |
-| `tokio::spawn(op)` | Submits a task to the async runtime, returning a handle that can later be awaited. Non-blocking. Can only be called from within an async context. |
+| `tokio::spawn(op.into_future())` | Submits the operation's future to the async runtime, returning a handle that can later be awaited. Non-blocking. Can only be called from within an async context. |
 
 > Note: An async context is any code appearing in a block defined with the `async` keyword, e.g. `async fn ...`, `async { ... }`, `async || { ... }`.
 
@@ -125,14 +125,14 @@ async fn main() -> Result<(), DeviceError> {
     let batch1 = batch1_op.await?;
 
     let result1_op = process_kernel(batch1);
-    let result1_handle = tokio::spawn(result1_op);  // Non-blocking
+    let result1_handle = tokio::spawn(result1_op.into_future());  // Non-blocking
 
     // batch 2 data can be prepared while batch 1's kernel runs
     let batch2 = batch2_op.await?;
 
     let result2 = process_kernel(batch2).await?;
 
-    let result1 = result1_handle.await?;
+    let result1 = result1_handle.await.expect("task panicked")?;
     Ok(())
 }
 ```
@@ -197,7 +197,7 @@ let result = my_kernel(out, &weights).sync_on(&stream)?;
 let result = my_kernel(out, &weights).await?;
 
 // COMPILE ERROR — &weights is not 'static, so the future can't be spawned.
-let handle = tokio::spawn(my_kernel(out, &weights));
+let handle = tokio::spawn(my_kernel(out, &weights).into_future());
 //                                       ^^^^^^^^ borrowed value does not live long enough
 ```
 
@@ -206,7 +206,7 @@ spawn, use `Arc<Tensor<T>>` instead:
 
 ```rust
 let weights: Arc<Tensor<f32>> = api::ones(&[1024]).sync_on(&stream)?.into();
-let handle = tokio::spawn(my_kernel(out, weights));  // OK — Arc is 'static
+let handle = tokio::spawn(my_kernel(out, weights).into_future());  // OK — Arc is 'static
 ```
 
 ---
@@ -237,7 +237,7 @@ Use `zip!` to create 4 tensors in parallel.
 let (a, b, c, d) = zip!(
     ones(&[100, 100]).map(Into::into),
     zeros(&[100, 100]).map(Into::into),
-    randn(0.0, 1.0, [100, 100]).map(Into::into),
+    randn(0.0, 1.0, [100, 100], None).map(Into::into),
     arange(10000).map(Into::into)
 ).await?;
 ```
