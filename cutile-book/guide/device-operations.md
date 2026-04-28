@@ -143,13 +143,13 @@ let result = step1(args)
     .await?;
 ```
 
-**CUDA graph** — `.graph()` / `.graph_on(&stream)` captures a composed `DeviceOp` into a reusable `CudaGraph<T>`. Best for hot paths that run the same pipeline many times. See [CUDA Graphs](#cuda-graphs) below for the capture/replay pattern.
+**CUDA graph** — `.graph()` / `.graph_on(stream.clone())` captures a composed `DeviceOp` into a reusable `CudaGraph<T>`. Best for hot paths that run the same pipeline many times. See [CUDA Graphs](#cuda-graphs) below for the capture/replay pattern.
 
 ---
 
 ## Composing DeviceOps
 
-`DeviceOp`s compose into computation graphs using four combinators: `.then()`, `zip!`, `unzip`, and `.shared()`. Graphs are constructed lazily and evaluated as a unit, which lets the scheduler fuse kernels, reuse memory, and overlap independent work.
+`DeviceOp`s compose into computation graphs using four combinators: `.then()`, `zip!`, `unzip`, and `.shared()`. Graphs are constructed lazily and evaluated as a unit, which preserves ordering, avoids duplicate work through sharing, and lets independent work overlap.
 
 ![Lazy computation graph showing how DeviceOps compose](../_static/images/computation-graph.svg)
 
@@ -241,16 +241,16 @@ Data dependencies are your responsibility. The round-robin policy does not track
 
 ```rust
 // Chain with .then() — same stream, automatic ordering
-let result = create_tensor().then(|t| process(t)).await;
+let result = create_tensor().then(|t| process(t)).await?;
 
 // Await sequentially — host ensures ordering
-let tensor = create_tensor().await;
-let result = process(tensor).await;
+let tensor = create_tensor().await?;
+let result = process(tensor).await?;
 
 // Pin to the same stream — CUDA guarantees ordering
 let stream = device.new_stream()?;
-let tensor = create_tensor().sync_on(&stream);
-let result = process(tensor).sync_on(&stream);
+let tensor = create_tensor().sync_on(&stream)?;
+let result = process(tensor).sync_on(&stream)?;
 ```
 
 The unsafe pattern — feeding A's output to B but submitting them as independent futures that land on different streams — can produce stale or partial reads:
@@ -286,7 +286,7 @@ Two capture APIs, depending on how you want to express the pipeline:
 
 ```rust
 // Combinator form — capture what a DeviceOp chain produces.
-let graph = pipeline(input).graph_on(&stream)?;
+let graph = pipeline(input).graph_on(stream.clone())?;
 
 // Scope form — imperative capture when you need &mut between steps.
 let graph = CudaGraph::scope(&stream, |s| {
@@ -347,16 +347,16 @@ let _ = kernel((&mut z).partition([4, 4]), &x).sync_on(&stream)?;
 
 Borrowed inputs and borrowed partitions aren't `'static`, so `tokio::spawn` rejects them at compile time — use `Arc` and owned partitions for spawned tasks. See the [Host API: Ownership Model](../reference/host-api.md#ownership-model) for the full ownership model.
 
-Synchronize before reading results back to the host or before modifying data that's still being read. `to_host_vec` always needs a sync:
+Host readback is itself a `DeviceOp`. Constructing it is lazy; sync or await the readback op before using the host data:
 
 ```rust
-// Bad: No sync before reading
-let z = kernel(x, y).sync_on(&stream);
-let data = z.to_host_vec();  // ❌ May read incomplete data!
+// Bad: constructs a host copy operation, but never executes it.
+let z = kernel(x, y).first().sync_on(&stream)?;
+let data_op = z.to_host_vec();
 
-// Good: Sync before reading
-let z = kernel(x, y).sync_on(&stream);
-let data = z.to_host_vec().sync_on(&stream);  // ✅ Waits for completion
+// Good: execute the copy before reading the Vec.
+let z = kernel(x, y).first().sync_on(&stream)?;
+let data = z.to_host_vec().sync_on(&stream)?;
 ```
 
 Common pitfalls: syncing per operation in hot paths (build a graph and sync once instead); forgetting to compose for overlap (use `zip!` or `tokio::join!` for independent work); calling `.await` sequentially when operations are actually independent (this effectively serializes them across streams).
@@ -367,7 +367,7 @@ Common pitfalls: syncing per operation in hot paths (build a graph and sync once
 
 **Execution lock.** cuTile enforces "only one `DeviceOp` executes per thread at a time." Nesting `.sync_on(...)`, `.sync()`, or `.await` inside a `.then(...)` closure or a `CudaGraph::scope` body returns a `DeviceError`. The lock exists to prevent cross-stream data races: a nested `sync_on(&other_stream)` inside a `.then()` handler would submit work to a second stream without ordering it against the first. For the rare legitimate case, use `unsafe fn then_unchecked`.
 
-**Default device.** The device each `DeviceOp` lands on is thread-local. `set_default_device(id)` changes it for the current thread — the common pattern for one-thread-per-GPU worker pools. For per-op routing without touching the thread default, `with_device(id, |device| …)` runs a closure against a specific device's scheduling policy.
+**Default device.** The device each `DeviceOp` lands on is thread-local. `set_default_device(id)` changes it for the current thread — the common pattern for one-thread-per-GPU worker pools. For per-op routing without touching the thread default, get a policy with `global_policy(id)` or `with_device_policy(id, |policy| ...)` and call `op.schedule(&policy)?`.
 
 Handles from other frameworks (cudarc, Candle, hand-rolled FFI) can be wrapped into a cuTile `Device` or `Stream` without transferring ownership via `Device::borrow_raw` / `Stream::borrow_raw` — see [Interoperability](interoperability.md).
 

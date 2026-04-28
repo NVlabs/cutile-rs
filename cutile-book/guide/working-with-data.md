@@ -211,7 +211,7 @@ let generics = vec![
     "8".to_string(),    // BK
     "128".to_string(),  // K
 ];
-gemm(z, x, y).generics(generics).sync_on(&stream);
+gemm(z, x, y).generics(generics).sync_on(&stream)?;
 ```
 
 Custom element types implement the [`ElementType`](../reference/dsl-api.md#elementtype) trait. The built-in numeric types all implement it.

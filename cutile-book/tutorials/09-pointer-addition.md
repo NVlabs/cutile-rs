@@ -22,15 +22,15 @@ mod my_module {
         let shape: Shape<{ [-1] }> = Shape::<{ [-1] }> { dims: &[len] };
         let strides: Array<{ [-1] }> = Array::<{ [-1] }> { dims: &[1i32] };
         let ptr_tile: PointerTile<*mut T, { [] }> = pointer_to_tile(ptr);
-        let tensor = make_tensor_view(ptr_tile, shape, strides, new_token_unordered());
+        let tensor = unsafe { make_tensor_view(ptr_tile, shape, strides, new_token_unordered()) };
         tensor
     }
 
     #[cutile::entry()]
     unsafe fn add_ptr<T: ElementType>(z_ptr: *mut T, x_ptr: *mut T, y_ptr: *mut T, len: i32) {
-        let mut z_tensor: Tensor<T, { [-1] }> = get_tensor(z_ptr, len);
-        let x_tensor: Tensor<T, { [-1] }> = get_tensor(x_ptr, len);
-        let y_tensor: Tensor<T, { [-1] }> = get_tensor(y_ptr, len);
+        let mut z_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(z_ptr, len) };
+        let x_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(x_ptr, len) };
+        let y_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(y_ptr, len) };
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_shape = const_shape![4i32];
         let tile_x = x_tensor.partition(tile_shape).load([pid.0]);
@@ -101,7 +101,7 @@ The helper function `get_tensor` constructs a `Tensor` view from a raw device po
 
 Inside the kernel, the hand-built tensors are partitioned and loaded exactly like their safe counterparts. The only difference is how they were created.
 
-On the host side, `device_pointer()` extracts the raw `*mut T` from an existing tensor. After the kernel completes, the original tensors still own the underlying memory, so we can read back the results with `to_host_vec()`.
+On the host side, `device_pointer()` returns a typed `DevicePointer<T>` handle for an existing tensor. Kernel launchers convert that handle to the raw device pointer expected by the unsafe kernel. After the kernel completes, the original tensors still own the underlying memory, so we can read back the results with `to_host_vec()`.
 
 ---
 
@@ -115,7 +115,7 @@ Because `tokio::spawn` is non-blocking, the host code continues executing immedi
 
 | Concept | What It Means |
 |---------|---------------|
-| **`device_pointer()`** | Extracts a raw `*mut T` from a tensor. |
+| **`device_pointer()`** | Returns a typed device pointer handle for a tensor. |
 | **`make_tensor_view`** | Constructs a tensor from a pointer, shape, and strides inside a kernel. |
 | **`unsafe` kernels** | Required whenever raw pointers bypass the type system's guarantees. |
 | **Lifetime responsibility** | The programmer must ensure pointed-to memory outlives the kernel. |
@@ -140,4 +140,4 @@ Write a safe Rust wrapper function around the unsafe kernel that validates the p
 
 - [Interoperability](../guide/interoperability.md) — a structured approach to pre-compiled CUDA C++ kernels using `AsyncKernelLaunch` instead of raw pointers
 - [Working with Data](../guide/working-with-data.md) — `PointerTile` and the safety model for pointer-based kernels
-- [DSL API](../reference/dsl-api.md#memory-pointer-based) — `int_to_ptr`, `ptr_to_int`, `ptr_to_ptr`, and atomic operations
+- [DSL API](../reference/dsl-api.md#low-level-memory-ops) — pointer tiles, tensor views, pointer loads/stores, and atomic operations

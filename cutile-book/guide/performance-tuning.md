@@ -38,7 +38,7 @@ use cutile::tile_kernel::CompileOptions;
 let result = my_kernel(input)
     .compile_options(CompileOptions::default().occupancy(4).num_cta_in_cga(2))
     .grid(grid)
-    .await;
+    .await?;
 ```
 
 Per-op hints (`latency`, `disallow_tma`) apply to individual load/store operations:
@@ -186,19 +186,21 @@ For the full memory hierarchy model and arithmetic intensity analysis, see [Wher
 
 ## Compute Optimization
 
-**Tensor Cores** deliver massive throughput for matrix operations when shapes align. cuTile Rust automatically uses them when matrix dimensions are divisible by 16 (for `f16`/`bf16`) or 8 (for `tf32`), and element types are `f16`, `bf16`, or `tf32`:
+**Tensor Cores** deliver massive throughput for matrix operations when shapes align. Express matrix multiply through `mma` with compatible `[M, K]`, `[K, N]`, and `[M, N]` tile shapes; the compiler lowers supported dtype/shape combinations to Tensor Core instructions:
 
 ```rust
 #[cutile::entry()]
-fn tensor_core_matmul<const M: i32, const N: i32>(
-    c: &mut Tensor<f16, {[M, N]}>,  // f16 enables Tensor Cores
+fn tensor_core_matmul<const M: i32, const N: i32, const K: i32>(
+    c: &mut Tensor<f32, {[M, N]}>,  // f32 accumulator
     a: &Tensor<f16, {[-1, -1]}>,
     b: &Tensor<f16, {[-1, -1]}>
 ) {
-    let tile_a = load_tile_like(a, c);
-    let tile_b = load_tile_like(b, c);
+    let part_a = a.partition(const_shape![M, K]);
+    let part_b = b.partition(const_shape![K, N]);
+    let pid: (i32, i32, i32) = get_tile_block_id();
+    let tile_a = part_a.load([pid.0, 0i32]);
+    let tile_b = part_b.load([0i32, pid.1]);
 
-    // MMA automatically uses Tensor Cores
     let acc = constant(0.0f32, c.shape());
     let result = mma(tile_a, tile_b, acc);
     c.store(result);

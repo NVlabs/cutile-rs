@@ -140,10 +140,10 @@ mod fmha_module {
         const BN: i32,  // K,V tile size (how many K,V we process at once)
         const D: i32,   // Head dimension
     >(
+        out: &mut Tensor<f32, { [1, BM, D] }>,
         q: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, M, D)
         k: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, N, D)
         v: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, N, D)
-        out: &mut Tensor<f32, { [1, BM, D] }>,
         qk_scale: f32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
@@ -241,7 +241,7 @@ fn main() -> Result<(), Error> {
     let qk_scale = 1.0 / f32::sqrt(head_dim as f32);
     let generics = vec![bm.to_string(), bn.to_string(), head_dim.to_string()];
 
-    let (_, _, _, out, _) = fmha(q, k, v, out, qk_scale)
+    let (out, _, _, _, _) = fmha(out, q, k, v, qk_scale)
         .generics(generics)
         .sync_on(&stream)?;
 

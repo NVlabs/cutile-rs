@@ -45,7 +45,7 @@ Entry points have four rules:
 
 1. **Must be in a module** — Entry points must be inside a `#[cutile::module]` block.
 2. **Const generics for tile size** — An output tensor's shape must be static. It determines the output tensor's tile size.
-3. **Tensor parameters** — All data passes through `Tensor` references.
+3. **Kernel parameters** — Tensor references carry structured memory, while scalar and raw-pointer parameters are supported for values and unsafe interop paths.
 4. **No return values** — Results are written to output tensors.
 
 ---

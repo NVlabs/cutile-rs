@@ -48,7 +48,7 @@ use cuda_core::Device;
 use cutile;
 use cutile::api::arange;
 use cutile::error::Error;
-use cutile::tensor::{IntoPartition, Tensor, ToHostVec, Unpartition};
+use cutile::tensor::{IntoPartition, Reshape, Tensor, ToHostVec, Unpartition};
 use std::sync::Arc;
 
 #[cutile::module]
@@ -57,8 +57,8 @@ mod my_module {
 
     #[cutile::entry()]
     fn softmax<const BM: i32, const BN: i32>(
-        x: &Tensor<f32, { [-1, -1] }>,
         y: &mut Tensor<f32, { [BM, BN] }>,
+        x: &Tensor<f32, { [-1, -1] }>,
     ) {
         let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
 
@@ -89,10 +89,10 @@ fn main() -> Result<(), Error> {
     let (bm, bn) = (2i32, n as i32);
 
     let input: Arc<Tensor<f32>> = arange(m * n).sync_on(&stream)?.into();
-    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape([m, n]).into();
-    let y = input.dup().sync_on(&stream)?.reshape([m, n]).partition([bm, bn]);
+    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape(&[m, n])?.into();
+    let y = input.dup().sync_on(&stream)?.reshape(&[m, n])?.partition([bm, bn]);
 
-    let (_x, y) = softmax(x, y).sync_on(&stream)?;
+    let (y, _x) = softmax(y, x).sync_on(&stream)?;
     let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;
 
     // Each row should sum to 1.0
@@ -190,8 +190,8 @@ Add a temperature parameter for softer or sharper distributions:
 
 ```rust
 fn softmax_with_temp<const BM: i32, const BN: i32>(
-    x: &Tensor<f32, {[-1, -1]}>,
     y: &mut Tensor<f32, {[BM, BN]}>,
+    x: &Tensor<f32, {[-1, -1]}>,
     temperature: f32,  // Higher = more uniform, Lower = more peaked
 ) {
     let tile_x = load_tile_like(x, y);

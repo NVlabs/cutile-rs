@@ -15,10 +15,12 @@ All creation functions return a `DeviceOp` — allocation and initialization hap
 | `api::zeros::<T>(shape: &[usize])` | `DeviceOp<Output = Tensor<T>>` | All zeros |
 | `api::ones::<T>(shape: &[usize])` | `DeviceOp<Output = Tensor<T>>` | All ones |
 | `api::full::<T>(val, shape: &[usize])` | `DeviceOp<Output = Tensor<T>>` | Fill with scalar value |
+| `api::fill::<T>(tensor, val)` | `DeviceOp<Output = Tensor<T>>` | Fill an existing tensor and return it |
 | `api::arange::<T>(len: usize)` | `DeviceOp<Output = Tensor<T>>` | `[0, 1, 2, ..., len-1]` (1D) |
 | `api::linspace(start: f32, stop: f32, n: usize)` | `DeviceOp<Output = Tensor<f32>>` | `n` values evenly spaced from `start` to `stop` |
 | `api::eye(n: usize)` | `DeviceOp<Output = Tensor<f32>>` | `n × n` identity matrix |
 | `api::eye_rect(rows: usize, cols: usize)` | `DeviceOp<Output = Tensor<f32>>` | `rows × cols`, ones on main diagonal |
+| `api::convert::<From, To>(src: Arc<Tensor<From>>)` | `DeviceOp<Output = Tensor<To>>` | Convert tensor element type |
 | `api::rand::<T, RANK>(shape: [usize; RANK], seed: Option<u64>)` | `DeviceOp<Output = Tensor<T>>` | Uniform `[0, 1)` from cuRAND (`T: RandUniform`) |
 | `api::randn::<T, RANK>(mean: T, std: T, shape: [usize; RANK], seed: Option<u64>)` | `DeviceOp<Output = Tensor<T>>` | Normal `N(mean, std²)` from cuRAND (`T: RandNormal`) |
 | `api::randn_f16(mean: f16, std: f16, shape: [usize; RANK], seed: Option<u64>)` | `DeviceOp<Output = Tensor<f16>>` | Normal for `f16` (generates `f32` and converts; cuRAND has no native `f16`) |
@@ -34,6 +36,62 @@ let r = api::randn(0.0f32, 1.0, [32, 64, 128], None).sync_on(&stream)?;   // 3D 
 let u = api::rand::<f32, 1>([1024], Some(42)).sync_on(&stream)?;          // Uniform with fixed seed
 let idx = api::arange::<i32>(1024).sync_on(&stream)?;
 let I = api::eye(64).sync_on(&stream)?;
+```
+
+### Tensor and `DeviceOp` shape helpers
+
+Host-side reshapes are zero-copy metadata changes. They require the new shape
+to preserve the element count and, for borrowed views, to be contiguous.
+
+| API | Description |
+|---|---|
+| `tensor.reshape(&shape)` | Consume and return `Tensor<T>` with a new shape. |
+| `(&arc_tensor).reshape(&shape)` | Return a new `Arc<Tensor<T>>` sharing the same allocation with new shape metadata. |
+| `device_op.reshape(&shape)` | Reshape the `Tensor<T>` or `Arc<Tensor<T>>` produced by a `DeviceOp`. |
+| `tensor.partition(shape)` | Consume a tensor and create a mutable output partition for kernel launch. |
+| `arc_tensor.try_partition(shape)` | Consume an `Arc<Tensor<T>>` only if it has a single owner, then partition it. |
+| `partition.unpartition()` | Recover the owned tensor from a partition returned by a kernel. |
+
+```rust
+use cutile::api::{self, DeviceOpReshape};
+use cutile::tensor::{Reshape, Tensor, TryPartition};
+use cutile::tile_kernel::PartitionOp;
+use std::sync::Arc;
+
+let x = api::arange::<f32>(32).reshape(&[4, 8]).sync_on(&stream)?;
+let z = api::zeros::<f32>(&[32]).partition([4]);
+
+let weights: Arc<Tensor<f32>> = api::ones::<f32>(&[4, 8]).sync_on(&stream)?.into();
+let weights_2d = (&weights).reshape(&[8, 4])?;
+let partitioned = weights_2d.try_partition([2, 4])?;
+```
+
+### Tensor metadata and reinterpretation
+
+`Tensor<T>` stores shape and layout metadata alongside the device allocation.
+These accessors do not synchronize with the GPU:
+
+| API | Description |
+|---|---|
+| `tensor.shape()` | Runtime dimensions as `&[i32]` |
+| `tensor.strides()` | Runtime strides as `&[i32]` |
+| `tensor.size()` | Number of elements |
+| `tensor.num_bytes()` | Number of bytes in the tensor view |
+| `tensor.is_contiguous()` | Whether the view is contiguous |
+| `tensor.device_id()` | CUDA device ordinal for the allocation |
+| `tensor.device_pointer()` | Typed non-owning `DevicePointer<T>` for interop |
+| `arc_tensor.reinterpret::<U>(&shape)` | Zero-copy reinterpretation as `Arc<Tensor<U>>` |
+
+`reinterpret` requires an `Arc<Tensor<T>>`, contiguous storage, matching total
+byte size, and compatible pointer alignment:
+
+```rust
+use cutile::tensor::Tensor;
+use std::sync::Arc;
+
+let raw: Arc<Tensor<u32>> = api::arange::<u32>(4).sync_on(&stream)?.into();
+let floats: Arc<Tensor<f32>> = raw.reinterpret::<f32>(&[4])?;
+assert_eq!(floats.shape(), &[4]);
 ```
 
 ### `TensorView`: zero-copy views and slices
@@ -65,15 +123,19 @@ Views and slices are passed to kernels as `&Tensor` parameters. They're the righ
 
 ---
 
-## Host-Device Transfers
+## Host-Device and Device-Device Transfers
 
-Moving data between CPU and GPU uses three APIs, all of which return `DeviceOp`s — the copy is scheduled when the op runs, not constructed:
+Moving data between CPU and GPU, or between two device tensors, uses APIs that
+return `DeviceOp`s — the copy is scheduled when the op runs, not constructed:
 
 | API | Returns | Description |
 |---|---|---|
 | `api::copy_host_vec_to_device::<T>(vec: &Arc<Vec<T>>)` | `DeviceOp<Output = Tensor<T>>` | Copy host `Vec<T>` to a new device `Tensor<T>` |
-| `api::copy_device_to_host_vec::<T>(tensor: &Tensor<T>)` | `DeviceOp<Output = Vec<T>>` | Copy a device `Tensor<T>` to a host `Vec<T>` |
+| `api::copy_device_to_host_vec::<T>(tensor: &Arc<Tensor<T>>)` | `DeviceOp<Output = Vec<T>>` | Copy a device `Tensor<T>` to a host `Vec<T>` |
 | `tensor.to_host_vec()` | `DeviceOp<Output = Vec<T>>` | Method form of `copy_device_to_host_vec` (preferred) |
+| `device_op.to_host_vec()` | `DeviceOp<Output = Vec<T>>` | Copy the `Tensor<T>` produced by a `DeviceOp` to host |
+| `api::dup(&tensor)` / `tensor.dup()` | `DeviceOp<Output = Tensor<T>>` | Allocate a new tensor and copy device-to-device |
+| `api::memcpy(&mut dst, &src)` | `DeviceOp<Output = ()>` | Copy device-to-device into an existing tensor, used especially for CUDA graph updates |
 
 ```rust
 // Host -> device
@@ -82,9 +144,34 @@ let tensor: Tensor<f32> = api::copy_host_vec_to_device(&data).sync_on(&stream)?;
 
 // Device -> host
 let result: Vec<f32> = tensor.to_host_vec().sync_on(&stream)?;
+
+// Device -> device
+let copy = tensor.dup().sync_on(&stream)?;
 ```
 
-The host-side `Vec` must remain alive until the op completes — the async copy reads from it until the stream synchronizes. `Arc<Vec<T>>` makes this straightforward for shared access. `to_host_vec` is available on `Tensor<T>`, `Arc<Tensor<T>>`, and `&Tensor<T>`; each returns the same `DeviceOp<Output = Vec<T>>`.
+The host-side `Vec` must remain alive until the op completes — the async copy
+reads from it until the stream synchronizes. `Arc<Vec<T>>` makes this
+straightforward for shared access. `to_host_vec` is available on `Tensor<T>`,
+`Arc<Tensor<T>>`, and `&Arc<Tensor<T>>`; each returns the same
+`DeviceOp<Output = Vec<T>>`. It is also available on a
+`DeviceOp<Output = Tensor<T>>`, which is the common form after a kernel chain:
+
+```rust
+let host: Vec<f32> = kernel(out.partition([128]), &input)
+    .first()
+    .unpartition()
+    .to_host_vec()
+    .sync_on(&stream)?;
+```
+
+`api::memcpy` copies between already allocated tensors and requires source and
+destination to have the same element count. It is the usual way to update graph
+input buffers before replay:
+
+```rust
+graph.update(api::memcpy(&mut input_buffer, &new_input))?;
+graph.launch().sync_on(&stream)?;
+```
 
 ---
 
@@ -104,11 +191,19 @@ let stream = device.new_stream()?;         // A new stream owned by this device
 | `Device::new(ordinal: usize)` | `Result<Arc<Device>, DriverError>` | Create a device handle bound to a GPU ordinal |
 | `Device::device_count()` | `Result<i32, DriverError>` | Number of CUDA-capable devices |
 | `device.ordinal()` | `usize` | GPU ordinal this handle represents |
+| `device.name()` | `Result<String, DriverError>` | Device name |
 | `device.new_stream()` | `Result<Arc<Stream>, DriverError>` | Create a new stream on this device |
+| `Device::borrow_raw(...)` | `Arc<Device>` | Borrow an externally owned CUDA context/device for interop |
+| `Stream::borrow_raw(...)` | `Arc<Stream>` | Borrow an externally owned CUDA stream for interop |
+| `Module::borrow_raw(...)` / `Function::borrow_raw(...)` | CUDA module/function wrappers | Borrow externally owned CUDA handles |
 
 Devices are `Arc`-wrapped for sharing across threads; streams are also `Arc`-wrapped and can be passed to `.sync_on(&stream)` for explicit stream scheduling.
 
 The default round-robin scheduling policy handles stream assignment automatically for most workloads — these APIs are for when you need explicit stream control (debugging, deterministic ordering, paired with `AsyncKernelLaunch`, or overlapping compute with transfers on dedicated streams).
+
+The `borrow_raw` constructors do not take ownership of the underlying CUDA
+handles and therefore do not destroy them on drop. Use them when integrating
+with another runtime that owns the context, stream, module, or function.
 
 ---
 
@@ -131,6 +226,23 @@ let result = my_kernel(args).compile_options(opts).grid(grid).await?;
 
 Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
 
+Generated `#[cutile::entry]` launchers also expose launch-time configuration
+methods:
+
+| Method | Description |
+|---|---|
+| `.grid((x, y, z))` | Set an explicit runtime launch grid instead of inferring it from partitioned tensor inputs. |
+| `.const_grid((x, y, z))` | Set a compile-time constant grid, enabling grid-dependent optimizations. |
+| `.compile_options(opts)` | Override occupancy, cluster/CTA, and divisibility hints for this compilation. |
+| `.generics(values)` | Bind type and const generic arguments manually when they cannot be inferred. |
+
+The JIT compiler invokes `tileiras` through normal `PATH` lookup by default.
+Set `CUTILE_TILEIRAS_PATH` to use a specific binary:
+
+```bash
+CUTILE_TILEIRAS_PATH=/opt/cuda-tile/bin/tileiras cargo test -p cutile
+```
+
 **`LaunchConfig`** — grid/block/shared-memory specification for `AsyncKernelLaunch` (raw CUDA kernels launched outside the `#[cutile::entry]` path):
 
 ```rust
@@ -151,10 +263,12 @@ use cuda_async::launch::AsyncKernelLaunch;
 let mut launcher = AsyncKernelLaunch::new(function.clone());
 launcher.push_arg(num_elements as u32);
 launcher.push_arg(scale);
+let input_ptr = input.device_pointer();
+let output_ptr = output.device_pointer();
 unsafe {
     launcher
-        .push_device_ptr(input.cu_deviceptr())
-        .push_device_ptr(output.cu_deviceptr());
+        .push_device_ptr(input_ptr.cu_deviceptr())
+        .push_device_ptr(output_ptr.cu_deviceptr());
 }
 launcher.set_launch_config(LaunchConfig {
     grid_dim: ((num_elements as u32 + 255) / 256, 1, 1),
@@ -269,6 +383,16 @@ If any kernel input is `&Tensor<T>` (borrowed), the operation is not
 The borrowed partition form (`Partition<&mut Tensor<T>>`) writes in place — no
 `unpartition()` needed. Create it with `(&mut tensor).partition(shape)`.
 
+Raw pointer entry points are `unsafe fn`s. Obtain a typed device pointer from a
+tensor with `tensor.device_pointer()`, and make sure the pointer remains valid
+for the duration of the kernel launch:
+
+```rust
+let backing = api::zeros::<f32>(&[1024]).sync_on(&stream)?;
+let ptr = backing.device_pointer();
+unsafe { raw_ptr_kernel(ptr, 1024) }.sync_on(&stream)?;
+```
+
 ---
 
 ## Ownership Model
@@ -341,7 +465,7 @@ let result = my_kernel(out_partition, &weights).sync_on(&stream)?;
 
 ```rust
 let op = my_kernel(out, &weights);  // borrows weights
-tokio::spawn(op);                    // ← compile error: not 'static
+tokio::spawn(op.into_future());      // ← compile error: not 'static
 ```
 
 This is enforced at compile time by Rust's lifetime system — no runtime

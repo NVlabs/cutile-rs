@@ -201,9 +201,9 @@ Consider SAXPY's kernel signature:
 
 ```rust
 fn saxpy<const S: [i32; 2]>(
+    y: &mut Tensor<f32, S>,
     a: f32,
-    x: &Tensor<f32, { [-1, -1] }>,
-    y: &mut Tensor<f32, S>
+    x: &Tensor<f32, { [-1, -1] }>
 )
 ```
 
