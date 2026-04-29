@@ -53,8 +53,8 @@ launcher.push_arg(scale);
 // read-only. Both remain allocated until this operation completes.
 unsafe {
     launcher
-        .push_device_ptr(input.cu_deviceptr())
-        .push_device_ptr(output.cu_deviceptr());
+        .push_device_ptr(input.device_pointer().cu_deviceptr())
+        .push_device_ptr(output.device_pointer().cu_deviceptr());
 }
 launcher.set_launch_config(LaunchConfig {
     grid_dim: ((num_elements as u32 + 255) / 256, 1, 1),
@@ -112,8 +112,8 @@ impl DeviceOp for ScaleKernel {
         // input is shared (Arc, read-only); output is exclusively written.
         unsafe {
             launcher
-                .push_device_ptr(self.input.cu_deviceptr())
-                .push_device_ptr(self.output.cu_deviceptr());
+                .push_device_ptr(self.input.device_pointer().cu_deviceptr())
+                .push_device_ptr(self.output.device_pointer().cu_deviceptr());
         }
         launcher.set_launch_config(LaunchConfig {
             grid_dim: ((self.n + 255) / 256, 1, 1),
@@ -131,7 +131,10 @@ impl IntoFuture for ScaleKernel {
     type Output = Result<(Arc<Tensor<f32>>, Tensor<f32>), DeviceError>;
     type IntoFuture = DeviceFuture<(Arc<Tensor<f32>>, Tensor<f32>), ScaleKernel>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| policy.schedule(self)) {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
             Ok(Ok(future)) => future,
             Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
         }
@@ -261,7 +264,7 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 | cuTile Python | cuTile Rust |
 |---------------|-------------|
 | `@ct.kernel` | `#[cutile::entry()]` |
-| `ct.load()` | `load_tile_like_2d()` |
+| `ct.load()` | `load_tile_like()` |
 | `ct.store()` | `tensor.store()` |
 | `ct.bid(0)` | Implicit via partition |
 | `ct.launch()` | Async operation + `.await` |

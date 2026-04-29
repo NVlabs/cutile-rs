@@ -169,16 +169,36 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .expect("Failed to compile CGA as var.");
                 call_variables.vars.insert(key.clone(), tr_val);
             }
+            let initial_types = call_variables
+                .vars
+                .iter()
+                .map(|(name, value)| (name.clone(), value.ty.clone()))
+                .collect::<HashMap<_, _>>();
+            let mut typed_fn_item = fn_item.clone();
+            crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);
+            let typeck_results = crate::passes::type_inference::infer_function(
+                self,
+                &typed_fn_item,
+                &call_generic_vars,
+                initial_types,
+            )?;
+            let lowered_fn_item = crate::passes::typed_dispatch_lowering::lower_function(
+                &typed_fn_item,
+                &typeck_results,
+            );
             // println!("inline_function_call {:#?}: generic_args={generic_args:#?} \nexpr_generic_args={expr_generic_args:#?} \ncall_generic_args={call_generic_args:#?}", fn_item.sig.ident.to_string());
             // println!("inline_function_call {:#?}: \n variables={call_variables:#?}", fn_item.sig.ident.to_string());
+            let previous_typeck_results = self.typeck_results.replace(Some(typeck_results));
             let result = self.compile_block(
                 module,
                 block_id,
-                &fn_item.block,
+                &lowered_fn_item.block,
                 &call_generic_vars,
                 &mut call_variables,
                 return_type.clone(),
-            )?;
+            );
+            self.typeck_results.replace(previous_typeck_results);
+            let result = result?;
             update_type_meta(
                 &mut call_variables,
                 ctx,
@@ -234,13 +254,43 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let call_arg_values =
                 self.compile_call_args(module, block_id, &args, generic_vars, ctx)?;
             let receiver_rust_ty = &call_arg_values[0].ty.rust_ty;
-            let impl_item_fn =
-                self.modules
-                    .get_impl_item_fn(receiver_rust_ty, method_call_expr, generic_vars)?;
-            if impl_item_fn.is_none() {
-                return self.jit_error_result(&method_call_expr.method.span(), "method not found");
-            }
-            let (module_name, impl_item, impl_method) = impl_item_fn.unwrap();
+            let call_arg_rust_tys = call_arg_values
+                .iter()
+                .map(|arg| arg.ty.rust_ty.clone())
+                .collect::<Vec<_>>();
+            let selected_method = self
+                .typeck_results
+                .borrow()
+                .as_ref()
+                .and_then(|results| results.method_selection(method_call_expr).cloned());
+            let (module_name, impl_item, impl_method, selected_generic_vars) =
+                if let Some(selection) = selected_method {
+                    (
+                        selection.module_name,
+                        selection.impl_item,
+                        selection.impl_method,
+                        None,
+                    )
+                } else {
+                    let impl_item_fn = self.modules.get_impl_item_fn(
+                        receiver_rust_ty,
+                        method_call_expr,
+                        generic_vars,
+                        &call_arg_rust_tys,
+                    )?;
+                    if impl_item_fn.is_none() {
+                        return self.jit_error_result(
+                            &method_call_expr.method.span(),
+                            &format!(
+                                "method `{}` not found for receiver type `{}`",
+                                method_call_expr.method,
+                                receiver_rust_ty.to_token_stream()
+                            ),
+                        );
+                    }
+                    let (module_name, impl_item, impl_method) = impl_item_fn.unwrap();
+                    (module_name, impl_item, impl_method, None)
+                };
             // println!("Expr::MethodCall: {:#?}, generic_vars: {generic_vars:#?}", impl_item_fn.to_token_stream().to_string());
 
             // Remap function parameters.
@@ -278,34 +328,24 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // Remap generic parameters.
             // This is different from a function call, because passing generics to a method
             // does not capture all generics available within the method.
-            let generic_arg_inference = GenericArgInference::new_method(&impl_item, &impl_method);
-            let call_generic_vars = if generic_arg_inference.param2arg.is_empty() {
-                // There are no generics in this method.
-                GenericVars::empty(&impl_method.sig.generics)?
+            let call_generic_vars = if let Some(selected_generic_vars) = selected_generic_vars {
+                selected_generic_vars
             } else {
-                // Infer generics from call arguments, including self.
-                let method_call_turbofish = &method_call_expr.turbofish;
-                // println!("infer generics for {}, \nturbofish={method_call_turbofish:#?}, \ngeneric_arg_inference: {generic_arg_inference:#?}", impl_method.sig.to_token_stream().to_string());
-                let mut generic_arg_inference =
+                let generic_arg_inference =
                     GenericArgInference::new_method(&impl_item, &impl_method);
-                let call_arg_rust_tys = call_arg_values
-                    .iter()
-                    .map(|arg| arg.ty.rust_ty.clone())
-                    .collect::<Vec<_>>();
-                generic_arg_inference.map_args_to_params(&call_arg_rust_tys, Some(self_ty));
-                // println!("sig={} \nargs={} \narg_map={:#?}", impl_method.sig.to_token_stream().to_string(), args.to_token_stream().to_string(), generic_arg_inference.param2arg);
-                let inferred_generics = generic_arg_inference
-                    .get_generic_vars_instance(&generic_vars, &self.modules.primitives());
-
-                // If there are generics passed as part of the method call, capture them.
-                if method_call_turbofish.is_some() {
-                    let passed_generics = generic_vars.from_expr_generic_args(
-                        &impl_method.sig.generics,
-                        &method_call_turbofish,
-                    )?;
-                    inferred_generics.merge(passed_generics)?
+                if generic_arg_inference.param2arg.is_empty() {
+                    // There are no generics in this method.
+                    GenericVars::empty(&impl_method.sig.generics)?
                 } else {
-                    inferred_generics
+                    crate::passes::type_inference::infer_method_generics(
+                        &impl_item,
+                        &impl_method,
+                        method_call_expr,
+                        &call_arg_rust_tys,
+                        self_ty,
+                        generic_vars,
+                        self.modules.primitives(),
+                    )?
                 }
             };
 
@@ -341,6 +381,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 target_span: method_call_expr.span(),
             };
             setter.visit_block_mut(&mut compile_block);
+            let previous_typeck_results = self.typeck_results.replace(None);
             let result = self.compile_block(
                 module,
                 block_id,
@@ -348,7 +389,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &call_generic_vars,
                 &mut call_variables,
                 return_type.clone(),
-            )?;
+            );
+            self.typeck_results.replace(previous_typeck_results);
+            let result = result?;
             update_type_meta(
                 &mut call_variables,
                 ctx,

@@ -15,7 +15,7 @@ fn debug_kernel<const S: [i32; 2]>(
     input: &Tensor<f32, {[-1, -1]}>
 ) {
     let pid: (i32, i32, i32) = get_tile_block_id();
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     cuda_tile_print!("Block ({}, {}): loaded tile\n", pid.0, pid.1);
 
@@ -28,7 +28,7 @@ GPU printing is slow and serializes tile block execution — use it only for sma
 **`cuda_tile_assert!`** asserts conditions inside a kernel:
 
 ```rust
-let tile = load_tile_like_2d(input, output);
+let tile = load_tile_like(input, output);
 cuda_tile_assert!(tile[0] > 0.0, "Value must be positive");
 ```
 
@@ -116,12 +116,12 @@ gdb --args ./target/debug/my_program
 
 Common causes:
 
-- **CUDA toolkit mismatch.** The JIT pipeline calls into CUDA libraries via FFI. An incompatible toolkit/driver pair, or a broken `CUDA_HOME`, can segfault in those FFI calls. Verify with `nvidia-smi`, `nvcc --version`, and `echo $CUDA_HOME`.
-- **Use-after-free with raw pointers.** If you extract a raw device pointer via `device_pointer()` and drop the owning tensor before the kernel completes, the kernel operates on freed memory. Ensure all tensors outlive any kernel that uses their pointers.
+- **CUDA toolkit mismatch.** The JIT pipeline calls into CUDA libraries via FFI. An incompatible toolkit/driver pair, or a broken `CUDA_TOOLKIT_PATH`, can segfault in those FFI calls. Verify with `nvidia-smi`, `nvcc --version`, and `echo $CUDA_TOOLKIT_PATH`.
+- **Use-after-free with raw pointers.** If you pass a `DevicePointer<T>` from `device_pointer()` into an unsafe raw-pointer kernel and drop the owning tensor before the kernel completes, the kernel operates on freed memory. Ensure all tensors outlive any kernel that uses their pointers.
 - **Async lifetime issues.** With `tokio::spawn`, the kernel runs concurrently; if tensors are dropped before the spawned task completes, the kernel accesses freed memory. Await the spawn handle before tensors go out of scope.
 - **OOM during JIT compilation.** The MLIR compiler allocates host memory during compilation. On RAM-constrained systems this can fail as a segfault rather than a clean error. Monitor host memory during the first kernel launch.
 
-Diagnostic checklist for segfaults: Is `nvidia-smi` reporting a healthy driver? Does `CUDA_HOME` point to a valid toolkit? Are all tensors alive for the duration of any kernel that uses their pointers? If using `tokio::spawn`, are all handles awaited before tensors are dropped? Does the backtrace point into CUDA/MLIR libraries (toolkit issue) or your own code (lifetime issue)?
+Diagnostic checklist for segfaults: Is `nvidia-smi` reporting a healthy driver? Does `CUDA_TOOLKIT_PATH` point to a valid toolkit? Are all tensors alive for the duration of any kernel that uses their pointers? If using `tokio::spawn`, are all handles awaited before tensors are dropped? Does the backtrace point into CUDA/MLIR libraries (toolkit issue) or your own code (lifetime issue)?
 
 ---
 
@@ -193,9 +193,11 @@ A few environment variables help during debugging:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CUTILE_DEBUG` | Enable debug output | `0` |
+| `CUTILE_DUMP` | Dump compiler stages (`ast`, `resolved`, `typed`, `instantiated`, `ir`, `bytecode`, or `all`) | unset |
+| `CUTILE_DUMP_FILTER` | Restrict dumps to matching function names or `module::function` paths | unset |
 | `CUDA_VISIBLE_DEVICES` | Select GPU device | All GPUs |
-| `CUDA_HOME` | Path to CUDA toolkit | `/usr/local/cuda` |
+| `CUDA_TOOLKIT_PATH` | Path to CUDA toolkit | Required by CUDA binding crates |
+| `CUTILE_TILEIRAS_PATH` | Override the `tileiras` binary used by the JIT | `tileiras` from `PATH` |
 
 The JIT kernel cache is in-memory per process — restart the process to force recompilation.
 

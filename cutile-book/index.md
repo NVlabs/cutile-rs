@@ -26,8 +26,8 @@ mod my_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x = load_tile_like_2d(x, z);
-        let tile_y = load_tile_like_2d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }

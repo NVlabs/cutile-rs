@@ -20,7 +20,6 @@
 //! - [`zeros`] - Create tensor filled with zeros
 //! - [`ones`] - Create tensor filled with ones
 //! - [`full`] - Create tensor filled with a specific value
-//! - [`empty`] - Create uninitialized tensor (unsafe, but fast)
 //!
 //! ### Sequential Data
 //!
@@ -32,7 +31,7 @@
 //!
 //! ### Memory Operations
 //!
-//! - [`copy`] - Copy a tensor to new GPU memory
+//! - [`dup`] - Copy a tensor to new GPU memory
 //! - [`copy_device_to_host_vec`] - Copy GPU tensor to CPU Vec
 //!
 //! ## Examples
@@ -128,7 +127,7 @@
 //!
 //! ## See Also
 //!
-//! - [`tile_async`](crate::tile_async) - Lower-level async execution primitives
+//! - [`tile_kernel`](crate::tile_kernel) - Lower-level async execution primitives
 //! - [`tensor`](crate::tensor) - Tensor type and partitioning
 //! - [`kernels`](crate::kernels) - Pre-built GPU kernels
 
@@ -241,7 +240,7 @@ pub fn dup<T: DType>(tensor: &Tensor<T>) -> impl DeviceOp<Output = Tensor<T>> {
 /// - The copy completes (via stream ordering or synchronization) before
 ///   `dst` is read.
 ///
-/// This is safe when used with [`CudaGraph::update`] (stream ordering
+/// This is safe when used with [`CudaGraph::update`](cuda_async::cuda_graph::CudaGraph::update) (stream ordering
 /// ensures the copy completes before graph launch) and inside
 /// [`CudaGraph::scope`](cuda_async::cuda_graph::CudaGraph::scope)
 /// (capture mode records the copy as a graph node).

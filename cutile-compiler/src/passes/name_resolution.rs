@@ -96,7 +96,7 @@ pub struct ModuleItems {
     pub functions: HashMap<String, ItemFn>,
     pub structs: HashMap<String, ItemStruct>,
     pub struct_impls: HashMap<String, Vec<ItemImpl>>,
-    pub trait_impls: HashMap<(String, String), ItemImpl>,
+    pub trait_impls: HashMap<(String, String), Vec<ItemImpl>>,
     pub primitives: HashMap<(String, String), ItemImpl>,
 }
 
@@ -140,11 +140,123 @@ pub struct NameResolver {
     cached_structs: HashMap<String, ItemStruct>,
     /// All struct impls across all modules: struct_name → [(module_name, ItemImpl)].
     cached_struct_impls: HashMap<String, Vec<(String, ItemImpl)>>,
-    /// All trait impls across all modules: (trait, self_ty) → (module_name, ItemImpl).
-    cached_trait_impls: HashMap<(String, String), (String, ItemImpl)>,
+    /// All trait impls across all modules: (trait, self_ty) → [(module_name, ItemImpl)].
+    cached_trait_impls: HashMap<(String, String), Vec<(String, ItemImpl)>>,
 }
 
 impl NameResolver {
+    fn collect_use_imports(
+        items_block: &[Item],
+        items: &HashMap<String, ModuleItems>,
+        module_imports: &mut HashMap<String, String>,
+    ) {
+        for item in items_block {
+            match item {
+                Item::Use(use_item) => {
+                    Self::process_use_tree(&use_item.tree, &[], items, module_imports);
+                }
+                Item::Mod(submod) => {
+                    if let Some((_, sub_items)) = &submod.content {
+                        Self::collect_use_imports(sub_items, items, module_imports);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn index_items(
+        items_block: &[Item],
+        module_name: &str,
+        mi: &mut ModuleItems,
+        has_cuda_tile_ty: &mut bool,
+        cached_functions: &mut HashMap<String, (String, ItemFn)>,
+        cached_structs: &mut HashMap<String, ItemStruct>,
+        cached_struct_impls: &mut HashMap<String, Vec<(String, ItemImpl)>>,
+        cached_trait_impls: &mut HashMap<(String, String), Vec<(String, ItemImpl)>>,
+        cached_primitives: &mut HashMap<(String, String), ItemImpl>,
+    ) -> Result<(), JITError> {
+        for item in items_block {
+            match item {
+                Item::Fn(f) => {
+                    let name = f.sig.ident.to_string();
+                    mi.functions.insert(name.clone(), f.clone());
+                    // Flat cache: duplicate check matches old behavior.
+                    if cached_functions
+                        .insert(name.clone(), (module_name.to_string(), f.clone()))
+                        .is_some()
+                    {
+                        return Err(JITError::generic_err(
+                            &format!("duplicate functions are not supported; try renaming your function: {name}"),
+                        ));
+                    }
+                }
+                Item::Struct(s) => {
+                    let name = s.ident.to_string();
+                    mi.structs.insert(name.clone(), s.clone());
+                    cached_structs.insert(name, s.clone());
+                }
+                Item::Impl(impl_item) => {
+                    let self_ident = get_type_str(&impl_item.self_ty);
+                    let trait_ident = impl_item
+                        .trait_
+                        .as_ref()
+                        .map(|(_, path, _)| path.segments.last().unwrap().ident.to_string());
+
+                    match (&self_ident, &trait_ident) {
+                        (Some(self_name), Some(trait_name)) => {
+                            if get_meta_list("cuda_tile :: ty", &impl_item.attrs).is_some() {
+                                *has_cuda_tile_ty = true;
+                                let key = (trait_name.clone(), self_name.clone());
+                                mi.primitives.insert(key.clone(), impl_item.clone());
+                                cached_primitives.insert(key, impl_item.clone());
+                            } else {
+                                let key = (trait_name.clone(), self_name.clone());
+                                mi.trait_impls
+                                    .entry(key.clone())
+                                    .or_default()
+                                    .push(impl_item.clone());
+                                cached_trait_impls
+                                    .entry(key)
+                                    .or_default()
+                                    .push((module_name.to_string(), impl_item.clone()));
+                            }
+                        }
+                        (Some(self_name), None) => {
+                            mi.struct_impls
+                                .entry(self_name.clone())
+                                .or_default()
+                                .push(impl_item.clone());
+                            cached_struct_impls
+                                .entry(self_name.clone())
+                                .or_default()
+                                .push((module_name.to_string(), impl_item.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                Item::Mod(submod) => {
+                    if let Some((_, sub_items)) = &submod.content {
+                        Self::index_items(
+                            sub_items,
+                            module_name,
+                            mi,
+                            has_cuda_tile_ty,
+                            cached_functions,
+                            cached_structs,
+                            cached_struct_impls,
+                            cached_trait_impls,
+                            cached_primitives,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Build the resolver from parsed module ASTs. This is Pass 1.
     pub fn build(module_asts: &[(String, ItemMod)]) -> Result<Self, JITError> {
         let mut items: HashMap<String, ModuleItems> = HashMap::new();
@@ -156,9 +268,15 @@ impl NameResolver {
         let mut cached_functions: HashMap<String, (String, ItemFn)> = HashMap::new();
         let mut cached_structs: HashMap<String, ItemStruct> = HashMap::new();
         let mut cached_struct_impls: HashMap<String, Vec<(String, ItemImpl)>> = HashMap::new();
-        let mut cached_trait_impls: HashMap<(String, String), (String, ItemImpl)> = HashMap::new();
+        let mut cached_trait_impls: HashMap<(String, String), Vec<(String, ItemImpl)>> =
+            HashMap::new();
 
-        // Phase 1: Index all items per module.
+        // Phase 1: Index all items per module. Submodules nested inside a
+        // `#[cutile::module]` (added once `cutile-macro` learned to recurse
+        // into `Item::Mod`) are flattened into the parent module's namespace
+        // for resolution purposes — they exist for human organization
+        // (and rustc namespacing), but the JIT treats the whole module as
+        // one flat scope.
         for (module_name, module_ast) in module_asts {
             modules.insert(module_name.clone(), module_ast.clone());
             let mut mi = ModuleItems::new();
@@ -168,84 +286,31 @@ impl NameResolver {
             };
 
             let mut has_cuda_tile_ty = false;
-            for item in &content.1 {
-                match item {
-                    Item::Fn(f) => {
-                        let name = f.sig.ident.to_string();
-                        mi.functions.insert(name.clone(), f.clone());
-                        // Flat cache: duplicate check matches old behavior.
-                        if cached_functions
-                            .insert(name.clone(), (module_name.clone(), f.clone()))
-                            .is_some()
-                        {
-                            return Err(JITError::generic_err(
-                                &format!("duplicate functions are not supported; try renaming your function: {name}"),
-                            ));
-                        }
-                    }
-                    Item::Struct(s) => {
-                        let name = s.ident.to_string();
-                        mi.structs.insert(name.clone(), s.clone());
-                        cached_structs.insert(name, s.clone());
-                    }
-                    Item::Impl(impl_item) => {
-                        let self_ident = get_type_str(&impl_item.self_ty);
-                        let trait_ident = impl_item
-                            .trait_
-                            .as_ref()
-                            .map(|(_, path, _)| path.segments.last().unwrap().ident.to_string());
-
-                        match (&self_ident, &trait_ident) {
-                            (Some(self_name), Some(trait_name)) => {
-                                if get_meta_list("cuda_tile :: ty", &impl_item.attrs).is_some() {
-                                    has_cuda_tile_ty = true;
-                                    let key = (trait_name.clone(), self_name.clone());
-                                    mi.primitives.insert(key.clone(), impl_item.clone());
-                                    cached_primitives.insert(key, impl_item.clone());
-                                } else if get_meta_list(
-                                    "cuda_tile :: variadic_trait_impl",
-                                    &impl_item.attrs,
-                                )
-                                .is_some()
-                                {
-                                    let key = (trait_name.clone(), self_name.clone());
-                                    mi.trait_impls.insert(key.clone(), impl_item.clone());
-                                    cached_trait_impls
-                                        .insert(key, (module_name.clone(), impl_item.clone()));
-                                }
-                            }
-                            (Some(self_name), None) => {
-                                mi.struct_impls
-                                    .entry(self_name.clone())
-                                    .or_default()
-                                    .push(impl_item.clone());
-                                cached_struct_impls
-                                    .entry(self_name.clone())
-                                    .or_default()
-                                    .push((module_name.clone(), impl_item.clone()));
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            Self::index_items(
+                &content.1,
+                module_name,
+                &mut mi,
+                &mut has_cuda_tile_ty,
+                &mut cached_functions,
+                &mut cached_structs,
+                &mut cached_struct_impls,
+                &mut cached_trait_impls,
+                &mut cached_primitives,
+            )?;
             if has_cuda_tile_ty {
                 core_module = Some(module_name.clone());
             }
             items.insert(module_name.clone(), mi);
         }
 
-        // Phase 2: Process `use` statements to build import maps.
+        // Phase 2: Process `use` statements to build import maps. Walks
+        // nested submodules too so their `use` statements feed the same
+        // flat import map as the parent (consistent with Phase 1).
         let mut imports: HashMap<String, HashMap<String, String>> = HashMap::new();
         for (module_name, module_ast) in module_asts {
             let mut module_imports: HashMap<String, String> = HashMap::new();
             if let Some(content) = &module_ast.content {
-                for item in &content.1 {
-                    if let Item::Use(use_item) = item {
-                        Self::process_use_tree(&use_item.tree, &[], &items, &mut module_imports);
-                    }
-                }
+                Self::collect_use_imports(&content.1, &items, &mut module_imports);
             }
             imports.insert(module_name.clone(), module_imports);
         }
@@ -445,7 +510,10 @@ impl NameResolver {
     pub fn get_trait_impl(&self, trait_name: &str, self_type: &str) -> Option<(&str, &ItemImpl)> {
         let key = (trait_name.to_string(), self_type.to_string());
         for (module_name, mi) in &self.items {
-            if let Some(impl_item) = mi.trait_impls.get(&key) {
+            if let Some(impls) = mi.trait_impls.get(&key) {
+                let Some(impl_item) = impls.first() else {
+                    continue;
+                };
                 return Some((module_name.as_str(), impl_item));
             }
         }
@@ -529,8 +597,8 @@ impl NameResolver {
         &self.cached_struct_impls
     }
 
-    /// Flat map of all trait impls: (trait, self_ty) → (module, ItemImpl).
-    pub fn trait_impls(&self) -> &HashMap<(String, String), (String, ItemImpl)> {
+    /// Flat map of all trait impls: (trait, self_ty) → [(module, ItemImpl)].
+    pub fn trait_impls(&self) -> &HashMap<(String, String), Vec<(String, ItemImpl)>> {
         &self.cached_trait_impls
     }
 

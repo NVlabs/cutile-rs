@@ -140,7 +140,7 @@ Each tile runs the same code but with different coordinates. This is how tiles d
 Modify the grid to `(3, 3, 1)`. How many messages do you see?
 
 ```rust
-launcher.grid((3, 3, 1)).sync_on(&stream);
+launcher.grid((3, 3, 1)).sync_on(&stream)?;
 ```
 
 :::{dropdown} Answer

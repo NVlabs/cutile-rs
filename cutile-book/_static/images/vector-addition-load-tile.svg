@@ -58,7 +58,7 @@
   <rect width="950" height="520" fill="url(#grid)" opacity="0.5"/>
   
   <!-- Main Title -->
-  <text x="475" y="35" text-anchor="middle" font-size="24" font-weight="500" fill="#ffffff" letter-spacing="-0.5">How load_tile_like_2d Works</text>
+  <text x="475" y="35" text-anchor="middle" font-size="24" font-weight="500" fill="#ffffff" letter-spacing="-0.5">How load_tile_like Works</text>
   <line x1="300" y1="47" x2="650" y2="47" stroke="#76B900" stroke-width="2" opacity="0.6"/>
   
   <!-- Subtitle -->
@@ -133,7 +133,7 @@
   <!-- Arrow - BETTER POSITIONED -->
   <g transform="translate(345, 235)">
     <text x="70" y="-20" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">
-      <tspan>load_tile_like_2d(</tspan><tspan fill="#79c0ff" font-weight="700">x</tspan><tspan>, </tspan><tspan fill="#ffa657" font-weight="700">z</tspan><tspan>)</tspan>
+      <tspan>load_tile_like(</tspan><tspan fill="#79c0ff" font-weight="700">x</tspan><tspan>, </tspan><tspan fill="#ffa657" font-weight="700">z</tspan><tspan>)</tspan>
     </text>
     <path d="M 0 0 L 130 0" stroke="#ffffff" stroke-width="1.5" marker-end="url(#arrow-white)"/>
   </g>
@@ -201,7 +201,7 @@
   <g transform="translate(50, 470)">
     <rect x="0" y="0" width="850" height="42" rx="8" fill="#21262d"/>
     <text x="425" y="28" text-anchor="middle" font-size="17" fill="#ffffff">
-      <tspan font-family="'RobotoMono', monospace" fill="#76B900" font-weight="600">load_tile_like_2d</tspan>
+      <tspan font-family="'RobotoMono', monospace" fill="#76B900" font-weight="600">load_tile_like</tspan>
       <tspan fill="#ffffff"> automatically calculates which region to load based on the output tile's grid position</tspan>
     </text>
   </g>

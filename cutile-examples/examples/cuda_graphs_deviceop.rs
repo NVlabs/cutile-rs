@@ -88,8 +88,8 @@ mod kernels {
         a: &Tensor<f32, { [-1] }>,
         b: &Tensor<f32, { [-1] }>,
     ) {
-        let ta: Tile<f32, { [B] }> = load_tile_like_1d(a, out);
-        let tb: Tile<f32, { [B] }> = load_tile_like_1d(b, out);
+        let ta: Tile<f32, { [B] }> = load_tile_like(a, out);
+        let tb: Tile<f32, { [B] }> = load_tile_like(b, out);
         out.store(ta + tb);
     }
 }

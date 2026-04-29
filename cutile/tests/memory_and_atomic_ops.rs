@@ -28,12 +28,24 @@ mod memory_and_atomic_ops_module {
         // Use the joined token in a partition view
         let shape = output.shape();
         let _partition: PartitionMut<f32, S> =
-            unsafe { make_partition_view_mut(output, shape, joined) };
+            unsafe { make_partition_view_mut(output, shape, padding::None, joined) };
 
         // Create a simple tile to demonstrate the joined token is used
         let tile: Tile<f32, S> = constant(1.0, shape);
 
         // Store using Tensor's high-level API (which internally manages tokens)
+        output.store(tile);
+    }
+
+    #[cutile::entry()]
+    fn print_tko_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = load_tile_mut(output);
+        let print_token: Token = print_tko("value: %f\n", tile, None);
+
+        let shape = output.shape();
+        let _partition: PartitionMut<f32, S> =
+            unsafe { make_partition_view_mut(output, shape, padding::None, print_token) };
+
         output.store(tile);
     }
 
@@ -46,15 +58,29 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         // Load from pointer tile with relaxed/device semantics, no optional params
-        let (loaded_values, _load_token): (Tile<f32, S>, Token) =
-            load_ptr_tko(ptrs, "relaxed", "device", None, None, None, None);
+        let (loaded_values, _load_token): (Tile<f32, S>, Token) = load_ptr_tko(
+            ptrs,
+            ordering::Relaxed,
+            Some(scope::Device),
+            None,
+            None,
+            None,
+            Latency::<0>,
+        );
 
         // Modify the values
         let modified: Tile<f32, S> = loaded_values + constant(1.0, output.shape());
 
         // Store back to pointer tile with relaxed/device semantics, no optional params
-        let _store_token: Token =
-            store_ptr_tko(ptrs, modified, "relaxed", "device", None, None, None);
+        let _store_token: Token = store_ptr_tko(
+            ptrs,
+            modified,
+            ordering::Relaxed,
+            Some(scope::Device),
+            None,
+            None,
+            Latency::<0>,
+        );
 
         // Store result using regular tensor API
         output.store(modified);
@@ -67,8 +93,15 @@ mod memory_and_atomic_ops_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) =
-            load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, None);
+        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
+            ptrs,
+            ordering::Weak,
+            None::<scope::TileBlock>,
+            None,
+            None,
+            None,
+            Latency::<0>,
+        );
 
         output.store(loaded_values);
     }
@@ -80,8 +113,15 @@ mod memory_and_atomic_ops_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) =
-            load_ptr_tko(ptrs, "acquire", "sys", None, None, None, None);
+        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
+            ptrs,
+            ordering::Acquire,
+            Some(scope::System),
+            None,
+            None,
+            None,
+            Latency::<0>,
+        );
 
         output.store(loaded_values);
     }
@@ -96,12 +136,12 @@ mod memory_and_atomic_ops_module {
         let input_token = new_token_unordered();
         let (loaded_values, _result_token): (Tile<f32, S>, Token) = load_ptr_tko(
             ptrs,
-            "relaxed",
-            "device",
+            ordering::Relaxed,
+            Some(scope::Device),
             None,
             None,
             Some(input_token),
-            None,
+            Latency::<0>,
         );
 
         output.store(loaded_values);
@@ -120,12 +160,12 @@ mod memory_and_atomic_ops_module {
 
         let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
             ptrs,
-            "relaxed",
-            "device",
+            ordering::Relaxed,
+            Some(scope::Device),
             Some(mask),
             Some(padding),
             None,
-            None,
+            Latency::<0>,
         );
 
         output.store(loaded_values);
@@ -142,7 +182,15 @@ mod memory_and_atomic_ops_module {
         let values: Tile<f32, S> = constant(42.0f32, output.shape());
 
         // Store with release semantics and sys scope
-        let _store_token: Token = store_ptr_tko(ptrs, values, "release", "sys", None, None, None);
+        let _store_token: Token = store_ptr_tko(
+            ptrs,
+            values,
+            ordering::Release,
+            Some(scope::System),
+            None,
+            None,
+            Latency::<0>,
+        );
 
         output.store(values);
     }
@@ -161,8 +209,15 @@ mod memory_and_atomic_ops_module {
         let mask: Tile<bool, S> = constant(true, output.shape());
 
         // Store with mask, relaxed semantics, and device scope
-        let _store_token: Token =
-            store_ptr_tko(ptrs, values, "relaxed", "device", Some(mask), None, None);
+        let _store_token: Token = store_ptr_tko(
+            ptrs,
+            values,
+            ordering::Relaxed,
+            Some(scope::Device),
+            Some(mask),
+            None,
+            Latency::<0>,
+        );
 
         output.store(values);
     }
@@ -179,8 +234,15 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         // Use atomic_addf_tko with relaxed/device semantics, no optional params
-        let (old_values, _result_token): (Tile<f32, S>, Token) =
-            atomic_rmw_tko(ptrs, increments, "addf", "relaxed", "device", None, None);
+        let (old_values, _result_token): (Tile<f32, S>, Token) = atomic_rmw_tko(
+            ptrs,
+            increments,
+            atomic::AddF,
+            ordering::Relaxed,
+            scope::Device,
+            None,
+            None,
+        );
 
         output.store(old_values);
 
@@ -210,8 +272,8 @@ mod memory_and_atomic_ops_module {
             ptrs,
             cmp_values,
             new_values,
-            "relaxed",
-            "device",
+            ordering::Relaxed,
+            scope::Device,
             None,
             Some(_token),
         );
@@ -242,8 +304,8 @@ mod memory_and_atomic_ops_module {
             ptrs,
             cmp_values,
             new_values,
-            "acquire",
-            "device",
+            ordering::Acquire,
+            scope::Device,
             Some(mask_values),
             None,
         );
@@ -263,8 +325,15 @@ mod memory_and_atomic_ops_module {
         let new_values: Tile<i64, S> = constant(200i64, output.shape());
 
         // Perform atomic compare-and-swap with acq_rel ordering and sys scope
-        let (old_values, _result_token): (Tile<i64, S>, Token) =
-            atomic_cas_tko(ptrs, cmp_values, new_values, "acq_rel", "sys", None, None);
+        let (old_values, _result_token): (Tile<i64, S>, Token) = atomic_cas_tko(
+            ptrs,
+            cmp_values,
+            new_values,
+            ordering::AcqRel,
+            scope::System,
+            None,
+            None,
+        );
 
         output.store(old_values);
     }
@@ -279,8 +348,15 @@ mod memory_and_atomic_ops_module {
 
         let values: Tile<i64, S> = constant(0xFFi64, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) =
-            atomic_rmw_tko(ptrs, values, "and", "relaxed", "device", None, None);
+        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
+            ptrs,
+            values,
+            atomic::And,
+            ordering::Relaxed,
+            scope::Device,
+            None,
+            None,
+        );
 
         output.store(old_values);
     }
@@ -294,8 +370,15 @@ mod memory_and_atomic_ops_module {
 
         let increments: Tile<i64, S> = constant(5i64, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) =
-            atomic_rmw_tko(ptrs, increments, "add", "acq_rel", "sys", None, None);
+        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
+            ptrs,
+            increments,
+            atomic::Add,
+            ordering::AcqRel,
+            scope::System,
+            None,
+            None,
+        );
 
         output.store(old_values);
     }
@@ -309,8 +392,15 @@ mod memory_and_atomic_ops_module {
 
         let values: Tile<i64, S> = constant(100i64, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) =
-            atomic_rmw_tko(ptrs, values, "max", "acquire", "device", None, None);
+        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
+            ptrs,
+            values,
+            atomic::Max,
+            ordering::Acquire,
+            scope::Device,
+            None,
+            None,
+        );
 
         output.store(old_values);
     }
@@ -328,9 +418,9 @@ mod memory_and_atomic_ops_module {
         let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
             ptrs,
             increments,
-            "add",
-            "relaxed",
-            "device",
+            atomic::Add,
+            ordering::Relaxed,
+            scope::Device,
             Some(mask),
             None,
         );
@@ -351,9 +441,9 @@ mod memory_and_atomic_ops_module {
         let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
             ptrs,
             values,
-            "xor",
-            "release",
-            "sys",
+            atomic::Xor,
+            ordering::Release,
+            scope::System,
             None,
             Some(input_token),
         );
@@ -370,8 +460,15 @@ mod memory_and_atomic_ops_module {
 
         let new_values: Tile<f32, S> = constant(42.5f32, output.shape());
 
-        let (old_values, _token): (Tile<f32, S>, Token) =
-            atomic_rmw_tko(ptrs, new_values, "xchg", "acq_rel", "device", None, None);
+        let (old_values, _token): (Tile<f32, S>, Token) = atomic_rmw_tko(
+            ptrs,
+            new_values,
+            atomic::Xchg,
+            ordering::AcqRel,
+            scope::Device,
+            None,
+            None,
+        );
 
         output.store(old_values);
     }
@@ -381,19 +478,26 @@ mod memory_and_atomic_ops_module {
         let token: Token = new_token_unordered();
         let shape = input.shape();
         let partition: Partition<f32, S> =
-            make_partition_view_padded(input, shape, "neg_inf", token);
+            make_partition_view(input, shape, padding::NegInf, dim_map::Identity, token);
         let idx: [i32; 1] = [0i32];
-        let _tile: Tile<f32, S> = load_from_view(&partition, idx, None, false);
+        let _tile: Tile<f32, S> = load_view_tko(
+            &partition,
+            idx,
+            ordering::Weak,
+            scope::TileBlock,
+            None,
+            tma::Enabled,
+        );
     }
 }
 
-use memory_and_atomic_ops_module::_module_asts;
+use memory_and_atomic_ops_module::__module_ast_self;
 
 #[test]
 fn compile_join_tokens() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -436,10 +540,43 @@ fn compile_join_tokens() -> () {
 }
 
 #[test]
+fn compile_print_tko() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "memory_and_atomic_ops_module",
+            "print_tko_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== PRINT_TKO MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("print_tko"),
+            "Expected print_tko operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("value: %f"),
+            "Expected print_tko format string in MLIR output"
+        );
+    });
+}
+
+#[test]
 fn compile_ptr_load_store() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -507,8 +644,8 @@ fn compile_ptr_load_store() -> () {
 #[test]
 fn compile_load_ptr_weak() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -542,8 +679,8 @@ fn compile_load_ptr_weak() -> () {
 #[test]
 fn compile_load_ptr_acquire() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -577,8 +714,8 @@ fn compile_load_ptr_acquire() -> () {
 #[test]
 fn compile_load_ptr_with_token() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -617,8 +754,8 @@ fn compile_load_ptr_with_token() -> () {
 #[test]
 fn compile_load_ptr_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -657,8 +794,8 @@ fn compile_load_ptr_with_mask() -> () {
 #[test]
 fn compile_store_ptr_release() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -692,8 +829,8 @@ fn compile_store_ptr_release() -> () {
 #[test]
 fn compile_store_ptr_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -731,8 +868,8 @@ fn compile_store_ptr_with_mask() -> () {
 #[test]
 fn compile_atomic_rmw() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -778,8 +915,8 @@ fn compile_atomic_rmw() -> () {
 #[test]
 fn compile_atomic_cas() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -826,8 +963,8 @@ fn compile_atomic_cas() -> () {
 #[test]
 fn compile_atomic_cas_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -866,8 +1003,8 @@ fn compile_atomic_cas_with_mask() -> () {
 #[test]
 fn compile_atomic_cas_acq_rel_sys() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -906,8 +1043,8 @@ fn compile_atomic_cas_acq_rel_sys() -> () {
 #[test]
 fn compile_atomic_and() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -945,8 +1082,8 @@ fn compile_atomic_and() -> () {
 #[test]
 fn compile_atomic_add() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -984,8 +1121,8 @@ fn compile_atomic_add() -> () {
 #[test]
 fn compile_atomic_max() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -1023,8 +1160,8 @@ fn compile_atomic_max() -> () {
 #[test]
 fn compile_atomic_rmw_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -1062,8 +1199,8 @@ fn compile_atomic_rmw_with_mask() -> () {
 #[test]
 fn compile_atomic_rmw_with_token() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -1101,8 +1238,8 @@ fn compile_atomic_rmw_with_token() -> () {
 #[test]
 fn compile_atomic_xchg() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -1140,8 +1277,8 @@ fn compile_atomic_xchg() -> () {
 #[test]
 fn compile_padded_partition_view() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -1168,6 +1305,6 @@ fn compile_padded_partition_view() -> () {
             "Expected padding_value = neg_inf in partition_view type"
         );
 
-        println!("\n✓ make_partition_view_padded with neg_inf padding verified");
+        println!("\n✓ make_partition_view with neg_inf padding verified");
     });
 }

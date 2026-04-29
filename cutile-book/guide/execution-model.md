@@ -45,7 +45,7 @@ Entry points have four rules:
 
 1. **Must be in a module** — Entry points must be inside a `#[cutile::module]` block.
 2. **Const generics for tile size** — An output tensor's shape must be static. It determines the output tensor's tile size.
-3. **Tensor parameters** — All data passes through `Tensor` references.
+3. **Kernel parameters** — Tensor references carry structured memory, while scalar and raw-pointer parameters are supported for values and unsafe interop paths.
 4. **No return values** — Results are written to output tensors.
 
 ---
@@ -70,9 +70,9 @@ fn kernel<const S: [i32; 2]>(
     let pid: (i32, i32, i32) = get_tile_block_id();    // This block's (x, y, z)
     let grid: (i32, i32, i32) = get_num_tile_blocks();  // Grid dimensions
 
-    // For element-wise ops, load_tile_like_2d uses the output's
+    // For element-wise ops, load_tile_like uses the output's
     // partition to determine which region this block processes:
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
     output.store(tile);
 }
 ```
@@ -91,7 +91,7 @@ fn kernel<const TILE_SIZE: [i32; 2]>(
     output: &mut Tensor<f32, TILE_SIZE>,  // Tile shape: compile-time constant
     input: &Tensor<f32, {[-1, -1]}>       // Tensor shape: runtime
 ) {
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     let max_vals = reduce_max(tile, 1i32);  // Reduction axis: compile-time constant
 

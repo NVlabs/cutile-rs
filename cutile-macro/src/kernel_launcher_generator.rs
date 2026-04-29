@@ -27,7 +27,7 @@
 //!
 //! ## Generated Launcher Structure
 //!
-//! ```rust,ignore
+//! ```text
 //! // For this kernel:
 //! #[cutile::entry]
 //! fn my_kernel<T: ElementType, const N: i32>(
@@ -48,12 +48,6 @@
 //!     input: impl DeviceOp<Output = Arc<Tensor<T>>>,
 //! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Launches from separate lazy arguments
-//! }
-//!
-//! // (_apply no longer generated)<T: Send + DType>(
-//!     inputs: (Partition<Tensor<T>>, Arc<Tensor<T>>),
-//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
-//!     // Launches from one grouped lazy argument tuple
 //! }
 //! ```
 //!
@@ -589,6 +583,9 @@ pub fn generate_kernel_launcher(
                 builder_statements.push(parse_stmt(format!(
                     "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
                 )));
+                scalar_hint_exprs.push(format!(
+                    r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
+                ));
                 param_element_types.push(None);
             }
             _ => {
@@ -829,7 +826,7 @@ pub fn generate_kernel_launcher(
         spec_args.join(",")
     )));
 
-    // Emit scalar_hints (populated for integer scalar params).
+    // Emit scalar_hints (populated for integer scalar and raw pointer params).
     launcher_method.block.stmts.push(parse_stmt(format!(
         "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
@@ -838,8 +835,10 @@ pub fn generate_kernel_launcher(
     let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
         let compile_options = std::mem::take(&mut self._compile_options);
+        // LINKING Phase B: pass the kernel's per-module AST builder; the JIT
+        // walks `use` statements against the linker registry for deps.
         let (function, validator) = self.compile(
-            ctx, _module_asts,
+            ctx, __module_ast_self,
             module_name, function_name, function_entry,
             function_generics, stride_args, spec_args.clone(), scalar_hints,
             const_grid,

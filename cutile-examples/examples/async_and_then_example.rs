@@ -11,7 +11,7 @@ use cutile::api::arange;
 use cutile::api::DeviceOpReshape;
 use cutile::tensor::{IntoPartition, ToHostVec};
 use cutile::tile_kernel::{compile_from_context, CompileOptions};
-use my_module::_module_asts;
+use my_module::__module_ast_self;
 use std::sync::Arc;
 
 #[cutile::module]
@@ -22,7 +22,7 @@ mod my_module {
     #[cutile::entry()]
     fn saxpy<const S: [i32; 2]>(y: &mut Tensor<f32, S>, a: f32, x: &Tensor<f32, { [-1, -1] }>) {
         let tile_a: Tile<f32, S> = a.broadcast(y.shape());
-        let tile_x: Tile<f32, S> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, S> = load_tile_like(x, y);
         let tile_y: Tile<f32, S> = y.load();
         y.store(tile_a * tile_x + tile_y);
     }
@@ -46,7 +46,7 @@ async fn main() -> Result<(), DeviceError> {
         with_context(|ctx| {
             let func = compile_from_context(
                 ctx,
-                _module_asts,
+                __module_ast_self,
                 "my_module",
                 "saxpy",
                 "saxpy_entry",

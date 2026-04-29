@@ -116,8 +116,8 @@ fn build_forward(
     weights: &[LayerWeights],
     input: Arc<Tensor<f32>>,
     buffers: Vec<LayerBuffers>,
-) -> DeviceOpVec<LayerBuffers> {
-    let mut result = Vec::with_capacity(buffers.len());
+) -> (DeviceOpVec<()>, SharedDeviceOp<Tensor<f32>>) {
+    let mut ops = Vec::with_capacity(buffers.len());
     let mut hidden: SharedDeviceOp<Tensor<f32>> = shared(input);
 
     for (w, bufs) in weights.iter().zip(buffers) {
@@ -167,15 +167,15 @@ fn build_forward(
 
         hidden = residual.clone();
 
-        // Collect buffers for this layer.
-        result.push(
+        // Keep the layer's work in the graph; the fixed buffers hold the data.
+        ops.push(
             zip!(norm, q, o, residual)
-                .map(|(norm, q, o, residual)| LayerBuffers { norm, q, o, residual })
+                .map(|_| ())
                 .boxed(),
         );
     }
 
-    DeviceOpVec::new(result)
+    (DeviceOpVec::new(ops), hidden)
 }
 ```
 
@@ -188,7 +188,7 @@ Key patterns to notice:
   `.first()` extracts just the output (the `&mut Tensor` parameter).
 - **`try_partition`** — Converts `Arc<Tensor<T>>` into a `Partition` by
   proving sole ownership (Arc refcount == 1).
-- **`DeviceOpVec`** — Collects boxed ops for heterogeneous layer outputs.
+- **`DeviceOpVec`** — Collects boxed ops for each layer's graph work.
 - **No GPU work yet** — Everything above is pure graph construction.
 
 ---
@@ -199,28 +199,27 @@ Key patterns to notice:
 recording all GPU work into a replayable graph:
 
 ```rust
-let input: Arc<Tensor<f32>> = api::rand([cfg.d], None).sync_on(&stream)?.into();
+let input: Tensor<f32> = api::rand([cfg.d], None).sync_on(&stream)?;
+let input_arc: Arc<Tensor<f32>> = unsafe { input.into_shared_alias() };
 let buffers: Vec<_> = (0..cfg.n_layers)
     .map(|_| LayerBuffers::allocate(cfg.d, &stream))
     .collect::<Result<_, _>>()?;
-stream.synchronize()?;
+unsafe { stream.synchronize() }?;
 
 // Build lazy graph (no GPU work).
-let forward_op = build_forward(&cfg, &weights, input.clone(), buffers);
+let (forward_op, output_shared) = build_forward(&cfg, &weights, input_arc, buffers);
 
 // Capture: executes once, records everything, returns CudaGraph.
 let mut graph = forward_op.graph_on(stream.clone())?;
 
 // Retrieve the output from the capture execution.
-let buffers = graph.take_output().unwrap();
-let output = buffers.last().unwrap().residual.clone();
+let output = output_shared.sync_on(&stream)?;
 ```
 
 After capture:
 - `graph` holds the recorded CUDA graph, ready for replay.
-- `buffers` holds the tensors that the graph writes into — these are the
-  same device pointers baked into the graph.
-- `output` points to the final layer's residual buffer.
+- `input` is the fixed input buffer whose pointer is baked into the graph.
+- `output` points to the final layer's residual buffer, which the graph rewrites on replay.
 
 ---
 
@@ -230,25 +229,24 @@ Wrap the graph in a `Module` trait for clean inference:
 
 ```rust
 trait Module {
-    type Input: Send;
+    type Input: Send + ?Sized;
     type Output: Send;
-    fn forward(&mut self, input: Self::Input) -> Result<Self::Output, DeviceError>;
+    fn forward(&mut self, input: &Self::Input) -> Result<Self::Output, DeviceError>;
 }
 
 struct GraphModel {
-    graph: CudaGraph<Vec<LayerBuffers>>,
-    input: Arc<Tensor<f32>>,
+    graph: CudaGraph<()>,
+    input: Tensor<f32>,
     output: Arc<Tensor<f32>>,
-    _buffers: Vec<LayerBuffers>,
 }
 
 impl Module for GraphModel {
-    type Input = Arc<Tensor<f32>>;
+    type Input = Tensor<f32>;
     type Output = Arc<Tensor<f32>>;
 
-    fn forward(&mut self, input: Self::Input) -> Result<Self::Output, DeviceError> {
+    fn forward(&mut self, input: &Self::Input) -> Result<Self::Output, DeviceError> {
         // Copy new embedding into the baked-in input buffer.
-        self.graph.update(api::memcpy(&mut self.input, &input))?;
+        self.graph.update(api::memcpy(&mut self.input, input))?;
         // Replay the entire forward pass with a single driver call.
         self.graph.launch().sync_on(self.graph.stream())?;
         Ok(self.output.clone())
@@ -292,8 +290,8 @@ fn main() -> Result<(), Error> {
     // Inference loop — each call is a single graph launch.
     let n_tokens = 512;
     for _ in 0..n_tokens {
-        let embedding: Arc<Tensor<f32>> = api::rand([cfg.d], None).sync_on(&stream)?.into();
-        let _output = model.forward(embedding)?;
+        let embedding: Tensor<f32> = api::rand([cfg.d], None).sync_on(&stream)?;
+        let _output = model.forward(&embedding)?;
     }
 
     Ok(())
@@ -419,12 +417,18 @@ capturing multiple graphs for common sizes.)
 
 ---
 
-## Full Reference Example
+## Full Reference Examples
 
-The complete working example with benchmarks:
+The scope-based reference example with benchmarks:
 
 ```bash
 cargo run -p cutile-examples --example cuda_graphs
+```
+
+The DeviceOp-combinator variant:
+
+```bash
+cargo run -p cutile-examples --example cuda_graphs_deviceop
 ```
 
 ---

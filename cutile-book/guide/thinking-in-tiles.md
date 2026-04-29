@@ -28,8 +28,8 @@ fn add<const S: [i32; 2]>(
     a: &Tensor<f32, {[-1, -1]}>,
     b: &Tensor<f32, {[-1, -1]}>
 ) {
-    let tile_a = load_tile_like_2d(a, c);
-    let tile_b = load_tile_like_2d(b, c);
+    let tile_a = load_tile_like(a, c);
+    let tile_b = load_tile_like(b, c);
     c.store(tile_a + tile_b);
 }
 ```

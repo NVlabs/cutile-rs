@@ -147,7 +147,7 @@ fn write_ir(
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_async::compile_from_context;
+/// use cutile::tile_kernel::compile_from_context;
 ///
 /// let ctx = get_execution_context();
 /// let function = compile_from_context(
@@ -162,9 +162,9 @@ fn write_ir(
 /// );
 /// ```
 #[allow(clippy::too_many_arguments)]
-pub fn compile_from_context<F: Fn() -> Vec<Module>>(
+pub fn compile_from_context<F: Fn() -> Module>(
     ctx: &ExecutionContext,
-    module_asts: F,
+    kernel_ast: F,
     module_name: &str,
     function_name: &str,
     function_entry: &str,
@@ -195,8 +195,10 @@ pub fn compile_from_context<F: Fn() -> Vec<Module>>(
         Ok((func, validator))
     } else {
         let gpu_name = get_gpu_name(device_id);
-        // A miss compiles, caches, and returns the compiled function.
-        let modules = CUDATileModules::new(module_asts())?;
+        // LINKING Phase B: build the module set by walking the kernel's
+        // `use` graph against the linker registry. The legacy chained
+        // `_module_asts()` is no longer consulted here.
+        let modules = CUDATileModules::from_kernel(kernel_ast())?;
         let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
             module_name,
             function_name,
@@ -427,12 +429,18 @@ pub trait TileKernel<ARGS: Send, DI, STORED: Send = ARGS>: DeviceOp<Output = ARG
 where
     DI: DeviceOp<Output = STORED>,
 {
-    /// Compiles the kernel from module ASTs, returning the CUDA function and validator.
+    /// Compiles the kernel from its module AST, returning the CUDA function
+    /// and validator.
+    ///
+    /// `kernel_ast` is invoked once on cache miss to obtain the kernel's own
+    /// [`Module`] (typically the macro-generated `__module_ast_self` fn).
+    /// Dep modules are discovered by walking the kernel's `use` statements
+    /// against the linker registry.
     #[allow(clippy::too_many_arguments)]
-    fn compile<F: Fn() -> Vec<Module>>(
+    fn compile<F: Fn() -> Module>(
         &mut self,
         ctx: &ExecutionContext,
-        module_asts: F,
+        kernel_ast: F,
         module_name: &str,
         function_name: &str,
         function_entry: &str,
@@ -445,7 +453,7 @@ where
     ) -> Result<(Arc<Function>, Arc<Validator>), Error> {
         compile_from_context(
             ctx,
-            module_asts,
+            kernel_ast,
             module_name,
             function_name,
             function_entry,
@@ -603,7 +611,7 @@ impl<'a, T: DType> KernelArgument for &Partition<&'a mut Tensor<T>> {
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_async::PartitionOp;
+/// use cutile::tile_kernel::PartitionOp;
 ///
 /// // Partition a tensor operation before it executes
 /// let x = api::ones(&[1024]).partition([128]);  // Creates 8 partitions
@@ -727,7 +735,7 @@ where
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_async::unwrap_partition;
+/// use cutile::tile_kernel::unwrap_partition;
 ///
 /// // After a kernel operation on partitioned tensors
 /// let x = api::ones(&[256]).partition([64]);
@@ -787,7 +795,7 @@ where
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_async::unwrap_partition;
+/// use cutile::tile_kernel::unwrap_partition;
 ///
 /// async fn process_data() -> Tensor<f32> {
 ///     let x = api::randn(0.0, 1.0, [1024]).partition([128]);

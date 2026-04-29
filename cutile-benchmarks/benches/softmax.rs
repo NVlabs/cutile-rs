@@ -24,7 +24,7 @@ mod kernels {
         x: &Tensor<f16, { [-1, -1] }>,
         y: &mut Tensor<f16, { [BM, BN] }>,
     ) {
-        let tile_x: Tile<f16, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f16, { [BM, BN] }> = load_tile_like(x, y);
         let tile_x_max: Tile<f16, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f16, { [BM, BN] }> =
             tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());

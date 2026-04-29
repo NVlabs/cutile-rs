@@ -10,7 +10,7 @@ Everything you express inside a kernel boils down to a small set of operation ca
 
 | Category | Representative operations | Reference |
 |---|---|---|
-| Load and store | `load_tile_mut`, `load_tile_like_2d`, `Partition::load`, `Tensor::store` | [Memory: Load and Store](../reference/dsl-api.md#memory-load-and-store) |
+| Load and store | `load_tile_mut`, `load_tile_like`, `Partition::load`, `Tensor::store` | [Memory: Load and Store](../reference/dsl-api.md#memory-load-and-store) |
 | Arithmetic | `+`, `-`, `*`, `/`, `fma`, `true_div` | [Arithmetic (Element-wise)](../reference/dsl-api.md#arithmetic-element-wise) |
 | Math | `exp`, `log`, `sqrt`, `rsqrt`, `sin`, `cos`, `tanh` | [Math (Floating-Point)](../reference/dsl-api.md#math-floating-point) |
 | Reduction / scan | `reduce_max`, `reduce_sum`, `reduce_min`, `reduce_prod`, `scan` | [Reduction and Scan](../reference/dsl-api.md#reduction-and-scan) |

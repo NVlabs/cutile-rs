@@ -25,3 +25,4 @@ cuda-async = { workspace = true }
 cutile-compiler = { workspace = true }
 cutile-macro = { workspace = true }
 cutile-ir = { workspace = true }
+linkme = { workspace = true }

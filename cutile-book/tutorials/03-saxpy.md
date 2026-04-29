@@ -27,7 +27,7 @@ use std::sync::Arc;
 use cutile;
 use cutile::api::arange;
 use cutile::error::Error;
-use cutile::tensor::{IntoPartition, Tensor, ToHostVec, Unpartition};
+use cutile::tensor::{IntoPartition, Reshape, Tensor, ToHostVec, Unpartition};
 
 #[cutile::module]
 mod my_module {
@@ -35,12 +35,12 @@ mod my_module {
 
     #[cutile::entry()]
     fn saxpy<const S: [i32; 2]>(
+        y: &mut Tensor<f32, S>,            // Vector input AND output (in-place)
         a: f32,                           // Scalar input
-        x: &Tensor<f32, { [-1, -1] }>,    // Vector input
-        y: &mut Tensor<f32, S>            // Vector input AND output (in-place)
+        x: &Tensor<f32, { [-1, -1] }>     // Vector input
     ) {
         let tile_a = a.broadcast(y.shape());  // Scalar → Tile
-        let tile_x = load_tile_like_2d(x, y);
+        let tile_x = load_tile_like(x, y);
         let tile_y = y.load();                // Load current y values
         y.store(tile_a * tile_x + tile_y);    // y = a*x + y
     }
@@ -56,11 +56,11 @@ fn main() -> Result<(), Error> {
     
     // Create x and y as [0, 1, 2, ..., 31] reshaped to 4×8
     let input: Arc<Tensor<f32>> = arange(32usize).sync_on(&stream)?.into();
-    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape([4, 8]).into();
-    let y = input.dup().sync_on(&stream)?.reshape([4, 8]).partition([2, 2]);
+    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape(&[4, 8])?.into();
+    let y = input.dup().sync_on(&stream)?.reshape(&[4, 8])?.partition([2, 2]);
     
     // Run: y = 2.0 * x + y = 2*x + x = 3*x
-    let (a, _x, y) = saxpy(a, x, y).sync_on(&stream)?;
+    let (y, a, _x) = saxpy(y, a, x).sync_on(&stream)?;
     let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;
     
     // Verify
@@ -151,13 +151,13 @@ Modify the kernel to compute `y = a * x + b * y` where both `a` and `b` are scal
 :::{dropdown} Hint
 ```rust
 fn saxpy_extended<const S: [i32; 2]>(
+    y: &mut Tensor<f32, S>,
     a: f32, b: f32,
-    x: &Tensor<f32, {[-1, -1]}>,
-    y: &mut Tensor<f32, S>
+    x: &Tensor<f32, {[-1, -1]}>
 ) {
     let tile_a = a.broadcast(y.shape());
     let tile_b = b.broadcast(y.shape());
-    let tile_x = load_tile_like_2d(x, y);
+    let tile_x = load_tile_like(x, y);
     let tile_y = y.load();
     y.store(tile_a * tile_x + tile_b * tile_y);
 }

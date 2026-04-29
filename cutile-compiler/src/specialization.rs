@@ -84,12 +84,12 @@ impl DivHint {
 /// cutile-python's `base_addr_divisible_by` convention.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SpecializationBits {
-    /// Per-dimension: divisibility of shape[i], in **elements**.
+    /// Per-dimension: divisibility of `shape[i]`, in **elements**.
     pub shape_div: Vec<DivHint>,
-    /// Per-dimension: divisibility of stride[i], in **elements** (not bytes).
+    /// Per-dimension: divisibility of `stride[i]`, in **elements** (not bytes).
     /// A stride of 1 element always has divisor 1, regardless of dtype size.
     pub stride_div: Vec<DivHint>,
-    /// Per-dimension: whether stride[i] == 1.
+    /// Per-dimension: whether `stride[i] == 1`.
     pub stride_one: Vec<bool>,
     /// Divisibility of the base device pointer, in **bytes**.
     /// A pointer at 0x1000 has divisor 16 (aligned to 16-byte boundary).
