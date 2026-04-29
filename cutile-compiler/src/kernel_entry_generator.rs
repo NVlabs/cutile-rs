@@ -246,13 +246,19 @@ impl TensorInput {
         //     statements.push(syn::Stmt::Item(item));
         // }
 
-        // Shape
-        // If it's mutable, we're partitioning, so use the specified partition dims, not the full tensor dims.
-        let dim_i_arg_name = if self.mutable { "partition_dim" } else { "dim" };
+        // Shape. Mutable tensor args are exposed to the user kernel as tile-shaped
+        // tensors, but the entry wrapper constructs a view of the full tensor so
+        // Tensor::store can index the output partition by the current tile-block id.
+        let dim_i_arg_name = "dim";
         let dims_arg_name = format!("{}s", dim_i_arg_name);
+        let tensor_view_shape = if self.mutable {
+            vec!["-1".to_string(); self.rank as usize]
+        } else {
+            self.input_tensor_shape.shape.clone()
+        };
         // At this point, we have concrete shape data for everything.
         let dynamic_dims: Vec<String> =
-            self.get_dynamic_elements(&self.input_tensor_shape.shape, dim_i_arg_name.to_string());
+            self.get_dynamic_elements(&tensor_view_shape, dim_i_arg_name.to_string());
         let dims_var = format!("{var_name}_{dims_arg_name}");
         for (i, dynamic_dim_var) in dynamic_dims.iter().enumerate() {
             statements.push(Self::get_assume_non_negative_stmt(dynamic_dim_var.clone()));
@@ -278,18 +284,19 @@ impl TensorInput {
         statements.push(dims);
 
         let shape_param = &self.input_tensor_shape.shape_param;
+        let tensor_view_shape_param = if self.mutable {
+            format!("{{[{}]}}", vec!["-1"; self.rank as usize].join(","))
+        } else {
+            shape_param.clone()
+        };
         let shape_var = format!("{dims_var}_shape");
         let dims_shape_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let {shape_var}: Shape<{shape_param}> = Shape::<{shape_param}>{{ dims: {var_name}_{dims_arg_name} }};").parse().unwrap()
+                format!("let {shape_var}: Shape<{tensor_view_shape_param}> = Shape::<{tensor_view_shape_param}>{{ dims: {var_name}_{dims_arg_name} }};").parse().unwrap()
         ).unwrap();
         statements.push(dims_shape_stmnt);
 
         // Strides
-        let stride_i_arg_name = if self.mutable {
-            "partition_stride"
-        } else {
-            "stride"
-        };
+        let stride_i_arg_name = "stride";
         let strides_arg_name = format!("{}s", stride_i_arg_name);
         let dynamic_strides: Vec<String> =
             self.get_dynamic_elements(&self.static_strides, stride_i_arg_name.to_string());
@@ -336,102 +343,17 @@ impl TensorInput {
         .unwrap();
         statements.push(strides_array_stmnt);
 
-        // Pointer offset (if this is a partition)
+        // Use the full tensor pointer. Mutable output partition indexing is
+        // handled by Tensor::load/store inside the kernel body.
         let ptr_var = format!("{var_name}_ptr");
-        let final_ptr_var = if self.mutable {
-            let pid_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let pid: (i32, i32, i32) = get_tile_block_id();")
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap();
-            statements.push(pid_stmnt);
-            let mut sum_of_prod = vec![];
-            for i in 0..self.rank {
-                // TODO (hme): Assert dynamic dim is equivalent to static dim if dim is static.
-                let pid_field_expr = format!("pid.{i}");
-                let dyn_partition_dim_var = format!("{var_name}_partition_dim_{i}");
-                // We use the Tensor's stride (not the partition stride) to compute the correct offset.
-                let dyn_stride_var = format!("{var_name}_stride_{i}");
-                sum_of_prod.push(format!(
-                    "{pid_field_expr}*{dyn_partition_dim_var}*{dyn_stride_var}"
-                ));
-            }
-            let offset_var = format!("{var_name}_offset");
-            let offset_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let {offset_var}: i32 = {};", sum_of_prod.join("+"))
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap();
-            statements.push(offset_stmnt);
-            let partition_ptr_var = format!("{var_name}_partition_ptr");
-            let partition_ptr_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let {partition_ptr_var}: PointerTile<*mut {element_type}, {{[]}}> = {ptr_var}.offset({offset_var});").parse().unwrap()
-            ).unwrap();
-            statements.push(partition_ptr_stmnt);
-            partition_ptr_var
-        } else {
-            // Immutable tensors: offset is applied host-side (the device
-            // pointer already points to the correct location). No
-            // ptr.offset() needed here.
-            ptr_var
-        };
+        let final_ptr_var = ptr_var;
         let inferred_ptr_div = self.spec.as_ref().map(|s| s.base_ptr_div.divisor);
         let ptr_div = self.effective_div(inferred_ptr_div);
         if ptr_div > 1 {
             statements.push(Self::get_assume_div_by(final_ptr_var.clone(), ptr_div));
         }
 
-        // For mutable (partitioned) tensors, compute the actual remaining
-        // elements per dimension for this block:
-        //   remaining_i = min(partition_dim_i, dim_i - pid.i * partition_dim_i)
-        // Pass these as a dynamic shape to make_tensor_view so the MLIR
-        // tensor_view has dynamic dims (?x?xf32). This lets partition views
-        // mask out-of-bounds stores with padding at tile boundaries.
-        // The Rust type annotation keeps the static shape_param for generic
-        // inference — the generic inference skips -1 (dynamic) values.
-        let final_shape_var = if self.mutable {
-            let mut remaining_dim_vars = vec![];
-            for i in 0..self.rank {
-                let remaining_var = format!("{var_name}_remaining_dim_{i}");
-                let dim_var = format!("{var_name}_dim_{i}");
-                let partition_dim_var = format!("{var_name}_partition_dim_{i}");
-                let pid_field = format!("pid.{i}");
-                let remaining_stmnt = syn::parse2::<syn::Stmt>(
-                    format!("let {remaining_var}: {i_type} = min({partition_dim_var}, {dim_var} - {pid_field} * {partition_dim_var});")
-                        .parse()
-                        .unwrap(),
-                )
-                .unwrap();
-                statements.push(remaining_stmnt);
-                remaining_dim_vars.push(remaining_var);
-            }
-            let remaining_dims_var = format!("{var_name}_remaining_dims");
-            let remaining_dims_stmnt = syn::parse2::<syn::Stmt>(
-                format!(
-                    "let {remaining_dims_var}: &[{i_type}] = &[{}];",
-                    remaining_dim_vars.join(",")
-                )
-                .parse()
-                .unwrap(),
-            )
-            .unwrap();
-            statements.push(remaining_dims_stmnt);
-
-            let dynamic_shape_param = format!("{{[{}]}}", vec!["-1"; self.rank as usize].join(","));
-            let remaining_shape_var = format!("{remaining_dims_var}_shape");
-            let remaining_shape_stmnt = syn::parse2::<syn::Stmt>(
-                format!("let {remaining_shape_var}: Shape<{dynamic_shape_param}> = Shape::<{dynamic_shape_param}>{{ dims: {remaining_dims_var} }};")
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap();
-            statements.push(remaining_shape_stmnt);
-            remaining_shape_var
-        } else {
-            shape_var.clone()
-        };
+        let final_shape_var = shape_var.clone();
 
         let tensor_stmnt = syn::parse2::<syn::Stmt>(
             format!("let {var_name}: Tensor<{element_type}, {shape_param}> = unsafe {{ make_tensor_view({final_ptr_var}, {final_shape_var}, {strides_array_var}, {token_var}) }};").parse().unwrap()

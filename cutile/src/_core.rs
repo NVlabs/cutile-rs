@@ -550,16 +550,8 @@ pub mod core {
         pub fn shape<'b>(&self) -> Shape<'b, S> {
             get_tensor_shape_meta(self)
         }
-        pub fn load(&mut self) -> Tile<E, S> {
-            load_tile_mut(self)
-        }
-
         pub fn load_tile<const R: [i32; N]>(&self, shape: Shape<R>, idx: [i32; N]) -> Tile<E, R> {
             load_tile(self, shape, idx)
-        }
-
-        pub fn store(&mut self, result: Tile<E, S>) {
-            store_tile(self, result);
         }
     }
 
@@ -1034,10 +1026,7 @@ pub mod core {
     /// `cuda_tile.get_index_space_shape` with axis-th result extracted.
     #[cuda_tile::compiler_op(name = "num_tiles")]
     #[cuda_tile::variadic_op(N = 6)]
-    pub unsafe fn num_tiles<E: ElementType, const S: [i32; N]>(
-        view: &Partition<E, S>,
-        axis: i32,
-    ) -> i32 {
+    pub fn num_tiles<E: ElementType, const S: [i32; N]>(view: &Partition<E, S>, axis: i32) -> i32 {
         unreachable!()
     }
 
@@ -2144,17 +2133,16 @@ pub mod core {
         tile_x
     }
 
-    /// Load `y`'s entire shape as a tile via a mutable partition view.
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn load_tile_mut<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>) -> Tile<E, S> {
-        let tile_shape: Shape<S> = y.shape();
+    fn load_tile_mut_1d<E: ElementType, const S: [i32; 1]>(y: &mut Tensor<E, S>) -> Tile<E, S> {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape: Shape<S> = Shape::<S> { dims: &[] };
         let tensor_token: Token = get_tensor_token(y);
         let y_partition: PartitionMut<E, S> =
-            unsafe { make_partition_view_mut(y, tile_shape, padding::Zero, tensor_token) };
+            unsafe { make_partition_view_mut(y, tile_shape, padding::None, tensor_token) };
         let tile_y: Tile<E, S> = unsafe {
             load_view_tko_mut(
                 &y_partition,
-                [0i32; N],
+                [pid.0],
                 ordering::Weak,
                 scope::TileBlock,
                 None,
@@ -2166,18 +2154,16 @@ pub mod core {
         tile_y
     }
 
-    /// Store `result` into `y`'s full shape via a mutable partition view.
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn store_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>, result: Tile<E, S>) {
-        let tile_shape: Shape<S> = y.shape();
+    fn load_tile_mut_2d<E: ElementType, const S: [i32; 2]>(y: &mut Tensor<E, S>) -> Tile<E, S> {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape: Shape<S> = Shape::<S> { dims: &[] };
         let tensor_token: Token = get_tensor_token(y);
-        let mut y_partition: PartitionMut<E, S> =
-            unsafe { make_partition_view_mut(y, tile_shape, padding::Zero, tensor_token) };
-        unsafe {
-            store_view_tko_mut(
-                &mut y_partition,
-                result,
-                [0i32; N],
+        let y_partition: PartitionMut<E, S> =
+            unsafe { make_partition_view_mut(y, tile_shape, padding::None, tensor_token) };
+        let tile_y: Tile<E, S> = unsafe {
+            load_view_tko_mut(
+                &y_partition,
+                [pid.0, pid.1],
                 ordering::Weak,
                 scope::TileBlock,
                 None,
@@ -2186,6 +2172,161 @@ pub mod core {
         };
         let new_token: Token = get_partition_token_mut(&y_partition);
         set_tensor_token(y, new_token);
+        tile_y
+    }
+
+    fn load_tile_mut_3d<E: ElementType, const S: [i32; 3]>(y: &mut Tensor<E, S>) -> Tile<E, S> {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape: Shape<S> = Shape::<S> { dims: &[] };
+        let tensor_token: Token = get_tensor_token(y);
+        let y_partition: PartitionMut<E, S> =
+            unsafe { make_partition_view_mut(y, tile_shape, padding::None, tensor_token) };
+        let tile_y: Tile<E, S> = unsafe {
+            load_view_tko_mut(
+                &y_partition,
+                [pid.0, pid.1, pid.2],
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            )
+        };
+        let new_token: Token = get_partition_token_mut(&y_partition);
+        set_tensor_token(y, new_token);
+        tile_y
+    }
+
+    fn store_tile_1d<E: ElementType, const S: [i32; 1]>(y: &mut Tensor<E, S>, result: Tile<E, S>) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape: Shape<S> = Shape::<S> { dims: &[] };
+        let tensor_token: Token = get_tensor_token(y);
+        let mut y_partition: PartitionMut<E, S> =
+            unsafe { make_partition_view_mut(y, tile_shape, padding::None, tensor_token) };
+        unsafe {
+            store_view_tko_mut(
+                &mut y_partition,
+                result,
+                [pid.0],
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            )
+        };
+        let new_token: Token = get_partition_token_mut(&y_partition);
+        set_tensor_token(y, new_token);
+    }
+
+    fn store_tile_2d<E: ElementType, const S: [i32; 2]>(y: &mut Tensor<E, S>, result: Tile<E, S>) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape: Shape<S> = Shape::<S> { dims: &[] };
+        let tensor_token: Token = get_tensor_token(y);
+        let mut y_partition: PartitionMut<E, S> =
+            unsafe { make_partition_view_mut(y, tile_shape, padding::None, tensor_token) };
+        unsafe {
+            store_view_tko_mut(
+                &mut y_partition,
+                result,
+                [pid.0, pid.1],
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            )
+        };
+        let new_token: Token = get_partition_token_mut(&y_partition);
+        set_tensor_token(y, new_token);
+    }
+
+    fn store_tile_3d<E: ElementType, const S: [i32; 3]>(y: &mut Tensor<E, S>, result: Tile<E, S>) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape: Shape<S> = Shape::<S> { dims: &[] };
+        let tensor_token: Token = get_tensor_token(y);
+        let mut y_partition: PartitionMut<E, S> =
+            unsafe { make_partition_view_mut(y, tile_shape, padding::None, tensor_token) };
+        unsafe {
+            store_view_tko_mut(
+                &mut y_partition,
+                result,
+                [pid.0, pid.1, pid.2],
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            )
+        };
+        let new_token: Token = get_partition_token_mut(&y_partition);
+        set_tensor_token(y, new_token);
+    }
+
+    /// Type-level dispatch for `load_tile_mut`.
+    pub trait LoadTileMutAtCurrentBlock {
+        type Out;
+
+        fn load(&mut self) -> Self::Out;
+    }
+
+    impl<E: ElementType, const S: [i32; 1]> LoadTileMutAtCurrentBlock for Tensor<E, S> {
+        type Out = Tile<E, S>;
+
+        fn load(&mut self) -> Tile<E, S> {
+            load_tile_mut_1d(self)
+        }
+    }
+
+    impl<E: ElementType, const S: [i32; 2]> LoadTileMutAtCurrentBlock for Tensor<E, S> {
+        type Out = Tile<E, S>;
+
+        fn load(&mut self) -> Tile<E, S> {
+            load_tile_mut_2d(self)
+        }
+    }
+
+    impl<E: ElementType, const S: [i32; 3]> LoadTileMutAtCurrentBlock for Tensor<E, S> {
+        type Out = Tile<E, S>;
+
+        fn load(&mut self) -> Tile<E, S> {
+            load_tile_mut_3d(self)
+        }
+    }
+
+    /// Load a mutable tensor tile at the current tile-block id.
+    pub fn load_tile_mut<Y>(y: &mut Y) -> <Y as LoadTileMutAtCurrentBlock>::Out
+    where
+        Y: LoadTileMutAtCurrentBlock,
+    {
+        y.load()
+    }
+
+    /// Type-level dispatch for `store_tile`.
+    pub trait StoreTileAtCurrentBlock<Result> {
+        fn store(&mut self, result: Result);
+    }
+
+    impl<E: ElementType, const S: [i32; 1]> StoreTileAtCurrentBlock<Tile<E, S>> for Tensor<E, S> {
+        fn store(&mut self, result: Tile<E, S>) {
+            store_tile_1d(self, result);
+        }
+    }
+
+    impl<E: ElementType, const S: [i32; 2]> StoreTileAtCurrentBlock<Tile<E, S>> for Tensor<E, S> {
+        fn store(&mut self, result: Tile<E, S>) {
+            store_tile_2d(self, result);
+        }
+    }
+
+    impl<E: ElementType, const S: [i32; 3]> StoreTileAtCurrentBlock<Tile<E, S>> for Tensor<E, S> {
+        fn store(&mut self, result: Tile<E, S>) {
+            store_tile_3d(self, result);
+        }
+    }
+
+    /// Store `result` into a mutable tensor tile at the current tile-block id.
+    pub fn store_tile<Y, Result>(y: &mut Y, result: Result)
+    where
+        Y: StoreTileAtCurrentBlock<Result>,
+    {
+        StoreTileAtCurrentBlock::store(y, result);
     }
 
     /// Type-level dispatch for `load_tile_like`.

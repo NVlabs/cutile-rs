@@ -610,14 +610,14 @@ because the caller must preserve aliasing, layout, and lifetime invariants.
 | `set_tensor_token(tensor, token)` | `(&Tensor<E, S>, Token)` | Update a tensor view's memory token |
 | `get_partition_token(partition)` | `&Partition<E, S> -> Token` | Read a read-only partition token |
 | `get_partition_token_mut(partition)` | `&PartitionMut<E, S> -> Token` | Read a mutable partition token |
-| `unsafe num_tiles(partition, axis)` | `(&Partition<E, S>, i32) -> i32` | Number of tiles along one partition axis |
+| `num_tiles(partition, axis)` | `(&Partition<E, S>, i32) -> i32` | Number of tiles along one partition axis |
 | `unsafe load_tensor(ptrs, idx, shape, strides)` | `(&Tensor<i64, S>, [i32; N], Shape<R>, Array<C>) -> Tensor<T, R>` | Load a strided tensor view from an integer pointer tensor |
 
 ```rust
 let shape = input.shape();
 let token = get_tensor_token(input);
 let part = make_partition_view(input, shape, padding::None, dim_map::Identity, token);
-let tiles_m: i32 = unsafe { num_tiles(&part, 0i32) };
+let tiles_m: i32 = num_tiles(&part, 0);
 ```
 
 #### View loads and stores

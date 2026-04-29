@@ -101,6 +101,26 @@ fn compiles_saxpy_style_2d_inference() {
         );
         assert!(mlir.contains("load_view_tko"));
         assert!(mlir.contains("tile<2x4xf32>"));
+        assert!(
+            !mlir.contains(" offset "),
+            "Mutable output entry lowering should not offset the output pointer.\nMLIR:\n{mlir}"
+        );
+        assert!(
+            !mlir.contains("mini"),
+            "Mutable output entry lowering should not compute per-block remaining dimensions.\nMLIR:\n{mlir}"
+        );
+        assert!(
+            !mlir.contains("padding_value = zero"),
+            "Tensor::load/store for mutable outputs should use padding::None.\nMLIR:\n{mlir}"
+        );
+        let store_line = mlir
+            .lines()
+            .find(|line| line.contains("store_view_tko"))
+            .expect("expected store_view_tko in saxpy_like MLIR");
+        assert!(
+            !store_line.contains("[0"),
+            "Tensor::store should index by tile-block id, not [0, 0].\nStore line:\n{store_line}\nMLIR:\n{mlir}"
+        );
     });
 }
 
