@@ -189,6 +189,7 @@ pub use cuda_async;
 pub use cuda_core;
 pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
+pub use cutile_compiler::compile_api;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;
