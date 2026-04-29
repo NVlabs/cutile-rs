@@ -24,7 +24,7 @@ mod compile_only_module {
 fn kernel_compiler_emits_ir_and_bytecode() {
     common::with_test_stack(|| {
         let artifacts = KernelCompiler::new(
-            compile_only_module::_module_asts,
+            compile_only_module::__module_ast_self,
             "compile_only_module",
             "tile_math",
         )

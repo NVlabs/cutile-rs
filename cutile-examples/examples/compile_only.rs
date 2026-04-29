@@ -44,7 +44,7 @@ fn main() {
     println!("Target GPU: {gpu_name}");
     println!("Compiling my_kernels::tile_math\n");
 
-    let artifacts = KernelCompiler::new(my_kernels::_module_asts, "my_kernels", "tile_math")
+    let artifacts = KernelCompiler::new(my_kernels::__module_ast_self, "my_kernels", "tile_math")
         .generics(vec!["32".into()])
         .strides(&[("output", &[1])])
         .target(&gpu_name)
