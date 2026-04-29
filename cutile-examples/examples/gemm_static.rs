@@ -35,7 +35,8 @@ mod my_module {
         let part_y = y.partition(const_shape![BK, BN]);
         let mut tile_z = load_tile_mut(z);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        for i in 0i32..(K / BK) {
+        let nk = num_tiles(&part_y, 0);
+        for i in 0i32..nk {
             let tile_x = part_x.load([pid.0, i]);
             let tile_y = part_y.load([i, pid.1]);
             tile_z = mma(tile_x, tile_y, tile_z);

@@ -17,6 +17,7 @@ use super::shared_types::Kind;
 use super::shared_utils::{get_binary_op_from_op_str, get_const_hex, TileBinaryOp};
 use super::tile_rust_type::TileRustType;
 use super::utils::{int_attr, rounding_mode_attr, signedness_attr};
+use crate::bounds::Bounds;
 use crate::error::JITError;
 use crate::generics::{GenericVars, TypeInstance};
 use crate::syn_utils::*;
@@ -393,6 +394,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "failed to compile partition-view argument to `num_tiles`",
                         )
                     })?;
+                let i32_tr_type = self
+                    .compile_type(&syn::parse_quote!(i32), generic_vars, &HashMap::new())?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.span(),
+                            "failed to synthesize `i32` type for `num_tiles`",
+                        )
+                    })?;
                 let axis_val = self
                     .compile_expression(
                         module,
@@ -400,7 +409,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &call_expr.args[1],
                         generic_vars,
                         ctx,
-                        None,
+                        Some(i32_tr_type.clone()),
                     )?
                     .ok_or_else(|| {
                         self.jit_error(
@@ -419,6 +428,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
                         "`num_tiles` axis must have a single known value",
+                    );
+                }
+                if axis_bounds.start < 0 {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        &format!("`num_tiles` axis {} out of range", axis_bounds.start),
                     );
                 }
                 let axis = axis_bounds.start as usize;
@@ -460,13 +475,49 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 append_op(module, block_id, op_id);
 
                 let selected = results[axis];
-                let return_type = return_type.ok_or_else(|| {
+                let return_type = match return_type {
+                    Some(return_type) => return_type,
+                    None => i32_tr_type,
+                };
+                let mut tr_value = TileRustValue::new_value_kind_like(selected, return_type);
+                let parent_axis = pv.dim_map.get(axis).copied().ok_or_else(|| {
                     self.jit_error(
-                        &call_expr.span(),
-                        "`num_tiles` return type could not be inferred",
+                        &call_expr.args[0].span(),
+                        &format!(
+                            "`num_tiles` axis {axis} is missing from partition dim_map {:?}",
+                            pv.dim_map
+                        ),
                     )
                 })?;
-                let tr_value = TileRustValue::new_value_kind_like(selected, return_type);
+                if parent_axis < 0 {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!(
+                            "`num_tiles` axis {axis} maps to invalid parent axis {parent_axis}"
+                        ),
+                    );
+                }
+                let parent_axis = parent_axis as usize;
+                let Some(&parent_dim) = pv.tensor_view.shape.get(parent_axis) else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!(
+                            "`num_tiles` axis {axis} maps to parent axis {parent_axis}, but parent tensor rank is {}",
+                            pv.tensor_view.shape.len()
+                        ),
+                    );
+                };
+                let tile_dim = pv.tile_shape[axis] as i64;
+                if tile_dim <= 0 {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!("`num_tiles` axis {axis} has invalid tile dimension {tile_dim}"),
+                    );
+                }
+                if parent_dim >= 0 {
+                    let num_tiles = (parent_dim + tile_dim - 1) / tile_dim;
+                    tr_value.bounds = Some(Bounds::exact(num_tiles));
+                }
                 Ok(Some(tr_value))
             }
             "reduce" => {
