@@ -112,8 +112,12 @@ pub struct Partition<'a, E: ElementType, const D: [i32; N]> { .. }
 
 The required param `tile` is always present (derived from `D`). The optional
 params appear only when set by the constructor op:
-- `make_partition_view` sets `tensor_view` -- type includes `tensor_view`
-- `make_partition_view_padded` sets `tensor_view` + `padding_value` -- type includes both
+- `make_partition_view(..., padding::None, dim_map::Identity, ...)` sets
+  `tensor_view`
+- `make_partition_view(..., padding::Zero, dim_map::Identity, ...)` sets
+  `tensor_view` + `padding_value`
+- `make_partition_view(..., padding::None, dim_map, ...)` sets
+  `tensor_view` + `dim_map`
 
 Resulting MLIR types:
 ```
@@ -158,12 +162,13 @@ whose *types* and *values* are forwarded into the output type:
 // Constructor op:
 #[cuda_tile::op(name="cuda_tile.make_partition_view",
                 params=["tensor_view"],
-                output_type_params=["tensor_view", "padding_value"],
+                output_type_params=["tensor_view", "padding_value", "dim_map"],
                 output_type_meta=["token", "tensor_view.shape()"])]
-fn make_partition_view_padded(
+fn make_partition_view(
     tensor_view: &Tensor<E, TENSOR_SHAPE>,  // forwarded as type param
     tile: Shape<TILE_SHAPE>,
-    padding_value: &str,                     // forwarded as type param
+    padding_value: impl padding::Mode,       // forwarded as type param
+    dim_map: impl dim_map::Mode,             // forwarded as type param
     token: Token,
 ) -> Partition<'a, E, TILE_SHAPE> { unreachable!() }
 ```
@@ -171,12 +176,15 @@ fn make_partition_view_padded(
 When the JIT compiles a call to this function:
 
 1. It compiles each argument and records the parameter name to compiled type
-   mapping (`arg_types` HashMap) and string literal values (`arg_string_values`).
+   mapping (`arg_types` HashMap) plus normalized metadata values for marker
+   arguments such as `padding::Zero`.
 
 2. For each name in `output_type_params`:
    - Looks up the corresponding argument type from `arg_types`
    - Calls `TypeParam::derive_param_from_type` to create a type parameter
-   - For `padding_value` specifically: if the derived `TypeParam` is a
+   - For `padding_value` and `dim_map` specifically: if the marker is
+     `padding::None` or `dim_map::Identity`, skip the optional type param.
+   - For real `padding_value` specifically: if the derived `TypeParam` is a
      `TypeParam::Padding` variant, sets its value from `arg_string_values`
      (i.e., the `"zero"` string literal from the call site)
 
@@ -247,8 +255,8 @@ Emits `%result = cuda_tile.cos %x : !cuda_tile.tile<128xf32>`.
 
 **Op with hint parameter:**
 ```rust
-#[cuda_tile::op(name="load_view_tko", params=["view", "index"], hint_params=["latency"])]
-fn load_from_view(view: &Partition<E, D>, index: [i32; N], latency: Option<i32>, ..) { .. }
+#[cuda_tile::op(name="load_view_tko", params=["view", "index"])]
+fn load_view_tko(view: &Partition<E, D>, index: [i32; N], latency: Option<i32>, tma: T, ..) { .. }
 ```
 `latency` guides TMA vs non-TMA lowering but doesn't appear as an MLIR operand.
 
@@ -267,10 +275,10 @@ pub struct PartitionMut<'a, E: ElementType, const D: [i32; N]> { .. }
                 params=["tensor_view"],
                 output_type_params=["tensor_view", "padding_value"],
                 output_type_meta=["token"])]
-fn make_partition_view_mut_padded(
+fn make_partition_view_mut(
     tensor_view: &Tensor<E, TENSOR_SHAPE>,
     shape: Shape<TILE_SHAPE>,
-    padding_value: &str,
+    padding_value: impl padding::Mode,
     token: Token,
 ) -> PartitionMut<'a, E, TILE_SHAPE> { unreachable!() }
 ```
@@ -278,7 +286,7 @@ fn make_partition_view_mut_padded(
 Call site:
 ```rust
 let pv: PartitionMut<E, S> =
-    unsafe { make_partition_view_mut_padded(y, tile_shape, "zero", token) };
+    unsafe { make_partition_view_mut(y, tile_shape, padding::Zero, token) };
 ```
 
 Compilation flow:
@@ -293,7 +301,7 @@ Compilation flow:
 
 3. `compile_general_op` calls `derive_type`, which invokes the type derivation
    path in `compile_type.rs`. This path:
-   - Looks up `make_partition_view_mut_padded`'s `output_type_params`
+   - Looks up `make_partition_view_mut`'s `output_type_params`
    - Finds `["tensor_view", "padding_value"]`
    - Inserts `tensor_view` as the compiled tensor arg type, `padding_value` as
      `TypeParam::Padding { padding_value: Some("zero") }` into the HashMap.
@@ -305,27 +313,32 @@ Compilation flow:
 
 5. Result: `!cuda_tile.partition_view<tile=(64x64), padding_value = zero, tensor_view<?x?xf32, strides=[?,1]>>`
 
-### Multiple ops sharing the same MLIR op name
+### One Rust op surface for optional MLIR type params
 
-Several Rust functions can map to the same MLIR op, distinguished by their
-`output_type_params`:
+The partition-view constructor has a single read-only Rust function and one
+mutable Rust function. Marker arguments determine which optional MLIR type
+parameters appear:
 
 ```rust
-// No padding:
-#[cuda_tile::op(name="cuda_tile.make_partition_view", output_type_params=["tensor_view"])]
-fn make_partition_view(..) -> Partition { .. }
+fn make_partition_view(
+    tensor,
+    shape,
+    padding_value: impl padding::Mode,
+    dim_map: impl dim_map::Mode,
+    token,
+) -> Partition { .. }
 
-// With padding:
-#[cuda_tile::op(name="cuda_tile.make_partition_view", output_type_params=["tensor_view", "padding_value"])]
-fn make_partition_view_padded(.., padding_value: &str, ..) -> Partition { .. }
-
-// With dim_map:
-#[cuda_tile::op(name="cuda_tile.make_partition_view", output_type_params=["tensor_view", "dim_map"])]
-fn make_partition_view_permuted(.., dim_map: Array<P>, ..) -> Partition { .. }
+unsafe fn make_partition_view_mut(
+    tensor,
+    shape,
+    padding_value: impl padding::Mode,
+    token,
+) -> PartitionMut { .. }
 ```
 
-All emit the same `make_partition_view` MLIR op, but the output type includes
-different optional parameters.
+Both emit the same `cuda_tile.make_partition_view` MLIR op. The output type
+includes `padding_value` only for real padding markers such as `padding::Zero`,
+and includes `dim_map` only for non-identity mappings.
 
 ---
 
@@ -384,79 +397,66 @@ no MLIR operation is emitted.
 
 ---
 
-## Variadic expansion macros
+## Rank-polymorphism macros
+
+The DSL is rank-polymorphic via const-generic-array (CGA) generics —
+parameters of the form `const X: [i32; N]`. Items annotated with the macros
+below get specialized over the supported ranks.
 
 ### `#[cuda_tile::variadic_struct(N = 6)]`
 
-Stamps out rank-specific struct definitions for ranks 1 through `N`.
-`Tile<E, {[i32; N]}>` becomes `Tile__1<E, D0>`, `Tile__2<E, D0, D1>`, etc.
+Emits per-rank struct definitions for ranks 0 through `N`.
+`Tile<E, const D: [i32; N]>` produces `Tile_0<E>`, `Tile_1<E, const D_0: i32>`,
+`Tile_2<E, const D_0: i32, const D_1: i32>`, etc.
 
-Optional: `constructor = "new"` generates a constructor function.
-
-### `#[cuda_tile::variadic_op(N = 6)]` / `#[cuda_tile::variadic_op(N = 6, M = 6)]`
-
-Stamps out rank-specific function definitions. A function with one CGA parameter
-produces `N` variants; with two CGA parameters (`N` and `M`), produces `N x M`.
-
-The function name gets a rank suffix: `reshape` with N=2, M=3 becomes `reshape__2_3`.
-
-Each function must have a `VariadicOpData` entry in
-`cutile-macro/src/types.rs:get_variadic_op_data`. This entry tells the macro how
-to map Rust types to const generic array dimensions for name mangling.
+Optional: `constructor = "new"` generates a `const_new()` constructor on
+each per-rank variant. If the struct has a slice-typed `dims` field, the
+macro additionally emits `new_K(dims: &'a [i32; K])` for each `K`.
 
 ### `#[cuda_tile::variadic_impl(N = 6)]`
 
-Stamps out rank-specific impl blocks, applying variadic expansion to all methods.
+For inherent impls on a CGA-bearing struct (`impl<E, const D: [i32; N]> Tile<E, D> { … }`),
+emits one per-rank impl block, with method bodies rewritten so any reference
+to `D`, `Shape<D>`, `Tile<E, D>`, etc. picks up the per-rank concrete form.
+Method names are not suffixed; rustc's receiver-type dispatch already
+disambiguates.
 
-### How variadic expansion interacts with JIT metadata
+### `#[cuda_tile::variadic_op(N = 6)]`
 
-The `#[cuda_tile::op]` and `#[cuda_tile::ty]` attributes survive variadic
-expansion -- they are cloned along with the item. So `make_partition_view_padded`
-with `N = 6` produces `make_partition_view_padded__1` through
-`make_partition_view_padded__6`, each carrying the same `cuda_tile::op`
-annotation. The JIT looks up these concrete names in its function registry.
+For free functions, this emits a single CGA-erased rank-polymorphic **trait** plus
+per-rank `impl`s plus a free-fn wrapper that delegates through the trait.
+The user-facing free-fn name is preserved; rustc resolves call sites via
+normal trait lookup (no rank suffix in user code).
 
-### `VariadicOpData` in `types.rs`
+The emitter recognizes three return-type shapes (case-3a same-shape, case-3b
+bound `Self::Out`, case-3c free `Out` as trait generic). See
+`cutile-macro/README.md` for the worked-out example. Optional parameter:
+`method = "name"` overrides the trait method name when the user-facing
+method should differ from the fn ident (e.g. `reshape_ptr` whose method is
+`reshape`); `trait_name = "Name"` overrides the synthesized trait ident
+when the default `PascalCase(fn_name)` would collide with a user trait of
+the same name.
 
-Every variadic function needs a `VariadicOpData` entry. Multiple function names
-can share one entry if they have the same generic structure:
+### `#[cuda_tile::variadic_trait(N = 6)]` and `#[cuda_tile::variadic_trait_impl()]`
 
-```rust
-"make_partition_view_mut" | "make_partition_view_mut_padded" => Some(VariadicOpData {
-    const_length_vars: &["N"],
-    cga_map: HashMap::from([("TENSOR_SHAPE", "N"), ("TILE_SHAPE", "N")]),
-    input_map: vec![
-        (0, "Tensor", &["TENSOR_SHAPE"]),
-        (1, "Shape", &["TILE_SHAPE"]),
-    ],
-    output_map: ("PartitionMut", &["TILE_SHAPE"]),
-    return_type: ("PartitionMut", &["'_", "_", "TILE_SHAPE"]),
-}),
-```
+For user-defined traits like `BroadcastScalar` that need rank-polymorphism:
+the trait declaration desugars to the same CGA-erased rank-polymorphic form, and
+its impl emits per-rank impls of that trait.
 
-- `const_length_vars`: Names of the array-length variables (here just `"N"`)
-- `cga_map`: Maps type parameter names to their length variable
-- `input_map`: Maps argument positions to expected types and their CGA params
-  (only typed variadic args -- `padding_value: &str` and `token: Token` are
-  skipped because they aren't variadic)
-- `output_map` / `return_type`: Type name and generic args for the output
+### How rank-polymorphism interacts with JIT metadata
 
-The method map in `get_variadic_method_data` connects Rust method syntax to
-variadic functions:
-```rust
-"Tensor" => HashMap::from([
-    ("store", "store_tile"),   // tensor.store(tile) becomes store_tile(tensor, tile)
-    ("load_tile", "load_tile"),
-    ("partition", "make_partition_view"),
-    ...
-]),
-```
+The `#[cuda_tile::op]` and `#[cuda_tile::ty]` attributes survive expansion;
+they are cloned along with each per-rank item. The JIT, however, doesn't
+look at the macro-emitted forms — it works from the *original* generic
+source captured by `_module_asts()`. So the macro and the JIT each
+instantiate per-rank independently: the macro for rustc, the JIT for code
+generation. There is no global registry connecting them.
 
 ---
 
 ## Inlined (composite) functions
 
-Functions with `#[cuda_tile::variadic_op]` but WITHOUT `#[cuda_tile::op]` or
+Free functions with `#[cuda_tile::variadic_op]` but no `#[cuda_tile::op]` /
 `#[cuda_tile::compiler_op]` have real bodies. The JIT inlines them:
 
 ```rust
@@ -465,22 +465,32 @@ pub fn store_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>, resul
     let tile_shape: Shape<S> = y.shape();
     let tensor_token: Token = get_tensor_token(y);
     let mut y_partition: PartitionMut<E, S> =
-        unsafe { make_partition_view_mut_padded(y, tile_shape, "zero", tensor_token) };
-    unsafe { store_to_view_mut(&mut y_partition, result, [0i32; N], None, false) };
+        unsafe { make_partition_view_mut(y, tile_shape, padding::Zero, tensor_token) };
+    unsafe {
+        store_view_tko_mut(
+            &mut y_partition,
+            result,
+            [0i32; N],
+            ordering::Weak,
+            scope::TileBlock,
+            None,
+            tma::Enabled,
+        )
+    };
     let new_token: Token = get_partition_token_mut(&y_partition);
     set_tensor_token(y, new_token);
 }
 ```
 
-This composes primitive ops (`get_tensor_token`, `make_partition_view_mut_padded`,
-`store_to_view_mut`, etc.) without emitting a single MLIR op of its own.
+This composes primitive ops (`get_tensor_token`, `make_partition_view_mut`,
+`store_view_tko_mut`, etc.) without emitting a single MLIR op of its own.
 
-When the JIT encounters a call to `store_tile__2(...)`:
+When the JIT encounters a call to `store_tile(...)`:
 1. `get_cuda_tile_op_attrs` returns `None` (no `cuda_tile::op`)
 2. `get_function_by_name` returns the function item
 3. No `cuda_tile::compiler_op` -- falls through to `inline_function_call`
-4. The body is compiled in the caller's context, with arguments bound to
-   parameter names
+4. The body is compiled in the caller's context with the call's CGA values
+   bound to the function's CGA generic, and arguments bound to parameter names
 
 ---
 

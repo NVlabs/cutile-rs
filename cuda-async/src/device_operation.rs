@@ -5,11 +5,11 @@
 
 //! Lazy, composable GPU operations and combinator types.
 
-use crate::device_context::with_default_device_policy;
+use crate::device_context::{pool_for_stream, with_default_device_policy};
 use crate::device_future::DeviceFuture;
 use crate::error::{device_error, DeviceError};
 use crate::scheduling_policies::SchedulingPolicy;
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{Device, MemPool, Stream};
 use std::cell::{Cell, UnsafeCell};
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -54,33 +54,49 @@ pub(crate) fn release_execution_lock() {
     });
 }
 
-pub type Device = usize;
+pub type DeviceOrdinal = usize;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
-    device: Device,
-    cuda_stream: Arc<CudaStream>,
-    cuda_context: Arc<CudaContext>,
+    ordinal: DeviceOrdinal,
+    cuda_stream: Arc<Stream>,
+    device: Arc<Device>,
+    pool: Option<Arc<MemPool>>,
 }
 
 impl ExecutionContext {
-    pub fn new(cuda_stream: Arc<CudaStream>) -> Self {
-        let cuda_context = cuda_stream.context().clone();
-        let device = cuda_context.ordinal();
+    pub fn new(cuda_stream: Arc<Stream>) -> Self {
+        let device = cuda_stream.device().clone();
+        let ordinal = device.ordinal();
+        let pool = pool_for_stream(&cuda_stream);
         Self {
             cuda_stream,
-            cuda_context,
             device,
+            ordinal,
+            pool,
         }
     }
-    pub fn get_cuda_stream(&self) -> &Arc<CudaStream> {
+    pub fn get_cuda_stream(&self) -> &Arc<Stream> {
         &self.cuda_stream
     }
-    pub fn get_cuda_context(&self) -> &Arc<CudaContext> {
-        &self.cuda_context
+    pub fn device(&self) -> &Arc<Device> {
+        &self.device
     }
-    pub fn get_device_id(&self) -> Device {
-        self.device
+    pub fn get_device_id(&self) -> DeviceOrdinal {
+        self.ordinal
+    }
+    pub fn get_pool(&self) -> Option<&Arc<MemPool>> {
+        self.pool.as_ref()
+    }
+    /// Allocates device memory on this context's stream, using the custom pool if set.
+    ///
+    /// # Safety
+    /// The stream must be valid and not destroyed.
+    pub unsafe fn alloc_async(&self, num_bytes: usize) -> cuda_core::sys::CUdeviceptr {
+        match &self.pool {
+            Some(pool) => cuda_core::malloc_from_pool_async(num_bytes, pool, &self.cuda_stream),
+            None => cuda_core::malloc_async(num_bytes, &self.cuda_stream),
+        }
     }
     #[expect(
         dead_code,
@@ -117,7 +133,7 @@ impl ExecutionContext {
 /// | `.into_future()`    | Default device's [`SchedulingPolicy`] | No (returns future) |
 /// | `.schedule(policy)` | The `policy` you provide              | No (returns future) |
 ///
-/// With the default [`StreamPoolRoundRobin`] policy (4 streams), consecutive `.await` or
+/// With the default [`StreamPoolRoundRobin`](crate::scheduling_policies::StreamPoolRoundRobin) policy (4 streams), consecutive `.await` or
 /// `.sync()` calls rotate through streams, so independent operations can overlap on the GPU.
 /// Operations chained with [`.then()`](DeviceOp::then) share a single stream
 /// and always execute in order.
@@ -328,7 +344,7 @@ pub trait DeviceOp:
     /// replayable graph and the initial output.
     fn graph_on(
         self,
-        stream: Arc<CudaStream>,
+        stream: Arc<Stream>,
     ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
         crate::cuda_graph::CudaGraph::capture(stream, self)
     }
@@ -351,7 +367,7 @@ pub trait DeviceOp:
     /// GPU data from the output.
     unsafe fn async_on(
         self,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<Stream>,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let ctx = ExecutionContext::new(stream.clone());
         unsafe { self.execute(&ctx) }
@@ -361,11 +377,11 @@ pub trait DeviceOp:
     /// This bypasses the scheduling policy entirely. All operations `sync_on` the same
     /// stream are guaranteed to execute in call order. Use this when you need deterministic
     /// ordering or are debugging concurrency issues.
-    fn sync_on(self, stream: &Arc<CudaStream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+    fn sync_on(self, stream: &Arc<Stream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         acquire_execution_lock()?;
         let ctx = ExecutionContext::new(stream.clone());
         let res = unsafe { self.execute(&ctx) };
-        let sync_res = stream.synchronize();
+        let sync_res = unsafe { stream.synchronize() };
         release_execution_lock();
         sync_res?;
         res
@@ -382,7 +398,7 @@ pub trait DeviceOp:
 ///
 /// Implementors:
 /// - Macro-generated kernel launchers (kernel launch only)
-/// - [`Memcpy`](crate::Memcpy) (copy between pre-allocated buffers)
+/// - Memcpy operations between pre-allocated buffers
 /// - [`Value<T>`] (no GPU work)
 ///
 /// Non-implementors (allocate device memory):

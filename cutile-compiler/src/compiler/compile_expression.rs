@@ -53,6 +53,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         TileRustValue::new_string(Expr::Path(path_expr.clone()), ty)
     }
 
+    fn make_option_type(rust_ty: syn::Type) -> TileRustType {
+        let type_instance = TypeInstance::UserType(TypeInstanceUserType {
+            maybe_generic_ty: rust_ty,
+        });
+        TileRustType::new_enum(type_instance)
+    }
+
+    fn make_option_type_from_payload(payload_ty: &TileRustType) -> TileRustType {
+        let payload_rust_ty = &payload_ty.rust_ty;
+        let rust_ty: syn::Type = parse_quote!(Option<#payload_rust_ty>);
+        Self::make_option_type(rust_ty)
+    }
+
     pub fn compile_expression(
         &self,
         module: &mut Module,
@@ -1074,7 +1087,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let var_name = path_expr.path.segments.last().unwrap().ident.to_string();
 
                     // Handle None specially — Rust Option::None, not a variable.
-                    if var_name == "None" {
+                    if path_expr.path.segments.len() == 1 && var_name == "None" {
+                        if let Some(return_type) = return_type {
+                            if return_type.kind == Kind::Enum {
+                                return Ok(Some(TileRustValue::new_enum(
+                                    "None",
+                                    None,
+                                    return_type,
+                                )));
+                            }
+                        }
                         return Ok(None);
                     }
 
@@ -1133,17 +1155,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let ident = get_ident_from_path_expr(&path_expr);
                             // Handle Some(...) specially - it's a Rust Option constructor, not a function call
                             if ident.to_string() == "Some" {
-                                // Some is used for optional parameters - extract the inner expression and compile it
-                                if call_expr.args.len() == 1 {
-                                    return Ok(self.compile_expression(
-                                        module,
-                                        block_id,
-                                        &call_expr.args[0],
-                                        generic_vars,
-                                        ctx,
-                                        return_type,
-                                    )?);
-                                } else {
+                                if call_expr.args.len() != 1 {
                                     return self.jit_error_result(
                                         &call_expr.span(),
                                         &format!(
@@ -1152,6 +1164,38 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                         ),
                                     );
                                 }
+
+                                if let Some(return_type) = return_type {
+                                    if return_type.kind == Kind::Enum {
+                                        return Ok(Some(TileRustValue::new_enum(
+                                            "Some",
+                                            Some(call_expr.args[0].clone()),
+                                            return_type,
+                                        )));
+                                    }
+                                }
+
+                                let Some(payload_value) = self.compile_expression(
+                                    module,
+                                    block_id,
+                                    &call_expr.args[0],
+                                    generic_vars,
+                                    ctx,
+                                    None,
+                                )?
+                                else {
+                                    return self.jit_error_result(
+                                        &call_expr.args[0].span(),
+                                        "failed to compile `Some` payload",
+                                    );
+                                };
+                                let option_type =
+                                    Self::make_option_type_from_payload(&payload_value.ty);
+                                return Ok(Some(TileRustValue::new_enum(
+                                    "Some",
+                                    Some(call_expr.args[0].clone()),
+                                    option_type,
+                                )));
                             }
                             if let Some(_) = self
                                 .modules
@@ -1524,7 +1568,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Ok(match mac_name.as_str() {
                         "const_shape" | "const_array" => {
                             // TODO (hme): Remove special case for const_shape here
-                            //  and in rewrite_variadics (proc macro side).
+                            //  and on the proc-macro side (rank_instantiation.rs).
                             let mut args = vec![];
                             let mut is_cga = false;
                             let mut is_consts = false;

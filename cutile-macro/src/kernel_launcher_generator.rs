@@ -27,7 +27,7 @@
 //!
 //! ## Generated Launcher Structure
 //!
-//! ```rust,ignore
+//! ```text
 //! // For this kernel:
 //! #[cutile::entry]
 //! fn my_kernel<T: ElementType, const N: i32>(
@@ -48,12 +48,6 @@
 //!     input: impl DeviceOp<Output = Arc<Tensor<T>>>,
 //! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
 //!     // Launches from separate lazy arguments
-//! }
-//!
-//! // (_apply no longer generated)<T: Send + DType>(
-//!     inputs: (Partition<Tensor<T>>, Arc<Tensor<T>>),
-//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
-//!     // Launches from one grouped lazy argument tuple
 //! }
 //! ```
 //!
@@ -566,9 +560,9 @@ pub fn generate_kernel_launcher(
                         .err("Pointers can only be used in unsafe kernel entry points.");
                 }
                 let ptr_str = ptr_type.to_token_stream().to_string();
-                let (is_mutable, type_name) = get_ptr_type(&ptr_str).ok_or_else(|| {
-                    ptr_type.error(&format!("Unexpected pointer type: {}", ptr_str))
-                })?;
+                let Some((is_mutable, type_name)) = get_ptr_type(&ptr_str) else {
+                    return ptr_type.err(&format!("Unexpected pointer type: {}", ptr_str));
+                };
                 if !is_mutable {
                     return ptr_type.err("Pointers must be * mut.");
                 }
@@ -589,6 +583,9 @@ pub fn generate_kernel_launcher(
                 builder_statements.push(parse_stmt(format!(
                     "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
                 )));
+                scalar_hint_exprs.push(format!(
+                    r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
+                ));
                 param_element_types.push(None);
             }
             _ => {
@@ -829,7 +826,7 @@ pub fn generate_kernel_launcher(
         spec_args.join(",")
     )));
 
-    // Emit scalar_hints (populated for integer scalar params).
+    // Emit scalar_hints (populated for integer scalar and raw pointer params).
     launcher_method.block.stmts.push(parse_stmt(format!(
         "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
@@ -838,8 +835,10 @@ pub fn generate_kernel_launcher(
     let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
         let compile_options = std::mem::take(&mut self._compile_options);
+        // LINKING Phase B: pass the kernel's per-module AST builder; the JIT
+        // walks `use` statements against the linker registry for deps.
         let (function, validator) = self.compile(
-            ctx, _module_asts,
+            ctx, __module_ast_self,
             module_name, function_name, function_entry,
             function_generics, stride_args, spec_args.clone(), scalar_hints,
             const_grid,
@@ -1196,9 +1195,9 @@ fn get_tensor_code(
 ) -> Result<TensorLaunchCode, Error> {
     // FnArg
     let (type_ident, type_generic_args) = get_ident_generic_args(&Type::Reference(ty.clone()));
-    let type_ident = type_ident
-        .ok_or_else(|| ty.error("Expected a named type identifier for tensor parameter."))?;
-
+    let Some(type_ident) = type_ident else {
+        return ty.err("Expected a named type identifier for tensor parameter.");
+    };
     if type_ident != "Tensor" {
         return ty.err(&format!("Expected Tensor type, got {}.", type_ident));
     }

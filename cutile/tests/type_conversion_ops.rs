@@ -22,7 +22,7 @@ mod type_conversion_ops_module {
         // Test integer conversion operations
         let x: Tile<i64, S> = load_tile_mut(output);
         // Truncate to i32, then extend back to i64
-        let truncated: Tile<i32, S> = trunci(x);
+        let truncated: Tile<i32, S> = trunci(x, overflow::None);
         let extended: Tile<i64, S> = exti(truncated);
         output.store(extended);
     }
@@ -45,7 +45,7 @@ mod type_conversion_ops_module {
         // Note: Using i64 tensor but operating on u32 tiles to test unsigned extension
         let x: Tile<i64, S> = load_tile_mut(output);
         // Truncate to u32, then extend back to i64 with unsigned (zero extension)
-        let truncated: Tile<u32, S> = trunci(x);
+        let truncated: Tile<u32, S> = trunci(x, overflow::None);
         let extended: Tile<i64, S> = exti(truncated);
         output.store(extended);
     }
@@ -65,7 +65,7 @@ mod type_conversion_ops_module {
         input: &Tensor<bf16, { [-1] }>,
     ) {
         // Runtime test kernel for bf16 -> f32 tile conversion
-        let x: Tile<bf16, S> = load_tile_like_1d(input, output);
+        let x: Tile<bf16, S> = load_tile_like(input, output);
         let y: Tile<f32, S> = convert_tile(x);
         output.store(y);
     }
@@ -76,13 +76,32 @@ mod type_conversion_ops_module {
         input: &Tensor<f32, { [-1] }>,
     ) {
         // Runtime test kernel for f32 -> bf16 tile conversion
-        let x: Tile<f32, S> = load_tile_like_1d(input, output);
+        let x: Tile<f32, S> = load_tile_like(input, output);
         let y: Tile<bf16, S> = convert_tile(x);
         output.store(y);
     }
+
+    #[cutile::entry()]
+    fn unannotated_load_tile_like_kernel<const S: [i32; 1]>(
+        output: &mut Tensor<f32, S>,
+        input: &Tensor<f32, { [-1] }>,
+    ) {
+        let x = load_tile_like(input, output);
+        output.store(x);
+    }
+
+    #[cutile::entry()]
+    fn explicit_conversion_ops_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let x: Tile<f32, S> = load_tile_mut(output);
+        let narrowed: Tile<f16, S> = ftof(x, rounding::NearestEven);
+        let widened: Tile<f32, S> = ftof(narrowed, rounding::NearestEven);
+        let ints: Tile<i32, S> = ftoi(widened, rounding::Zero);
+        let floats: Tile<f32, S> = itof(ints, rounding::NearestEven);
+        output.store(floats);
+    }
 }
 
-use type_conversion_ops_module::_module_asts;
+use type_conversion_ops_module::__module_ast_self;
 use type_conversion_ops_module::bf16_conversion_kernel;
 use type_conversion_ops_module::bf16_to_f32_conversion_kernel;
 use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
@@ -90,8 +109,8 @@ use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
 #[test]
 fn compile_conversion_ops() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -129,8 +148,8 @@ fn compile_conversion_ops() -> () {
 #[test]
 fn compile_ptr_conversion() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -168,8 +187,8 @@ fn compile_ptr_conversion() -> () {
 #[test]
 fn compile_exti_unsigned() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -203,8 +222,8 @@ fn compile_exti_unsigned() -> () {
 #[test]
 fn compile_bf16_conversion() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -229,6 +248,123 @@ fn compile_bf16_conversion() -> () {
         assert!(
             module_op_str.contains("bf16"),
             "Expected bf16 type in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_bf16_to_f32_load_tile_like() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = "sm_120".to_string();
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "type_conversion_ops_module",
+            "bf16_to_f32_conversion_kernel",
+            &[128.to_string()],
+            &[("output", &[1]), ("input", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!(
+            "\n=== BF16 -> F32 LOAD TILE LIKE MLIR ===\n{}",
+            module_op_str
+        );
+
+        assert!(
+            module_op_str.contains("load_view_tko"),
+            "Expected load_view_tko operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("tile<128xbf16>"),
+            "Expected source tile type in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("tile<128xf32>"),
+            "Expected converted tile type in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_unannotated_load_tile_like() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = "sm_120".to_string();
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "type_conversion_ops_module",
+            "unannotated_load_tile_like_kernel",
+            &[128.to_string()],
+            &[("output", &[1]), ("input", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!(
+            "\n=== UNANNOTATED LOAD TILE LIKE MLIR ===\n{}",
+            module_op_str
+        );
+
+        assert!(
+            module_op_str.contains("load_view_tko"),
+            "Expected load_view_tko operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("tile<128xf32>"),
+            "Expected statically shaped tile type in MLIR output"
+        );
+        assert!(
+            !module_op_str.contains("-9223372036854775808"),
+            "Did not expect dynamic-shape sentinel in load_tile_like result"
+        );
+    });
+}
+
+#[test]
+fn compile_explicit_conversion_ops() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "type_conversion_ops_module",
+            "explicit_conversion_ops_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== EXPLICIT CONVERSION OPS MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.matches("= ftof").count() >= 2,
+            "Expected two ftof operations in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("= ftoi"),
+            "Expected ftoi operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("= itof"),
+            "Expected itof operation in MLIR output"
         );
     });
 }

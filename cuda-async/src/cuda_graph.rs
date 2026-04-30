@@ -7,7 +7,7 @@ use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
 use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
 use crate::error::DeviceError;
-use cuda_core::{stream, sys, CudaStream, IntoResult};
+use cuda_core::{sys, IntoResult, Stream};
 use std::future::IntoFuture;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 /// }
 /// ```
 pub struct CudaGraph<T> {
-    stream: Arc<CudaStream>,
+    stream: Arc<Stream>,
     cu_graph: sys::CUgraph,
     cu_graph_exec: sys::CUgraphExec,
     output: Option<T>,
@@ -59,15 +59,15 @@ impl<T: Send> CudaGraph<T> {
     ///
     /// Retrieve the output via [`take_output`](CudaGraph::take_output).
     pub fn capture(
-        stream: Arc<CudaStream>,
+        stream: Arc<Stream>,
         op: impl DeviceOp<Output = T>,
     ) -> Result<Self, DeviceError> {
-        let ctx = stream.context().clone();
-        ctx.bind_to_thread()?;
+        let device = stream.device().clone();
+        device.bind_to_thread()?;
 
         // Begin capture.
         unsafe {
-            stream::begin_capture(stream.cu_stream(), CU_STREAM_CAPTURE_MODE_RELAXED)?;
+            stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
         }
 
         // Execute the operation on the capture stream.
@@ -75,7 +75,7 @@ impl<T: Send> CudaGraph<T> {
         let op_result = unsafe { op.execute(&exec_ctx) };
 
         // End capture — must happen regardless of op success.
-        let end_result = unsafe { stream::end_capture(stream.cu_stream()) };
+        let end_result = unsafe { stream.end_capture() };
 
         // Handle the (op_result, end_result) matrix, cleaning up on failure.
         let (output, cu_graph) = match (op_result, end_result) {
@@ -126,7 +126,7 @@ impl<T: Send> CudaGraph<T> {
         }
 
         // Synchronize so the output is safe to read.
-        stream.synchronize()?;
+        unsafe { stream.synchronize() }?;
 
         Ok(Self {
             stream,
@@ -183,7 +183,7 @@ impl<T: Send> CudaGraph<T> {
     }
 
     /// Returns a reference to the stream this graph was captured on.
-    pub fn stream(&self) -> &Arc<CudaStream> {
+    pub fn stream(&self) -> &Arc<Stream> {
         &self.stream
     }
 }
@@ -228,17 +228,17 @@ impl IntoFuture for GraphLaunch {
 
 impl<T> Drop for CudaGraph<T> {
     fn drop(&mut self) {
-        let ctx = self.stream.context();
-        ctx.record_err(ctx.bind_to_thread());
+        let device = self.stream.device();
+        let _ = device.bind_to_thread();
 
         let cu_graph_exec = std::mem::replace(&mut self.cu_graph_exec, std::ptr::null_mut());
         if !cu_graph_exec.is_null() {
-            ctx.record_err(unsafe { sys::cuGraphExecDestroy(cu_graph_exec).result() });
+            let _ = unsafe { sys::cuGraphExecDestroy(cu_graph_exec).result() };
         }
 
         let cu_graph = std::mem::replace(&mut self.cu_graph, std::ptr::null_mut());
         if !cu_graph.is_null() {
-            ctx.record_err(unsafe { sys::cuGraphDestroy(cu_graph).result() });
+            let _ = unsafe { sys::cuGraphDestroy(cu_graph).result() };
         }
     }
 }
@@ -340,9 +340,6 @@ impl<T> Drop for CudaGraph<T> {
 /// # Thread safety
 ///
 /// `Scope` is `!Send` — it cannot escape to another thread.
-///
-/// See `.internal/cuda-graph-redesign/SAFETY_PROOF_CUDA_GRAPH.md` for the full
-/// formal proof.
 pub struct Scope {
     ctx: ExecutionContext,
     _not_send: std::marker::PhantomData<*const ()>,
@@ -400,7 +397,7 @@ impl CudaGraph<()> {
     /// ```
     ///
     /// See [`Scope`] for the safety proof and edge-case behavior.
-    pub fn scope<F>(stream: &Arc<CudaStream>, f: F) -> Result<Self, DeviceError>
+    pub fn scope<F>(stream: &Arc<Stream>, f: F) -> Result<Self, DeviceError>
     where
         F: FnOnce(&Scope) -> Result<(), DeviceError>,
     {
@@ -418,16 +415,16 @@ impl CudaGraph<()> {
         }
     }
 
-    fn scope_inner<F>(stream: &Arc<CudaStream>, f: F) -> Result<Self, DeviceError>
+    fn scope_inner<F>(stream: &Arc<Stream>, f: F) -> Result<Self, DeviceError>
     where
         F: FnOnce(&Scope) -> Result<(), DeviceError>,
     {
-        let ctx = stream.context().clone();
-        ctx.bind_to_thread()?;
+        let device = stream.device().clone();
+        device.bind_to_thread()?;
 
         // Begin capture.
         unsafe {
-            stream::begin_capture(stream.cu_stream(), CU_STREAM_CAPTURE_MODE_RELAXED)?;
+            stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
         }
 
         let scope = Scope {
@@ -440,13 +437,13 @@ impl CudaGraph<()> {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&scope))) {
                 Ok(result) => result,
                 Err(panic_payload) => {
-                    let _ = unsafe { stream::end_capture(stream.cu_stream()) };
+                    let _ = unsafe { stream.end_capture() };
                     std::panic::resume_unwind(panic_payload);
                 }
             };
 
         // End capture.
-        let end_result = unsafe { stream::end_capture(stream.cu_stream()) };
+        let end_result = unsafe { stream.end_capture() };
 
         let cu_graph = match (scope_result, end_result) {
             (Err(scope_err), Ok(cu_graph)) => {
@@ -496,7 +493,7 @@ impl CudaGraph<()> {
         }
 
         // Synchronize.
-        stream.synchronize()?;
+        unsafe { stream.synchronize() }?;
 
         Ok(CudaGraph {
             stream: stream.clone(),
@@ -528,7 +525,7 @@ impl CudaGraph<()> {
 /// }
 ///
 /// impl MyModel {
-///     fn new(stream: Arc<CudaStream>) -> Result<Self, DeviceError> {
+///     fn new(stream: Arc<Stream>) -> Result<Self, DeviceError> {
 ///         let h_input = api::zeros(&[d]).sync_on(&stream)?;
 ///         let forward_op = build_forward(h_input.clone().into());
 ///         let mut graph = forward_op.graph_on(stream)?;

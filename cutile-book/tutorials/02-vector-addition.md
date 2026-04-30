@@ -8,7 +8,7 @@ In cutile, tile threads run concurrently and each tile knows its coordinates via
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api::{ones, zeros};
@@ -26,8 +26,8 @@ mod my_module {
         x: &Tensor<f32, {[-1, -1]}>,     // Input: dynamic shape (full tensor)
         y: &Tensor<f32, {[-1, -1]}>      // Input: dynamic shape (full tensor)
     ) {
-        let tile_x = load_tile_like_2d(x, z);  // Load a tile from x using z's partitioning
-        let tile_y = load_tile_like_2d(y, z);  // Load a tile from y using z's partitioning
+        let tile_x = load_tile_like(x, z);  // Load a tile from x using z's partitioning
+        let tile_y = load_tile_like(y, z);  // Load a tile from y using z's partitioning
         z.store(tile_x + tile_y);              // Add and store result
     }
 }
@@ -35,8 +35,8 @@ mod my_module {
 use my_module::add;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
     
     // Create input tensors: 32×32 matrices filled with 1.0
     let x: Arc<Tensor<f32>> = ones(&[32, 32]).sync_on(&stream)?.into();
@@ -98,7 +98,7 @@ let tile = part_x.load([i, j]);
 
 This is more flexible — the same `&Tensor` can be partitioned in different ways within the same kernel (e.g., in GEMM, `x` and `y` use different partition shapes).
 
-In this tutorial, we use `load_tile_like_2d(x, z)` instead of explicit device-side partitioning. This convenience function partitions `x` using the same shape and coordinates as `z`, which is the common case for element-wise operations. Later tutorials (starting with [matrix multiplication](./04-matrix-multiplication.md)) use explicit device-side partitioning when inputs need different access patterns.
+In this tutorial, we use `load_tile_like(x, z)` instead of explicit device-side partitioning. This convenience function partitions `x` using the same shape and coordinates as `z`, which is the common case for element-wise operations. Later tutorials (starting with [matrix multiplication](./04-matrix-multiplication.md)) use explicit device-side partitioning when inputs need different access patterns.
 
 ### Putting It Together
 
@@ -118,22 +118,22 @@ fn add<const S: [i32; 2]>(
     x: &Tensor<f32, {[-1, -1]}>,  // Full input tensor
     y: &Tensor<f32, {[-1, -1]}>   // Full input tensor
 ) {
-    let tile_x = load_tile_like_2d(x, z);
-    let tile_y = load_tile_like_2d(y, z);
+    let tile_x = load_tile_like(x, z);
+    let tile_y = load_tile_like(y, z);
     z.store(tile_x + tile_y);
 }
 ```
 
-`load_tile_like_2d(x, z)` loads a tile from `x` using the same tile shape (`S`=4×4) and coordinates (tile thread id) as `z`.
+`load_tile_like(x, z)` loads a tile from `x` using the same tile shape (`S`=4×4) and coordinates (tile thread id) as `z`.
 
-![How load_tile_like_2d calculates which region to load](../_static/images/vector-addition-load-tile.svg)
+![How load_tile_like calculates which region to load](../_static/images/vector-addition-load-tile.svg)
 
 Compare to CUDA C++:
 
 | Task | CUDA C++ | cuTile Rust |
 |------|----------|-----------|
 | Calculate thread index | `int i = blockIdx.x * blockDim.x + threadIdx.x;` | Not needed |
-| Calculate global offset | Manual pointer arithmetic | `load_tile_like_2d()` |
+| Calculate global offset | Manual pointer arithmetic | `load_tile_like()` |
 | Bounds checking | `if (i < n) { ... }` | Built-in |
 | Coalesced memory access | Manual, error-prone | Automatic |
 
@@ -167,7 +167,7 @@ fn my_kernel(...) {
 | **Device-side partitioning** | `.partition(const_shape![M, N])` inside the kernel — available for `&Tensor`, flexible access patterns |
 | **Static shape `S`** | The tile shape, static during JIT compilation |
 | **Dynamic shape `[-1, -1]`** | Dynamic tensor shape; does not trigger JIT recompilation when tensor shape changes |
-| **load_tile_like_2d** | Convenience for element-wise ops: loads from input using the same partitioning and mapping as the output |
+| **load_tile_like** | Convenience for element-wise ops: loads from input using the same partitioning and mapping as the output |
 | **Load/Store pattern** | Load → Compute → Store is the GPU kernel idiom |
 
 ---
@@ -195,7 +195,7 @@ Modify the kernel to add three tensors: `z = x + y + w`.
 :::{dropdown} Hint
 Add a third input parameter and load three tiles:
 ```rust
-let tile_w = load_tile_like_2d(w, z);
+let tile_w = load_tile_like(w, z);
 z.store(tile_x + tile_y + tile_w);
 ```
 :::
@@ -210,4 +210,4 @@ Try `partition([4, 8])` — rectangular tiles. Does it still work?
 
 - [Thinking in Tiles](../guide/thinking-in-tiles.md) — tile blocks, partitioning, and the grid
 - [Writing Computations](../guide/writing-computations.md) — arithmetic and load/store operations
-- [DSL API](../reference/dsl-api.md) — full signatures for `load_tile_like_2d`, `store`, and the arithmetic operators used here
+- [DSL API](../reference/dsl-api.md) — full signatures for `load_tile_like`, `store`, and the arithmetic operators used here

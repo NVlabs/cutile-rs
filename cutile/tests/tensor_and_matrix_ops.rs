@@ -78,15 +78,39 @@ mod tensor_and_matrix_ops_module {
 
         output.store(result_i64);
     }
+
+    #[cutile::entry()]
+    fn raw_mmai_kernel(output: &mut Tensor<i64, { [16, 16] }>) {
+        let lhs: Tile<i8, { [16, 32] }> = constant(1i8, const_shape![16, 32]);
+        let rhs: Tile<i8, { [32, 16] }> = constant(1i8, const_shape![32, 16]);
+        let acc: Tile<i32, { [16, 16] }> = constant(0i32, const_shape![16, 16]);
+
+        let result_i32: Tile<i32, { [16, 16] }> =
+            mmai(lhs, rhs, acc, signedness::Signed, signedness::Unsigned);
+        let result_i64: Tile<i64, { [16, 16] }> = exti(result_i32);
+
+        output.store(result_i64);
+    }
+
+    #[cutile::entry()]
+    fn raw_mmaf_kernel(output: &mut Tensor<f32, { [16, 16] }>) {
+        let lhs: Tile<f32, { [16, 8] }> = constant(1.0f32, const_shape![16, 8]);
+        let rhs: Tile<f32, { [8, 16] }> = constant(1.0f32, const_shape![8, 16]);
+        let acc: Tile<f32, { [16, 16] }> = constant(0.0f32, const_shape![16, 16]);
+
+        let result: Tile<f32, { [16, 16] }> = mmaf(lhs, rhs, acc);
+
+        output.store(result);
+    }
 }
 
-use tensor_and_matrix_ops_module::_module_asts;
+use tensor_and_matrix_ops_module::__module_ast_self;
 
 #[test]
 fn compile_cat() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -120,8 +144,8 @@ fn compile_cat() -> () {
 #[test]
 fn compile_extract() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -151,8 +175,8 @@ fn compile_extract() -> () {
 #[test]
 fn compile_mmai() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -184,5 +208,67 @@ fn compile_mmai() -> () {
         );
 
         println!("\n✓ mmai operation verified in MLIR output (using i64 tensor workaround)");
+    });
+}
+
+#[test]
+fn compile_raw_mmai() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "raw_mmai_kernel",
+            &[],
+            &[("output", &[16, 16])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== RAW MMAI MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= mmai"),
+            "Expected raw mmai operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("signed unsigned"),
+            "Expected explicit signedness attributes in raw mmai operation"
+        );
+    });
+}
+
+#[test]
+fn compile_raw_mmaf() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "raw_mmaf_kernel",
+            &[],
+            &[("output", &[16, 16])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== RAW MMAF MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= mmaf"),
+            "Expected raw mmaf operation in MLIR output"
+        );
     });
 }

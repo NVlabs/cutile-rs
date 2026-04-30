@@ -109,8 +109,8 @@ async fn main() -> Result<(), DeviceError> {
         block_dim.to_string(),
         dim.to_string(),
     ];
-    let w0 = api::randn(0.0f32, 1.0, [dim, dim]); // impl DeviceOp
-    let w1 = api::randn(0.0f32, 1.0, [dim]); // impl DeviceOp
+    let w0 = api::randn(0.0f32, 1.0, [dim, dim], None); // impl DeviceOp
+    let w1 = api::randn(0.0f32, 1.0, [dim], None); // impl DeviceOp
     let w = zip!(w0.map(Into::into), w1.map(Into::into)).schedule(&devices[0])?.await?;
     let mut joins = vec![];
     for i in 1..num_devices {
@@ -127,7 +127,7 @@ async fn main() -> Result<(), DeviceError> {
     for i in 0..num_devices {
         let w = &model_weights[i];
         let (w0, w1) = (w.0.clone(), w.1.clone());
-        let data = api::randn(0.0, 1.0, [dim, dim]).map(Into::into);
+        let data = api::randn(0.0, 1.0, [dim, dim], None).map(Into::into);
         // Unified launcher: pass output partition and inputs directly.
         let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
         let out0 = gemm(out0, data, w0)
@@ -171,7 +171,7 @@ for i in 0..num_devices {
     let (w0, w1) = (w.0.clone(), w.1.clone());
     // Sample random data. Although the sampling procedure is a simulation,
     // this can be replaced with a procedure that actually samples a batch of data.
-    let data = api::randn(0.0, 1.0, [dim, dim]).map(Into::into);
+    let data = api::randn(0.0, 1.0, [dim, dim], None).map(Into::into);
     // Unified launcher: pass output partition and inputs directly.
     let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
     let out0 = gemm(out0, data, w0)
@@ -186,9 +186,9 @@ for i in 0..num_devices {
         .unpartition();
     // Apply ReLU. Partition for tile-level dispatch, then unzip the result.
     let (out1,) = relu(out1.partition([block_dim])).unzip();
-    // out1 now contains the work we would like to schedule on device i.
-    // By invoking schedule on device i, we generate a device future which is
-    // ready to execute on device i. By spawning a task for the device future,
+    // out1 now contains the work we would like to schedule with policy i.
+    // By invoking schedule with that policy, we generate a device future which is
+    // ready to execute on the policy's chosen stream. By spawning a task for the device future,
     // we submit the work for execution to the async runtime (tokio). We then
     // collect the task handle into the futures vec.
     futures.push(tokio::spawn(out1.schedule(&devices[i])?));
@@ -213,7 +213,7 @@ for future in futures.into_iter() {
 |---------|---------------|
 | **Device operations** | Chainable, resource-agnostic DAGs |
 | **tokio::spawn** | Run batches concurrently |
-| **schedule(device)** | Target a specific GPU |
+| **schedule(policy)** | Target a specific scheduling policy |
 | **Lazy execution** | Pipeline is built first, then executed on `.await` or `spawn()` |
 
 ---
@@ -230,5 +230,5 @@ What would we need to change to construct a pipeline that overlaps data movement
 
 ## See also
 
-- [Orchestrating Device Operations](../guide/device-operations.md) — stream scheduling and the `DeviceOp` lifecycle
+- [Device Operations](../guide/device-operations.md) — stream scheduling and the `DeviceOp` lifecycle
 - [Host API](../reference/host-api.md) — `.schedule()`, scheduling policies, and execution methods

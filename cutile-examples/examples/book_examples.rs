@@ -10,7 +10,7 @@
 //! Run with: cargo run --example book_examples
 
 use cuda_async::device_operation::*;
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{Device, Stream};
 use cutile;
 use cutile::api::{arange, ones, randn, zeros};
 use cutile::error::Error;
@@ -41,7 +41,7 @@ mod hello_world_module {
     }
 }
 
-fn test_hello_world(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_hello_world(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("\n=== Tutorial 1: Hello World ===");
     use hello_world_module::hello_world_kernel;
 
@@ -63,13 +63,13 @@ mod vector_add_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x = load_tile_like_2d(x, z);
-        let tile_y = load_tile_like_2d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
 
-fn test_vector_addition(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_vector_addition(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 2: Vector Addition ===");
     use vector_add_module::add;
 
@@ -101,13 +101,13 @@ mod saxpy_module {
     #[cutile::entry()]
     fn saxpy<const S: [i32; 2]>(a: f32, x: &Tensor<f32, { [-1, -1] }>, y: &mut Tensor<f32, S>) {
         let tile_a = a.broadcast(y.shape());
-        let tile_x = load_tile_like_2d(x, y);
+        let tile_x = load_tile_like(x, y);
         let tile_y = y.load();
         y.store(tile_a * tile_x + tile_y);
     }
 }
 
-fn test_saxpy(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_saxpy(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 3: SAXPY ===");
     use saxpy_module::saxpy;
 
@@ -174,7 +174,7 @@ mod gemm_module {
     }
 }
 
-fn test_gemm(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_gemm(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 4: Matrix Multiplication (GEMM) ===");
     use cutile::api;
     use cutile::DType;
@@ -216,7 +216,7 @@ mod softmax_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &mut Tensor<f32, { [BM, BN] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
             tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
@@ -227,7 +227,7 @@ mod softmax_module {
     }
 }
 
-fn test_softmax(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_softmax(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 5: Fused Softmax ===");
     use softmax_module::softmax;
 
@@ -350,7 +350,7 @@ mod fmha_module {
     }
 }
 
-fn test_flash_attention(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_flash_attention(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 6: Fused Multihead Attention ===");
     use fmha_module::fmha;
 
@@ -408,7 +408,7 @@ fn test_flash_attention(stream: &Arc<CudaStream>) -> Result<(), Error> {
 // ============================================================================
 // Tutorial 7: Intro to Async (sync equivalent — DeviceOp composition)
 // ============================================================================
-fn test_async_composition(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_async_composition(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 7: Intro to Async (DeviceOp Composition) ===");
     use vector_add_module::add;
 
@@ -501,7 +501,7 @@ mod mlp_module {
     }
 }
 
-fn test_data_parallel_mlp(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_data_parallel_mlp(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 8: Data Parallel MLP ===");
     use cutile::api;
     use cutile::DType;
@@ -596,7 +596,7 @@ mod pointer_add_module {
     }
 }
 
-fn test_pointer_addition(stream: &Arc<CudaStream>) -> Result<(), Error> {
+fn test_pointer_addition(stream: &Arc<Stream>) -> Result<(), Error> {
     println!("=== Tutorial 9: Pointer Addition ===");
     use pointer_add_module::add_ptr;
 
@@ -635,8 +635,8 @@ fn test_pointer_addition(stream: &Arc<CudaStream>) -> Result<(), Error> {
 fn main() -> Result<(), Error> {
     println!("cuTile Rust Book Examples - Verification Suite\n");
 
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     test_hello_world(&stream)?;
     test_vector_addition(&stream)?;

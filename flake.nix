@@ -23,7 +23,10 @@
           inherit system overlays;
         };
 
-        # CUDA 13.2 fetched from nvidia since not available in nixpkgs
+        isDarwin = pkgs.stdenv.isDarwin;
+
+        # CUDA 13.2 fetched from nvidia (headers needed on all platforms for
+        # bindgen type generation; runtime libraries only needed on Linux)
         cudaRedistBase = "https://developer.download.nvidia.com/compute/cuda/redist";
         fetchCudaRedist =
           { name, version, sha256 }:
@@ -182,21 +185,22 @@
           LLVM_INCLUDE_DIRS = "${llvmIncludeRoot}/include";
           LLVM_LIBRARY_DIR = "${llvmPkgs.llvm.lib}/lib";
           LIBCLANG_PATH = "${llvmPkgs.libclang.lib}/lib";
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+          MLIR_SYS_210_PREFIX = "${llvmInstall}";
+          TABLEGEN_210_PREFIX = "${llvmInstall}";
+
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
             pkgs.libffi
             pkgs.libxml2
             llvmPkgs.libclang.lib
             llvmPkgs.llvm.lib
             llvmPkgs.mlir
-            cudaToolkit
-          ];
-          MLIR_SYS_210_PREFIX = "${llvmInstall}";
-          TABLEGEN_210_PREFIX = "${llvmInstall}";
+          ] ++ pkgs.lib.optionals (!isDarwin) [ cudaToolkit ]);
 
           shellHook = ''
-            export PATH="${cudaToolkit}/bin:${llvmInstall}/bin:$PATH"
+            export PATH="${llvmInstall}/bin:$PATH"
             export CMAKE_PREFIX_PATH="${llvmInstall}:$CMAKE_PREFIX_PATH"
-
+          '' + pkgs.lib.optionalString (!isDarwin) ''
+            export PATH="${cudaToolkit}/bin:$PATH"
             # GPU driver libs: NixOS provides /run/opengl-driver/lib; on other
             # distros, symlink just the NVIDIA libs into a temp dir so we don't
             # pull in the host glibc.
@@ -218,6 +222,7 @@
                 rm -rf "$_nv_drv_dir"
               fi
             fi
+          '' + ''
 
             if [ ! -d cuda-tile-rs/cuda-tile/.git ] && [ ! -f cuda-tile-rs/cuda-tile/CMakeLists.txt ]; then
               echo "Initializing cuda-tile submodule..."
@@ -226,9 +231,14 @@
 
             echo ""
             echo "cutile-rs dev shell"
-            echo " ✓ CUDA  $CUDA_TOOLKIT_PATH"
+            echo " ${if isDarwin then "~" else "✓"} CUDA  ${if isDarwin then "(headers only — no GPU required)" else "$CUDA_TOOLKIT_PATH"}"
             echo " ✓ LLVM  $(llvm-config --version 2>/dev/null)"
             echo " ✓ Rust  $(rustc --version 2>/dev/null | awk '{print $2}')"
+          '' + pkgs.lib.optionalString isDarwin ''
+            echo ""
+            echo "macOS: compile-only mode. Run:"
+            echo "  cargo run -p cutile-examples --example compile_only"
+          '' + ''
             echo ""
           '';
         };

@@ -14,7 +14,9 @@ publish = false
 
 [dependencies]
 cutile-compiler = { workspace = true }
+cutile-ir = { workspace = true }
 cutile = { workspace = true }
+cuda-bindings = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 tokio = { workspace = true }

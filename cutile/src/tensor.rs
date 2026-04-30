@@ -197,7 +197,7 @@
 //! ## See Also
 //!
 //! - [`api`](crate::api) - High-level tensor creation functions
-//! - [`tile_async`](crate::tile_async) - Async execution infrastructure
+//! - [`tile_kernel`](crate::tile_kernel) - Async execution infrastructure
 //! - [`core`](crate::core) - GPU kernel DSL types
 
 use crate::api::{copy_device_to_host_vec, copy_host_vec_to_device};
@@ -207,7 +207,6 @@ use anyhow::Result;
 use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
-use cuda_core::malloc_async;
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::{DType, DTypeId};
 use std::fmt::Debug;
@@ -619,7 +618,7 @@ impl<T: DType> Tensor<T> {
             let num_bytes = len * size_of::<T>();
             value(MaybeUninit::new(unsafe {
                 Self::from_raw_parts(
-                    malloc_async(num_bytes, ctx.get_cuda_stream()),
+                    ctx.alloc_async(num_bytes),
                     num_bytes,
                     ctx.get_device_id(),
                     vec![len as i32],
@@ -805,7 +804,7 @@ impl<T: DType> ToHostVec<T> for &Arc<Tensor<T>> {
 
 // ── Reshape trait ────────────────────────────────────────────────────────────
 
-/// Reshape a tensor or Arc<Tensor> to a new shape.
+/// Reshape a tensor or `Arc<Tensor>` to a new shape.
 ///
 /// - On `Tensor<T>`: consumes and returns a reshaped `Tensor<T>`.
 /// - On `&Arc<Tensor<T>>`: creates a new `Arc` sharing device memory.

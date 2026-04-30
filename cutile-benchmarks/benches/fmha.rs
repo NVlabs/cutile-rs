@@ -4,7 +4,7 @@
  */
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::api::{randn_f16, zeros};
 use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
@@ -127,8 +127,14 @@ mod kernels {
             // Compute softmax(mask(scale(q @ k^T))) @ v.
             // let v_tile: Tile<f16, {[1, 1, BN, D]}> = v_part.load([batch_idx, kv_head_idx, j, 0i32]);
             // TODO (hme): Separate this into safe/unsafe unchecked versions.
-            let v_tile: Tile<f16, { [1, 1, BN, D] }> =
-                load_from_view(&v_part, [batch_idx, kv_head_idx, j, 0i32], Some(4), false);
+            let v_tile: Tile<f16, { [1, 1, BN, D] }> = load_view_tko(
+                &v_part,
+                [batch_idx, kv_head_idx, j, 0i32],
+                ordering::Weak,
+                scope::TileBlock,
+                Some(4),
+                tma::Enabled,
+            );
             let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
             acc = mma(p, v_tile, acc);
             m_i = m_ij;
@@ -153,8 +159,8 @@ fn ocean_fmha(c: &mut Criterion) {
             .measurement_time(Duration::from_millis(2000));
     }
 
-    let ctx = CudaContext::new(0).expect("Failed to get context.");
-    let stream = ctx.new_stream().expect("Failed to get stream.");
+    let device = Device::new(0).expect("Failed to get device.");
+    let stream = device.new_stream().expect("Failed to get stream.");
 
     // This is what the ocean benchmark uses.
     let context_lengths = (0..6).map(|i| (2usize.pow(10 + i),)).collect::<Vec<_>>();
@@ -232,7 +238,7 @@ fn ocean_fmha(c: &mut Criterion) {
                         out.grid().expect("Invalid grid."),
                         ((b * h) as u32, (m / bm) as u32, 1)
                     );
-                    stream.synchronize().expect("Failed to synchronize.");
+                    unsafe { stream.synchronize() }.expect("Failed to synchronize.");
                     let start = Instant::now();
                     for _i in 0..iters {
                         let (_, _, _, out_local, _, _) = unsafe {
@@ -250,7 +256,7 @@ fn ocean_fmha(c: &mut Criterion) {
                         };
                         out = out_local;
                     }
-                    stream.synchronize().expect("Failed to synchronize.");
+                    unsafe { stream.synchronize() }.expect("Failed to synchronize.");
                     start.elapsed()
                 });
             },

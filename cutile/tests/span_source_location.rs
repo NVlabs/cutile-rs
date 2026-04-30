@@ -63,7 +63,7 @@ mod span_error_module {
 #[test]
 fn untyped_literal_error_has_correct_source_location() {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::new(span_error_module::_module_asts())
+        let modules = CUDATileModules::from_kernel(span_error_module::__module_ast_self())
             .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
@@ -205,7 +205,7 @@ mod span_comments_module {
 #[test]
 fn comments_do_not_break_span_tracking() {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::new(span_comments_module::_module_asts())
+        let modules = CUDATileModules::from_kernel(span_comments_module::__module_ast_self())
             .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(

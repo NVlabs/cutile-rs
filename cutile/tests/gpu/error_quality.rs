@@ -76,12 +76,8 @@ mod error_quality_untyped_literal {
     }
 }
 
-fn compile_and_get_error(
-    module_asts: Vec<Module>,
-    module_name: &str,
-    function_name: &str,
-) -> JITError {
-    let modules = CUDATileModules::new(module_asts).expect("Failed to create CUDATileModules");
+fn compile_and_get_error(kernel: Module, module_name: &str, function_name: &str) -> JITError {
+    let modules = CUDATileModules::from_kernel(kernel).expect("Failed to create CUDATileModules");
     let gpu_name = get_gpu_name(0);
     let compiler = CUDATileFunctionCompiler::new(
         &modules,
@@ -111,7 +107,7 @@ fn compile_and_get_error(
 fn untyped_literal_error_message_quality() {
     common::with_test_stack(|| {
         let err = compile_and_get_error(
-            error_quality_untyped_literal::_module_asts(),
+            error_quality_untyped_literal::__module_ast_self(),
             "error_quality_untyped_literal",
             "untyped_kernel",
         );
@@ -155,7 +151,7 @@ fn untyped_literal_error_message_quality() {
 fn untyped_literal_error_location_points_to_this_file() {
     common::with_test_stack(|| {
         let err = compile_and_get_error(
-            error_quality_untyped_literal::_module_asts(),
+            error_quality_untyped_literal::__module_ast_self(),
             "error_quality_untyped_literal",
             "untyped_kernel",
         );

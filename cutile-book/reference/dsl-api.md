@@ -220,6 +220,8 @@ fn kernel(
 - `tensor.store(tile)` — Store a tile to the tensor
 - `tensor.load_tile(shape, [indices])` — Load a tile at a specific partition index
 - `tensor.partition(shape)` — Create a `Partition` view for block-indexed loading
+- `tensor.partition_permuted(shape, dim_map)` — Create a permuted `Partition` view
+- `unsafe tensor.partition_mut(shape)` — Create a mutable `PartitionMut` view
 
 ### Partition / PartitionMut
 
@@ -335,6 +337,39 @@ Trait implemented by all scalar types usable in tiles:
 
 ## Operations
 
+### Tile IR Operation Mapping
+
+The functions in this reference are the Rust DSL surface for
+[CUDA Tile IR operations](https://docs.nvidia.com/cuda/tile-ir/latest/sections/operations.html).
+Most low-level operations in `cutile::core` map directly to a `cuda_tile.*`
+operation. The Rust name is usually either the Tile IR operation name without
+the `cuda_tile.` prefix, or a small wrapper with a Rust-oriented name and type
+signature.
+
+Examples:
+
+| Rust DSL surface | Tile IR operation family |
+|---|---|
+| `constant`, `iota`, `broadcast`, `reshape`, `permute`, `cat`, `extract`, `select` | Core tile ops such as `cuda_tile.constant`, `cuda_tile.iota`, `cuda_tile.broadcast`, `cuda_tile.reshape`, `cuda_tile.permute`, `cuda_tile.cat`, `cuda_tile.extract`, `cuda_tile.select` |
+| `addf`, `mulf`, `fma`, `exp`, `sqrt`, `maxf`, `cmpf` and operator overloads | Floating-point ops such as `cuda_tile.addf`, `cuda_tile.mulf`, `cuda_tile.fma`, `cuda_tile.exp`, `cuda_tile.sqrt`, `cuda_tile.maxf`, `cuda_tile.cmpf` |
+| `addi`, `muli`, `shli`, `shri`, `andi`, `ori`, `xori`, `cmpi` and operator overloads | Integer and bitwise ops such as `cuda_tile.addi`, `cuda_tile.muli`, `cuda_tile.shli`, `cuda_tile.andi`, `cuda_tile.cmpi` |
+| `convert_tile`, `bitcast`, `exti`, `trunci`, `int_to_ptr`, `ptr_to_int`, `ptr_to_ptr` | Conversion ops such as `cuda_tile.bitcast`, `cuda_tile.exti`, `cuda_tile.trunci`, `cuda_tile.int_to_ptr`, `cuda_tile.ptr_to_int`, `cuda_tile.ptr_to_ptr` |
+| `load_ptr_tko`, `store_ptr_tko`, `atomic_rmw_tko`, `atomic_cas_tko`, `new_token_unordered`, `join_tokens` | Memory, atomic, and token ops such as `cuda_tile.load_ptr_tko`, `cuda_tile.store_ptr_tko`, `cuda_tile.atomic_rmw_tko`, `cuda_tile.atomic_cas_tko`, `cuda_tile.make_token`, `cuda_tile.join_tokens` |
+| `load_tile_like`, `tensor.load_tile`, `tensor.store`, partition and tensor view helpers | View ops such as `cuda_tile.load_view_tko`, `cuda_tile.store_view_tko`, `cuda_tile.make_tensor_view`, `cuda_tile.make_partition_view`, plus compiler-generated shape/stride plumbing |
+| `assume_div_by`, `assume_bounds_*`, `cuda_tile_print!`, `cuda_tile_assert!` | Compiler and debugging ops such as `cuda_tile.assume`, `cuda_tile.print_tko`, and `cuda_tile.assert` |
+
+Some Tile IR operations are intentionally compiler-owned rather than public DSL
+functions. `cuda_tile.module`, `cuda_tile.entry`, `cuda_tile.return`, and
+control-flow operations are generated from Rust modules, entry attributes,
+`return`, `if`, `for`, `loop`, `break`, and `continue` syntax. This keeps user
+code Rust-shaped while still lowering to the corresponding Tile IR operations.
+
+Tile IR attributes such as memory ordering, memory scope, comparison predicate,
+rounding mode, overflow behavior, and flush-to-zero mode are represented as
+Rust marker types and traits where possible. This lets the Rust type checker
+reject unsupported attribute combinations before the JIT compiler lowers the
+operation.
+
 ### Memory: Load and Store
 
 | Function | Signature | Description |
@@ -343,8 +378,7 @@ Trait implemented by all scalar types usable in tiles:
 | `tensor.store(tile)` | `(&mut Tensor<E, S>, Tile<E, S>)` | Store a tile to the tensor |
 | `tensor.load_tile(shape, idx)` | `(&Tensor<E, S>, Shape<R>, [i32; N]) -> Tile<E, R>` | Load at a partition index |
 | `load_tile_mut(tensor)` | `(&mut Tensor<E, S>) -> Tile<E, S>` | Load output tile (convenience) |
-| `load_tile_like_1d(src, dst)` | `(&Tensor, &mut Tensor) -> Tile` | Load from src at dst's position (1D) |
-| `load_tile_like_2d(src, dst)` | `(&Tensor, &mut Tensor) -> Tile` | Load from src at dst's position (2D) |
+| `load_tile_like(src, dst)` | `(&Tensor, &Tensor) -> Tile` | Load from src at dst's tile-block position (rank 1-3) |
 
 ```rust
 // Pattern 1: Direct load/store on mutable tensor
@@ -356,7 +390,7 @@ let pid: (i32, i32, i32) = get_tile_block_id();
 let tile: Tile<f32, { [128] }> = input.load_tile(const_shape![128], [pid.0]);
 
 // Pattern 3: Load-like (positional)
-let tile_x: Tile<f32, { [16, 16] }> = load_tile_like_2d(x, output);
+let tile_x: Tile<f32, { [16, 16] }> = load_tile_like(x, output);
 ```
 
 ### Grid and Block
@@ -438,14 +472,14 @@ let neg_i: Tile<i32, S> = negi(int_tile);
 
 ```rust
 // Softmax numerics: subtract max, exponentiate
-let max_val: Tile<f32, { [1] }> = reduce_max(x, const_shape![1]);
-let shifted: Tile<f32, S> = x - max_val.broadcast(x.shape());
+let max_val: Tile<f32, { [BM] }> = reduce_max(x, 1i32);
+let shifted: Tile<f32, S> = x - max_val.reshape(const_shape![BM, 1]).broadcast(x.shape());
 let softmax_exp: Tile<f32, S> = exp(shifted);
 
 // RMS normalization
 let sq: Tile<f32, S> = x * x;
-let mean_sq: Tile<f32, { [1] }> = reduce_sum(sq, const_shape![1]);
-let rms: Tile<f32, { [1] }> = rsqrt(mean_sq + broadcast_scalar(1e-6f32, const_shape![1]));
+let mean_sq: Tile<f32, { [BM] }> = reduce_sum(sq, 1i32);
+let rms: Tile<f32, { [BM] }> = rsqrt(mean_sq + broadcast_scalar(1e-6f32, mean_sq.shape()));
 
 // Activation functions
 let gelu_approx: Tile<f32, S> = x * (constant(1.0f32, x.shape()) + tanh(x));
@@ -506,31 +540,33 @@ let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, const_shape![16, 1
 | `permute(tile, indices, shape)` | `(Tile<E, A>, Array<I>, Shape<R>) -> Tile<E, R>` | Transpose / permute dimensions |
 | `cat(a, b, dim)` | `(Tile<E, SLhs>, Tile<E, SRhs>, i32) -> Tile<E, SOut>` | Concatenate along a dimension |
 | `extract(tile, offsets, shape)` | `(Tile<E, SIn>, [i32; N], Shape<SOut>) -> Tile<E, SOut>` | Extract a sub-tile |
+| `get_shape_dim(shape, dim_idx)` | `(Shape<S>, i32) -> i32` | Read one runtime dimension from a shape |
 
 ```rust
 let row: Tile<f32, { [128] }> = iota(const_shape![128]);
 let col: Tile<f32, { [128, 1] }> = row.reshape(const_shape![128, 1]);
 let matrix: Tile<f32, { [128, 64] }> = col.broadcast(const_shape![128, 64]);
+let n_cols: i32 = get_shape_dim(matrix.shape(), 1i32);
 ```
 
 ### Reduction and Scan
 
 | Function | Signature | Description |
 |---|---|---|
-| `reduce_sum(tile, shape)` | `Tile<E, S> -> Tile<E, R>` | Sum reduction along axes |
-| `reduce_max(tile, shape)` | `Tile<E, S> -> Tile<E, R>` | Max reduction |
-| `reduce_min(tile, shape)` | `Tile<E, S> -> Tile<E, R>` | Min reduction |
-| `reduce_prod(tile, shape)` | `Tile<E, S> -> Tile<E, R>` | Product reduction |
-| `reduce(tile, shape, f)` | `Tile<E, S> -> Tile<E, R>` | Custom reduction |
-| `scan_sum(tile, axis)` | `Tile<E, S> -> Tile<E, S>` | Inclusive prefix sum |
-| `scan(tile, axis, f)` | `Tile<E, S> -> Tile<E, S>` | Custom inclusive scan |
+| `reduce_sum(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Sum reduction along one dimension |
+| `reduce_max(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Max reduction |
+| `reduce_min(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Min reduction |
+| `reduce_prod(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Product reduction |
+| `reduce(tile, dim, identity, f)` | `(Tile<E, S>, i32, E, Fn(E, E) -> E) -> Tile<E, R>` | Custom reduction |
+| `scan_sum(tile, dim, reverse, identity)` | `(Tile<E, S>, i32, reverse::Mode, E) -> Tile<E, S>` | Prefix sum |
+| `scan(tile, dim, reverse, identity, f)` | `(Tile<E, S>, i32, reverse::Mode, E, Fn(E, E) -> E) -> Tile<E, S>` | Custom prefix scan |
 
 ```rust
-// Sum a [128, 64] tile to [1, 64] (reduce along axis 0)
-let col_sums: Tile<f32, { [1, 64] }> = reduce_sum(matrix, const_shape![1, 64]);
+// Sum each row of a [128, 64] tile to [128] (reduce along axis 1)
+let row_sums: Tile<f32, { [128] }> = reduce_sum(matrix, 1i32);
 
-// Max of a 1D tile to a scalar
-let max_val: Tile<f32, { [1] }> = reduce_max(row, const_shape![1]);
+// Prefix sum along axis 0
+let prefix: Tile<f32, { [128] }> = scan_sum(row, 0i32, reverse::Forward, 0.0f32);
 ```
 
 ### Matrix Multiply
@@ -550,42 +586,96 @@ for k in 0i32..(K/BK) {
 }
 ```
 
-### Memory: Pointer-Based
+### Low-Level Memory Ops
+
+These APIs are close to the Tile IR memory/view operations. Prefer the
+high-level methods above (`tensor.load_tile`, `partition.load`,
+`partition_mut.store`, `load_tile_like`, `tensor.store`) unless you are building
+custom views, raw-pointer kernels, or compiler-facing helpers.
+
+#### View construction and queries
+
+View constructors create typed tensor or partition views from lower-level
+metadata. Mutable view construction and raw tensor construction are `unsafe`
+because the caller must preserve aliasing, layout, and lifetime invariants.
 
 | Function | Signature | Description |
 |---|---|---|
-| `load_ptr_tko(ptrs, ordering, scope, mask, fill, hint)` | `-> (Tile<E, S>, Token)` | Scatter-gather load via pointers |
-| `store_ptr_tko(tile, ptrs, ordering, scope, mask, hint)` | `-> Token` | Scatter-gather store via pointers |
+| `unsafe make_tensor_view(base, shape, strides, token)` | `(PointerTile<*mut E, {[]}>, Shape<D>, Array<C>, Token) -> Tensor<E, D>` | Build a tensor view from a base pointer |
+| `make_partition_view(tensor, tile, padding, dim_map, token)` | `(&Tensor<E, S>, Shape<R>, padding::Mode, dim_map::Mode, Token) -> Partition<E, R>` | Build a read-only partition view |
+| `unsafe make_partition_view_mut(tensor, tile, padding, token)` | `(&Tensor<E, S>, Shape<R>, padding::Mode, Token) -> PartitionMut<E, R>` | Build a mutable partition view |
+| `get_tensor_shape(tensor)` | `&Tensor<E, S> -> [i32; N]` | Query a tensor view's runtime shape |
+| `get_index_space_shape(partition)` | `&Partition<E, S> -> [i32; N]` | Query a partition's tile-grid shape |
+| `get_tensor_token(tensor)` | `&Tensor<E, S> -> Token` | Read a tensor view's memory token |
+| `set_tensor_token(tensor, token)` | `(&Tensor<E, S>, Token)` | Update a tensor view's memory token |
+| `get_partition_token(partition)` | `&Partition<E, S> -> Token` | Read a read-only partition token |
+| `get_partition_token_mut(partition)` | `&PartitionMut<E, S> -> Token` | Read a mutable partition token |
+| `num_tiles(partition, axis)` | `(&Partition<E, S>, i32) -> i32` | Number of tiles along one partition axis |
+| `unsafe load_tensor(ptrs, idx, shape, strides)` | `(&Tensor<i64, S>, [i32; N], Shape<R>, Array<C>) -> Tensor<T, R>` | Load a strided tensor view from an integer pointer tensor |
+
+```rust
+let shape = input.shape();
+let token = get_tensor_token(input);
+let part = make_partition_view(input, shape, padding::None, dim_map::Identity, token);
+let tiles_m: i32 = num_tiles(&part, 0);
+```
+
+#### View loads and stores
+
+These are the direct memory operations on partition views. They expose Tile IR
+ordering, scope, latency, and TMA controls explicitly.
+
+| Function | Signature | Description |
+|---|---|---|
+| `load_view_tko(view, index, ordering, scope, latency, tma)` | `(&Partition<E, S>, [i32; N], O, Sc, Option<i32>, T) -> Tile<E, S>` | Load a tile from a read-only partition |
+| `unsafe load_view_tko_mut(view, index, ordering, scope, latency, tma)` | `(&PartitionMut<E, S>, [i32; N], O, Sc, Option<i32>, T) -> Tile<E, S>` | Load from a mutable partition; unsafe aliasing contract |
+| `unsafe store_view_tko_mut(view, tile, index, ordering, scope, latency, tma)` | `(&mut PartitionMut<E, S>, Tile<E, S>, [i32; N], O, Sc, Option<i32>, T) -> Token` | Store a tile into a mutable partition |
+
+```rust
+let pid = get_tile_block_id();
+let tile: Tile<f32, S> =
+    load_view_tko(&part, [pid.0], ordering::Weak, scope::TileBlock, None, tma::Enabled);
+```
+
+#### Pointer-based loads and stores
+
+| Function | Signature | Description |
+|---|---|---|
+| `load_ptr_tko(ptrs, ordering, Option<scope>, mask, fill, token, Latency<N>)` | `-> (Tile<E, S>, Token)` | Scatter-gather load via pointers |
+| `store_ptr_tko(ptrs, values, ordering, Option<scope>, mask, token, Latency<N>)` | `-> Token` | Scatter-gather store via pointers |
 | `pointer_to_tile(ptr)` | `P -> PointerTile<P, {[]}>` | Convert raw pointer to scalar pointer tile |
 | `tile_to_pointer(ptile)` | `PointerTile<P, {[]}> -> P` | Convert back |
 | `addptr(ptile, offset)` | Offset a pointer tile by a scalar |
 | `addptr_tile(ptile, offsets)` | Offset a pointer tile by an index tile |
+| `broadcast_ptr(ptile, shape)` | Broadcast a pointer tile to a larger shape |
+| `reshape_ptr(ptile, shape)` | Reshape a pointer tile |
 
 ```rust
 let base: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
 let ptrs: PointerTile<*mut f32, { [128] }> = base.broadcast(const_shape![128]).offset_tile(offsets);
-let (values, token): (Tile<f32, { [128] }>, Token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None);
+let (values, token): (Tile<f32, { [128] }>, Token) =
+    load_ptr_tko(ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 ```
 
-### Memory: Atomics
+#### Atomics
 
 | Function | Signature | Description |
 |---|---|---|
-| `atomic_rmw_tko(ptrs, vals, op, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic read-modify-write |
+| `atomic_rmw_tko(ptrs, vals, mode, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic read-modify-write |
 | `atomic_cas_tko(ptrs, cmp, new, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic compare-and-swap |
 
-**RMW operations:** `"add"`, `"addf"`, `"and"`, `"or"`, `"xor"`, `"max"`, `"min"`, `"xchg"`
+**RMW modes:** `atomic::{Add, AddF, And, Or, Xor, Max, Min, Umax, Umin, Xchg}`
 
-**Memory orderings:** `"relaxed"`, `"acquire"`, `"release"`, `"acq_rel"`
+**Memory orderings:** `ordering::{Relaxed, Acquire, Release, AcqRel}` (atomics; load/store also accept `Weak`)
 
-**Scopes:** `"device"`, `"sys"` (system)
+**Scopes:** `scope::{TileBlock, Device, System}`
 
 ```rust
-atomic_rmw_tko(ptrs, increments, "add", "relaxed", "device", None, None);
-atomic_cas_tko(ptrs, expected, desired, "acq_rel", "sys", None, None);
+atomic_rmw_tko(ptrs, increments, atomic::Add, ordering::Relaxed, scope::Device, None, None);
+atomic_cas_tko(ptrs, expected, desired, ordering::AcqRel, scope::System, None, None);
 ```
 
-### Memory: Tokens
+#### Tokens
 
 Tokens track ordering dependencies between memory operations. A token returned from a load guarantees that the load has completed before any operation that consumes that token. `join_tokens` merges multiple tokens into one, ensuring all joined operations complete before the result token is used.
 
@@ -602,27 +692,28 @@ let token: Token = new_token_unordered();
 
 // Load returns a new token guaranteeing the load completed
 let (data, load_token): (Tile<f32, { [128] }>, Token) =
-    load_ptr_tko(src_ptrs, "weak", "tl_blk", None, None, None);
+    load_ptr_tko(src_ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 
 // Compute on the loaded data
 let result: Tile<f32, { [128] }> = data * data;
 
 // Store uses the load token: waits for the load before writing
 let store_token: Token =
-    store_ptr_tko(result, dst_ptrs, "weak", "tl_blk", None, None);
+    store_ptr_tko(dst_ptrs, result, ordering::Weak, None::<scope::TileBlock>, None, Some(load_token), Latency::<0>);
 ```
 
 ```rust
 // Join tokens from two independent loads before a dependent store:
 let (a_data, a_token): (Tile<f32, { [128] }>, Token) =
-    load_ptr_tko(a_ptrs, "weak", "tl_blk", None, None, None);
+    load_ptr_tko(a_ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 let (b_data, b_token): (Tile<f32, { [128] }>, Token) =
-    load_ptr_tko(b_ptrs, "weak", "tl_blk", None, None, None);
+    load_ptr_tko(b_ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 
 // Both loads must complete before the store
 let combined: Token = join_tokens(&[a_token, b_token]);
 let result: Tile<f32, { [128] }> = a_data + b_data;
-let _: Token = store_ptr_tko(result, out_ptrs, "weak", "tl_blk", None, None);
+let _: Token =
+    store_ptr_tko(out_ptrs, result, ordering::Weak, None::<scope::TileBlock>, None, Some(combined), Latency::<0>);
 ```
 
 ### Bitwise
@@ -654,12 +745,17 @@ let toggled: Tile<i32, S> = xori(x, mask);
 |---|---|---|
 | `convert_tile(tile)` | `Tile<FROM, S> -> Tile<TO, S>` | Convert element type |
 | `convert_scalar(x)` | `impl Scalar -> S` | Convert scalar type |
+| `scalar_to_tile(x)` | `impl Scalar -> Tile<E, {[]}>` | Wrap a scalar in a rank-0 tile |
+| `tile_to_scalar(tile)` | `Tile<E, {[]}> -> S` | Convert a rank-0 tile back to a scalar |
+| `ftof(tile, rounding)` | `Tile<EIn, S> -> Tile<EOut, S>` | Float-to-float conversion with rounding mode |
+| `ftoi(tile, rounding)` | `Tile<EIn, S> -> Tile<EOut, S>` | Float-to-integer conversion with rounding mode |
+| `itof(tile, rounding)` | `Tile<EIn, S> -> Tile<EOut, S>` | Integer-to-float conversion with rounding mode |
 | `bitcast(tile)` | `Tile<EIn, S> -> Tile<EOut, S>` | Reinterpret bits (no conversion) |
 | `exti(tile)` | `Tile<EIn, S> -> Tile<EOut, S>` | Extend integer (sign/zero) |
-| `trunci(tile)` | `Tile<EIn, S> -> Tile<EOut, S>` | Truncate integer |
-| `int_to_ptr(tile)` | `Tile<SRC_T, S> -> Tile<PTR_T, S>` | Integer to pointer |
-| `ptr_to_int(tile)` | `Tile<E, S> -> Tile<i64, S>` | Pointer to integer |
-| `ptr_to_ptr(tile)` | `Tile<EIn, S> -> Tile<EOut, S>` | Pointer cast |
+| `trunci(tile, overflow)` | `Tile<EIn, S> -> Tile<EOut, S>` | Truncate integer with overflow mode |
+| `int_to_ptr(tile)` | `Tile<SRC_T, S> -> PointerTile<*mut PTR_T, S>` | Integer to pointer |
+| `ptr_to_int(ptrs)` | `PointerTile<*mut E, S> -> Tile<E, S>` | Pointer to integer tile |
+| `ptr_to_ptr(ptrs)` | `PointerTile<*mut EIn, S> -> PointerTile<*mut EOut, S>` | Pointer cast |
 
 ```rust
 // Float to int conversion
@@ -673,7 +769,7 @@ let bits: Tile<u32, { [128] }> = bitcast(float_tile);  // 0x3F800000
 // Integer extension and truncation
 let small: Tile<i16, { [64] }> = constant(42i16, const_shape![64]);
 let wide: Tile<i32, { [64] }> = exti(small);     // sign-extend i16 -> i32
-let narrow: Tile<i16, { [64] }> = trunci(wide);  // truncate i32 -> i16
+let narrow: Tile<i16, { [64] }> = trunci(wide, overflow::None);
 ```
 
 ### Compiler Hints
@@ -715,4 +811,3 @@ cuda_tile_assert!(len > 0, "Length must be positive");
 // Print scalars for debugging (runs on every block, so output may interleave)
 cuda_tile_print!("offset = {}\n", pid.0 * 128);
 ```
-

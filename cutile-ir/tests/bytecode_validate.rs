@@ -113,7 +113,7 @@ fn run_tileiras(bc: &[u8], name: &str) {
         std::thread::current().id()
     ));
     std::fs::write(&tmp, bc).expect("write bc file");
-    match std::process::Command::new("tileiras")
+    match std::process::Command::new(tileiras_binary())
         .arg("--gpu-name")
         .arg("sm_120")
         .arg("-o")
@@ -133,6 +133,13 @@ fn run_tileiras(bc: &[u8], name: &str) {
             std::fs::remove_file(&tmp).ok();
         }
     }
+}
+
+fn tileiras_binary() -> std::path::PathBuf {
+    std::env::var_os("CUTILE_TILEIRAS_PATH")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("tileiras"))
 }
 
 // =========================================================================

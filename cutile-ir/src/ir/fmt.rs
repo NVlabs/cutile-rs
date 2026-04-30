@@ -265,7 +265,12 @@ impl<'a> ModulePrinter<'a> {
             }
 
             // ---- Pattern B: Binary same-type `$lhs, $rhs attr-dict : type($result)` ----
-            Opcode::AndI | Opcode::OrI | Opcode::XOrI | Opcode::RemF | Opcode::MulhiI => {
+            Opcode::AndI
+            | Opcode::Atan2
+            | Opcode::OrI
+            | Opcode::XOrI
+            | Opcode::RemF
+            | Opcode::MulhiI => {
                 self.print_binary_result_type(op_id, out);
             }
 
@@ -1916,6 +1921,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         AndI => "andi",
         Assert => "assert",
         Assume => "assume",
+        Atan2 => "atan2",
         AtomicCAS => "atomic_cas_tko",
         AtomicRMW => "atomic_rmw_tko",
         Bitcast => "bitcast",
@@ -1976,7 +1982,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         OrI => "ori",
         Permute => "permute",
         Pow => "pow",
-        Print => "print",
+        Print => "print_tko",
         PtrToInt => "ptr_to_int",
         PtrToPtr => "ptr_to_ptr",
         Reduce => "reduce",

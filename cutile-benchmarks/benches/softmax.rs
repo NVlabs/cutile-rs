@@ -4,7 +4,7 @@
  */
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile::api::{randn_f16, zeros};
 use cutile::core::f16;
 use cutile::tensor::{IntoPartition, Partition, Tensor};
@@ -24,7 +24,7 @@ mod kernels {
         x: &Tensor<f16, { [-1, -1] }>,
         y: &mut Tensor<f16, { [BM, BN] }>,
     ) {
-        let tile_x: Tile<f16, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f16, { [BM, BN] }> = load_tile_like(x, y);
         let tile_x_max: Tile<f16, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f16, { [BM, BN] }> =
             tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
@@ -49,8 +49,8 @@ fn softmax(c: &mut Criterion) {
             .measurement_time(Duration::from_millis(2000));
     }
 
-    let ctx = CudaContext::new(0).expect("Failed to get context.");
-    let stream = ctx.new_stream().expect("Failed to get stream.");
+    let device = Device::new(0).expect("Failed to get device.");
+    let stream = device.new_stream().expect("Failed to get stream.");
 
     let shapes = (0..6)
         .map(|i| (4096, 2usize.pow(10 + i)))
@@ -82,7 +82,7 @@ fn softmax(c: &mut Criterion) {
                         .sync_on(&stream)
                         .expect("Failed.")
                         .partition([bm, bn]);
-                    stream.synchronize().expect("Failed to synchronize.");
+                    unsafe { stream.synchronize() }.expect("Failed to synchronize.");
                     let start = Instant::now();
                     for _i in 0..iters {
                         unsafe {
@@ -93,7 +93,7 @@ fn softmax(c: &mut Criterion) {
                             out = local_out;
                         }
                     }
-                    stream.synchronize().expect("Failed to synchronize.");
+                    unsafe { stream.synchronize() }.expect("Failed to synchronize.");
                     start.elapsed()
                 });
             },

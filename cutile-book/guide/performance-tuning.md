@@ -7,7 +7,7 @@ GPU performance optimization balances three concerns: memory bandwidth (moving d
 :alt: The GPU performance triangle showing memory bandwidth, compute utilization, and occupancy
 ```
 
-For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Integrating with CUDA C++](interoperability.md).
+For algorithms where peak performance requires warp-level control or integration with hand-tuned CUDA C++ kernels, see [Interoperability](interoperability.md).
 
 ---
 
@@ -38,15 +38,19 @@ use cutile::tile_kernel::CompileOptions;
 let result = my_kernel(input)
     .compile_options(CompileOptions::default().occupancy(4).num_cta_in_cga(2))
     .grid(grid)
-    .await;
+    .await?;
 ```
 
 Per-op hints (`latency`, `disallow_tma`) apply to individual load/store operations:
 
 ```rust
-let tile: Tile<f32, S> = load_from_view(&partition, idx, Some(4), false);
-unsafe { store_to_view_mut(&mut partition, tile, idx, None, true); }
-let (values, token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Some(4));
+let tile: Tile<f32, S> =
+    load_view_tko(&partition, idx, ordering::Weak, scope::TileBlock, Some(4), tma::Enabled);
+unsafe {
+    store_view_tko_mut(&mut partition, tile, idx, ordering::Weak, scope::TileBlock, None, tma::Disabled);
+}
+let (values, token) =
+    load_ptr_tko(ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<4>);
 ```
 
 | Level | Hint | Description | Default |
@@ -54,7 +58,7 @@ let (values, token) = load_ptr_tko(ptrs, "weak", "tl_blk", None, None, None, Som
 | Entry | `max_divisibility` | Cap on auto-inferred alignment divisor | 16 |
 | Entry | `num_cta_in_cga` | CTAs in Cooperative Group Array | 1 |
 | Entry | `occupancy` | Target occupancy level | Auto |
-| Per-op | `latency` | Latency optimization hint (`Option<i32>`) | `None` (compiler decides) |
+| Per-op | `latency` | Latency optimization hint (`Option<i32>` for view ops, `Latency<N>` for pointer ops) | Compiler decides / `Latency<0>` |
 | Per-op | `disallow_tma` | Disable Tensor Memory Accelerator for this op | `false` (TMA allowed) |
 
 **Tile size** significantly impacts performance. Larger tiles mean fewer memory transactions but more registers per block, reducing occupancy. General guidelines:
@@ -120,7 +124,7 @@ The tradeoff: every new combination of const values triggers a JIT recompilation
 
 ## Memory Optimization
 
-**Coalesced access** — adjacent threads reading adjacent memory locations — is how the GPU memory system is designed to be used. cuTile Rust's tile load operations automatically generate coalesced access patterns, so you get this for free from `load_tile_like_2d`, `Partition::load`, and the standard loading APIs.
+**Coalesced access** — adjacent threads reading adjacent memory locations — is how the GPU memory system is designed to be used. cuTile Rust's tile load operations automatically generate coalesced access patterns, so you get this for free from `load_tile_like`, `Partition::load`, and the standard loading APIs.
 
 **Keep data in registers.** Load once from global memory, compute many times in registers:
 
@@ -138,7 +142,7 @@ fn fused_ops<const S: [i32; 2]>(
     input: &Tensor<f32, {[-1, -1]}>
 ) {
     // Single load from global memory
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     // Multiple operations in registers (free!)
     let normalized = tile - reduce_max(tile, 1i32);
@@ -163,9 +167,9 @@ fn fused<const S: [i32; 2]>(
     b: &Tensor<f32, {[-1, -1]}>,
     c: &Tensor<f32, {[-1, -1]}>
 ) {
-    let tile_a = load_tile_like_2d(a, w);
-    let tile_b = load_tile_like_2d(b, w);
-    let tile_c = load_tile_like_2d(c, w);
+    let tile_a = load_tile_like(a, w);
+    let tile_b = load_tile_like(b, w);
+    let tile_c = load_tile_like(c, w);
 
     // All in registers — no intermediate memory traffic
     let y = tile_a + tile_b;
@@ -182,19 +186,21 @@ For the full memory hierarchy model and arithmetic intensity analysis, see [Wher
 
 ## Compute Optimization
 
-**Tensor Cores** deliver massive throughput for matrix operations when shapes align. cuTile Rust automatically uses them when matrix dimensions are divisible by 16 (for `f16`/`bf16`) or 8 (for `tf32`), and element types are `f16`, `bf16`, or `tf32`:
+**Tensor Cores** deliver massive throughput for matrix operations when shapes align. Express matrix multiply through `mma` with compatible `[M, K]`, `[K, N]`, and `[M, N]` tile shapes; the compiler lowers supported dtype/shape combinations to Tensor Core instructions:
 
 ```rust
 #[cutile::entry()]
-fn tensor_core_matmul<const M: i32, const N: i32>(
-    c: &mut Tensor<f16, {[M, N]}>,  // f16 enables Tensor Cores
+fn tensor_core_matmul<const M: i32, const N: i32, const K: i32>(
+    c: &mut Tensor<f32, {[M, N]}>,  // f32 accumulator
     a: &Tensor<f16, {[-1, -1]}>,
     b: &Tensor<f16, {[-1, -1]}>
 ) {
-    let tile_a = load_tile_like_2d(a, c);
-    let tile_b = load_tile_like_2d(b, c);
+    let part_a = a.partition(const_shape![M, K]);
+    let part_b = b.partition(const_shape![K, N]);
+    let pid: (i32, i32, i32) = get_tile_block_id();
+    let tile_a = part_a.load([pid.0, 0i32]);
+    let tile_b = part_b.load([0i32, pid.1]);
 
-    // MMA automatically uses Tensor Cores
     let acc = constant(0.0f32, c.shape());
     let result = mma(tile_a, tile_b, acc);
     c.store(result);
@@ -252,4 +258,4 @@ Pre-ship checklist: tile size appropriate for workload and architecture; memory 
 
 ---
 
-Continue to [Integrating with CUDA C++](interoperability.md) for the escape hatch when tile programming isn't enough, or [Debugging and Profiling](debugging.md) for deeper troubleshooting.
+Continue to [Interoperability](interoperability.md) for the escape hatch when tile programming isn't enough, or [Debugging and Profiling](debugging.md) for deeper troubleshooting.

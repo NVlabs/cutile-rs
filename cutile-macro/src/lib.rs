@@ -4,121 +4,71 @@
  */
 //! Procedural macros for the cuTile Rust GPU kernel framework.
 //!
-//! This crate provides the `#[module]` procedural macro that transforms Rust code into
-//! GPU kernels. It handles the compilation pipeline from high-level Rust syntax to
-//! CUDA-compatible code.
+//! Provides the `#[cutile::module]` attribute that turns a Rust module of
+//! kernel code into a compilable Rust module + a runtime hook that hands
+//! the original (pre-expansion) source AST to the JIT for CUDA codegen.
 //!
-//! ## Overview
-//!
-//! The `cutile-macro` crate is the compiler frontend for cuTile Rust. It performs several
-//! critical transformations:
-//!
-//! 1. **Syntax Validation** - Ensures kernel code follows DSL restrictions
-//! 2. **Variadic Expansion** - Generates specialized versions for different ranks (1D, 2D, 3D, 4D)
-//! 3. **Type System Integration** - Manages compile-time shape information and type metadata
-//! 4. **Launcher Generation** - Creates host-side kernel launcher functions
-//! 5. **AST Construction** - Builds intermediate representation for MLIR compilation
-//!
-//! ## Architecture
-//!
-//! ### Module Processing Pipeline
+//! ## Pipeline (per item inside the module)
 //!
 //! ```text
-//! Rust Source Code
+//! Rust source AST
 //!       ↓
-//! [validate_dsl_syntax] ← Verify DSL restrictions
+//! [validate_dsl_syntax]  ← entry-point parameter checks
 //!       ↓
-//! [rewrite_variadics] ← Expand rank-polymorphic code
+//! [_module]              ← orchestration: route each item by attribute
+//!       ↓ ↓ ↓
+//!   [rank_instantiation]     [shadow_dispatch]      [kernel_launcher_generator]
+//!   rank-instance specialize  CGA-erased trait      emit `#[entry]` launchers
+//!   structs / impls /    + rank-instance impls      (host-side glue)
+//!   inherent fn bodies   + free-fn wrappers
 //!       ↓
-//! [types] ← Type system and metadata
-//!       ↓
-//! [_module] ← Main orchestration
-//!       ↓
-//! [kernel_launcher_generator] ← Generate kernel launchers
-//!       ↓
-//! Expanded Rust + AST builders
+//! Emitted Rust (consumed only by rustc)
+//!  + `_module_asts()`    ← runtime hook returning the original source AST
+//!                          for the JIT compiler
 //! ```
 //!
-//! ### Key Components
+//! Two emitters carry the rank-polymorphism:
 //!
-//! - **[`_module`]** - Main entry point that orchestrates the entire transformation
-//! - **[`validate_dsl_syntax`]** - Validates that kernel code follows DSL restrictions
-//! - **[`rewrite_variadics`]** - Handles variadic types and generates rank-specific versions
-//! - **[`types`]** - Type system including shape inference and metadata management
-//! - **[`kernel_launcher_generator`]** - Generates kernel launcher functions
+//! - `rank_instantiation` handles items whose generics include a CGA
+//!   (`const X: [i32; N]`) by producing one concrete copy per rank instance.
+//! - `shadow_dispatch` handles `#[variadic_op]` fns and `#[variadic_trait]`
+//!   declarations by emitting a single CGA-erased shadow trait plus
+//!   rank-instance impls; user call sites resolve through rustc's normal trait
+//!   dispatch.
 //!
-//! ## The `#[module]` Attribute
+//! The JIT path is independent: at proc-macro time `_module` captures the
+//! verbatim source text via `Span::source_text()`, and `_module_asts()`
+//! re-parses that string at runtime so the JIT works from the user's
+//! original CGA-generic definitions, not the macro-emitted specializations.
 //!
-//! The primary export of this crate is the `module` procedural macro attribute:
+//! ## Example
 //!
 //! ```rust,ignore
 //! #[cutile::module]
 //! mod my_kernels {
 //!     use cutile::core::*;
-//!     
+//!
 //!     #[cutile::entry]
 //!     fn vector_add<T: ElementType, const N: i32>(
 //!         z: &mut Tensor<T, {[N]}>,
 //!         x: &Tensor<T, {[-1]}>,
 //!         y: &Tensor<T, {[-1]}>,
 //!     ) {
-//!         let tile_x = load_tile_like_1d(x, z);
-//!         let tile_y = load_tile_like_1d(y, z);
+//!         let tile_x = load_tile_like(x, z);
+//!         let tile_y = load_tile_like(y, z);
 //!         z.store(tile_x + tile_y);
 //!     }
 //! }
 //! ```
 //!
-//! The macro transforms this into:
-//! - An AST builder function for MLIR compilation
-//! - A direct launcher function (`vector_add`)
-//! - A unified launcher that accepts both values and DeviceOps
-//! - Type metadata for shape inference
-//! - Proper handling of generic parameters
+//! Expands to: rank-instance specializations of `vector_add` for rustc, a
+//! launcher (`VectorAdd { … }` + `vector_add(…)`) for host code, and
+//! `_module_asts()` returning the captured source AST for JIT compilation.
 //!
-//! ## Variadic Type System
+//! ## See also
 //!
-//! One of the key features is support for rank-polymorphic code through variadics.
-//! A single function can be expanded to work with 1D, 2D, 3D, and 4D tensors:
-//!
-//! ```rust,ignore
-//! #[cuda_tile::variadic_op(N=4)]
-//! pub fn load_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>) -> Tile<E, S>
-//! ```
-//!
-//! This generates four specialized versions:
-//! - `load_tile` for 1D: `const S: [i32; 1]`
-//! - `load_tile` for 2D: `const S: [i32; 2]`
-//! - `load_tile` for 3D: `const S: [i32; 3]`
-//! - `load_tile` for 4D: `const S: [i32; 4]`
-//!
-//! ## Compile-Time Shape Tracking
-//!
-//! The macro system tracks tensor shapes at compile time, enabling:
-//! - Static verification of shape compatibility
-//! - Automatic inference of result shapes
-//! - Optimization opportunities for the backend
-//!
-//! ## Safety
-//!
-//! The macro system enforces several safety properties:
-//! - No arbitrary unsafe blocks in kernel code
-//! - Restricted control flow (no early returns in some contexts)
-//! - Validated memory access patterns
-//! - Type-safe tensor operations
-//!
-//! ## Implementation Notes
-//!
-//! This crate makes extensive use of:
-//! - `syn` for parsing Rust syntax
-//! - `quote` for code generation
-//! - `proc_macro2` for token manipulation
-//! - Custom AST types for MLIR generation
-//!
-//! ## See Also
-//!
-//! - `cutile` crate - The runtime library and core types
-//! - `cuda-tile` crate - The MLIR compiler backend
+//! - `cutile` — runtime library and core types.
+//! - `cutile_compiler` — MLIR/PTX backend that consumes `_module_asts()`.
 
 #![allow(dead_code)]
 #![allow(unused_assignments)]
@@ -131,8 +81,8 @@ use proc_macro::TokenStream;
 mod _module;
 mod error;
 mod kernel_launcher_generator;
-mod rewrite_variadics;
-mod types;
+mod rank_instantiation;
+mod shadow_dispatch;
 mod validate_dsl_syntax;
 
 /// Transforms a Rust module into GPU kernel code with kernel launchers.
@@ -164,7 +114,6 @@ mod validate_dsl_syntax;
 ///
 /// ## Attributes
 ///
-/// - `core=true` - Marks this as a core DSL module (for `cutile::core`)
 /// - `tile_rust_crate=true` - Indicates this is within the cutile crate
 ///
 /// ## Generated Code
@@ -178,7 +127,7 @@ mod validate_dsl_syntax;
 /// ## See Also
 ///
 /// - Main crate documentation for usage examples
-/// - [`_module::module`] for implementation details
+/// - `_module::module` for implementation details
 #[proc_macro_attribute]
 pub fn module(attr: TokenStream, input: TokenStream) -> TokenStream {
     _module::module(attr, input)

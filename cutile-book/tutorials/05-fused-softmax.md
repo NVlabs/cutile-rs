@@ -44,11 +44,11 @@ exp(x_i - max) / Σ exp(x_j - max)
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use cutile;
 use cutile::api::arange;
 use cutile::error::Error;
-use cutile::tensor::{IntoPartition, Tensor, ToHostVec, Unpartition};
+use cutile::tensor::{IntoPartition, Reshape, Tensor, ToHostVec, Unpartition};
 use std::sync::Arc;
 
 #[cutile::module]
@@ -57,10 +57,10 @@ mod my_module {
 
     #[cutile::entry()]
     fn softmax<const BM: i32, const BN: i32>(
-        x: &Tensor<f32, { [-1, -1] }>,
         y: &mut Tensor<f32, { [BM, BN] }>,
+        x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
 
         // Find max per row (for numerical stability)
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
@@ -82,17 +82,17 @@ mod my_module {
 use my_module::softmax;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let (m, n) = (4usize, 8usize);
     let (bm, bn) = (2i32, n as i32);
 
     let input: Arc<Tensor<f32>> = arange(m * n).sync_on(&stream)?.into();
-    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape([m, n]).into();
-    let y = input.dup().sync_on(&stream)?.reshape([m, n]).partition([bm, bn]);
+    let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape(&[m, n])?.into();
+    let y = input.dup().sync_on(&stream)?.reshape(&[m, n])?.partition([bm, bn]);
 
-    let (_x, y) = softmax(x, y).sync_on(&stream)?;
+    let (y, _x) = softmax(y, x).sync_on(&stream)?;
     let y_host: Vec<f32> = y.unpartition().to_host_vec().sync_on(&stream)?;
 
     // Each row should sum to 1.0
@@ -146,7 +146,7 @@ Fused kernels load once, compute everything in registers, and store once:
 
 ```rust
 // 1. LOAD once
-let tile = load_tile_like_2d(input, output);
+let tile = load_tile_like(input, output);
 
 // 2. ALL COMPUTATION in registers
 let step1 = reduce_max(tile, axis);
@@ -190,11 +190,11 @@ Add a temperature parameter for softer or sharper distributions:
 
 ```rust
 fn softmax_with_temp<const BM: i32, const BN: i32>(
-    x: &Tensor<f32, {[-1, -1]}>,
     y: &mut Tensor<f32, {[BM, BN]}>,
+    x: &Tensor<f32, {[-1, -1]}>,
     temperature: f32,  // Higher = more uniform, Lower = more peaked
 ) {
-    let tile_x = load_tile_like_2d(x, y);
+    let tile_x = load_tile_like(x, y);
     let scaled = tile_x / temperature.broadcast(y.shape());
     // ... rest of softmax ...
 }

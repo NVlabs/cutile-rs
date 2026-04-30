@@ -114,6 +114,14 @@ write_bytecode_to_file(&module, "kernel.bc")?;
 // Then: tileiras --gpu-name sm_120 -o kernel.cubin kernel.bc
 ```
 
+cuTile's JIT uses `tileiras` from `PATH` by default. Set
+`CUTILE_TILEIRAS_PATH` to force a specific binary, for example:
+
+```bash
+CUTILE_TILEIRAS_PATH=/opt/cuda-tile/bin/tileiras \
+    cargo test -p cutile-compiler
+```
+
 ## Design
 
 ### Arena ownership

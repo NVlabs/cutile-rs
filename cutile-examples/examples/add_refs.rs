@@ -19,8 +19,8 @@ mod my_module {
         x: &Tensor<f32, { [-1] }>,
         y: &Tensor<f32, { [-1] }>,
     ) {
-        let tile_x = load_tile_like_1d(x, z);
-        let tile_y = load_tile_like_1d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
@@ -28,8 +28,8 @@ mod my_module {
 use my_module::add;
 
 fn main() {
-    let ctx = cuda_core::CudaContext::new(0).unwrap();
-    let stream = ctx.new_stream().unwrap();
+    let device = cuda_core::Device::new(0).unwrap();
+    let stream = device.new_stream().unwrap();
 
     let x = api::ones::<f32>(&[32]).sync_on(&stream).unwrap();
     let y = api::ones::<f32>(&[32]).sync_on(&stream).unwrap();

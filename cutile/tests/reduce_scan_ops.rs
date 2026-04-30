@@ -20,7 +20,7 @@ mod reduce_scan_ops_module {
         let tile: Tile<f32, S> = load_tile_mut(output);
 
         // Scan along dimension 0 (cumulative sum) - result has same shape
-        let prefix_sums: Tile<f32, S> = scan_sum(tile, 0i32, false, 0.0f32);
+        let prefix_sums: Tile<f32, S> = scan_sum(tile, 0i32, reverse::Forward, 0.0f32);
 
         // Store the prefix sums
         output.store(prefix_sums);
@@ -86,20 +86,21 @@ mod reduce_scan_ops_module {
         let tile: Tile<f32, S> = load_tile_mut(output);
 
         // Use closure for prefix product
-        let prefix_products: Tile<f32, S> = scan(tile, 0i32, false, 1.0f32, |acc, x| acc * x);
+        let prefix_products: Tile<f32, S> =
+            scan(tile, 0i32, reverse::Forward, 1.0f32, |acc, x| acc * x);
 
         // Store the result
         output.store(prefix_products);
     }
 }
 
-use reduce_scan_ops_module::_module_asts;
+use reduce_scan_ops_module::__module_ast_self;
 
 #[test]
 fn compile_scan_sum_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -142,8 +143,8 @@ fn compile_scan_sum_test() -> () {
 #[test]
 fn compile_reduce_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -189,8 +190,8 @@ fn compile_reduce_closure_test() -> () {
 #[test]
 fn compile_reduce_product_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -236,8 +237,8 @@ fn compile_reduce_product_closure_test() -> () {
 #[test]
 fn compile_reduce_max_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -283,8 +284,8 @@ fn compile_reduce_max_closure_test() -> () {
 #[test]
 fn compile_scan_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,

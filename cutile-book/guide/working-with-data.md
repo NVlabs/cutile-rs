@@ -24,7 +24,7 @@ fn kernel(
     input: &Tensor<f32, {[-1, -1]}>   // Immutable tensor (read-only)
 ) {
     // Tiles: live in registers, created by loading
-    let tile = load_tile_like_2d(input, output);  // Load creates a tile
+    let tile = load_tile_like(input, output);  // Load creates a tile
     let result = tile * 2.0;                      // Operations create new tiles
     output.store(result);                         // Store tile back to tensor
 }
@@ -91,7 +91,7 @@ fn kernel(
     let tile = part.load([pid.0, i]);
 
     // Tile<E, S> — immutable data fragment in registers
-    let tile_a: Tile<f32, { [BM, BN] }> = load_tile_like_2d(input, output);
+    let tile_a: Tile<f32, { [BM, BN] }> = load_tile_like(input, output);
     let result = tile_a * 2.0;
     output.store(result);
 }
@@ -139,8 +139,8 @@ fn add<const S: [i32; 2]>(
     x: &Tensor<f32, {[-1, -1]}>,      // Dynamic: full tensor
     y: &Tensor<f32, {[-1, -1]}>,      // Dynamic: full tensor
 ) {
-    let tile_x = load_tile_like_2d(x, z);  // Load matching z's shape
-    let tile_y = load_tile_like_2d(y, z);
+    let tile_x = load_tile_like(x, z);  // Load matching z's shape
+    let tile_y = load_tile_like(y, z);
     z.store(tile_x + tile_y);
 }
 ```
@@ -211,7 +211,7 @@ let generics = vec![
     "8".to_string(),    // BK
     "128".to_string(),  // K
 ];
-gemm(z, x, y).generics(generics).sync_on(&stream);
+gemm(z, x, y).generics(generics).sync_on(&stream)?;
 ```
 
 Custom element types implement the [`ElementType`](../reference/dsl-api.md#elementtype) trait. The built-in numeric types all implement it.

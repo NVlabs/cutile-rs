@@ -50,7 +50,7 @@ mod gpu_exec_module {
     #[cutile::entry()]
     fn scan_prefix_sum_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let tile: Tile<f32, S> = load_tile_mut(output);
-        let prefix: Tile<f32, S> = scan_sum(tile, 0i32, false, 0.0f32);
+        let prefix: Tile<f32, S> = scan_sum(tile, 0i32, reverse::Forward, 0.0f32);
         output.store(prefix);
     }
 

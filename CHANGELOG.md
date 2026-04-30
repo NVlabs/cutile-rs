@@ -7,53 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-04-26
+
+This release is a broad API and compiler update focused on making kernel
+launching composable, removing the JIT's dependency on external MLIR tooling,
+and aligning the Rust DSL with the Tile IR operation model.
+
 ### Added
-- **DeviceOp combinators**: `.then()`, `.map()`, `.inspect()`, `.first()`, `.last()`, `.shared()`, `.boxed()`, `zip!`/`.unzip()`, following `futures` crate conventions.
-- **Unified kernel launcher**: Single function per kernel via `IntoDeviceOp`. Accepts `Tensor<T>`, `Arc<Tensor<T>>`, `&Tensor<T>`, `DeviceOp`s, and scalars interchangeably.
-- **KernelInput trait**: `&Tensor` params accept `Tensor<T>`, `Arc<Tensor<T>>`, or `&Tensor<T>`. Same type in, same type out. `&Tensor<T>` inputs prevent `tokio::spawn` at compile time via Rust's lifetime system.
-- **KernelOutput trait**: `&mut Tensor` params accept `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>`. Borrowed partitions write in place: No `unpartition()` needed.
-- **CUDA graph capture**: `.graph()` / `.graph_on(stream)` captures any `DeviceOp` into a replayable `CudaGraph<T>`. `graph.update()` + `graph.launch().sync_on(&stream)` for efficient replay. `launch()` returns a `DeviceOp`, composable with `.then()`, `.map()`, etc.
-- **`CudaGraph::scope`**: Scoped graph capture with `&mut` borrows. `s.record(op)` records `GraphNode` ops as graph nodes, releasing borrows between calls.
-- **`GraphNode` trait**: Marker trait for operations safe to record in a CUDA graph (kernel launches, `memcpy`). Allocation ops are excluded at compile time.
-- **Thread-local execution lock**: Enforces "only one DeviceOp may be executing at a time per thread." Prevents cross-stream data races from nested execution (e.g., `sync_on` inside a `then` closure). `unsafe then_unchecked` opts out.
-- **TensorView**: Safe borrowed reshaped view via `tensor.view(&[usize])`. Replaces `unsafe fn view()`.
-- **SharedDeviceOp**: Cloneable, execute-once operations via `.shared()`.
-- **DeviceOpVec**: Heterogeneous collections of boxed operations.
-- **Scheduling**: Simplified `SchedulingPolicy` trait with single `fn next_stream()`. `StreamPoolRoundRobin` (default, 4 streams) and `SingleStream`.
-- **Prelude**: `use cutile::prelude::*` for common imports.
-- **New examples**: `cuda_graphs.rs` (scope-based), `cuda_graphs_deviceop.rs` (combinator-based), `add_refs.rs` (borrow pattern).
-- **cutile-book**: DeviceOp API reference, CUDA Graphs tutorial, tutorials 6-9 in book_examples.rs.
+
+- `DeviceOp` combinators, shared/boxed operations, heterogeneous operation
+  collections, and a unified launcher API for kernels.
+- CUDA graph capture APIs, including scoped graph capture and graph launches
+  that compose as `DeviceOp`s.
+- Safe tensor views and slicing, plus host helpers such as `linspace`, `eye`,
+  and generic random tensor creation.
+- `cutile-ir`, a pure Rust Tile IR representation, formatter, bytecode writer,
+  decoder, validation tests, and round-trip coverage.
+- JIT compiler infrastructure for name resolution, stable node IDs, typed
+  dispatch lowering, type inference groundwork, specialization hints, and
+  linker-based module discovery.
+- Type-safe Tile IR op modifiers for rounding, overflow, memory ordering,
+  scope, padding, TMA, FTZ, NaN propagation, comparison predicates, and related
+  static attributes.
+- `cuda-tile-rs` as an opt-in wrapper around the bundled cuda-tile C++ library
+  and `cuda-tile-translate`.
+- New examples, benchmarks, and book/reference material for DeviceOps, CUDA
+  graphs, interop, tensor slicing, and the updated DSL.
 
 ### Changed
-- **`DeviceOperation` renamed to `DeviceOp`**: Shorter, consistent with `DeviceOp` combinators.
-- **`zeros`/`ones`/`full` take `&[usize]`**: Dynamic shape, no const-generic rank parameter.
-- **`randn`/`rand` are generic**: `randn::<T>(mean, std, shape, seed)` via `RandNormal`/`RandUniform` traits. Per-type functions (`randn_f32`, etc.) removed.
-- **`copy` renamed to `dup`**: Takes `&Tensor<T>` not `&Arc<Tensor<T>>`.
-- **Copy API consolidated**: `copy_from`/`copy_into`/`copy_data_into` replaced by `memcpy(&mut dst, &src)` + `dup(&tensor)`.
-- **Reshape unification**: `reshape(&[usize])` returns `Result`. Old variants (`reshape_dyn`, `try_view`, `view_dyn`, `flatten_view`, etc.) removed.
-- **Tensor fields**: `shape`/`strides` now `pub(crate)` with `shape()`/`strides()` accessors.
-- **Partition uses `[usize]`**: Partition shapes are `[usize; N]`, not `[i32; N]`.
-- **Output-first convention**: `&mut Tensor` is always the first kernel parameter.
-- **Extension trait renames**: `IntoDeviceOperationPartition` → `PartitionOp`, `TensorDeviceOpToHostVec` → `ToHostVecOp`.
-- **`.graph()` / `.graph_on(stream)`**: Follows `sync` / `sync_on` convention.
 
-### Added (cont.)
-- **`api::linspace(start, stop, n)`**: Evenly spaced f32 values between two endpoints.
-- **`api::eye(n)` / `api::eye_rect(rows, cols)`**: Identity and identity-like matrices.
-- **`TensorView::slice()`**: Numpy-style range slicing with offset accumulation. Chained slices compose correctly.
-- **`TensorView` contiguity check**: `view()` on a non-contiguous slice returns an error instead of producing incorrect data.
+- Renamed `DeviceOperation` to `DeviceOp` and simplified scheduling around a
+  smaller `SchedulingPolicy` API.
+- Renamed CUDA wrapper types from `CudaContext`/`CudaStream`/`CudaModule`/
+  `CudaFunction` to `Device`/`Stream`/`Module`/`Function`, with borrowed raw
+  handle constructors for interop.
+- Consolidated tensor copy, reshape, view, random, and creation APIs around
+  dynamic shapes and clearer ownership/borrowing behavior.
+- Updated kernel parameter handling so tensors, borrowed tensors, mutable
+  outputs, partitions, scalars, and `DeviceOp` inputs can be mixed more
+  naturally.
+- Reworked rank-polymorphic macro expansion through shadow dispatch and rank
+  instantiation instead of the old variadic registry machinery.
+- Aligned `_core.rs` with the Tile IR operation groups and expanded named DSL
+  coverage for numeric, conversion, comparison, memory, atomic, view, token,
+  shape, matrix, and misc operations.
+- Collapsed `load_tile_like_*` helpers into a single `load_tile_like`, and
+  reduced partition view construction to `make_partition_view` and
+  `make_partition_view_mut`.
 
 ### Fixed
-- **`arange` multi-block correctness**: `arange` used `get_tile_block_id()` where it needed the partition dimension (`S[0]`), producing wrong values at block boundaries. Hidden by uniform-data tests.
-- **`sync_on` error propagation**: `stream.synchronize()` errors are now returned instead of panicking.
-- **Concurrent stream capture**: Removed `cuCtxSynchronize` call in `CudaContext::new_stream` that caused `DriverError(900)` when creating streams while another thread was capturing a CUDA graph.
+
+- Corrected `arange` behavior across multiple tile blocks.
+- Propagated stream synchronization errors instead of panicking.
+- Fixed concurrent CUDA graph capture failures caused by unnecessary context
+  synchronization.
+- Fixed bytecode defaults and silent-drop cases in the JIT/compiler path.
+- Restored nested marker type path resolution for static op modifiers.
+- Improved compiler, macro, and DSL error messages and source locations.
 
 ### Removed
-- `DeviceOperationArc`, `UnwrapArc` struct, `GlobalSchedulingPolicy` enum, `WithDeviceId` trait.
-- `_op()` generated launcher variant (unified launcher replaces it).
-- `num_mb()`, `num_gb()`, `copy_sync()` on Tensor.
-- `DeviceOperationReshape`, `DeviceOperationDynamicReshape`, `DeviceOperationCopyFrom` traits.
-- cudarc event-tracking infrastructure (`num_streams`, `event_tracking` on `CudaContext`). Unused; caused interference with concurrent captures.
+
+- The external LLVM/MLIR dependency from the default JIT compiler path.
+- The generated `_op()` launcher variant; the unified launcher is now the
+  public entry point.
+- Legacy `DeviceOperation*` aliases, old copy/reshape/view helper traits, and
+  unused cudarc event-tracking infrastructure.
 
 ## [0.0.1] - 2026-04-07
 

@@ -122,7 +122,7 @@ For each Q tile (row block of the output):
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
-use cuda_core::CudaContext;
+use cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api::{randn, zeros};
@@ -140,10 +140,10 @@ mod fmha_module {
         const BN: i32,  // K,V tile size (how many K,V we process at once)
         const D: i32,   // Head dimension
     >(
+        out: &mut Tensor<f32, { [1, BM, D] }>,
         q: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, M, D)
         k: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, N, D)
         v: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, N, D)
-        out: &mut Tensor<f32, { [1, BM, D] }>,
         qk_scale: f32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
@@ -220,8 +220,8 @@ mod fmha_module {
 use fmha_module::fmha;
 
 fn main() -> Result<(), Error> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
     let (batch, heads, seq_len, head_dim) = (2, 4, 128, 64);
     let (bm, bn) = (64, 32);
@@ -241,7 +241,7 @@ fn main() -> Result<(), Error> {
     let qk_scale = 1.0 / f32::sqrt(head_dim as f32);
     let generics = vec![bm.to_string(), bn.to_string(), head_dim.to_string()];
 
-    let (_, _, _, out, _) = fmha(q, k, v, out, qk_scale)
+    let (out, _, _, _, _) = fmha(out, q, k, v, qk_scale)
         .generics(generics)
         .sync_on(&stream)?;
 

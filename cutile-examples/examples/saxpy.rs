@@ -11,7 +11,7 @@ mod my_module {
     #[cutile::entry()]
     fn saxpy<const S: [i32; 2]>(y: &mut Tensor<f32, S>, a: f32, x: &Tensor<f32, { [-1, -1] }>) {
         let tile_a = a.broadcast(y.shape());
-        let tile_x = load_tile_like_2d(x, y);
+        let tile_x = load_tile_like(x, y);
         let tile_y = y.load();
         y.store(tile_a * tile_x + tile_y);
     }
@@ -22,9 +22,9 @@ use my_module::saxpy;
 // TODO (hme): Answer question about whether main should return Result<(), ...>
 fn main() -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
-    let ctx = CudaContext::new(0)?;
+    let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.
-    let stream = ctx.new_stream()?;
+    let stream = device.new_stream()?;
     let a = 2.0;
     let input: Arc<Tensor<f32>> = api::arange(2usize.pow(5)).sync_on(&stream)?.into();
     let x: Arc<Tensor<f32>> = input

@@ -79,7 +79,7 @@ pub mod conversion {
         src: &Tensor<SrcType, { [-1] }>,
         dst: &mut Tensor<DstType, S>,
     ) {
-        let src_tile: Tile<SrcType, S> = load_tile_like_1d(src, dst);
+        let src_tile: Tile<SrcType, S> = load_tile_like(src, dst);
         let dst_tile: Tile<DstType, S> = convert_tile(src_tile);
         dst.store(dst_tile);
     }

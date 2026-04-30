@@ -107,6 +107,7 @@ pub enum Opcode {
     TruncI = 0x6B,
     XOrI = 0x6C,
     Yield = 0x6D,
+    Atan2 = 0x6E,
 }
 
 impl Opcode {
@@ -133,13 +134,13 @@ impl Opcode {
             // 0 results
             Assert | Global | Module => Some(0),
             // 1 result
-            AbsF | AbsI | AddF | AddI | AndI | Assume | Bitcast | Broadcast | Cat | Ceil | CmpF
-            | CmpI | Constant | Cos | CosH | DivF | DivI | Exp | Exp2 | ExtI | Floor | Fma
-            | FToF | FToI | GetGlobal | IntToPtr | Iota | IToF | Log | Log2 | MakePartitionView
-            | MakeToken | MaxF | MaxI | MinF | MinI | MmaF | MmaI | MulF | MulhiI | MulI | NegF
-            | NegI | Offset | OrI | Permute | Pow | PtrToInt | PtrToPtr | Reshape | RemF | RemI
-            | Rsqrt | Select | ShLI | ShRI | Sin | SinH | Sqrt | SubF | SubI | Tan | TanH
-            | TruncI | XOrI => Some(1),
+            AbsF | AbsI | AddF | AddI | AndI | Assume | Atan2 | Bitcast | Broadcast | Cat
+            | Ceil | CmpF | CmpI | Constant | Cos | CosH | DivF | DivI | Exp | Exp2 | ExtI
+            | Floor | Fma | FToF | FToI | GetGlobal | IntToPtr | Iota | IToF | Log | Log2
+            | MakePartitionView | MakeToken | MaxF | MaxI | MinF | MinI | MmaF | MmaI | MulF
+            | MulhiI | MulI | NegF | NegI | Offset | OrI | Permute | Pow | PtrToInt | PtrToPtr
+            | Reshape | RemF | RemI | Rsqrt | Select | ShLI | ShRI | Sin | SinH | Sqrt | SubF
+            | SubI | Tan | TanH | TruncI | XOrI => Some(1),
             // 2 results
             AtomicCAS | AtomicRMW | LoadPtrTko => Some(2),
             // 1 result (token)

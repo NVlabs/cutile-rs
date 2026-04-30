@@ -4,617 +4,16 @@
  * Portions of this file are copyright per https://github.com/chelsea0x3b/cudarc
  */
 
-//! CUDA context, stream, event, module, and function wrappers.
-//!
-//! Provides RAII types that manage CUDA driver object lifetimes and expose
-//! safe(r) methods for common operations.
-
-use std::ffi::{c_int, c_uint, c_void, CString};
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-};
+//\! Low-level CUDA driver API wrappers.
+//\!
+//\! Thin `pub(crate)` modules around `cuda_bindings` calls. The public API
+//\! lives in [`crate::runtime`].
 
 use crate::error::*;
-use crate::init;
-
-/// Kernel launch configuration specifying grid, block, and shared memory sizes.
-#[derive(Clone, Copy, Debug)]
-pub struct LaunchConfig {
-    /// Grid dimensions `(x, y, z)` in thread blocks.
-    pub grid_dim: (u32, u32, u32),
-    /// Block dimensions `(x, y, z)` in threads.
-    pub block_dim: (u32, u32, u32),
-    /// Bytes of dynamic shared memory per block.
-    pub shared_mem_bytes: u32,
-}
-
-/// Owns a CUDA primary context and tracks stream/event/error state.
-#[derive(Debug)]
-pub struct CudaContext {
-    pub(crate) cu_device: cuda_bindings::CUdevice,
-    pub(crate) cu_ctx: cuda_bindings::CUcontext,
-    pub(crate) ordinal: usize,
-    #[expect(
-        dead_code,
-        reason = "cached device capability for future async memory pool decisions"
-    )]
-    pub(crate) has_async_alloc: bool,
-    pub(crate) error_state: AtomicU32,
-}
-
-unsafe impl Send for CudaContext {}
-unsafe impl Sync for CudaContext {}
-
-impl Drop for CudaContext {
-    fn drop(&mut self) {
-        self.record_err(self.bind_to_thread());
-        let ctx = std::mem::replace(&mut self.cu_ctx, std::ptr::null_mut());
-        if !ctx.is_null() {
-            self.record_err(unsafe { primary_ctx::release(self.cu_device) });
-        }
-    }
-}
-
-impl PartialEq for CudaContext {
-    fn eq(&self, other: &Self) -> bool {
-        self.cu_device == other.cu_device
-            && self.cu_ctx == other.cu_ctx
-            && self.ordinal == other.ordinal
-    }
-}
-impl Eq for CudaContext {}
-
-impl CudaContext {
-    /// Creates a new context on the specified device ordinal.
-    pub fn new(ordinal: usize) -> Result<Arc<Self>, DriverError> {
-        unsafe { init(0)? };
-        let cu_device = device::get(ordinal as c_int)?;
-        let cu_ctx = unsafe { primary_ctx::retain(cu_device) }?;
-        let has_async_alloc = unsafe {
-            let memory_pools_supported = device::get_attribute(
-                cu_device,
-                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED,
-            )?;
-            memory_pools_supported > 0
-        };
-        let ctx = Arc::new(CudaContext {
-            cu_device,
-            cu_ctx,
-            ordinal,
-            has_async_alloc,
-            error_state: AtomicU32::new(0),
-        });
-        ctx.bind_to_thread()?;
-        Ok(ctx)
-    }
-
-    /// Returns the number of CUDA-capable devices available.
-    pub fn device_count() -> Result<i32, DriverError> {
-        unsafe { init(0)? };
-        device::get_count()
-    }
-
-    /// Get the `ordinal` index of the device this is on.
-    pub fn ordinal(&self) -> usize {
-        self.ordinal
-    }
-
-    /// Get the name of this device.
-    pub fn name(&self) -> Result<String, DriverError> {
-        self.check_err()?;
-        device::get_name(self.cu_device)
-    }
-
-    /// Get the UUID of this device.
-    pub fn uuid(&self) -> Result<cuda_bindings::CUuuid, DriverError> {
-        self.check_err()?;
-        device::get_uuid(self.cu_device)
-    }
-
-    /// Returns the raw `CUdevice` handle.
-    pub fn cu_device(&self) -> cuda_bindings::CUdevice {
-        self.cu_device
-    }
-
-    /// Returns the raw `CUcontext` handle.
-    pub fn cu_ctx(&self) -> cuda_bindings::CUcontext {
-        self.cu_ctx
-    }
-
-    /// Binds this context to the calling thread if not already current.
-    pub fn bind_to_thread(&self) -> Result<(), DriverError> {
-        self.check_err()?;
-        if match ctx::get_current()? {
-            Some(curr_ctx) => curr_ctx != self.cu_ctx,
-            None => true,
-        } {
-            unsafe { ctx::set_current(self.cu_ctx) }?;
-        }
-        Ok(())
-    }
-
-    /// Queries a device attribute for the underlying device.
-    pub fn attribute(&self, attrib: cuda_bindings::CUdevice_attribute) -> Result<i32, DriverError> {
-        self.check_err()?;
-        unsafe { device::get_attribute(self.cu_device, attrib) }
-    }
-
-    /// Blocks until all work on this context's device is complete.
-    pub fn synchronize(&self) -> Result<(), DriverError> {
-        self.bind_to_thread()?;
-        ctx::synchronize()
-    }
-
-    /// Configures the context to use blocking synchronization.
-    pub fn set_blocking_synchronize(&self) -> Result<(), DriverError> {
-        self.set_flags(cuda_bindings::CUctx_flags_enum_CU_CTX_SCHED_BLOCKING_SYNC)
-    }
-
-    /// Sets context flags (e.g. scheduling policy).
-    pub fn set_flags(&self, flags: cuda_bindings::CUctx_flags) -> Result<(), DriverError> {
-        self.bind_to_thread()?;
-        ctx::set_flags(flags)
-    }
-
-    /// Checks and clears the context's recorded error state.
-    pub fn check_err(&self) -> Result<(), DriverError> {
-        let error_state = self.error_state.swap(0, Ordering::Relaxed);
-        if error_state == 0 {
-            Ok(())
-        } else {
-            Err(DriverError(unsafe {
-                std::mem::transmute::<u32, cuda_bindings::cudaError_enum>(error_state)
-            }))
-        }
-    }
-
-    /// Records an error into the context's error state if the result is `Err`.
-    pub fn record_err<T>(&self, result: Result<T, DriverError>) {
-        if let Err(err) = result {
-            self.error_state.store(err.0, Ordering::Relaxed)
-        }
-    }
-}
-
-/// Owns a CUDA stream and its parent context reference.
-#[derive(Debug, PartialEq, Eq)]
-pub struct CudaStream {
-    pub(crate) cu_stream: cuda_bindings::CUstream,
-    pub(crate) ctx: Arc<CudaContext>,
-}
-
-unsafe impl Send for CudaStream {}
-unsafe impl Sync for CudaStream {}
-
-impl Drop for CudaStream {
-    fn drop(&mut self) {
-        self.ctx.record_err(self.ctx.bind_to_thread());
-        if !self.cu_stream.is_null() {
-            self.ctx
-                .record_err(unsafe { stream::destroy(self.cu_stream) });
-        }
-    }
-}
-
-impl CudaContext {
-    /// Returns the default (null) CUDA stream for this context.
-    pub fn default_stream(self: &Arc<Self>) -> Arc<CudaStream> {
-        Arc::new(CudaStream {
-            cu_stream: std::ptr::null_mut(),
-            ctx: self.clone(),
-        })
-    }
-    /// Creates a new non-blocking CUDA stream on this context.
-    pub fn new_stream(self: &Arc<Self>) -> Result<Arc<CudaStream>, DriverError> {
-        self.bind_to_thread()?;
-        let cu_stream = stream::create(stream::StreamKind::NonBlocking)?;
-        Ok(Arc::new(CudaStream {
-            cu_stream,
-            ctx: self.clone(),
-        }))
-    }
-}
-
-impl CudaStream {
-    /// Creates a new stream that waits on this stream's current work before proceeding.
-    pub fn fork(&self) -> Result<Arc<Self>, DriverError> {
-        self.ctx.bind_to_thread()?;
-        let cu_stream = stream::create(stream::StreamKind::NonBlocking)?;
-        let stream = Arc::new(CudaStream {
-            cu_stream,
-            ctx: self.ctx.clone(),
-        });
-        stream.join(self)?;
-        Ok(stream)
-    }
-
-    /// Returns the raw `CUstream` handle.
-    pub fn cu_stream(&self) -> cuda_bindings::CUstream {
-        self.cu_stream
-    }
-
-    /// Returns a reference to the parent context.
-    pub fn context(&self) -> &Arc<CudaContext> {
-        &self.ctx
-    }
-
-    /// Blocks until all work on this stream is complete.
-    pub fn synchronize(&self) -> Result<(), DriverError> {
-        self.ctx.bind_to_thread()?;
-        unsafe { stream::synchronize(self.cu_stream) }
-    }
-
-    /// Records a new event on this stream and returns it.
-    pub fn record_event(
-        &self,
-        flags: Option<cuda_bindings::CUevent_flags>,
-    ) -> Result<CudaEvent, DriverError> {
-        let event = self.ctx.new_event(flags)?;
-        event.record(self)?;
-        Ok(event)
-    }
-
-    /// Makes this stream wait until the given event has been recorded.
-    pub fn wait(&self, event: &CudaEvent) -> Result<(), DriverError> {
-        if self.ctx != event.ctx {
-            return Err(DriverError(
-                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_CONTEXT,
-            ));
-        }
-        self.ctx.bind_to_thread()?;
-        unsafe {
-            stream::wait_event(
-                self.cu_stream,
-                event.cu_event,
-                cuda_bindings::CUevent_wait_flags_enum_CU_EVENT_WAIT_DEFAULT,
-            )
-        }
-    }
-    /// Makes this stream wait until all prior work on `other` is complete.
-    pub fn join(&self, other: &CudaStream) -> Result<(), DriverError> {
-        self.wait(&other.record_event(None)?)
-    }
-    /// Enqueues a host-side callback to execute after all prior stream work completes.
-    pub fn launch_host_function<F: FnOnce() + Send>(
-        &self,
-        host_func: F,
-    ) -> Result<(), DriverError> {
-        let boxed_host_func = Box::new(host_func);
-        unsafe {
-            stream::launch_host_function(
-                self.cu_stream,
-                CudaStream::callback_wrapper::<F>,
-                // Memory allocated for the callback is wrapped in a ManuallyDrop.
-                Box::into_raw(boxed_host_func) as *mut c_void,
-            )
-        }
-    }
-    unsafe extern "C" fn callback_wrapper<F: FnOnce() + Send>(callback: *mut c_void) {
-        // Stop panics from unwinding across the FFI.
-        let _ = std::panic::catch_unwind(|| {
-            // Any memory allocated for the callback is freed when this Box goes out of scope.
-            let callback: Box<F> = Box::from_raw(callback as *mut F);
-            callback();
-        });
-    }
-}
-
-/// Owns a CUDA event and its parent context reference.
-#[derive(Debug)]
-pub struct CudaEvent {
-    pub(crate) cu_event: cuda_bindings::CUevent,
-    pub(crate) ctx: Arc<CudaContext>,
-}
-
-unsafe impl Send for CudaEvent {}
-unsafe impl Sync for CudaEvent {}
-
-impl Drop for CudaEvent {
-    fn drop(&mut self) {
-        self.ctx.record_err(self.ctx.bind_to_thread());
-        self.ctx
-            .record_err(unsafe { event::destroy(self.cu_event) });
-    }
-}
-
-impl CudaContext {
-    /// Creates a new CUDA event with the given flags (defaults to disable-timing).
-    pub fn new_event(
-        self: &Arc<Self>,
-        flags: Option<cuda_bindings::CUevent_flags>,
-    ) -> Result<CudaEvent, DriverError> {
-        let flags = flags.unwrap_or(cuda_bindings::CUevent_flags_enum_CU_EVENT_DISABLE_TIMING);
-        self.bind_to_thread()?;
-        let cu_event = event::create(flags)?;
-        Ok(CudaEvent {
-            cu_event,
-            ctx: self.clone(),
-        })
-    }
-}
-
-impl CudaEvent {
-    /// Returns the raw `CUevent` handle.
-    pub fn cu_event(&self) -> cuda_bindings::CUevent {
-        self.cu_event
-    }
-
-    /// Returns a reference to the parent context.
-    pub fn context(&self) -> &Arc<CudaContext> {
-        &self.ctx
-    }
-
-    /// Records this event on the given stream.
-    pub fn record(&self, stream: &CudaStream) -> Result<(), DriverError> {
-        if self.ctx != stream.ctx {
-            return Err(DriverError(
-                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_CONTEXT,
-            ));
-        }
-        self.ctx.bind_to_thread()?;
-        unsafe { event::record(self.cu_event, stream.cu_stream) }
-    }
-
-    /// Blocks until this event has been recorded.
-    pub fn synchronize(&self) -> Result<(), DriverError> {
-        self.ctx.bind_to_thread()?;
-        unsafe { event::synchronize(self.cu_event) }
-    }
-
-    /// Returns elapsed time in milliseconds between `self` (start) and `end`.
-    pub fn elapsed_ms(&self, end: &Self) -> Result<f32, DriverError> {
-        if self.ctx != end.ctx {
-            return Err(DriverError(
-                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_CONTEXT,
-            ));
-        }
-        self.ctx.bind_to_thread()?;
-        self.synchronize()?;
-        end.synchronize()?;
-        unsafe { event::elapsed(self.cu_event, end.cu_event) }
-    }
-
-    /// Returns `true` if all work preceding this event has completed.
-    pub fn is_complete(&self) -> bool {
-        unsafe { event::query(self.cu_event) }.is_ok()
-    }
-}
-
-/// Owns a loaded CUDA module (PTX/cubin) and its parent context reference.
-#[derive(Debug)]
-pub struct CudaModule {
-    pub(crate) cu_module: cuda_bindings::CUmodule,
-    pub(crate) ctx: Arc<CudaContext>,
-}
-
-unsafe impl Send for CudaModule {}
-unsafe impl Sync for CudaModule {}
-
-impl Drop for CudaModule {
-    fn drop(&mut self) {
-        self.ctx.record_err(self.ctx.bind_to_thread());
-        self.ctx
-            .record_err(unsafe { module::unload(self.cu_module) });
-    }
-}
-
-impl CudaContext {
-    /// Loads a CUDA module from a PTX source string.
-    pub fn load_module_from_ptx_src(
-        self: &Arc<Self>,
-        ptx_src: &str,
-    ) -> Result<Arc<CudaModule>, DriverError> {
-        self.bind_to_thread()?;
-        let cu_module = {
-            let c_src = CString::new(ptx_src).unwrap();
-            unsafe { module::load_data(c_src.as_ptr() as *const _) }
-        }?;
-        Ok(Arc::new(CudaModule {
-            cu_module,
-            ctx: self.clone(),
-        }))
-    }
-    /// Loads a CUDA module from a file path (PTX or cubin).
-    pub fn load_module_from_file(
-        self: &Arc<Self>,
-        filename: &str,
-    ) -> Result<Arc<CudaModule>, DriverError> {
-        self.bind_to_thread()?;
-        let cu_module = { module::load(filename) }?;
-        Ok(Arc::new(CudaModule {
-            cu_module,
-            ctx: self.clone(),
-        }))
-    }
-}
-
-/// Handle to a device function loaded from a [`CudaModule`].
-#[derive(Debug, Clone)]
-pub struct CudaFunction {
-    pub(crate) cu_function: cuda_bindings::CUfunction,
-    #[allow(unused)]
-    pub(crate) module: Arc<CudaModule>,
-}
-
-unsafe impl Send for CudaFunction {}
-unsafe impl Sync for CudaFunction {}
-
-impl CudaModule {
-    /// Looks up a device function by name within this module.
-    pub fn load_function(self: &Arc<Self>, fn_name: &str) -> Result<CudaFunction, DriverError> {
-        let cu_function = unsafe { module::get_function(self.cu_module, fn_name) }?;
-        Ok(CudaFunction {
-            cu_function,
-            module: self.clone(),
-        })
-    }
-}
-
-impl CudaFunction {
-    /// Returns the raw `CUfunction` handle.
-    ///
-    /// # Safety
-    /// The caller must not use the handle after the parent module is dropped.
-    pub unsafe fn cu_function(&self) -> cuda_bindings::CUfunction {
-        self.cu_function
-    }
-
-    /// Returns the available dynamic shared memory per block for the given configuration.
-    pub fn occupancy_available_dynamic_smem_per_block(
-        &self,
-        num_blocks: u32,
-        block_size: u32,
-    ) -> Result<usize, DriverError> {
-        let mut dynamic_smem_size: usize = 0;
-
-        unsafe {
-            cuda_bindings::cuOccupancyAvailableDynamicSMemPerBlock(
-                &mut dynamic_smem_size,
-                self.cu_function,
-                num_blocks as c_int,
-                block_size as c_int,
-            )
-            .result()?
-        };
-
-        Ok(dynamic_smem_size)
-    }
-
-    /// Returns the maximum number of active blocks per SM for the given block size.
-    pub fn occupancy_max_active_blocks_per_multiprocessor(
-        &self,
-        block_size: u32,
-        dynamic_smem_size: usize,
-        flags: Option<cuda_bindings::CUoccupancy_flags_enum>,
-    ) -> Result<u32, DriverError> {
-        let mut num_blocks: c_int = 0;
-        let flags = flags.unwrap_or(cuda_bindings::CUoccupancy_flags_enum_CU_OCCUPANCY_DEFAULT);
-
-        unsafe {
-            cuda_bindings::cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
-                &mut num_blocks,
-                self.cu_function,
-                block_size as c_int,
-                dynamic_smem_size,
-                flags as c_uint,
-            )
-            .result()?
-        };
-
-        Ok(num_blocks as u32)
-    }
-
-    /// Returns the maximum number of active clusters for the given launch configuration.
-    pub fn occupancy_max_active_clusters(
-        &self,
-        config: LaunchConfig,
-        stream: &CudaStream,
-    ) -> Result<u32, DriverError> {
-        let mut num_clusters: c_int = 0;
-
-        let cfg = cuda_bindings::CUlaunchConfig {
-            gridDimX: config.grid_dim.0,
-            gridDimY: config.grid_dim.1,
-            gridDimZ: config.grid_dim.2,
-            blockDimX: config.block_dim.0,
-            blockDimY: config.block_dim.1,
-            blockDimZ: config.block_dim.2,
-            sharedMemBytes: config.shared_mem_bytes,
-            hStream: stream.cu_stream,
-            attrs: std::ptr::null_mut(),
-            numAttrs: 0,
-        };
-
-        unsafe {
-            cuda_bindings::cuOccupancyMaxActiveClusters(&mut num_clusters, self.cu_function, &cfg)
-                .result()?
-        };
-
-        Ok(num_clusters as u32)
-    }
-
-    /// Returns `(min_grid_size, block_size)` that achieves maximum occupancy.
-    pub fn occupancy_max_potential_block_size(
-        &self,
-        block_size_to_dynamic_smem_size: extern "C" fn(block_size: c_int) -> usize,
-        dynamic_smem_size: usize,
-        block_size_limit: u32,
-        flags: Option<cuda_bindings::CUoccupancy_flags_enum>,
-    ) -> Result<(u32, u32), DriverError> {
-        let mut min_grid_size: c_int = 0;
-        let mut block_size: c_int = 0;
-        let flags = flags.unwrap_or(cuda_bindings::CUoccupancy_flags_enum_CU_OCCUPANCY_DEFAULT);
-
-        unsafe {
-            cuda_bindings::cuOccupancyMaxPotentialBlockSizeWithFlags(
-                &mut min_grid_size,
-                &mut block_size,
-                self.cu_function,
-                Some(block_size_to_dynamic_smem_size),
-                dynamic_smem_size,
-                block_size_limit as c_int,
-                flags as c_uint,
-            )
-            .result()?
-        };
-
-        Ok((min_grid_size as u32, block_size as u32))
-    }
-
-    /// Returns the maximum potential cluster size for the given launch configuration.
-    pub fn occupancy_max_potential_cluster_size(
-        &self,
-        config: LaunchConfig,
-        stream: &CudaStream,
-    ) -> Result<u32, DriverError> {
-        let mut cluster_size: c_int = 0;
-
-        let cfg = cuda_bindings::CUlaunchConfig {
-            gridDimX: config.grid_dim.0,
-            gridDimY: config.grid_dim.1,
-            gridDimZ: config.grid_dim.2,
-            blockDimX: config.block_dim.0,
-            blockDimY: config.block_dim.1,
-            blockDimZ: config.block_dim.2,
-            sharedMemBytes: config.shared_mem_bytes,
-            hStream: stream.cu_stream,
-            attrs: std::ptr::null_mut(),
-            numAttrs: 0,
-        };
-
-        unsafe {
-            cuda_bindings::cuOccupancyMaxPotentialClusterSize(
-                &mut cluster_size,
-                self.cu_function,
-                &cfg,
-            )
-            .result()?
-        };
-
-        Ok(cluster_size as u32)
-    }
-
-    /// Sets a function attribute (e.g. max dynamic shared memory).
-    pub fn set_attribute(
-        &self,
-        attribute: cuda_bindings::CUfunction_attribute_enum,
-        value: i32,
-    ) -> Result<(), DriverError> {
-        unsafe { function::set_function_attribute(self.cu_function, attribute, value) }
-    }
-
-    /// Sets the preferred cache configuration for this function.
-    pub fn set_function_cache_config(
-        &self,
-        attribute: cuda_bindings::CUfunc_cache_enum,
-    ) -> Result<(), DriverError> {
-        unsafe { function::set_function_cache_config(self.cu_function, attribute) }
-    }
-}
 
 /// Low-level primary context retain/release operations.
-pub mod primary_ctx {
+#[allow(dead_code)]
+pub(crate) mod primary_ctx {
 
     use super::{DriverError, IntoResult};
     use std::mem::MaybeUninit;
@@ -641,7 +40,9 @@ pub mod primary_ctx {
 }
 
 /// Low-level device query operations.
-pub mod device {
+
+#[allow(dead_code)]
+pub(crate) mod device {
 
     use super::{DriverError, IntoResult};
     use std::{
@@ -715,7 +116,8 @@ pub mod device {
 }
 
 /// Low-level function attribute operations.
-pub mod function {
+#[allow(dead_code)]
+pub(crate) mod function {
 
     use super::{DriverError, IntoResult};
 
@@ -750,7 +152,8 @@ pub mod function {
 }
 
 /// Low-level CUDA context management operations.
-pub mod ctx {
+#[allow(dead_code)]
+pub(crate) mod ctx {
     use super::{DriverError, IntoResult};
     use std::mem::MaybeUninit;
 
@@ -788,7 +191,9 @@ pub mod ctx {
 }
 
 /// Low-level CUDA stream operations.
-pub mod stream {
+
+#[allow(dead_code)]
+pub(crate) mod stream {
     use super::{DriverError, IntoResult};
     use std::ffi::c_void;
     use std::mem::MaybeUninit;
@@ -918,7 +323,8 @@ pub mod stream {
 }
 
 /// Low-level CUDA module load/unload and function lookup operations.
-pub mod module {
+#[allow(dead_code)]
+pub(crate) mod module {
     use super::{DriverError, IntoResult};
     use core::ffi::c_void;
     use std::ffi::CString;
@@ -982,7 +388,8 @@ pub mod module {
 }
 
 /// Low-level CUDA event operations.
-pub mod event {
+#[allow(dead_code)]
+pub(crate) mod event {
     use super::{DriverError, IntoResult};
     use std::mem::MaybeUninit;
 
@@ -1048,8 +455,78 @@ pub mod event {
     }
 }
 
+/// Low-level CUDA memory pool operations.
+pub(crate) mod pool {
+    use super::{DriverError, IntoResult};
+    use std::mem::MaybeUninit;
+
+    /// Creates a new memory pool with the given properties.
+    ///
+    /// # Safety
+    /// `props` must describe a valid pool configuration for an available device.
+    pub unsafe fn create(
+        props: &cuda_bindings::CUmemPoolProps,
+    ) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
+        let mut pool = MaybeUninit::uninit();
+        cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), props as *const _ as *mut _).result()?;
+        Ok(pool.assume_init())
+    }
+
+    /// Destroys a memory pool.
+    ///
+    /// # Safety
+    /// `pool` must be valid and all allocations from it must have been freed.
+    pub unsafe fn destroy(pool: cuda_bindings::CUmemoryPool) -> Result<(), DriverError> {
+        cuda_bindings::cuMemPoolDestroy(pool).result()
+    }
+
+    /// Returns the default memory pool for the given device.
+    ///
+    /// # Safety
+    /// `device` must be a valid device ordinal.
+    pub unsafe fn get_default(
+        device: cuda_bindings::CUdevice,
+    ) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
+        let mut pool = MaybeUninit::uninit();
+        cuda_bindings::cuDeviceGetDefaultMemPool(pool.as_mut_ptr(), device).result()?;
+        Ok(pool.assume_init())
+    }
+
+    /// Sets the release threshold for a memory pool.
+    ///
+    /// # Safety
+    /// `pool` must be a valid pool handle.
+    pub unsafe fn set_release_threshold(
+        pool: cuda_bindings::CUmemoryPool,
+        threshold: u64,
+    ) -> Result<(), DriverError> {
+        cuda_bindings::cuMemPoolSetAttribute(
+            pool,
+            cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+            &threshold as *const _ as *mut _,
+        )
+        .result()
+    }
+
+    /// Allocates device memory from a specific pool asynchronously.
+    ///
+    /// # Safety
+    /// `pool` and `stream` must be valid handles.
+    pub unsafe fn malloc_from_pool_async(
+        pool: cuda_bindings::CUmemoryPool,
+        stream: cuda_bindings::CUstream,
+        num_bytes: usize,
+    ) -> Result<cuda_bindings::CUdeviceptr, DriverError> {
+        let mut dev_ptr = MaybeUninit::uninit();
+        cuda_bindings::cuMemAllocFromPoolAsync(dev_ptr.as_mut_ptr(), num_bytes, pool, stream)
+            .result()?;
+        Ok(dev_ptr.assume_init())
+    }
+}
+
 /// Low-level CUDA memory allocation, transfer, and management operations.
-pub mod memory {
+#[allow(dead_code)]
+pub(crate) mod memory {
 
     use crate::sys::{self};
     use std::ffi::{c_uchar, c_uint, c_void};

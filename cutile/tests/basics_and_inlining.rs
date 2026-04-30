@@ -36,6 +36,19 @@ mod basics_and_inlining_module {
         other_function(tile_x, shape);
     }
 
+    #[cutile::entry()]
+    fn scalar_bool_condition_kernel<const CAUSAL: i32, const EVEN_K: i32>(
+        output: &mut Tensor<i32, { [1] }>,
+        mask_start: i32,
+    ) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let j = pid.0;
+        if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
+            let one: Tile<i32, { [1] }> = constant(1i32, const_shape![1]);
+            output.store(one);
+        }
+    }
+
     // Various Rust->TileIR tests.
 
     pub struct SomeStruct {
@@ -93,12 +106,34 @@ mod basics_and_inlining_module {
             let _some_tensor: Tensor<f32, { [-1, -1] }> =
                 make_tensor_view(ptr_tile, dynamic_shape, stride, token);
             let mut partition: PartitionMut<f32, { [128, 256] }> =
-                make_partition_view_mut(&y, shape, token);
+                make_partition_view_mut(y, shape, padding::None, token);
             let idx: [i32; 2] = [0i32, 0i32];
-            let some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
-            store_to_view_mut(&mut partition, some_tile, idx, None, false);
-            let _store_token_2: Token =
-                store_to_view_mut(&mut partition, some_tile, idx, None, false);
+            let some_tile: Tile<f32, { [128, 256] }> = load_view_tko_mut(
+                &partition,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            let _store_token_2: Token = store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
         }
 
         let shape: Shape<{ [1, 1] }> = Shape::<{ [1, 1] }> {
@@ -181,19 +216,58 @@ mod basics_and_inlining_module {
             let _some_tensor: Tensor<f32, { [-1, -1] }> =
                 make_tensor_view(ptr_tile, dynamic_shape, stride, token);
             let mut partition: PartitionMut<f32, { [128, 256] }> =
-                make_partition_view_mut(&y, shape, token);
+                make_partition_view_mut(y, shape, padding::None, token);
             let idx: [i32; 2] = [0i32, 0i32];
-            let mut some_tile: Tile<f32, { [128, 256] }> = load_from_view_mut(&partition, idx);
-            store_to_view_mut(&mut partition, some_tile, idx, None, false);
-            store_to_view_mut(&mut partition, some_tile, idx, None, false);
+            let mut some_tile: Tile<f32, { [128, 256] }> = load_view_tko_mut(
+                &partition,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            store_view_tko_mut(
+                &mut partition,
+                some_tile,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
             for _i in 0i32..10i32 {
                 let some_tile_2: Tile<f32, { [128, 256] }> = constant(2.0, shape);
                 some_tile = some_tile + some_tile_2;
-                store_to_view_mut(&mut partition, some_tile, idx, None, false);
+                store_view_tko_mut(
+                    &mut partition,
+                    some_tile,
+                    idx,
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                );
                 continue;
             }
             let some_3: Tile<f32, { [128, 256] }> = some_tile + some_tile;
-            store_to_view_mut(&mut partition, some_3, idx, None, false);
+            store_view_tko_mut(
+                &mut partition,
+                some_3,
+                idx,
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
         }
 
         let _basic_string = "a string.";
@@ -230,13 +304,13 @@ mod basics_and_inlining_module {
     }
 }
 
-use basics_and_inlining_module::_module_asts;
+use basics_and_inlining_module::__module_ast_self;
 
 #[test]
 fn compile_inlining() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -264,10 +338,34 @@ fn compile_inlining() -> () {
 }
 
 #[test]
+fn compile_scalar_bool_condition() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "scalar_bool_condition_kernel",
+            &[1.to_string(), 0.to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("{module_op_str}");
+    });
+}
+
+#[test]
 fn compile_basics() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -290,8 +388,8 @@ fn compile_basics() -> () {
 #[test]
 fn compile_negative_constant() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -318,8 +416,8 @@ fn compile_negative_constant() -> () {
 #[test]
 fn compile_ptr_tile_reshape() -> () {
     common::with_test_stack(|| {
-        let modules =
-            CUDATileModules::new(_module_asts()).expect("Failed to create CUDATileModules");
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
         let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,

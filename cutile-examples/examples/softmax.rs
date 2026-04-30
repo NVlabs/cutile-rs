@@ -13,7 +13,7 @@ mod my_module {
         y: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like_2d(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
             tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
@@ -29,9 +29,9 @@ use my_module::softmax;
 
 fn main() -> Result<(), Error> {
     // Create a context. Device 0 is associated with the context.
-    let ctx = CudaContext::new(0)?;
+    let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.
-    let stream = ctx.new_stream()?;
+    let stream = device.new_stream()?;
     let (m, n) = (4, 8);
     let (bm, bn) = (2, n);
     let input: Arc<Tensor<f32>> = api::arange(m * n).sync_on(&stream)?.into();

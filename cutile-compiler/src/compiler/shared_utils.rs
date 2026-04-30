@@ -70,27 +70,28 @@ impl ElementTypePrefix {
 }
 
 impl AtomicMode {
-    /// Parses an atomic mode string, validating compatibility with the element type.
+    /// Parses an atomic mode from the ZST type identifier (e.g. `AddF`),
+    /// validating compatibility with the element type.
     pub fn new(mode: &str, elem_ty_prefix: ElementTypePrefix) -> Result<Self, JITError> {
         let result = match mode {
-            "and" => AtomicMode::And,
-            "or" => AtomicMode::Or,
-            "xor" => AtomicMode::Xor,
-            "add" => AtomicMode::Add,
-            "addf" => AtomicMode::AddF,
-            "max" => AtomicMode::Max,
-            "min" => AtomicMode::Min,
-            "umax" => AtomicMode::UMax,
-            "umin" => AtomicMode::UMin,
-            "xchg" => AtomicMode::XChg,
+            "And" => AtomicMode::And,
+            "Or" => AtomicMode::Or,
+            "Xor" => AtomicMode::Xor,
+            "Add" => AtomicMode::Add,
+            "AddF" => AtomicMode::AddF,
+            "Max" => AtomicMode::Max,
+            "Min" => AtomicMode::Min,
+            "Umax" => AtomicMode::UMax,
+            "Umin" => AtomicMode::UMin,
+            "Xchg" => AtomicMode::XChg,
             _ => return SourceLocation::unknown().jit_error_result(
-                &format!("invalid atomic mode `{mode}`; valid modes are: and, or, xor, add, addf, max, min, umax, umin, xchg"),
+                &format!("invalid atomic mode `{mode}`; valid modes are: And, Or, Xor, Add, AddF, Max, Min, Umax, Umin, Xchg"),
             ),
         };
         if elem_ty_prefix == ElementTypePrefix::Float {
             if ![AtomicMode::XChg, AtomicMode::AddF].contains(&result) {
                 return SourceLocation::unknown().jit_error_result(&format!(
-                    "float types only support `xchg` and `addf` atomic modes, got `{:?}`",
+                    "float types only support `Xchg` and `AddF` atomic modes, got `{:?}`",
                     result
                 ));
             }
@@ -318,6 +319,44 @@ pub fn get_const_hex(rust_element_type_str: &str, const_str: &str) -> Result<Str
 // String literal / option arg extraction
 // ---------------------------------------------------------------------------
 
+/// Reads the last path-segment ident from a ZST type-as-value expression.
+///
+/// Examples: `atomic::AddF` -> `"AddF"`, `Enabled` -> `"Enabled"`.
+/// Used to resolve attribute selectors that the DSL surfaces as ZST type
+/// arguments (`mode: atomic::Mode`, `memory_ordering: ordering::Mode`, etc.).
+pub fn extract_zst_type_name(expr: &syn::Expr, param_name: &str) -> Result<String, JITError> {
+    use syn::Expr;
+    match expr {
+        Expr::Path(path) => Ok(path.path.segments.last().unwrap().ident.to_string()),
+        _ => SourceLocation::unknown().jit_error_result(&format!(
+            "`{param_name}` must be a unit-struct type-as-value path, got `{}`",
+            expr.to_token_stream().to_string()
+        )),
+    }
+}
+
+pub fn padding_zst_value(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = expr else {
+        return None;
+    };
+    let ident = path.path.segments.last()?.ident.to_string();
+    match ident.as_str() {
+        "Zero" => Some("zero".to_string()),
+        "NegZero" => Some("neg_zero".to_string()),
+        "Nan" => Some("nan".to_string()),
+        "PosInf" => Some("pos_inf".to_string()),
+        "NegInf" => Some("neg_inf".to_string()),
+        _ => None,
+    }
+}
+
+pub fn zst_type_name(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = expr else {
+        return None;
+    };
+    Some(path.path.segments.last()?.ident.to_string())
+}
+
 /// Extracts a string literal value from an expression, handling both direct literals
 /// and variables that were bound from string literals.
 pub fn extract_string_literal(
@@ -360,7 +399,7 @@ pub fn resolve_option_arg(expr: &syn::Expr, ctx: &CompilerContext) -> Option<syn
     if let Expr::Call(call) = expr {
         if let Expr::Path(path) = &*call.func {
             if path.path.segments.last().unwrap().ident == "Some" {
-                return Some(call.args[0].clone());
+                return call.args.first().cloned();
             }
         }
     } else if let Expr::Path(path) = expr {
@@ -369,11 +408,18 @@ pub fn resolve_option_arg(expr: &syn::Expr, ctx: &CompilerContext) -> Option<syn
         }
         let var_name = path.path.segments.last().unwrap().ident.to_string();
         if let Some(val) = ctx.vars.get(&var_name) {
+            if let Some(variant) = &val.enum_variant {
+                return match variant.as_str() {
+                    "Some" => val.enum_payload.as_deref().cloned(),
+                    "None" => None,
+                    _ => None,
+                };
+            }
             if let Some(ast) = &val.string_literal {
                 if let Expr::Call(call) = ast {
                     if let Expr::Path(path) = &*call.func {
                         if path.path.segments.last().unwrap().ident == "Some" {
-                            return Some(call.args[0].clone());
+                            return call.args.first().cloned();
                         }
                     }
                 } else if let Expr::Path(path) = ast {

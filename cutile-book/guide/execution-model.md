@@ -18,7 +18,7 @@ The abstract machine maps to CUDA like this:
 
 The mapping of the grid and individual tile blocks to underlying hardware threads is abstracted away and handled by the compiler: thread block and cluster configuration, register allocation, shared memory staging, memory coalescing, and Tensor Core utilization.
 
-Execution happens across two spaces: the **host side** (CPU) allocates GPU memory, launches kernels, manages data transfers, and coordinates async operations; the **device side** (GPU) concurrently runs kernel code on tile blocks, operating on tiles in registers and accessing global memory through tensors. See [Orchestrating Device Operations](device-operations.md) for the host-side execution story.
+Execution happens across two spaces: the **host side** (CPU) allocates GPU memory, launches kernels, manages data transfers, and coordinates async operations; the **device side** (GPU) concurrently runs kernel code on tile blocks, operating on tiles in registers and accessing global memory through tensors. See [Device Operations](device-operations.md) for the host-side execution story.
 
 ---
 
@@ -45,7 +45,7 @@ Entry points have four rules:
 
 1. **Must be in a module** — Entry points must be inside a `#[cutile::module]` block.
 2. **Const generics for tile size** — An output tensor's shape must be static. It determines the output tensor's tile size.
-3. **Tensor parameters** — All data passes through `Tensor` references.
+3. **Kernel parameters** — Tensor references carry structured memory, while scalar and raw-pointer parameters are supported for values and unsafe interop paths.
 4. **No return values** — Results are written to output tensors.
 
 ---
@@ -70,9 +70,9 @@ fn kernel<const S: [i32; 2]>(
     let pid: (i32, i32, i32) = get_tile_block_id();    // This block's (x, y, z)
     let grid: (i32, i32, i32) = get_num_tile_blocks();  // Grid dimensions
 
-    // For element-wise ops, load_tile_like_2d uses the output's
+    // For element-wise ops, load_tile_like uses the output's
     // partition to determine which region this block processes:
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
     output.store(tile);
 }
 ```
@@ -91,7 +91,7 @@ fn kernel<const TILE_SIZE: [i32; 2]>(
     output: &mut Tensor<f32, TILE_SIZE>,  // Tile shape: compile-time constant
     input: &Tensor<f32, {[-1, -1]}>       // Tensor shape: runtime
 ) {
-    let tile = load_tile_like_2d(input, output);
+    let tile = load_tile_like(input, output);
 
     let max_vals = reduce_max(tile, 1i32);  // Reduction axis: compile-time constant
 
@@ -103,4 +103,4 @@ Compile-time constants drive specialization: each unique combination of const ge
 
 ---
 
-Continue to [Orchestrating Device Operations](device-operations.md) for the host-side execution story. For tuning tile sizes and architecture-specific hints, see [Tuning for Performance](performance-tuning.md).
+Continue to [Device Operations](device-operations.md) for the host-side execution story. For tuning tile sizes and architecture-specific hints, see [Tuning for Performance](performance-tuning.md).

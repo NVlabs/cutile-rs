@@ -18,19 +18,19 @@ mod tensor_views_module {
 
     #[cutile::entry()]
     fn passthrough_1d(output: &mut Tensor<f32, { [4] }>, input: &Tensor<f32, { [-1] }>) {
-        let tile: Tile<f32, { [4] }> = load_tile_like_1d(input, output);
+        let tile: Tile<f32, { [4] }> = load_tile_like(input, output);
         output.store(tile);
     }
 
     #[cutile::entry()]
     fn passthrough_2d(output: &mut Tensor<f32, { [2, 2] }>, input: &Tensor<f32, { [-1, -1] }>) {
-        let tile: Tile<f32, { [2, 2] }> = load_tile_like_2d(input, output);
+        let tile: Tile<f32, { [2, 2] }> = load_tile_like(input, output);
         output.store(tile);
     }
 
     #[cutile::entry()]
     fn passthrough_1d_2(output: &mut Tensor<f32, { [2] }>, input: &Tensor<f32, { [-1] }>) {
-        let tile: Tile<f32, { [2] }> = load_tile_like_1d(input, output);
+        let tile: Tile<f32, { [2] }> = load_tile_like(input, output);
         output.store(tile);
     }
 
@@ -38,7 +38,7 @@ mod tensor_views_module {
     /// with offset produce correct data.
     #[cutile::entry()]
     fn copy_4(output: &mut Tensor<f32, { [4] }>, input: &Tensor<f32, { [-1] }>) {
-        let tile: Tile<f32, { [4] }> = load_tile_like_1d(input, output);
+        let tile: Tile<f32, { [4] }> = load_tile_like(input, output);
         output.store(tile);
     }
 
@@ -46,7 +46,7 @@ mod tensor_views_module {
     /// strides produce correct data.
     #[cutile::entry()]
     fn copy_2x2(output: &mut Tensor<f32, { [2, 2] }>, input: &Tensor<f32, { [-1, -1] }>) {
-        let tile: Tile<f32, { [2, 2] }> = load_tile_like_2d(input, output);
+        let tile: Tile<f32, { [2, 2] }> = load_tile_like(input, output);
         output.store(tile);
     }
 }

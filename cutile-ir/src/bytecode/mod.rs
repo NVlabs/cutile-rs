@@ -5,7 +5,7 @@
 
 //! Tile IR bytecode writer.
 //!
-//! Serializes an in-memory [`ir::Module`] into the binary bytecode format
+//! Serializes an in-memory [`Module`](crate::ir::Module) into the binary bytecode format
 //! consumed by `tileiras`. Format reference: `BytecodeWriter.cpp` in the
 //! `cuda-tile` submodule.
 

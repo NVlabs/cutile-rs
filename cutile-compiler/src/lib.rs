@@ -10,15 +10,18 @@ extern crate core;
 
 pub mod ast;
 mod bounds;
+pub mod compile_api;
 pub mod cuda_tile_runtime_utils;
 pub mod error;
 pub mod generics;
 pub mod hints;
 mod kernel_entry_generator;
 pub mod kernel_naming;
+pub mod registry;
 pub mod syn_utils;
 pub mod train_map;
 pub mod types;
+pub mod use_classifier;
 
 pub mod compiler;
 pub mod dump;

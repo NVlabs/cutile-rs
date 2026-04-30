@@ -21,7 +21,7 @@ use cuda_async::device_operation::DeviceOp;
 use cuda_async::device_operation::ExecutionContext;
 use cuda_async::error::DeviceError;
 use cuda_async::launch::AsyncKernelLaunch;
-use cuda_core::{CudaFunction, LaunchConfig};
+use cuda_core::{Function, LaunchConfig};
 use cutile::api::{arange, zeros};
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec};
 use std::future::IntoFuture;
@@ -41,8 +41,8 @@ mod tile_add {
         x: &Tensor<f32, { [-1] }>,
         y: &Tensor<f32, { [-1] }>,
     ) {
-        let tile_x = load_tile_like_1d(x, z);
-        let tile_y = load_tile_like_1d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
@@ -108,7 +108,7 @@ $done:
 // ---------------------------------------------------------------------------
 
 struct ScaleKernel {
-    function: Arc<CudaFunction>,
+    function: Arc<Function>,
     n: u32,
     scale: f32,
     input: Arc<Tensor<f32>>,

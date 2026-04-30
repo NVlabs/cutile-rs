@@ -18,6 +18,16 @@ pub struct DriverError(pub cuda_bindings::CUresult);
 
 impl DriverError {
     fn _fmt(&self, formatter: &mut Formatter) -> fmt::Result {
+        if self.0 == cuda_bindings::cudaError_enum_CUDA_ERROR_SHARED_OBJECT_INIT_FAILED {
+            if let Some(load_error) = cuda_bindings::cuda_driver_load_error() {
+                return formatter
+                    .debug_tuple("DriverError")
+                    .field(&self.0)
+                    .field(&format!("CUDA driver library unavailable: {load_error}"))
+                    .finish();
+            }
+        }
+
         match self.error_string() {
             Ok(err_str) => formatter
                 .debug_tuple("DriverError")
@@ -99,5 +109,34 @@ impl DriverError {
             cuda_bindings::cuGetErrorString(self.0, err_str.as_mut_ptr()).result()?;
             Ok(CStr::from_ptr(err_str.assume_init()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DriverError;
+
+    #[test]
+    fn shared_object_init_failed_includes_loader_error_when_driver_is_missing() {
+        if cuda_bindings::cuda_driver_load_error().is_none() {
+            return;
+        }
+
+        let formatted =
+            DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_SHARED_OBJECT_INIT_FAILED)
+                .to_string();
+
+        assert!(
+            formatted.contains("CUDA driver library unavailable"),
+            "expected a human-readable loader hint, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("failed to load any of"),
+            "expected the cached loader failure context to be surfaced, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("libcuda"),
+            "expected the driver library name to be surfaced, got: {formatted}"
+        );
     }
 }

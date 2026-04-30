@@ -20,7 +20,6 @@
 //! - [`zeros`] - Create tensor filled with zeros
 //! - [`ones`] - Create tensor filled with ones
 //! - [`full`] - Create tensor filled with a specific value
-//! - [`empty`] - Create uninitialized tensor (unsafe, but fast)
 //!
 //! ### Sequential Data
 //!
@@ -32,7 +31,7 @@
 //!
 //! ### Memory Operations
 //!
-//! - [`copy`] - Copy a tensor to new GPU memory
+//! - [`dup`] - Copy a tensor to new GPU memory
 //! - [`copy_device_to_host_vec`] - Copy GPU tensor to CPU Vec
 //!
 //! ## Examples
@@ -128,7 +127,7 @@
 //!
 //! ## See Also
 //!
-//! - [`tile_async`](crate::tile_async) - Lower-level async execution primitives
+//! - [`tile_kernel`](crate::tile_kernel) - Lower-level async execution primitives
 //! - [`tensor`](crate::tensor) - Tensor type and partitioning
 //! - [`kernels`](crate::kernels) - Pre-built GPU kernels
 
@@ -143,7 +142,7 @@ use cuda_async::error::DeviceError;
 use cuda_core::curand::{RandNormal, RandUniform, RNG};
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::DType;
-use cuda_core::{malloc_async, memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
+use cuda_core::{memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
 use half::f16;
 use std::alloc::{alloc, Layout};
 use std::future::IntoFuture;
@@ -170,7 +169,7 @@ impl<T: DType> DeviceOp for CopyDeviceToDevice<T> {
         ctx: &ExecutionContext,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let num_bytes = self.num_elements * std::mem::size_of::<T>();
-        let dst = malloc_async(num_bytes, ctx.get_cuda_stream());
+        let dst = ctx.alloc_async(num_bytes);
         memcpy_dtod_async::<T>(dst, self.src_ptr, self.num_elements, ctx.get_cuda_stream());
         Ok(Tensor::from_raw_parts(
             dst,
@@ -241,7 +240,7 @@ pub fn dup<T: DType>(tensor: &Tensor<T>) -> impl DeviceOp<Output = Tensor<T>> {
 /// - The copy completes (via stream ordering or synchronization) before
 ///   `dst` is read.
 ///
-/// This is safe when used with [`CudaGraph::update`] (stream ordering
+/// This is safe when used with [`CudaGraph::update`](cuda_async::cuda_graph::CudaGraph::update) (stream ordering
 /// ensures the copy completes before graph launch) and inside
 /// [`CudaGraph::scope`](cuda_async::cuda_graph::CudaGraph::scope)
 /// (capture mode records the copy as a graph node).
@@ -392,7 +391,7 @@ impl<T: DType> DeviceOp for CopyHostVecToDevice<T> {
         let num_elements = vec.len();
         let shape = vec![num_elements as i32];
         let strides = vec![1];
-        let dptr = malloc_async(element_size * num_elements, ctx.get_cuda_stream());
+        let dptr = ctx.alloc_async(element_size * num_elements);
         memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
         Ok(Tensor::from_raw_parts(
             dptr,

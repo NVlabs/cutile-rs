@@ -24,7 +24,7 @@ mod my_module {
         x: &Tensor<T, { [-1, -1] }>,
     ) {
         let tile_a = a.broadcast(y.shape());
-        let tile_x = load_tile_like_2d(x, y);
+        let tile_x = load_tile_like(x, y);
         let tile_y = y.load();
         y.store(tile_a * tile_x + tile_y);
     }

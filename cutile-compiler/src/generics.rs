@@ -69,7 +69,7 @@ pub enum GenericVarType {
 ///  - Lookup `"E"` → `f32`
 ///  - Lookup `"BM"` → `64`, `"BN"` → `64`
 ///  - Substitute: `Tensor<f32, {[64, 64]}>`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenericVars {
     // Generic type param (the T in scalar: T or x: Tensor<T, ...>) to concrete impl ElementType.
     // TODO (hme): Ensure the type mapped here is _always_ concrete. Check inlining specifically.
@@ -1590,11 +1590,8 @@ impl GenericArgInference {
                                 }
                             }
                         }
-                        (syn::Type::Reference(arg_ref), syn::Type::Reference(_param_ref)) => {
-                            unimplemented!(
-                                "get_generic_args: Type::Reference not supported: {:#?}",
-                                arg_ref
-                            );
+                        (syn::Type::Reference(arg_ref), syn::Type::Reference(param_ref)) => {
+                            self.add_generic_args(&param_ref.elem, &arg_ref.elem);
                         }
                         _ => {}
                     }
@@ -1757,11 +1754,14 @@ impl GenericArgInference {
                     }
                 }
             }
-            (syn::Type::Reference(arg_ref), syn::Type::Reference(_param_ref)) => {
-                unimplemented!(
-                    "get_generic_args: Type::Reference not supported: {:#?}",
-                    arg_ref
-                );
+            (syn::Type::Reference(arg_ref), syn::Type::Reference(param_ref)) => {
+                self.add_generic_type(&param_ref.elem, &arg_ref.elem);
+            }
+            (syn::Type::Reference(arg_ref), _) => {
+                self.add_generic_type(param_type, &arg_ref.elem);
+            }
+            (_, syn::Type::Reference(param_ref)) => {
+                self.add_generic_type(&param_ref.elem, arg_type);
             }
             _ => {}
         }

@@ -79,6 +79,8 @@ pub struct TileRustValue {
     pub(crate) mutability: Mutability,
     pub(crate) bounds: Option<Bounds<i64>>,
     pub(crate) string_literal: Option<syn::Expr>,
+    pub(crate) enum_variant: Option<String>,
+    pub(crate) enum_payload: Option<Box<syn::Expr>>,
 }
 
 impl TileRustValue {
@@ -93,6 +95,8 @@ impl TileRustValue {
             mutability: Mutability::Unset,
             bounds: None,
             string_literal: None,
+            enum_variant: None,
+            enum_payload: None,
         }
     }
 
@@ -107,6 +111,8 @@ impl TileRustValue {
             mutability: Mutability::Unset,
             bounds: None,
             string_literal: None,
+            enum_variant: None,
+            enum_payload: None,
         }
     }
 
@@ -125,6 +131,8 @@ impl TileRustValue {
             mutability: Mutability::Unset,
             bounds: None,
             string_literal: None,
+            enum_variant: None,
+            enum_payload: None,
         }
     }
 
@@ -143,6 +151,8 @@ impl TileRustValue {
             mutability: Mutability::Unset,
             bounds,
             string_literal: None,
+            enum_variant: None,
+            enum_payload: None,
         }
     }
 
@@ -157,6 +167,28 @@ impl TileRustValue {
             mutability: Mutability::Unset,
             bounds: None,
             string_literal: Some(string_literal),
+            enum_variant: None,
+            enum_payload: None,
+        }
+    }
+
+    pub fn new_enum(
+        variant: impl Into<String>,
+        payload: Option<syn::Expr>,
+        ty: TileRustType,
+    ) -> TileRustValue {
+        Self {
+            fields: None,
+            values: None,
+            value: None,
+            ty,
+            kind: Kind::Enum,
+            type_meta: None,
+            mutability: Mutability::Unset,
+            bounds: None,
+            string_literal: None,
+            enum_variant: Some(variant.into()),
+            enum_payload: payload.map(Box::new),
         }
     }
 
@@ -180,6 +212,8 @@ impl TileRustValue {
                 mutability: Mutability::Unset,
                 bounds: None,
                 string_literal: None,
+                enum_variant: None,
+                enum_payload: None,
             },
         }
     }
@@ -195,6 +229,8 @@ impl TileRustValue {
             mutability: Mutability::Unset,
             bounds: None,
             string_literal: Some(literal_expr),
+            enum_variant: None,
+            enum_payload: None,
         }
     }
 
@@ -234,6 +270,15 @@ impl TileRustValue {
             Kind::Struct => {
                 if !(self.value.is_none() && self.values.is_none() && self.fields.is_some()) {
                     return JITError::generic("internal: struct value has inconsistent fields set");
+                }
+            }
+            Kind::Enum => {
+                if !(self.value.is_none()
+                    && self.values.is_none()
+                    && self.fields.is_none()
+                    && self.enum_variant.is_some())
+                {
+                    return JITError::generic("internal: enum value has inconsistent fields set");
                 }
             }
         }
@@ -317,6 +362,7 @@ impl TileRustValue {
                 };
                 unpack_btree_to(fields, values)?;
             }
+            Kind::Enum => {}
         }
         Ok(())
     }
@@ -368,6 +414,7 @@ impl TileRustValue {
                 result.fields = Some(res.0);
                 pos = res.1;
             }
+            Kind::Enum => {}
         }
         result.verify()?;
         Ok((result, pos))
