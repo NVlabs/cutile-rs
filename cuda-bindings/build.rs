@@ -73,12 +73,41 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn generate_type_bindings(cuda_toolkit: &str, out_dir: &Path) -> Result<(), Box<dyn Error>> {
-    bindgen_builder(cuda_toolkit)
+    let bindings = bindgen_builder(cuda_toolkit)
         .header("wrapper.h")
         .blocklist_function(".*")
-        .generate()?
-        .write_to_file(out_dir.join("types.rs"))?;
+        .generate()?;
+    let source = bindings.to_string();
+    emit_layout_cfgs(&source);
+    fs::write(out_dir.join("types.rs"), source)?;
     Ok(())
+}
+
+// Detect whether bindgen wrapped `CUmemLocation_st::id` in an anonymous union (e.g. CUDA 13.2+) 
+// or left it as a plain `int` (e.g. 13.0/13.1), so the helper in lib.rs can pick the right access path.
+fn emit_layout_cfgs(generated_source: &str) {
+    println!("cargo:rustc-check-cfg=cfg(cu_mem_location_anon_union)");
+    if cu_mem_location_uses_anon_union(generated_source) {
+        println!("cargo:rustc-cfg=cu_mem_location_anon_union");
+    }
+}
+
+fn cu_mem_location_uses_anon_union(generated_source: &str) -> bool {
+    let Ok(file) = syn::parse_file(generated_source) else {
+        return false;
+    };
+    file.items.iter().any(|item| match item {
+        Item::Struct(item_struct) if item_struct.ident == "CUmemLocation_st" => {
+            let Fields::Named(fields) = &item_struct.fields else {
+                return false;
+            };
+            fields
+                .named
+                .iter()
+                .any(|f| f.ident.as_ref().is_some_and(|i| i == "__bindgen_anon_1"))
+        }
+        _ => false,
+    })
 }
 
 fn generate_dynamic_api(
