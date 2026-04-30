@@ -224,11 +224,13 @@ pub fn module(attributes: TokenStream, item: TokenStream) -> TokenStream {
 /// Process the items inside a `#[cutile::module]` (or a submodule of one)
 /// and return the macro-emitted code for rustc.
 ///
-/// Returns `(concrete_items, entry_functions)`:
+/// Returns `(concrete_items, entry_functions, entry_metas)`:
 /// - `concrete_items` are the rustc-emitted item tokens (functions,
 ///   structs, impls, etc.) in their declaration order.
 /// - `entry_functions` are kernel launcher tokens generated for each
 ///   `#[cutile::entry]` fn found at this nesting level.
+/// - `entry_metas` are (function_name, function_entry) pairs for entry fns
+///   found at this nesting level.
 ///
 /// Submodules (`mod inner { ... }`) are processed recursively: the
 /// submodule's items go through the same item walker, then are wrapped
@@ -242,7 +244,14 @@ fn process_items(
     items: &[syn::Item],
     parent_name: &Ident,
     tile_rust_crate_root: &Ident,
-) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
+) -> Result<
+    (
+        Vec<TokenStream2>,
+        Vec<TokenStream2>,
+        Vec<(String, String)>,
+    ),
+    Error,
+> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
     // Collect entry point metadata for _entries() generation.
@@ -300,8 +309,9 @@ fn process_items(
                          not supported because the macro needs the body at expansion time.",
                     );
                 };
-                let (sub_concrete, sub_entries) =
+                let (sub_concrete, sub_entries, sub_entry_metas) =
                     process_items(&sub_content.1, &submod.ident, tile_rust_crate_root)?;
+                entry_metas.extend(sub_entry_metas);
                 let sub_name = &submod.ident;
                 let sub_attrs = &submod.attrs;
                 let sub_vis = &submod.vis;
@@ -319,7 +329,7 @@ fn process_items(
             }
         }
     }
-    Ok((concrete_items, entry_functions))
+    Ok((concrete_items, entry_functions, entry_metas))
 }
 
 /// Fallible inner implementation of the `module` macro.
@@ -332,8 +342,10 @@ fn module_inner(
         return module_item.err("Non-empty module expected.");
     };
     let name = &module_item.ident;
-    let (concrete_items, entry_functions) = process_items(&content.1, name, tile_rust_crate_root)?;
+    let (concrete_items, entry_functions, entry_metas) =
+        process_items(&content.1, name, tile_rust_crate_root)?;
     let ast_path = get_ast_path(tile_rust_crate_root);
+    let self_ast_ident = get_self_ast_ident();
     let ast_module_item: ItemMod = module_item.clone();
     let ast_module_tokens = emit_module_ast_self_and_registry_entry(
         ast_module_item,
@@ -386,7 +398,7 @@ fn module_inner(
             specs: &[#tile_rust_crate_root::tile_kernel::WarmupSpec],
         ) -> Result<(), #tile_rust_crate_root::error::Error> {
             #tile_rust_crate_root::tile_kernel::compile_warmup(
-                || _module_asts(),
+                || #self_ast_ident(),
                 &_entries(),
                 #module_name_str,
                 _SOURCE_HASH,

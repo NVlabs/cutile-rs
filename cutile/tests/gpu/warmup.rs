@@ -35,8 +35,8 @@ mod warmup_test_module {
         x: &Tensor<T, { [-1] }>,
         y: &Tensor<T, { [-1] }>,
     ) {
-        let tile_x = load_tile_like_1d(x, z);
-        let tile_y = load_tile_like_1d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
@@ -527,9 +527,10 @@ fn load_module_from_bytes_concurrent() {
         let gpu_name = get_gpu_name(device_id);
 
         // Get cubin bytes by compiling the kernel and reading the output file.
-        let modules =
-            cutile_compiler::compiler::CUDATileModules::new(warmup_test_module::_module_asts())
-                .unwrap();
+        let modules = cutile_compiler::compiler::CUDATileModules::from_kernel(
+            warmup_test_module::__module_ast_self(),
+        )
+        .unwrap();
         let compiler = cutile_compiler::compiler::CUDATileFunctionCompiler::new(
             &modules,
             "warmup_test_module",

@@ -522,7 +522,7 @@ fn compile_kernel_uncached(
 fn get_or_compile_kernel(
     key: &TileFunctionKey,
     cached_modules: Option<&CUDATileModules>,
-    module_asts: &dyn Fn() -> Vec<Module>,
+    module_builder: &dyn Fn() -> Result<CUDATileModules, Error>,
     function_entry: &str,
     device_id: usize,
 ) -> Result<Arc<OnceCell<CompiledKernel>>, Error> {
@@ -535,7 +535,7 @@ fn get_or_compile_kernel(
         let modules: &CUDATileModules = match cached_modules {
             Some(m) => m,
             None => {
-                owned = CUDATileModules::new(module_asts())?;
+                owned = module_builder()?;
                 &owned
             }
         };
@@ -556,7 +556,7 @@ fn get_or_compile_kernel(
 /// ## Arguments
 ///
 /// * `ctx` - Execution context containing device information
-/// * `module_asts` - Closure that produces the AST modules to compile
+/// * `kernel_ast` - Closure that builds the kernel module AST
 /// * `module_name` - Name of the module containing the function
 /// * `function_name` - Name of the function to compile
 /// * `function_entry` - Entry point name in the compiled CUDA code
@@ -576,7 +576,7 @@ fn get_or_compile_kernel(
 /// let ctx = get_execution_context();
 /// let function = compile_from_context(
 ///     &ctx,
-///     || vec![my_module_ast()],
+///     || my_module::__module_ast_self(),
 ///     "my_module",
 ///     "my_function",
 ///     "my_function_kernel",
@@ -618,7 +618,11 @@ pub fn compile_from_context<F: Fn() -> Module>(
         get_cuda_toolkit_version(),
     );
 
-    let slot = get_or_compile_kernel(&key, None, &module_asts, function_entry, device_id)?;
+    let module_builder = || {
+        Ok(CUDATileModules::from_kernel(kernel_ast())?)
+    };
+
+    let slot = get_or_compile_kernel(&key, None, &module_builder, function_entry, device_id)?;
     let compiled = slot.get().expect("OnceCell initialized by get_or_compile_kernel");
     Ok((
         Arc::clone(&compiled.function),
@@ -701,7 +705,7 @@ impl WarmupSpec {
 ///
 /// ```rust,ignore
 /// compile_warmup(
-///     || linalg::_module_asts(),
+///     || linalg::__module_ast_self(),
 ///     &linalg::_entries(),
 ///     "linalg",
 ///     linalg::_SOURCE_HASH,
@@ -712,8 +716,8 @@ impl WarmupSpec {
 ///     ],
 /// )?;
 /// ```
-pub fn compile_warmup<F: Fn() -> Vec<Module>>(
-    module_asts: F,
+pub fn compile_warmup<F: Fn() -> Module>(
+    kernel_ast: F,
     entries: &[EntryMeta],
     module_name: &str,
     source_hash: &str,
@@ -727,7 +731,10 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
     let cuda_toolkit_version = get_cuda_toolkit_version();
 
     // Build module ASTs once, shared across all specs in this warmup call.
-    let modules = CUDATileModules::new(module_asts())?;
+    let module_builder = || {
+        Ok(CUDATileModules::from_kernel(kernel_ast())?)
+    };
+    let modules = module_builder()?;
 
     for spec in specs {
         let entry = entries
@@ -758,7 +765,7 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
         get_or_compile_kernel(
             &key,
             Some(&modules),
-            &module_asts,
+            &module_builder,
             entry.function_entry,
             device_id,
         )?;
