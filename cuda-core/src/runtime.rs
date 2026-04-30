@@ -210,7 +210,7 @@ impl Device {
         props.allocType = cuda_bindings::CUmemAllocationType_enum_CU_MEM_ALLOCATION_TYPE_PINNED;
         props.handleTypes = cuda_bindings::CUmemAllocationHandleType_enum_CU_MEM_HANDLE_TYPE_NONE;
         props.location.type_ = cuda_bindings::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.__bindgen_anon_1.id = self.ordinal as c_int;
+        cuda_bindings::set_mem_location_id(&mut props.location, self.ordinal as c_int);
         let cu_pool = unsafe { pool::create(&props) }?;
         Ok(Arc::new(MemPool {
             cu_pool,
