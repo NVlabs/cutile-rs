@@ -120,8 +120,7 @@ fn set_device_pool_rejects_cross_device_pool() {
             .expect("get context failed")
             .expect("pool creation failed");
 
-        let err = set_device_pool(99, pool)
-            .expect_err("expected cross-device pool to be rejected");
+        let err = set_device_pool(99, pool).expect_err("expected cross-device pool to be rejected");
         match err {
             cuda_async::error::DeviceError::Context { device_id, message } => {
                 assert_eq!(device_id, 99, "error should point to target device");
@@ -202,7 +201,11 @@ fn pool_is_frozen_at_scheduling_time() {
         let policy = global_policy(0).expect("get policy failed");
         let future = with_context(move |ctx| {
             let p = ctx.get_pool().expect("pool should be present");
-            assert_eq!(p.cu_pool() as usize, pool_a_ptr, "should use frozen pool_a, not pool_b");
+            assert_eq!(
+                p.cu_pool() as usize,
+                pool_a_ptr,
+                "should use frozen pool_a, not pool_b"
+            );
             value(())
         })
         .schedule(&policy)
@@ -236,7 +239,11 @@ fn schedule_applies_device_pool() {
         let policy = global_policy(0).expect("get policy failed");
         let future = with_context(move |ctx| {
             let p = ctx.get_pool().expect("pool should be present via schedule");
-            assert_eq!(p.cu_pool() as usize, pool_ptr, "schedule must pick up device pool");
+            assert_eq!(
+                p.cu_pool() as usize,
+                pool_ptr,
+                "schedule must pick up device pool"
+            );
             let dptr = unsafe { ctx.alloc_async(512) };
             assert!(dptr != 0, "allocation returned null pointer");
             value(dptr)
@@ -269,7 +276,11 @@ fn sync_on_applies_device_pool() {
 
         let dptr = with_context(move |ctx| {
             let p = ctx.get_pool().expect("pool should be present via sync_on");
-            assert_eq!(p.cu_pool() as usize, pool_ptr, "sync_on must pick up device pool");
+            assert_eq!(
+                p.cu_pool() as usize,
+                pool_ptr,
+                "sync_on must pick up device pool"
+            );
             let dptr = unsafe { ctx.alloc_async(512) };
             assert!(dptr != 0, "allocation returned null pointer");
             value(dptr)

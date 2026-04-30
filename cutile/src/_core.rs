@@ -543,7 +543,11 @@ pub mod core {
         ) -> PartitionMut<'a, E, R> {
             // TODO (hme): Bounds checks.
             let tensor_token: Token = get_tensor_token(self);
-            unsafe { make_partition_view_mut(self, tile, padding::None, tensor_token) }
+            let outer_tile: Shape<S> = Shape::<S> { dims: &[] };
+            let mut p: PartitionMut<E, R> =
+                unsafe { make_nested_partition_view_mut(self, tile, padding::None, tensor_token) };
+            set_nested_mutable_partition_access_offset(&mut p, outer_tile);
+            p
         }
 
         /// Returns the shape of this tensor.
@@ -1001,6 +1005,21 @@ pub mod core {
     pub fn set_tensor_token<E: ElementType, const S: [i32; N]>(
         tensor: &Tensor<E, S>,
         token: Token,
+    ) {
+        unreachable!()
+    }
+
+    /// Attach CTA-local index offset metadata to a nested mutable partition.
+    #[cuda_tile::variadic_op(N = 6)]
+    #[cuda_tile::compiler_op(name = "set_nested_mutable_partition_access_offset")]
+    pub fn set_nested_mutable_partition_access_offset<
+        'a,
+        E: ElementType,
+        const OUTER_TILE: [i32; N],
+        const NESTED_TILE: [i32; N],
+    >(
+        partition: &mut PartitionMut<'a, E, NESTED_TILE>,
+        outer_tile: Shape<OUTER_TILE>,
     ) {
         unreachable!()
     }
@@ -1929,6 +1948,30 @@ pub mod core {
     )]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn make_partition_view_mut<
+        'a,
+        E: ElementType,
+        const TENSOR_SHAPE: [i32; N],
+        const TILE_SHAPE: [i32; N],
+        P: padding::Mode,
+    >(
+        tensor_view: &Tensor<E, TENSOR_SHAPE>,
+        shape: Shape<TILE_SHAPE>,
+        padding_value: P,
+        token: Token,
+    ) -> PartitionMut<'a, E, TILE_SHAPE> {
+        unreachable!()
+    }
+
+    /// Build a nested mutable partition view from an already partitioned
+    /// mutable tensor. This still partitions the full tensor view; the compiler
+    /// attaches metadata so tile accesses are offset by the enclosing CTA tile.
+    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+                    params=["tensor_view"],
+                    output_type_params=["tensor_view", "padding_value"],
+                    output_type_meta=["token"]
+    )]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn make_nested_partition_view_mut<
         'a,
         E: ElementType,
         const TENSOR_SHAPE: [i32; N],

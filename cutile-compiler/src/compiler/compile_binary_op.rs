@@ -72,13 +72,29 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         ctx: &mut CompilerContext,
         return_type: Option<TileRustType>,
     ) -> Result<Option<TileRustValue>, JITError> {
+        let tile_binary_op = get_tile_bop_from_rust_bop(&bin_expr.op)?;
+        let is_comparison = matches!(
+            tile_binary_op,
+            TileBinaryOp::Eq
+                | TileBinaryOp::Ne
+                | TileBinaryOp::Lt
+                | TileBinaryOp::Le
+                | TileBinaryOp::Gt
+                | TileBinaryOp::Ge
+        );
+        let is_logical = matches!(bin_expr.op, syn::BinOp::And(_) | syn::BinOp::Or(_));
+        let lhs_return_type = if is_comparison || is_logical {
+            None
+        } else {
+            return_type.clone()
+        };
         let lhs = self.compile_expression(
             module,
             block_id,
             &bin_expr.left,
             generic_vars,
             ctx,
-            return_type.clone(),
+            lhs_return_type,
         )?;
         if lhs.is_none() {
             return self.jit_error_result(
@@ -87,13 +103,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         }
         let lhs = lhs.unwrap();
+        let rhs_return_type = if is_logical {
+            None
+        } else if is_comparison {
+            Some(lhs.ty.clone())
+        } else {
+            return_type.clone().or_else(|| Some(lhs.ty.clone()))
+        };
         let rhs = self.compile_expression(
             module,
             block_id,
             &bin_expr.right,
             generic_vars,
             ctx,
-            return_type.clone(),
+            rhs_return_type,
         )?;
         if rhs.is_none() {
             return self.jit_error_result(
@@ -107,7 +130,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             block_id,
             lhs,
             rhs,
-            &get_tile_bop_from_rust_bop(&bin_expr.op)?,
+            &tile_binary_op,
             generic_vars,
             ctx,
             return_type,
