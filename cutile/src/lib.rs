@@ -186,6 +186,7 @@ pub mod tile_kernel;
 pub mod utils;
 
 pub use cuda_async;
+pub use cuda_async::jit_store::{self, FileSystemJitStore, JitStore};
 pub use cuda_core;
 pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
