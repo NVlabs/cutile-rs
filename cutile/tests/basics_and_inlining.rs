@@ -36,6 +36,19 @@ mod basics_and_inlining_module {
         other_function(tile_x, shape);
     }
 
+    #[cutile::entry()]
+    fn scalar_bool_condition_kernel<const CAUSAL: i32, const EVEN_K: i32>(
+        output: &mut Tensor<i32, { [1] }>,
+        mask_start: i32,
+    ) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let j = pid.0;
+        if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
+            let one: Tile<i32, { [1] }> = constant(1i32, const_shape![1]);
+            output.store(one);
+        }
+    }
+
     // Various Rust->TileIR tests.
 
     pub struct SomeStruct {
@@ -312,6 +325,30 @@ fn compile_inlining() -> () {
                 2.to_string(),
             ],
             &[("y", &[1024, 1, 1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("{module_op_str}");
+    });
+}
+
+#[test]
+fn compile_scalar_bool_condition() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "scalar_bool_condition_kernel",
+            &[1.to_string(), 0.to_string()],
+            &[("output", &[1])],
             &[],
             &[],
             None,
