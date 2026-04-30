@@ -468,8 +468,7 @@ pub(crate) mod pool {
         props: &cuda_bindings::CUmemPoolProps,
     ) -> Result<cuda_bindings::CUmemoryPool, DriverError> {
         let mut pool = MaybeUninit::uninit();
-        cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), props as *const _ as *mut _)
-            .result()?;
+        cuda_bindings::cuMemPoolCreate(pool.as_mut_ptr(), props as *const _ as *mut _).result()?;
         Ok(pool.assume_init())
     }
 

@@ -19,7 +19,7 @@ use super::tile_rust_type::TileRustType;
 use super::utils::{int_attr, rounding_mode_attr, signedness_attr};
 use crate::bounds::Bounds;
 use crate::error::JITError;
-use crate::generics::{GenericVars, TypeInstance};
+use crate::generics::{get_cga_from_type, GenericVars, TypeInstance};
 use crate::syn_utils::*;
 use crate::types::*;
 
@@ -32,6 +32,8 @@ use cutile_ir::ir::{
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::{Expr, ExprCall, ExprPath, GenericArgument, ItemFn, Lit, PathArguments};
+
+const NESTED_MUTABLE_ACCESS_OFFSET_META: &str = "nested_mutable_access_offset";
 
 /// Helper: determine signedness string from a Rust element type name.
 fn get_signedness_str(element_type_str: &str) -> &'static str {
@@ -64,6 +66,138 @@ fn tile_ir_type_from_trt(
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
+    fn scalar_i32_type(&self, span: &proc_macro2::Span) -> Result<TileRustType, JITError> {
+        let rust_ty = syn::parse2::<syn::Type>("i32".parse()?).unwrap();
+        self.compile_type(&rust_ty, &GenericVars::empty_unchecked(), &HashMap::new())?
+            .ok_or_else(|| self.jit_error(span, "failed to compile i32 type"))
+    }
+
+    fn array_i32_type(
+        &self,
+        rank: usize,
+        generic_vars: &GenericVars,
+        span: &proc_macro2::Span,
+    ) -> Result<TileRustType, JITError> {
+        let rust_ty = syn::parse_str::<syn::Type>(&format!("[i32; {rank}]")).unwrap();
+        self.compile_type(&rust_ty, generic_vars, &HashMap::new())?
+            .ok_or_else(|| self.jit_error(span, "failed to compile i32 array type"))
+    }
+
+    fn static_shape_from_value(
+        &self,
+        value: &TileRustValue,
+        generic_vars: &GenericVars,
+        span: &proc_macro2::Span,
+    ) -> Result<Vec<i32>, JITError> {
+        if let TypeInstance::StructuredType(instance) = &value.ty.type_instance {
+            Ok(instance.shape.clone())
+        } else if let Some(shape) = get_cga_from_type(&value.ty.rust_ty, generic_vars) {
+            Ok(shape)
+        } else {
+            self.jit_error_result(span, "expected a statically shaped value")
+        }
+    }
+
+    fn partition_tile_shape(
+        &self,
+        value: &TileRustValue,
+        span: &proc_macro2::Span,
+    ) -> Result<Vec<i32>, JITError> {
+        let tile_shape = value.ty.params.iter().find_map(|param| match param {
+            TypeParam::Tile(tile) => match tile.type_instance.as_ref() {
+                Some(TypeInstance::StructuredType(instance)) => Some(instance.shape.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        tile_shape.ok_or_else(|| {
+            self.jit_error(
+                span,
+                "nested mutable partition is missing tile-shape metadata",
+            )
+        })
+    }
+
+    fn compile_nested_mutable_access_offset_metadata(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        span: &proc_macro2::Span,
+        partition_value: &TileRustValue,
+        outer_tile: &TileRustValue,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+    ) -> Result<TileRustValue, JITError> {
+        let outer_shape = self.static_shape_from_value(outer_tile, generic_vars, span)?;
+        let nested_shape = self.partition_tile_shape(partition_value, span)?;
+        if outer_shape.len() != nested_shape.len() {
+            return self.jit_error_result(
+                span,
+                &format!(
+                    "nested mutable partition rank mismatch: outer tile rank {}, nested tile rank {}",
+                    outer_shape.len(),
+                    nested_shape.len()
+                ),
+            );
+        }
+        let rank = outer_shape.len();
+        if rank > 3 {
+            return self.jit_error_result(
+                span,
+                "nested mutable partition access offsets are only supported up to rank 3",
+            );
+        }
+
+        let i32_ty = self.scalar_i32_type(span)?;
+        let scalar_i32_ir_ty = Type::Tile(TileType {
+            shape: vec![],
+            element_type: TileElementType::Scalar(ScalarType::I32),
+        });
+        let mut op_builder = OpBuilder::new(Opcode::GetTileBlockId, self.ir_location(span));
+        for _ in 0..3 {
+            op_builder = op_builder.result(scalar_i32_ir_ty.clone());
+        }
+        let (op_id, pid_results) = op_builder.build(module);
+        append_op(module, block_id, op_id);
+
+        let mut offsets = Vec::with_capacity(rank);
+        for i in 0..rank {
+            let outer_dim = outer_shape[i];
+            let nested_dim = nested_shape[i];
+            if outer_dim <= 0 || nested_dim <= 0 {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "nested mutable partition requires static positive tile dimensions, got outer dim {outer_dim} and nested dim {nested_dim} at axis {i}"
+                    ),
+                );
+            }
+            let pid = TileRustValue::new_primitive(pid_results[i], i32_ty.clone(), None);
+            let ratio = ((outer_dim as i64 + nested_dim as i64 - 1) / nested_dim as i64) as i32;
+            let offset = if ratio == 1 {
+                pid
+            } else {
+                let ratio_value =
+                    self.compile_constant(module, block_id, generic_vars, ratio as i32)?;
+                self.compile_binary_op_from_values(
+                    module,
+                    block_id,
+                    pid,
+                    ratio_value,
+                    &TileBinaryOp::Mul,
+                    generic_vars,
+                    ctx,
+                    None,
+                    span,
+                )?
+            };
+            offsets.push(offset);
+        }
+
+        let array_ty = self.array_i32_type(rank, generic_vars, span)?;
+        Ok(TileRustValue::new_compound(offsets, array_ty))
+    }
+
     /// Compiles a `compiler_op` (intrinsic) function call.
     /// The compiler implements Rust-related functionality, such as polymorphism,
     /// for these functions.
@@ -1128,6 +1262,94 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 };
                 Ok(Some(return_value.clone()))
+            }
+            "set_nested_mutable_partition_access_offset" => {
+                if call_expr.args.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "set_nested_mutable_partition_access_offset expects 2 arguments, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+
+                let var_path = match &call_expr.args[0] {
+                    Expr::Path(var_path) => var_path,
+                    Expr::Reference(reference) => match &*reference.expr {
+                        Expr::Path(var_path) => var_path,
+                        _ => {
+                            return self.jit_error_result(
+                                &call_expr.args[0].span(),
+                                &format!(
+                                    "first argument to `set_nested_mutable_partition_access_offset` must be a mutable partition variable, got `{}`",
+                                    call_expr.args[0].to_token_stream()
+                                ),
+                            )
+                        }
+                    },
+                    _ => {
+                        return self.jit_error_result(
+                            &call_expr.args[0].span(),
+                            &format!(
+                                "first argument to `set_nested_mutable_partition_access_offset` must be a mutable partition variable, got `{}`",
+                                call_expr.args[0].to_token_stream()
+                            ),
+                        )
+                    }
+                };
+                let var_name = get_ident_from_path_expr(var_path)
+                    .to_token_stream()
+                    .to_string();
+
+                let outer_tile = self
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[1],
+                        generic_vars,
+                        ctx,
+                        None,
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.args[1].span(),
+                            "failed to compile nested mutable outer tile shape",
+                        )
+                    })?;
+                let mut partition_value = ctx.vars.get(var_name.as_str()).cloned().ok_or_else(
+                    || {
+                        self.jit_error(
+                            &call_expr.args[0].span(),
+                            &format!(
+                                "first argument to `set_nested_mutable_partition_access_offset` must be a known variable, got `{}`",
+                                call_expr.args[0].to_token_stream()
+                            ),
+                        )
+                    },
+                )?;
+                if partition_value.mutability != Mutability::Mutable {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!(
+                            "`set_nested_mutable_partition_access_offset` requires a mutable variable, but got {:?}",
+                            partition_value.mutability
+                        ),
+                    );
+                }
+                let access_offset = self.compile_nested_mutable_access_offset_metadata(
+                    module,
+                    block_id,
+                    &call_expr.span(),
+                    &partition_value,
+                    &outer_tile,
+                    generic_vars,
+                    ctx,
+                )?;
+                partition_value
+                    .insert_type_meta_field(NESTED_MUTABLE_ACCESS_OFFSET_META, access_offset)?;
+                ctx.vars.insert(var_name, partition_value);
+                Ok(None)
             }
             "set_type_meta_field" => {
                 let Some(type_meta_field) = compiler_op_attrs.parse_string("type_meta_field")

@@ -9,7 +9,7 @@ use crate::device_context::{pool_for_stream, with_default_device_policy};
 use crate::device_future::DeviceFuture;
 use crate::error::{device_error, DeviceError};
 use crate::scheduling_policies::SchedulingPolicy;
-use cuda_core::{Device, Stream, MemPool};
+use cuda_core::{Device, MemPool, Stream};
 use std::cell::{Cell, UnsafeCell};
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -94,9 +94,7 @@ impl ExecutionContext {
     /// The stream must be valid and not destroyed.
     pub unsafe fn alloc_async(&self, num_bytes: usize) -> cuda_core::sys::CUdeviceptr {
         match &self.pool {
-            Some(pool) => {
-                cuda_core::malloc_from_pool_async(num_bytes, pool, &self.cuda_stream)
-            }
+            Some(pool) => cuda_core::malloc_from_pool_async(num_bytes, pool, &self.cuda_stream),
             None => cuda_core::malloc_async(num_bytes, &self.cuda_stream),
         }
     }
