@@ -422,7 +422,7 @@ impl TypeInferenceCx<'_, '_> {
             return Ok(None);
         }
         let mut generic_arg_inf = GenericArgInference::new_method(impl_item, impl_method);
-        generic_arg_inf.map_args_to_params(&call_arg_rust_tys.to_vec(), Some(self_ty));
+        generic_arg_inf.map_args_to_params(call_arg_rust_tys, Some(self_ty));
         generic_arg_inf.apply_provided_generics_method_call(method_call, self.generic_vars);
         if !generic_arg_inf.verify() {
             return Ok(None);
@@ -651,7 +651,7 @@ pub fn infer_method_generics(
     }
 
     let mut generic_arg_inference = GenericArgInference::new_method(impl_item, impl_method);
-    generic_arg_inference.map_args_to_params(&call_arg_rust_tys.to_vec(), Some(self_ty));
+    generic_arg_inference.map_args_to_params(call_arg_rust_tys, Some(self_ty));
     let inferred = generic_arg_inference.get_generic_vars_instance(caller_generic_vars, primitives);
 
     if method_call.turbofish.is_some() {

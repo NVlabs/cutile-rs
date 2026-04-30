@@ -393,8 +393,10 @@ fn trait_impl_matches_call(
         return false;
     }
 
-    let mut ctx = TraitMatchCtx::default();
-    ctx.caller_array_params = generic_vars.inst_array.clone();
+    let mut ctx = TraitMatchCtx{
+        caller_array_params: generic_vars.inst_array.clone(),
+        ..Default::default()
+    };
     collect_generics_for_trait_match(&item_impl.generics, &mut ctx);
     collect_generics_for_trait_match(&impl_method.sig.generics, &mut ctx);
 
@@ -776,7 +778,7 @@ impl CUDATileModules {
         if matches!(
             generic_vars.instantiate_type(receiver_rust_ty, self.primitives())?,
             TypeInstance::ElementType(_)
-        ) {
+      ) {
             if let Some(impls) = self
                 .name_resolver
                 .trait_impls()

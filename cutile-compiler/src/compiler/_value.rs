@@ -293,9 +293,7 @@ impl TileRustValue {
     }
 
     pub fn take_type_meta_field(self, name: &str) -> Option<Self> {
-        let Some(mut type_meta) = self.type_meta else {
-            return None;
-        };
+        let mut type_meta = self.type_meta?;
         type_meta.fields.remove(name)
     }
 
