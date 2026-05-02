@@ -337,3 +337,112 @@ fn switch_between_pools() {
         op_default.sync().expect("default op failed");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Memory accounting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mem_stats_initially_zero() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+
+        let stats = pool.mem_stats().expect("read stats failed");
+        assert_eq!(stats.used_current, 0, "no allocations yet");
+        assert_eq!(stats.used_high, 0, "no allocations yet");
+    });
+}
+
+
+#[test]
+fn mem_stats_track_alloc_and_free() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        pool.set_release_threshold(u64::MAX)
+            .expect("set threshold failed");
+
+        let stream = global_policy(0)
+            .expect("get policy failed")
+            .next_stream()
+            .expect("get stream failed");
+
+        const N: usize = 1 << 20;
+
+        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) };
+        assert!(dptr != 0);
+        unsafe { stream.synchronize() }.expect("stream sync failed");
+
+        let stats = pool.mem_stats().expect("read stats failed");
+        assert!(
+            stats.used_current >= N as u64,
+            "used_current should reflect alloc, got {}",
+            stats.used_current
+        );
+        assert!(
+            stats.used_high >= N as u64,
+            "used_high should track peak, got {}",
+            stats.used_high
+        );
+
+        unsafe { cuda_core::free_async(dptr, &stream) };
+        unsafe { stream.synchronize() }.expect("stream sync failed");
+
+        let stats = pool.mem_stats().expect("read stats failed");
+        assert_eq!(
+            stats.used_current, 0,
+            "used_current should return to 0 after free + sync"
+        );
+        assert!(
+            stats.used_high >= N as u64,
+            "used_high is a watermark and must not decrease, got {}",
+            stats.used_high
+        );
+    });
+}
+
+#[test]
+fn reset_used_high_collapses_watermark_to_current() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        pool.set_release_threshold(u64::MAX)
+            .expect("set threshold failed");
+
+        let stream = global_policy(0)
+            .expect("get policy failed")
+            .next_stream()
+            .expect("get stream failed");
+
+        const N: usize = 1 << 20;
+
+        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) };
+        unsafe { cuda_core::free_async(dptr, &stream) };
+        unsafe { stream.synchronize() }.expect("stream sync failed");
+
+        let before = pool.mem_stats().expect("read stats failed");
+        assert_eq!(before.used_current, 0);
+        assert!(
+            before.used_high >= N as u64,
+            "precondition: high watermark should be > 0"
+        );
+
+        pool.reset_used_high().expect("reset used_high failed");
+
+        let after = pool.mem_stats().expect("read stats failed");
+        assert_eq!(
+            after.used_high, after.used_current,
+            "after reset, used_high should collapse to used_current"
+        );
+    });
+}

@@ -508,6 +508,35 @@ pub(crate) mod pool {
         .result()
     }
 
+    /// Reads a `u64`-valued pool attribute.
+    ///
+    /// # Safety
+    /// `pool` must be a valid handle. `attr` must be one whose value type is
+    /// `cuuint64_t` — the four `*_MEM_CURRENT` / `*_MEM_HIGH` accounting
+    /// attributes and `RELEASE_THRESHOLD`.
+    pub unsafe fn get_attribute_u64(
+        pool: cuda_bindings::CUmemoryPool,
+        attr: cuda_bindings::CUmemPool_attribute,
+    ) -> Result<u64, DriverError> {
+        let mut value: u64 = 0;
+        cuda_bindings::cuMemPoolGetAttribute(pool, attr, &mut value as *mut _ as *mut _).result()?;
+        Ok(value)
+    }
+
+    /// Resets a high-watermark attribute by writing 0. The driver rejects any
+    /// other value for these attributes.
+    ///
+    /// # Safety
+    /// `pool` must be valid. `attr` must be `USED_MEM_HIGH` or
+    /// `RESERVED_MEM_HIGH`.
+    pub unsafe fn reset_high_watermark(
+        pool: cuda_bindings::CUmemoryPool,
+        attr: cuda_bindings::CUmemPool_attribute,
+    ) -> Result<(), DriverError> {
+        let zero: u64 = 0;
+        cuda_bindings::cuMemPoolSetAttribute(pool, attr, &zero as *const _ as *mut _).result()
+    }
+
     /// Allocates device memory from a specific pool asynchronously.
     ///
     /// # Safety
