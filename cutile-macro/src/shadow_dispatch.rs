@@ -477,10 +477,8 @@ impl RankPolyOpSpec {
         }
         // Rank-dependent non-shape arg types as trait generics (e.g. `Idx0`
         // for `idx: [i32; N]`). Caller's array literal pins them.
-        for slot in &self.rank_dep_arg_idents {
-            if let Some(id) = slot {
-                all_trait_params.push(quote! { #id });
-            }
+        for id in self.rank_dep_arg_idents.iter().flatten() {
+            all_trait_params.push(quote! { #id });
         }
         if let Some(ref out) = extra_out_trait_param {
             all_trait_params.push(out.clone());
@@ -565,7 +563,7 @@ impl RankPolyOpSpec {
         let mut return_concrete = rewrite_ty_for_rank(&self.return_type, combo, &self.cgas);
         for (orig, replacement) in self.dead_lifetimes.iter().zip(self.dead_lt_idents.iter()) {
             return_concrete =
-                replace_lifetimes_with(&return_concrete, &[orig.clone()], replacement);
+                replace_lifetimes_with(&return_concrete, std::slice::from_ref(orig), replacement);
         }
 
         let mut trait_instantiation_args: Vec<TokenStream2> = Vec::new();
@@ -773,10 +771,8 @@ impl RankPolyOpSpec {
             trait_args.push(quote! { #i });
         }
         // Rank-dep arg generics, matching trait declaration ordering.
-        for slot in &self.rank_dep_arg_idents {
-            if let Some(id) = slot {
-                trait_args.push(quote! { #id });
-            }
+        for id in self.rank_dep_arg_idents.iter().flatten() {
+            trait_args.push(quote! { #id });
         }
         if use_free_out {
             trait_args.push(quote! { #out_ident });
@@ -827,10 +823,8 @@ impl RankPolyOpSpec {
         for i in &extra_shape_generic_idents {
             all_wrapper_generics.push(quote! { #i });
         }
-        for slot in &self.rank_dep_arg_idents {
-            if let Some(id) = slot {
-                all_wrapper_generics.push(quote! { #id });
-            }
+        for id in self.rank_dep_arg_idents.iter().flatten() {
+            all_wrapper_generics.push(quote! { #id });
         }
         if use_free_out {
             all_wrapper_generics.push(quote! { #out_ident });
@@ -1744,7 +1738,7 @@ pub fn desugar_variadic_trait_decl(item: &ItemTrait) -> Result<TokenStream2, Err
     for param in &item.generics.params {
         let drop_it = matches!(
             param,
-            GenericParam::Const(c) if cga_idents.iter().any(|i| *i == c.ident)
+            GenericParam::Const(c) if cga_idents.contains(&c.ident)
         );
         if !drop_it {
             new_params.push(param.clone());
@@ -1942,7 +1936,7 @@ fn emit_variadic_trait_impl_for_rank(
     for param in &item.generics.params {
         let skip = matches!(
             param,
-            GenericParam::Const(c) if cga_idents.iter().any(|i| *i == c.ident)
+            GenericParam::Const(c) if cga_idents.contains(&c.ident)
         );
         if !skip {
             all_impl_params.push(quote! { #param });
@@ -2012,7 +2006,7 @@ fn rewrite_trait_method_for_rank_poly(
                 .map(|(i, _)| i);
             if let Some(i) = cga_idx {
                 if let CgaRole::ShapeBound { sh_ident } = &shape.roles[i] {
-                    pt.ty = Box::new(syn::parse_quote! { #sh_ident });
+                    *pt.ty = syn::parse_quote! { #sh_ident };
                 }
                 // Free CGAs aren't in args by definition (classify_cgas's
                 // post-condition), so reaching this branch with a Free role
@@ -2031,7 +2025,7 @@ fn rewrite_trait_method_for_rank_poly(
             } else {
                 syn::parse_quote! { Self::Out }
             };
-            *ret = Box::new(new_ret);
+            **ret = new_ret;
         }
     }
 }
@@ -2110,13 +2104,13 @@ fn rewrite_impl_method_body_for_rank(
         if let FnArg::Typed(pt) = arg {
             let new_ty = rewrite_ty_for_rank(&pt.ty, combo, cgas);
             let new_ty = bind_anon_lifetimes_to(&new_ty, recv_lt);
-            pt.ty = Box::new(new_ty);
+            *pt.ty = new_ty;
         }
     }
     if let ReturnType::Type(_, ret) = &mut new_sig.output {
         let new_ret = rewrite_ty_for_rank(ret, combo, cgas);
         let new_ret = bind_anon_lifetimes_to(&new_ret, recv_lt);
-        *ret = Box::new(new_ret);
+        **ret = new_ret;
     }
     let muted_args: Vec<TokenStream2> = new_sig
         .inputs
@@ -2212,10 +2206,8 @@ fn type_uses_lifetime(ty: &Type) -> bool {
                     for arg in ab.args.iter() {
                         match arg {
                             GenericArgument::Lifetime(_) => return true,
-                            GenericArgument::Type(t) => {
-                                if type_uses_lifetime(t) {
-                                    return true;
-                                }
+                            GenericArgument::Type(t) if type_uses_lifetime(t) => {
+                                return true;
                             }
                             _ => {}
                         }
@@ -2236,11 +2228,10 @@ fn filter_cuda_tile_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
     attrs
         .iter()
         .filter(|a| {
-            let path = a.path();
-            !path
+            a.path()
                 .segments
                 .first()
-                .is_some_and(|s| s.ident == "cuda_tile")
+                .is_none_or(|s| s.ident != "cuda_tile")
         })
         .cloned()
         .collect()
