@@ -282,6 +282,73 @@ impl MemPool {
         self.device.bind_to_thread()?;
         unsafe { pool::set_release_threshold(self.cu_pool, threshold) }
     }
+
+    /// Reads all four memory accounting counters in a single bind-to-thread block.
+    ///
+    /// The four reads happen back-to-back, but the pool is being mutated by
+    /// async allocations on streams — so this is a best-effort snapshot, not
+    /// a synchronously consistent reading. For stable values, sync the streams
+    /// that allocate from this pool first.
+    pub fn mem_stats(&self) -> Result<PoolMemStats, DriverError> {
+        self.device.bind_to_thread()?;
+        unsafe {
+            Ok(PoolMemStats {
+                used_current: pool::get_attribute_u64(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
+                )?,
+                used_high: pool::get_attribute_u64(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+                )?,
+                reserved_current: pool::get_attribute_u64(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
+                )?,
+                reserved_high: pool::get_attribute_u64(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+                )?,
+            })
+        }
+    }
+
+    /// Resets `used_high` to the current `used_current`.
+    pub fn reset_used_high(&self) -> Result<(), DriverError> {
+        self.device.bind_to_thread()?;
+        unsafe {
+            pool::reset_high_watermark(
+                self.cu_pool,
+                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+            )
+        }
+    }
+
+    /// Resets `reserved_high` to the current `reserved_current`.
+    pub fn reset_reserved_high(&self) -> Result<(), DriverError> {
+        self.device.bind_to_thread()?;
+        unsafe {
+            pool::reset_high_watermark(
+                self.cu_pool,
+                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+            )
+        }
+    }
+}
+
+/// Snapshot of a pool's memory accounting counters at a point in time.
+///
+/// `used_*` tracks memory currently checked out to the application; `reserved_*`
+/// tracks memory the pool holds from the OS (which may exceed `used_*` due to
+/// internal caching). `*_high` are watermarks since the last reset (or pool
+/// creation), readable via [`MemPool::mem_stats`] and resettable via
+/// [`MemPool::reset_used_high`] / [`MemPool::reset_reserved_high`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolMemStats {
+    pub used_current: u64,
+    pub used_high: u64,
+    pub reserved_current: u64,
+    pub reserved_high: u64,
 }
 
 /// A CUDA stream handle.
