@@ -1337,17 +1337,21 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                let access_offset = self.compile_nested_mutable_access_offset_metadata(
-                    module,
-                    block_id,
-                    &call_expr.span(),
-                    &partition_value,
-                    &outer_tile,
-                    generic_vars,
-                    ctx,
-                )?;
-                partition_value
-                    .insert_type_meta_field(NESTED_MUTABLE_ACCESS_OFFSET_META, access_offset)?;
+                let outer_shape =
+                    self.static_shape_from_value(&outer_tile, generic_vars, &call_expr.span())?;
+                if outer_shape.iter().all(|d| *d > 0) {
+                    let access_offset = self.compile_nested_mutable_access_offset_metadata(
+                        module,
+                        block_id,
+                        &call_expr.span(),
+                        &partition_value,
+                        &outer_tile,
+                        generic_vars,
+                        ctx,
+                    )?;
+                    partition_value
+                        .insert_type_meta_field(NESTED_MUTABLE_ACCESS_OFFSET_META, access_offset)?;
+                }
                 ctx.vars.insert(var_name, partition_value);
                 Ok(None)
             }
