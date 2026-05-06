@@ -120,6 +120,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_nested_mutable_access_offset_metadata(
         &self,
         module: &mut Module,
@@ -185,7 +186,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 pid
             } else {
                 let ratio_value =
-                    self.compile_constant(module, block_id, generic_vars, ratio as i32)?;
+                    self.compile_constant(module, block_id, generic_vars, ratio)?;
                 self.compile_binary_op_from_values(
                     module,
                     block_id,
