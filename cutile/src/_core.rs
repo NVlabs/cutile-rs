@@ -2433,8 +2433,8 @@ pub mod core {
         fn load_tile_like(&self, y: &Y) -> Self::Out;
     }
 
-    impl<E1: ElementType, E2: ElementType, const S: [i32; 1]> LoadTileLike<Tensor<E2, S>>
-        for Tensor<E1, { [-1] }>
+    impl<E1: ElementType, E2: ElementType, const X: [i32; 1], const S: [i32; 1]>
+        LoadTileLike<Tensor<E2, S>> for Tensor<E1, X>
     {
         type Out = Tile<E1, S>;
 
@@ -2462,8 +2462,8 @@ pub mod core {
         }
     }
 
-    impl<E1: ElementType, E2: ElementType, const S: [i32; 2]> LoadTileLike<Tensor<E2, S>>
-        for Tensor<E1, { [-1, -1] }>
+    impl<E1: ElementType, E2: ElementType, const X: [i32; 2], const S: [i32; 2]>
+        LoadTileLike<Tensor<E2, S>> for Tensor<E1, X>
     {
         type Out = Tile<E1, S>;
 
@@ -2491,8 +2491,8 @@ pub mod core {
         }
     }
 
-    impl<E1: ElementType, E2: ElementType, const S: [i32; 3]> LoadTileLike<Tensor<E2, S>>
-        for Tensor<E1, { [-1, -1, -1] }>
+    impl<E1: ElementType, E2: ElementType, const X: [i32; 3], const S: [i32; 3]>
+        LoadTileLike<Tensor<E2, S>> for Tensor<E1, X>
     {
         type Out = Tile<E1, S>;
 

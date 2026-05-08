@@ -53,6 +53,15 @@ mod load_tile_like_examples_module {
         let tile_y = y.load();
         y.store(tile_a * tile_x + tile_y);
     }
+
+    #[cutile::entry()]
+    fn static_input_like<const B: i32, const N: i32>(
+        z: &mut Tensor<f32, { [B] }>,
+        x: &Tensor<f32, { [N] }>,
+    ) {
+        let tile_x = load_tile_like(x, z);
+        z.store(tile_x);
+    }
 }
 
 use load_tile_like_examples_module::__module_ast_self;
@@ -121,6 +130,19 @@ fn compiles_saxpy_style_2d_inference() {
             !store_line.contains("[0"),
             "Tensor::store should index by tile-block id, not [0, 0].\nStore line:\n{store_line}\nMLIR:\n{mlir}"
         );
+    });
+}
+
+#[test]
+fn compiles_static_input_1d_inference() {
+    common::with_test_stack(|| {
+        let mlir = compile(
+            "static_input_like",
+            &[4.to_string(), 16.to_string()],
+            &[("z", &[1]), ("x", &[1])],
+        );
+        assert!(mlir.contains("load_view_tko"));
+        assert!(mlir.contains("tile<4xf32>"));
     });
 }
 
