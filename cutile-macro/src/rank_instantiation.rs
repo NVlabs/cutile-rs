@@ -882,6 +882,7 @@ fn instantiate_cga_args(
 ) -> Result<(Ident, AngleBracketedGenericArguments), Error> {
     let mut instantiated_param_name = type_ident.to_string();
     let mut generic_args_result: Vec<String> = vec![];
+    let mut rank_suffixes: Vec<u32> = vec![];
 
     for generic_arg in &generic_args.args {
         match generic_arg {
@@ -905,11 +906,7 @@ fn instantiate_cga_args(
                             for j in 0..cga.length {
                                 generic_args_result.push(format!("{}{}", cga.name, j));
                             }
-                            instantiated_param_name = if skip_suffix {
-                                type_ident.to_string()
-                            } else {
-                                concrete_name(&type_ident.to_string(), &[cga.length])
-                            };
+                            rank_suffixes.push(cga.length);
                         } else {
                             // Not a const generic array instance, just convert to string
                             // This handles regular types like Tile<i1, S>, Token, etc.
@@ -953,11 +950,7 @@ fn instantiate_cga_args(
                                     generic_args_result
                                         .push(format_rank_const_expr(elem, instances)?);
                                 }
-                                instantiated_param_name = if skip_suffix {
-                                    type_ident.to_string()
-                                } else {
-                                    concrete_name(&type_ident.to_string(), &[rank as u32])
-                                };
+                                rank_suffixes.push(rank as u32);
                             }
                             Expr::Repeat(repeat_expr) => {
                                 // println!("Expr::Repeat: {:?}", repeat_expr.expr);
@@ -1009,11 +1002,7 @@ fn instantiate_cga_args(
                                         ))
                                     }
                                 };
-                                instantiated_param_name = if skip_suffix {
-                                    type_ident.to_string()
-                                } else {
-                                    concrete_name(&type_ident.to_string(), &[num_repetitions])
-                                };
+                                rank_suffixes.push(num_repetitions);
                             }
                             _ => {
                                 return Err(syn_err(
@@ -1035,6 +1024,9 @@ fn instantiate_cga_args(
                 generic_args_result.push(generic_arg.to_token_stream().to_string());
             }
         }
+    }
+    if !skip_suffix && !rank_suffixes.is_empty() {
+        instantiated_param_name = concrete_name(&type_ident.to_string(), &rank_suffixes);
     }
     let instantiated_param_ident = Ident::new(instantiated_param_name.as_str(), type_ident.span());
     let formatted = format!("<{}>", generic_args_result.join(","));

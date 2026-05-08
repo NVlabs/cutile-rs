@@ -35,7 +35,7 @@ mod my_module {
         query_group_size: i32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id(); // (b*h, m/bm, 1)
-        let h = get_shape_dim(q.shape(), 1i32);
+        let h = q.shape()[1];
         let batch_idx = pid.0 / h; // \in  [0, b)
         let q_head_idx = pid.0 % h; // \in [0, h)
         let q_m_idx = pid.1; // \in [0, m/bm)
@@ -74,7 +74,7 @@ mod my_module {
         let tq: Tile<f32, { [1, 1, BM, D] }> = q_part.load([batch_idx, q_head_idx, q_m_idx, 0i32]);
         let tq: Tile<f32, { [BM, D] }> = tq.reshape(const_shape![BM, D]);
 
-        let n: i32 = get_shape_dim(k.shape(), 2i32);
+        let n: i32 = k.shape()[2];
         let num_tiles: i32 = ceil_div(n, BN);
         // let mask_start: i32 = n / BN;
 

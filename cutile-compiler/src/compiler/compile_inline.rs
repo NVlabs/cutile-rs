@@ -173,17 +173,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             };
             self.add_module_const_vars(&mut call_generic_vars);
             // Add function call const generics as variables.
-            for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(module, block_id, &call_generic_vars, *value)?;
-                call_variables.vars.insert(key.clone(), tr_val);
+            for (key, value) in call_generic_vars.ordered_inst_i32() {
+                let tr_val = self.compile_constant(module, block_id, &call_generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
-            for (key, value) in &call_generic_vars.inst_bool {
+            for (key, value) in call_generic_vars.ordered_inst_bool() {
                 let tr_val =
-                    self.compile_bool_constant(module, block_id, &call_generic_vars, *value)?;
-                call_variables.vars.insert(key.clone(), tr_val);
+                    self.compile_bool_constant(module, block_id, &call_generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
             // Add function call CGAs arrays as variables.
-            for (key, value) in &call_generic_vars.inst_array {
+            for (key, value) in call_generic_vars.ordered_inst_array() {
                 let arr_expr = syn::parse2::<Expr>(format!("{value:?}").parse().unwrap()).unwrap();
                 let arr_ty =
                     syn::parse2::<Type>(format!("[i32;{}]", value.len()).parse().unwrap()).unwrap();
@@ -198,7 +198,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ty,
                     )?
                     .expect("Failed to compile CGA as var.");
-                call_variables.vars.insert(key.clone(), tr_val);
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
             let initial_types = call_variables
                 .vars
@@ -389,15 +389,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             self.add_module_const_vars(&mut call_generic_vars);
 
             // Add method call const generics as variables.
-            for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(module, block_id, generic_vars, *value)?;
-                call_variables.vars.insert(key.clone(), tr_val);
+            for (key, value) in call_generic_vars.ordered_inst_i32() {
+                let tr_val = self.compile_constant(module, block_id, generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
-            for (key, value) in &call_generic_vars.inst_bool {
-                let tr_val = self.compile_bool_constant(module, block_id, generic_vars, *value)?;
-                call_variables.vars.insert(key.clone(), tr_val);
+            for (key, value) in call_generic_vars.ordered_inst_bool() {
+                let tr_val = self.compile_bool_constant(module, block_id, generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
-            for (key, value) in &call_generic_vars.inst_array {
+            for (key, value) in call_generic_vars.ordered_inst_array() {
                 let arr_expr = syn::parse2::<Expr>(format!("{value:?}").parse().unwrap()).unwrap();
                 let arr_ty =
                     syn::parse2::<Type>(format!("[i32;{}]", value.len()).parse().unwrap()).unwrap();
@@ -412,7 +412,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ty,
                     )?
                     .expect("Failed to compile CGA as var.");
-                call_variables.vars.insert(key.clone(), tr_val);
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
             // println!("inline_method_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ncall_generic_args={call_generic_args:#?}", impl_method.sig.ident.to_string());
             // Method calls are always core/library methods (user kernel code

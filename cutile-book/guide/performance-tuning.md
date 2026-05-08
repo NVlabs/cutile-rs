@@ -75,50 +75,60 @@ let (values, token) =
 | `[64, 64]`    | ~64-128            | Medium-High   |
 | `[128, 128]`  | ~256+              | Medium        |
 
-Two strategies remove bounds checks on tile loads and stores, depending on how stable your problem sizes are. **`unchecked_accesses = true`** (with `unsafe`) removes all runtime bounds checks from tile loads and stores. Compile-time shape and MMA-dimension checks still apply. Use when problem sizes vary widely and compilation overhead matters more than the safety net:
+The preferred safe performance path is a mapped output partition. The output
+partition produces bounded, disjoint indices, while input partitions use
+`with_bounds(...)` to carry the matching logical grid:
 
 ```rust
-#[cutile::entry(unchecked_accesses = true)]
-unsafe fn fast_kernel<const S: [i32; 2]>(...) {
-    // No bounds checking — programmer must ensure correctness
+fn gemm_persistent<
+    T: ElementType,
+    const BM: i32, const BN: i32, const BK: i32,
+    const MAP_SHAPE: [i32; 2],
+>(
+    mut z: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
+    x: &Tensor<T, { [-1, -1] }>,
+    y: &Tensor<T, { [-1, -1] }>,
+) {
+    let m = num_tiles(&z, 0);
+    let n = num_tiles(&z, 1);
+    let k = Dim::new(x.shape()[1] / BK);
+
+    let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
+    let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+
+    for out_idx in z.iter_indices() {
+        let (bid_m, bid_n) = out_idx.components();
+        let acc = compute_tile(bid_m, bid_n, k, &part_x, &part_y);
+        z.store(acc, out_idx);
+    }
 }
 ```
 
-**`.const_grid()` with fully static tensor shapes** keeps the safety net. When every dimension is a compile-time const and the grid is passed via `.const_grid()`, the JIT compiler can prove all partition accesses are in bounds and optimize the checks away — no `unsafe` needed:
+On the host side, `.map(...)` defines the output traversal and lets the launch
+grid be inferred from the mapped partition:
 
 ```rust
-#[cutile::entry()]
-fn gemm<
-    E: ElementType,
-    const BM: i32, const BN: i32, const BK: i32,
-    const M: i32, const N: i32, const K: i32,
->(
-    z: &mut Tensor<E, { [BM, BN] }>,
-    x: &Tensor<E, { [M, K] }>,    // Fully static
-    y: &Tensor<E, { [K, N] }>,    // Fully static
-) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
-    let pid: (i32, i32, i32) = get_tile_block_id();
-
-    let mut acc = load_tile_mut(z);
-    for i in 0i32..(K / BK) {
-        let tile_x = part_x.load([pid.0, i]);
-        let tile_y = part_y.load([i, pid.1]);
-        acc = mma(tile_x, tile_y, acc);
-    }
-    z.store(acc);
-}
-
-// On the host side:
-let grid = z.grid()?;
-let (z, _x, _y) = gemm(z, x, y)
-    .const_grid(grid)
+let z = z.partition([BM, BN]).map([4, 1], num_tile_blocks);
+let (z, _x, _y) = gemm_persistent(z, x, y)
     .generics(generics)
     .sync_on(&stream)?;
 ```
 
-The tradeoff: every new combination of const values triggers a JIT recompilation. Use this when problem sizes come from a small, known set — the JIT cache makes repeated sizes free.
+`unchecked_accesses = true` remains available when the programmer wants to opt
+out of all runtime bounds checks explicitly:
+
+```rust
+#[cutile::entry(unchecked_accesses = true)]
+unsafe fn fast_kernel<const S: [i32; 2]>(...) {
+    // No bounds checking - programmer must ensure correctness
+}
+```
+
+The older fully static GEMM pattern can also eliminate checks safely by making
+all tensor dimensions const generics and passing the launch grid with
+`.const_grid(...)`. That path is mainly useful for legacy kernels or workloads
+with a very small fixed set of problem sizes; every new full tensor shape
+specializes the JIT compilation.
 
 ---
 
