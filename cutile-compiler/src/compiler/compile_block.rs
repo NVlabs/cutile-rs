@@ -17,7 +17,7 @@ use super::tile_rust_type::TileRustType;
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::GenericVars;
 use crate::syn_utils::*;
-use crate::types::{get_pat_mutability, get_type_mutability};
+use crate::types::get_type_mutability;
 
 use cutile_ir::builder::{append_op, OpBuilder};
 use cutile_ir::bytecode::Opcode;
@@ -29,6 +29,187 @@ use syn::spanned::Spanned;
 use syn::{Expr, Item, Pat, Stmt};
 
 impl<'m> CUDATileFunctionCompiler<'m> {
+    fn bind_pattern_value(
+        &self,
+        pat: &Pat,
+        value: TileRustValue,
+        inherited_mutability: bool,
+        ctx: &mut CompilerContext,
+    ) -> Result<(), JITError> {
+        match pat {
+            Pat::Ident(ident) => {
+                let mut value = value;
+                value.mutability = if inherited_mutability || ident.mutability.is_some() {
+                    Mutability::Mutable
+                } else {
+                    Mutability::Immutable
+                };
+                ctx.vars.insert(ident.ident.to_string(), value.clone());
+                if let Some((_at, subpat)) = &ident.subpat {
+                    self.bind_pattern_value(subpat, value, inherited_mutability, ctx)?;
+                }
+                Ok(())
+            }
+            Pat::Type(pat_type) => self.bind_pattern_value(
+                &pat_type.pat,
+                value,
+                inherited_mutability || get_type_mutability(&pat_type.ty),
+                ctx,
+            ),
+            Pat::Paren(paren) => {
+                self.bind_pattern_value(&paren.pat, value, inherited_mutability, ctx)
+            }
+            Pat::Reference(reference) => self.bind_pattern_value(
+                &reference.pat,
+                value,
+                inherited_mutability || reference.mutability.is_some(),
+                ctx,
+            ),
+            Pat::Tuple(tuple) => {
+                let Some(elements) = value.values.clone() else {
+                    return self.jit_error_result(
+                        &tuple.span(),
+                        "right-hand side of tuple destructuring must be a tuple expression",
+                    );
+                };
+                if elements.len() != tuple.elems.len() {
+                    return self.jit_error_result(
+                        &tuple.span(),
+                        &format!(
+                            "tuple pattern has {} bindings but the expression produces {} values",
+                            tuple.elems.len(),
+                            elements.len()
+                        ),
+                    );
+                }
+                for (pat, value) in tuple.elems.iter().zip(elements.into_iter()) {
+                    self.bind_pattern_value(pat, value, inherited_mutability, ctx)?;
+                }
+                Ok(())
+            }
+            Pat::Slice(slice) => {
+                let Some(elements) = value.values.clone() else {
+                    return self.jit_error_result(
+                        &slice.span(),
+                        "right-hand side of slice destructuring must be an array expression",
+                    );
+                };
+                let pats = slice.elems.iter().collect::<Vec<_>>();
+                let rest_pos = pats.iter().position(|pat| matches!(pat, Pat::Rest(_)));
+                match rest_pos {
+                    Some(rest_pos) => {
+                        if pats.len().saturating_sub(1) > elements.len() {
+                            return self.jit_error_result(
+                                &slice.span(),
+                                &format!(
+                                    "slice pattern requires at least {} values but the expression produces {} values",
+                                    pats.len() - 1,
+                                    elements.len()
+                                ),
+                            );
+                        }
+                        for idx in 0..rest_pos {
+                            self.bind_pattern_value(
+                                pats[idx],
+                                elements[idx].clone(),
+                                inherited_mutability,
+                                ctx,
+                            )?;
+                        }
+                        let suffix_len = pats.len() - rest_pos - 1;
+                        for suffix_idx in 0..suffix_len {
+                            self.bind_pattern_value(
+                                pats[rest_pos + 1 + suffix_idx],
+                                elements[elements.len() - suffix_len + suffix_idx].clone(),
+                                inherited_mutability,
+                                ctx,
+                            )?;
+                        }
+                    }
+                    None => {
+                        if pats.len() != elements.len() {
+                            return self.jit_error_result(
+                                &slice.span(),
+                                &format!(
+                                    "slice pattern has {} bindings but the expression produces {} values",
+                                    pats.len(),
+                                    elements.len()
+                                ),
+                            );
+                        }
+                        for (pat, value) in pats.into_iter().zip(elements.into_iter()) {
+                            self.bind_pattern_value(pat, value, inherited_mutability, ctx)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Pat::Struct(pat_struct) => {
+                if value.kind != Kind::Struct {
+                    return self.jit_error_result(
+                        &pat_struct.span(),
+                        "right-hand side of struct destructuring must be a struct value",
+                    );
+                }
+                let Some(fields) = value.fields.clone() else {
+                    return self.jit_error_result(
+                        &pat_struct.span(),
+                        "struct value is missing its field data (internal)",
+                    );
+                };
+                for field in &pat_struct.fields {
+                    let syn::Member::Named(field_name) = &field.member else {
+                        return self.jit_error_result(
+                            &field.member.span(),
+                            "tuple struct patterns are not supported in struct destructuring",
+                        );
+                    };
+                    let Some(field_value) = fields.get(&field_name.to_string()).cloned() else {
+                        return self.jit_error_result(
+                            &field.member.span(),
+                            &format!("{} is not a field", field_name),
+                        );
+                    };
+                    self.bind_pattern_value(&field.pat, field_value, inherited_mutability, ctx)?;
+                }
+                Ok(())
+            }
+            Pat::TupleStruct(tuple_struct) => {
+                let Some(elements) = value.values.clone() else {
+                    return self.jit_error_result(
+                        &tuple_struct.span(),
+                        "right-hand side of tuple-struct destructuring must be a compound value",
+                    );
+                };
+                if elements.len() != tuple_struct.elems.len() {
+                    return self.jit_error_result(
+                        &tuple_struct.span(),
+                        &format!(
+                            "tuple-struct pattern has {} bindings but the expression produces {} values",
+                            tuple_struct.elems.len(),
+                            elements.len()
+                        ),
+                    );
+                }
+                for (pat, value) in tuple_struct.elems.iter().zip(elements.into_iter()) {
+                    self.bind_pattern_value(pat, value, inherited_mutability, ctx)?;
+                }
+                Ok(())
+            }
+            Pat::Or(or_pat) => {
+                for case in &or_pat.cases {
+                    self.bind_pattern_value(case, value.clone(), inherited_mutability, ctx)?;
+                }
+                Ok(())
+            }
+            Pat::Wild(_) | Pat::Rest(_) => Ok(()),
+            _ => self.jit_error_result(
+                &pat.span(),
+                "this pattern form is not supported in let bindings",
+            ),
+        }
+    }
+
     pub fn compile_block(
         &self,
         module: &mut Module,
@@ -47,238 +228,38 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let is_last = i == num_statements - 1;
                 match statement {
                     Stmt::Local(local) => {
-                        let var_name: Option<String>;
-                        let mut ct_ty: Option<TileRustType> = None;
-                        let mut mutability: bool = false;
-                        match &local.pat {
-                            Pat::Type(pat_type) => {
-                                let pat_mutability = get_pat_mutability(&pat_type.pat);
-                                let ty_mutability = get_type_mutability(&pat_type.ty);
-                                mutability = pat_mutability || ty_mutability;
-                                match &*pat_type.pat {
-                                    Pat::Ident(pat_ident) => {
-                                        var_name = Some(pat_ident.ident.to_string());
-                                    }
-                                    Pat::Tuple(pat_tuple) => {
-                                        ct_ty = self.compile_type(
-                                            &*pat_type.ty,
-                                            generic_args,
-                                            &HashMap::new(),
-                                        )?;
-
-                                        let Some(init) = &local.init else {
-                                            return self.jit_error_result(
-                                                &local.span(),
-                                                "tuple destructuring requires an initializer expression",
-                                            );
-                                        };
-                                        let Some(tuple_value) = self.compile_expression(
-                                            module,
-                                            block_id,
-                                            &*init.expr,
-                                            generic_args,
-                                            ctx,
-                                            ct_ty.clone(),
-                                        )?
-                                        else {
-                                            return self.jit_error_result(
-                                                &init.expr.span(),
-                                                "failed to compile tuple initializer expression",
-                                            );
-                                        };
-
-                                        let mut tuple_var_names = vec![];
-                                        for elem in &pat_tuple.elems {
-                                            match elem {
-                                                Pat::Ident(ident) => {
-                                                    tuple_var_names
-                                                        .push(ident.ident.to_string());
-                                                }
-                                                _ => {
-                                                    return self.jit_error_result(
-                                                        &elem.span(),
-                                                        "only simple variable names are supported in tuple destructuring patterns",
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        if tuple_value.kind == Kind::Compound {
-                                            let Some(elements) = &tuple_value.values else {
-                                                return self.jit_error_result(
-                                                    &init.expr.span(),
-                                                    "internal: expected compound value for tuple destructuring",
-                                                );
-                                            };
-                                            if elements.len() != tuple_var_names.len() {
-                                                return self.jit_error_result(
-                                                    &init.expr.span(),
-                                                    &format!(
-                                                        "tuple pattern has {} bindings but the expression produces {} values",
-                                                        tuple_var_names.len(),
-                                                        elements.len()
-                                                    ),
-                                                );
-                                            }
-                                            for (i, var_name) in
-                                                tuple_var_names.iter().enumerate()
-                                            {
-                                                let mut elem_value = elements[i].clone();
-                                                elem_value.mutability = if mutability {
-                                                    Mutability::Mutable
-                                                } else {
-                                                    Mutability::Immutable
-                                                };
-                                                ctx.vars
-                                                    .insert(var_name.clone(), elem_value);
-                                            }
-                                        } else {
-                                            return self.jit_error_result(
-                                                &init.expr.span(),
-                                                "right-hand side of tuple destructuring must be a tuple expression",
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                    _ => {
-                                        return self.jit_error_result(
-                                            &pat_type.pat.span(),
-                                            "this pattern form is not supported on the left side of a let binding",
-                                        )
-                                    }
-                                }
-                                ct_ty = self.compile_type(
-                                    &*pat_type.ty,
-                                    generic_args,
-                                    &HashMap::new(),
-                                )?;
-                            }
-                            Pat::Ident(pat_ident) => {
-                                var_name = Some(pat_ident.ident.to_string());
-                            }
-                            Pat::Tuple(pat_tuple) => {
-                                let Some(init) = &local.init else {
-                                    return self.jit_error_result(
-                                        &local.span(),
-                                        "tuple destructuring requires an initializer expression",
-                                    );
-                                };
-
-                                let Some(tuple_value) = self.compile_expression(
-                                    module,
-                                    block_id,
-                                    &*init.expr,
-                                    generic_args,
-                                    ctx,
-                                    ct_ty.clone(),
-                                )?
-                                else {
-                                    return self.jit_error_result(
-                                        &init.expr.span(),
-                                        "failed to compile tuple initializer expression",
-                                    );
-                                };
-
-                                let mut tuple_var_names = vec![];
-                                for elem in &pat_tuple.elems {
-                                    match elem {
-                                        Pat::Ident(ident) => {
-                                            tuple_var_names.push(ident.ident.to_string());
-                                        }
-                                        _ => {
-                                            return self.jit_error_result(
-                                                &elem.span(),
-                                                "only simple variable names are supported in tuple destructuring patterns",
-                                            )
-                                        }
-                                    }
-                                }
-
-                                if tuple_value.kind == Kind::Compound {
-                                    let Some(elements) = &tuple_value.values else {
-                                        return self.jit_error_result(
-                                            &init.expr.span(),
-                                            "internal: expected compound value for tuple destructuring",
-                                        );
-                                    };
-                                    if elements.len() != tuple_var_names.len() {
-                                        return self.jit_error_result(
-                                            &init.expr.span(),
-                                            &format!(
-                                                "tuple pattern has {} bindings but the expression produces {} values",
-                                                tuple_var_names.len(),
-                                                elements.len()
-                                            ),
-                                        );
-                                    }
-                                    for (i, var_name) in tuple_var_names.iter().enumerate() {
-                                        let mut elem_value = elements[i].clone();
-                                        elem_value.mutability = if mutability {
-                                            Mutability::Mutable
-                                        } else {
-                                            Mutability::Immutable
-                                        };
-                                        ctx.vars.insert(var_name.clone(), elem_value);
-                                    }
-                                } else {
-                                    return self.jit_error_result(
-                                        &init.expr.span(),
-                                        "right-hand side of tuple destructuring must be a tuple expression",
-                                    );
-                                }
-
-                                continue;
-                            }
-                            _ => {
-                                return self.jit_error_result(
-                                    &local.pat.span(),
-                                    "this pattern form is not supported in let bindings",
-                                );
-                            }
-                        }
-                        if var_name.is_none() {
+                        let Some(init) = &local.init else {
                             return self.jit_error_result(
                                 &local.span(),
-                                "unable to determine variable name for let binding",
+                                "let bindings must have an initializer expression",
                             );
-                        }
-                        let var_name = var_name.unwrap();
-                        match &local.init {
-                            Some(init) => {
-                                match self.compile_expression(
-                                    module,
-                                    block_id,
-                                    &*init.expr,
-                                    generic_args,
-                                    ctx,
-                                    ct_ty,
-                                )? {
-                                    Some(mut value) => {
-                                        value.mutability = if mutability {
-                                            Mutability::Mutable
-                                        } else {
-                                            Mutability::Immutable
-                                        };
-                                        ctx.vars.insert(var_name, value);
-                                    }
-                                    None => {
-                                        return self.jit_error_result(
-                                            &init.expr.span(),
-                                            &format!(
-                                                "failed to compile initializer: `{}`",
-                                                init.expr.to_token_stream().to_string()
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                            None => {
-                                return self.jit_error_result(
-                                    &local.span(),
-                                    "let bindings must have an initializer expression",
-                                )
-                            }
                         };
+                        let annotated_ty = local_pattern_type(&local.pat);
+                        let annotated_ct_ty = match annotated_ty {
+                            Some(ty) => self.compile_type(ty, generic_args, &HashMap::new())?,
+                            None => None,
+                        };
+                        let init_ty = self
+                            .typeck_expr_tile_type(&init.expr, generic_args, &HashMap::new())?
+                            .or(annotated_ct_ty);
+                        let Some(value) = self.compile_expression(
+                            module,
+                            block_id,
+                            &*init.expr,
+                            generic_args,
+                            ctx,
+                            init_ty,
+                        )?
+                        else {
+                            return self.jit_error_result(
+                                &init.expr.span(),
+                                &format!(
+                                    "failed to compile initializer: `{}`",
+                                    init.expr.to_token_stream()
+                                ),
+                            );
+                        };
+                        self.bind_pattern_value(&local.pat, value, false, ctx)?;
                     }
                     Stmt::Item(item) => {
                         match item {
@@ -370,6 +351,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                         )
                                     }
                                 };
+                            let rhs_ty = self.typeck_expr_tile_type(
+                                &assign_expr.right,
+                                generic_args,
+                                &HashMap::new(),
+                            )?;
                             let mut ct_value: TileRustValue =
                                 match self.compile_expression(
                                     module,
@@ -377,7 +363,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     &*assign_expr.right,
                                     generic_args,
                                     ctx,
-                                    None,
+                                    rhs_ty,
                                 )? {
                                     Some(value) => value,
                                     None => return self.jit_error_result(
@@ -494,5 +480,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             Ok(return_value)
         }) // stacker::maybe_grow
+    }
+}
+
+fn local_pattern_type(pat: &Pat) -> Option<&syn::Type> {
+    match pat {
+        Pat::Type(pat_type) => Some(pat_type.ty.as_ref()),
+        _ => None,
     }
 }

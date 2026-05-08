@@ -22,8 +22,12 @@ use super::_value::{CompilerContext, TileRustValue};
 // Stack management constants
 // ---------------------------------------------------------------------------
 
-/// Minimum remaining stack space before growing (1 MiB).
-pub(crate) const STACK_RED_ZONE: usize = 1 * 1024 * 1024;
+/// Minimum remaining stack space before growing (4 MiB).
+///
+/// Large kernels with nested control flow and inlined DSL helpers can enter
+/// non-trivial work just below a `stacker::maybe_grow` boundary. Growing before
+/// the final MiB avoids finite deep lowering paths exhausting the native stack.
+pub(crate) const STACK_RED_ZONE: usize = 4 * 1024 * 1024;
 /// Size of each new stack segment when growth is needed (10 MiB).
 pub(crate) const STACK_GROW_SIZE: usize = 10 * 1024 * 1024;
 
@@ -439,6 +443,54 @@ pub fn resolve_option_arg(expr: &syn::Expr, ctx: &CompilerContext) -> Option<syn
 // Variable mutation analysis
 // ---------------------------------------------------------------------------
 
+fn collect_pattern_bindings(pat: &Pat, names: &mut Vec<String>) -> Result<(), JITError> {
+    match pat {
+        Pat::Ident(ident) => {
+            names.push(ident.ident.to_string());
+            if let Some((_at, subpat)) = &ident.subpat {
+                collect_pattern_bindings(subpat, names)?;
+            }
+            Ok(())
+        }
+        Pat::Type(pat_type) => collect_pattern_bindings(&pat_type.pat, names),
+        Pat::Paren(paren) => collect_pattern_bindings(&paren.pat, names),
+        Pat::Reference(reference) => collect_pattern_bindings(&reference.pat, names),
+        Pat::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_pattern_bindings(elem, names)?;
+            }
+            Ok(())
+        }
+        Pat::Slice(slice) => {
+            for elem in &slice.elems {
+                collect_pattern_bindings(elem, names)?;
+            }
+            Ok(())
+        }
+        Pat::Struct(pat_struct) => {
+            for field in &pat_struct.fields {
+                collect_pattern_bindings(&field.pat, names)?;
+            }
+            Ok(())
+        }
+        Pat::TupleStruct(tuple_struct) => {
+            for elem in &tuple_struct.elems {
+                collect_pattern_bindings(elem, names)?;
+            }
+            Ok(())
+        }
+        Pat::Or(or_pat) => {
+            for case in &or_pat.cases {
+                collect_pattern_bindings(case, names)?;
+            }
+            Ok(())
+        }
+        Pat::Wild(_) | Pat::Rest(_) => Ok(()),
+        _ => SourceLocation::unknown()
+            .jit_error_result(&format!("Local pattern type not supported {:#?}", pat)),
+    }
+}
+
 /// Collects the names of variables assigned (mutated) in a block that were defined outside it.
 pub fn collect_mutated_variables_from_block(
     block: &syn::Block,
@@ -449,60 +501,7 @@ pub fn collect_mutated_variables_from_block(
         match statement {
             Stmt::Local(local) => {
                 let mut var_names: Vec<String> = vec![];
-                match &local.pat {
-                    Pat::Type(pat_type) => match &*pat_type.pat {
-                        Pat::Ident(pat_ident) => {
-                            var_names.push(pat_ident.ident.to_string());
-                        }
-                        Pat::Tuple(pat_tuple) => {
-                            for elem in &pat_tuple.elems {
-                                match elem {
-                                    Pat::Ident(ident) => {
-                                        var_names.push(ident.ident.to_string());
-                                    }
-                                    _ => {
-                                        return SourceLocation::unknown().jit_error_result(
-                                            "Only identifier patterns supported in tuple destructuring",
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            return SourceLocation::unknown().jit_error_result(&format!(
-                                "let binding LHS not implemented {:#?}.",
-                                pat_type.pat
-                            ));
-                        }
-                    },
-                    Pat::Tuple(pat_tuple) => {
-                        for elem in &pat_tuple.elems {
-                            match elem {
-                                Pat::Ident(ident) => {
-                                    var_names.push(ident.ident.to_string());
-                                }
-                                _ => {
-                                    return SourceLocation::unknown().jit_error_result(
-                                        "Only identifier patterns supported in tuple destructuring",
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Pat::Ident(pat_ident) => {
-                        var_names.push(pat_ident.ident.to_string());
-                    }
-                    _ => {
-                        return SourceLocation::unknown().jit_error_result(&format!(
-                            "Local pattern type not supported {:#?}",
-                            local.pat
-                        ));
-                    }
-                }
-                if var_names.is_empty() {
-                    return SourceLocation::unknown()
-                        .jit_error_result("failed to parse variable name in let expression");
-                }
+                collect_pattern_bindings(&local.pat, &mut var_names)?;
                 local_vars.extend(var_names);
             }
             Stmt::Expr(Expr::Assign(assign_expr), _) => {
@@ -521,7 +520,7 @@ pub fn collect_mutated_variables_from_block(
             }
             // Recurse into control-flow expressions to find nested mutations.
             Stmt::Expr(Expr::ForLoop(for_expr), _) => {
-                let inner = collect_mutated_variables_from_block(&for_expr.body)?;
+                let inner = collect_mutated_variables(for_expr)?;
                 for name in inner {
                     if !local_vars.contains(&name) {
                         result.insert(name);
@@ -544,21 +543,11 @@ pub fn collect_mutated_variables_from_block(
                     }
                 }
             }
-            Stmt::Expr(Expr::If(if_expr), _) => {
-                let inner = collect_mutated_variables_from_block(&if_expr.then_branch)?;
+            Stmt::Expr(expr, _) => {
+                let inner = collect_mutated_variables_from_expr(expr)?;
                 for name in inner {
                     if !local_vars.contains(&name) {
                         result.insert(name);
-                    }
-                }
-                if let Some((_else, else_expr)) = &if_expr.else_branch {
-                    if let Expr::Block(block_expr) = &**else_expr {
-                        let inner = collect_mutated_variables_from_block(&block_expr.block)?;
-                        for name in inner {
-                            if !local_vars.contains(&name) {
-                                result.insert(name);
-                            }
-                        }
                     }
                 }
             }
@@ -568,11 +557,47 @@ pub fn collect_mutated_variables_from_block(
     Ok(result)
 }
 
+/// Collects mutated outer-scope variables from an expression.
+pub fn collect_mutated_variables_from_expr(expr: &Expr) -> Result<BTreeSet<String>, JITError> {
+    match expr {
+        Expr::Assign(assign_expr) => {
+            let var_name: String = match &*assign_expr.left {
+                Expr::Path(path_expr) => get_ident_from_path_expr(path_expr).to_string(),
+                _ => {
+                    return SourceLocation::unknown().jit_error_result(&format!(
+                        "LHS assign expression not implemented {:#?}.",
+                        assign_expr.left
+                    ));
+                }
+            };
+            Ok(BTreeSet::from([var_name]))
+        }
+        Expr::Block(block_expr) => collect_mutated_variables_from_block(&block_expr.block),
+        Expr::ForLoop(for_expr) => collect_mutated_variables(for_expr),
+        Expr::While(while_expr) => collect_mutated_variables_from_block(&while_expr.body),
+        Expr::Loop(loop_expr) => collect_mutated_variables_from_block(&loop_expr.body),
+        Expr::If(if_expr) => {
+            let mut result = collect_mutated_variables_from_block(&if_expr.then_branch)?;
+            if let Some((_else, else_expr)) = &if_expr.else_branch {
+                result.extend(collect_mutated_variables_from_expr(else_expr)?);
+            }
+            Ok(result)
+        }
+        _ => Ok(BTreeSet::new()),
+    }
+}
+
 /// Collects mutated outer-scope variables from a for-loop body.
 pub fn collect_mutated_variables(
     for_expr: &syn::ExprForLoop,
 ) -> Result<BTreeSet<String>, JITError> {
-    collect_mutated_variables_from_block(&for_expr.body)
+    let mut result = collect_mutated_variables_from_block(&for_expr.body)?;
+    let mut loop_vars = Vec::new();
+    collect_pattern_bindings(&for_expr.pat, &mut loop_vars)?;
+    for loop_var in loop_vars {
+        result.remove(&loop_var);
+    }
+    Ok(result)
 }
 
 /// Collects mutated outer-scope variables from a while-loop body.

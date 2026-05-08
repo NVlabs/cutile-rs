@@ -25,6 +25,18 @@ run_step \
     "cutile library tests" \
     cargo test -p cutile --lib
 
+run_step \
+    "cutile compile-only FMHA regression" \
+    cargo test -p cutile --test flash_attention_compile
+
+run_step \
+    "cutile load_tile_like compile-only regressions" \
+    cargo test -p cutile --test load_tile_like_examples
+
+run_step \
+    "cutile type inference sanity regressions" \
+    cargo test -p cutile --test type_inference_sanity
+
 print_summary_and_exit \
     "All CPU tests passed!" \
     "Some CPU checks failed. See output above for details."

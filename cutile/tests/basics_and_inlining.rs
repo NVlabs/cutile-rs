@@ -61,7 +61,86 @@ mod basics_and_inlining_module {
     }
 
     fn ones_shape<const N: usize>() -> [i32; N] {
-        [1i32; N]
+        [1; N]
+    }
+
+    fn expects_i32(value: i32) -> i32 {
+        value
+    }
+
+    fn expects_f32(value: f32) -> f32 {
+        value
+    }
+
+    unsafe fn tensor_from_ptr<T: ElementType>(ptr: *mut T, len: i32) -> Tensor<T, { [-1] }> {
+        let shape: Shape<{ [-1] }> = Shape::<{ [-1] }> { dims: &[len] };
+        let strides: Array<{ [-1] }> = Array::<{ [-1] }> { dims: &[1i32] };
+        let ptr_tile: PointerTile<*mut T, { [] }> = pointer_to_tile(ptr);
+        make_tensor_view(ptr_tile, shape, strides, new_token_unordered())
+    }
+
+    #[cutile::entry()]
+    unsafe fn inline_tensor_from_ptr_kernel<T: ElementType>(ptr: *mut T, len: i32) {
+        let _tensor: Tensor<T, { [-1] }> = tensor_from_ptr(ptr, len);
+    }
+
+    #[cutile::entry()]
+    unsafe fn ptr_partition_load_kernel<T: ElementType>(ptr: *mut T, len: i32) {
+        let tensor: Tensor<T, { [-1] }> = tensor_from_ptr(ptr, len);
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape = const_shape![4i32];
+        let _tile = tensor.partition(tile_shape).load([pid.0]);
+    }
+
+    #[cutile::entry()]
+    unsafe fn ptr_partition_mut_store_kernel(ptr: *mut f32, len: i32) {
+        let mut tensor: Tensor<f32, { [-1] }> = tensor_from_ptr(ptr, len);
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile_shape = const_shape![4i32];
+        let tile: Tile<f32, { [4] }> = constant(1.0, tile_shape);
+        tensor.partition_mut(tile_shape).store(tile, [pid.0]);
+    }
+
+    #[cutile::entry()]
+    unsafe fn partition_mut_store_rank3_loop_kernel<const S: [i32; 3]>(out: &mut Tensor<f32, S>) {
+        let tile_shape = const_shape![1i32, 4i32, 8i32];
+        let mut out_part: PartitionMut<f32, { [1, 4, 8] }> =
+            unsafe { out.partition_mut(tile_shape) };
+        for s_local in 0i32..4i32 {
+            let tile: Tile<f32, { [1, 4, 8] }> = constant(1.0, tile_shape);
+            unsafe { out_part.store(tile, [0i32, s_local, 0i32]) };
+        }
+    }
+
+    #[cutile::entry()]
+    unsafe fn partition_mut_store_loaded_rank3_loop_kernel<
+        const BLOCK_SIZE: i32,
+        const BM_S: i32,
+    >(
+        source: &Tensor<f32, { [-1, -1, BLOCK_SIZE] }>,
+        out: &mut Tensor<f32, { [1, BM_S, BLOCK_SIZE] }>,
+        seq_len: i32,
+    ) {
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let head = pid.0;
+        let s_tile_idx = pid.1;
+        let d_block = pid.2;
+
+        let source_part = source.partition(const_shape![1, 1, BLOCK_SIZE]);
+        let mut out_part = unsafe { out.partition_mut(const_shape![1, 1, BLOCK_SIZE]) };
+
+        let s_start: i32 = s_tile_idx * BM_S;
+        if s_start < seq_len {
+            for s_local in 0i32..BM_S {
+                let s_global: i32 = s_start + s_local;
+                if s_global < seq_len {
+                    let tile = source_part
+                        .load([s_global, head, d_block])
+                        .reshape(const_shape![1, 1, BLOCK_SIZE]);
+                    unsafe { out_part.store(tile, [0i32, s_local, 0i32]) };
+                }
+            }
+        }
     }
 
     #[cutile::entry()]
@@ -190,6 +269,27 @@ mod basics_and_inlining_module {
         let _b: bool = an_f32 < another_f32;
         let _b: bool = an_f32 <= another_f32;
 
+        let inferred_i32 = 7i32;
+        let _inferred_i32_tile: Tile<i32, { [] }> = scalar_to_tile(inferred_i32);
+        let inferred_f32 = 7.0f32;
+        let _inferred_f32_tile: Tile<f32, { [] }> = scalar_to_tile(inferred_f32);
+        let mut assigned_i32: i32 = 0i32;
+        let _assigned_i32_initial_tile: Tile<i32, { [] }> = scalar_to_tile(assigned_i32);
+        assigned_i32 = 9;
+        let _assigned_i32_tile: Tile<i32, { [] }> = scalar_to_tile(assigned_i32);
+        let mut assigned_f32: f32 = 0.0f32;
+        let _assigned_f32_initial_tile: Tile<f32, { [] }> = scalar_to_tile(assigned_f32);
+        assigned_f32 = 9.0;
+        let _assigned_f32_tile: Tile<f32, { [] }> = scalar_to_tile(assigned_f32);
+        let contextual_i32 = expects_i32(11);
+        let _contextual_i32_tile: Tile<i32, { [] }> = scalar_to_tile(contextual_i32);
+        let contextual_f32 = expects_f32(11.0);
+        let _contextual_f32_tile: Tile<f32, { [] }> = scalar_to_tile(contextual_f32);
+        let annotated_call_i32: i32 = expects_i32(13);
+        let _annotated_call_i32_tile: Tile<i32, { [] }> = scalar_to_tile(annotated_call_i32);
+        let annotated_call_f32: f32 = expects_f32(13.0);
+        let _annotated_call_f32_tile: Tile<f32, { [] }> = scalar_to_tile(annotated_call_f32);
+
         // Convert things.
         let x: f32 = 0.0;
         let x: i32 = convert_scalar::<i32>(x);
@@ -244,7 +344,8 @@ mod basics_and_inlining_module {
                 None,
                 tma::Enabled,
             );
-            for _i in 0i32..10i32 {
+            let loop_end: i32 = 10;
+            for _i in 0..loop_end {
                 let some_tile_2: Tile<f32, { [128, 256] }> = constant(2.0, shape);
                 some_tile = some_tile + some_tile_2;
                 store_view_tko_mut(
@@ -274,6 +375,8 @@ mod basics_and_inlining_module {
 
         let x: [i32; 2] = [1i32, 2i32];
         let _x_val: i32 = x[0];
+        let repeat_x: [i32; 2] = [0; 2];
+        let _repeat_x_val: i32 = repeat_x[0];
         let x: &[i32] = &[1i32, 2i32];
         let _x_val: i32 = x[0];
 
@@ -291,7 +394,10 @@ mod basics_and_inlining_module {
     #[cutile::entry()]
     unsafe fn ptr_tile_reshape_kernel(ptr: *mut f32) {
         let ptr_tile: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
+        let offset_ptr_tile: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr).offset(1);
         let reshaped: PointerTile<*mut f32, { [1] }> = ptr_tile.reshape(const_shape![1]);
+        let _reshaped_offset: PointerTile<*mut f32, { [1] }> =
+            offset_ptr_tile.reshape(const_shape![1]);
         let _broadcast: PointerTile<*mut f32, { [128] }> = reshaped.broadcast(const_shape![128]);
     }
 
@@ -307,11 +413,149 @@ mod basics_and_inlining_module {
 use basics_and_inlining_module::__module_ast_self;
 
 #[test]
+fn compile_inline_tensor_from_ptr_helper() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "inline_tensor_from_ptr_kernel",
+            &["f32".to_string()],
+            &[],
+            &[],
+            &[],
+            None,
+            "sm_120".to_string(),
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        assert!(
+            module_op_str.contains("make_tensor_view"),
+            "Expected inlined pointer helper to emit make_tensor_view.\n{module_op_str}"
+        );
+        println!("{module_op_str}");
+    });
+}
+
+#[test]
+fn compile_ptr_partition_load_helper() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "ptr_partition_load_kernel",
+            &["f32".to_string()],
+            &[],
+            &[],
+            &[],
+            None,
+            "sm_120".to_string(),
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        assert!(
+            module_op_str.contains("make_partition_view"),
+            "Expected partition helper to emit make_partition_view.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("load_view_tko"),
+            "Expected partition load helper to emit load_view_tko.\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
+fn compile_ptr_partition_mut_store_helper() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "ptr_partition_mut_store_kernel",
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            "sm_120".to_string(),
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        assert!(
+            module_op_str.contains("make_partition_view"),
+            "Expected mutable partition helper to emit make_partition_view.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("store_view_tko"),
+            "Expected mutable partition helper to emit store_view_tko.\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
+fn compile_partition_mut_store_rank3_loop() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "partition_mut_store_rank3_loop_kernel",
+            &[1.to_string(), 4.to_string(), 8.to_string()],
+            &[("out", &[1, 4, 8])],
+            &[],
+            &[],
+            None,
+            "sm_120".to_string(),
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        assert!(
+            module_op_str.contains("store_view_tko"),
+            "Expected partition store helper to emit store_view_tko.\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
+fn compile_partition_mut_store_loaded_rank3_loop() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "basics_and_inlining_module",
+            "partition_mut_store_loaded_rank3_loop_kernel",
+            &[8.to_string(), 4.to_string()],
+            &[("source", &[16, 16, 8]), ("out", &[1, 4, 8])],
+            &[],
+            &[],
+            None,
+            "sm_120".to_string(),
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        assert!(
+            module_op_str.contains("store_view_tko"),
+            "Expected partition store helper to emit store_view_tko.\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
 fn compile_inlining() -> () {
     common::with_test_stack(|| {
         let modules = CUDATileModules::from_kernel(__module_ast_self())
             .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             "basics_and_inlining_module",
@@ -328,7 +572,7 @@ fn compile_inlining() -> () {
             &[],
             &[],
             None,
-            gpu_name,
+            "sm_120".to_string(),
             &CompileOptions::default(),
         )
         .expect("Failed.");

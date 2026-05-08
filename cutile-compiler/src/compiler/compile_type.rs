@@ -26,6 +26,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         generic_vars: &GenericVars,
         type_params: &HashMap<String, TypeParam>,
     ) -> Result<Option<TileRustType>, JITError> {
+        let normalized_ty = self.modules.normalize_type_aliases(ty)?;
+        let ty = &normalized_ty;
         let _ty_debug_str = ty.to_token_stream().to_string();
         let mut ty_attrs: Option<SingleMetaList> = None;
         let mut structure: Option<(String, &syn::ItemStruct)> = None;

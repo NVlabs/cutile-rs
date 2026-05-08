@@ -57,13 +57,13 @@ use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::{env, fs};
 
 use syn::{
     parse_file, parse_macro_input, parse_quote, AngleBracketedGenericArguments, GenericArgument,
-    GenericParam, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, Path,
+    GenericParam, ItemFn, ItemImpl, ItemMod, ItemStruct, ItemTrait, ItemType, Path,
 };
 
 use crate::error::{Error, SpannedError};
@@ -244,6 +244,7 @@ fn process_items(
 ) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
+    let type_aliases = cutile_compiler::type_aliases::collect_type_aliases(items);
 
     for item in items {
         match item {
@@ -256,9 +257,17 @@ fn process_items(
                     &function_item.attrs,
                 );
                 if entry_attrs.is_some() {
-                    entry_functions.push(kernel_launcher(parent_name, function_item)?);
+                    entry_functions.push(kernel_launcher(
+                        parent_name,
+                        function_item,
+                        &type_aliases,
+                    )?);
                 };
-                concrete_items.push(function(function_item.clone(), tile_rust_crate_root)?);
+                concrete_items.push(function(
+                    function_item.clone(),
+                    tile_rust_crate_root,
+                    &type_aliases,
+                )?);
             }
             syn::Item::Struct(struct_item) => {
                 let item_clone = struct_item.clone();
@@ -269,7 +278,7 @@ fn process_items(
                 concrete_items.push(trait_(item_clone)?.into());
             }
             syn::Item::Type(type_item) => {
-                concrete_items.push(type_item.to_token_stream());
+                concrete_items.push(instantiate_type_alias_for_rank(type_item)?.to_token_stream());
             }
             syn::Item::Impl(impl_item) => {
                 let item_clone = impl_item.clone();
@@ -283,7 +292,7 @@ fn process_items(
                 concrete_items.push(const_item.to_token_stream());
             }
             syn::Item::Static(static_item) => {
-                concrete_items.push(static_item.to_token_stream());
+                concrete_items.push(instantiate_static_for_rank(static_item)?.to_token_stream());
             }
             syn::Item::Mod(submod) => {
                 let Some(sub_content) = &submod.content else {
@@ -590,10 +599,19 @@ pub fn structure(mut item: ItemStruct) -> Result<TokenStream, Error> {
 /// ## Entry Points
 ///
 /// Functions marked with `#[entry]` are validated and have launchers generated.
-pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenStream2, Error> {
+pub fn function(
+    mut item: ItemFn,
+    tile_rust_crate_root: &Ident,
+    type_aliases: &HashMap<String, ItemType>,
+) -> Result<TokenStream2, Error> {
     let is_entry = get_meta_list_by_last_segment("entry", &item.attrs).is_some();
     if is_entry {
-        validate_entry_point_parameters(&item)?
+        let validation_item = cutile_compiler::type_aliases::normalize_item_fn_param_type_aliases(
+            &item,
+            type_aliases,
+        )
+        .map_err(|msg| crate::error::syn_err(item.sig.ident.span(), &msg))?;
+        validate_entry_point_parameters(&validation_item)?
     }
     let attributes = get_meta_list("cuda_tile :: variadic_op", &item.attrs);
     // Any function annotated with `#[cuda_tile::variadic_op(...)]` is
@@ -687,7 +705,11 @@ pub fn function(mut item: ItemFn, tile_rust_crate_root: &Ident) -> Result<TokenS
 /// ## Entry Attributes
 ///
 /// Respects `#[entry(print_ir = true)]` to print the generated launcher code.
-pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStream2, Error> {
+pub fn kernel_launcher(
+    module_ident: &Ident,
+    item: &ItemFn,
+    type_aliases: &HashMap<String, ItemType>,
+) -> Result<TokenStream2, Error> {
     let module_name = module_ident.to_string();
     let function_name = item.sig.ident.to_string();
     let kernel_naming = KernelNaming::new(function_name.as_str());
@@ -695,6 +717,9 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
     let launcher_name = function_name.to_case(Case::UpperCamel).to_string();
     let launcher_args_name = format!("{}Args", launcher_name);
     let unsafety = item.sig.unsafety;
+    let launcher_item =
+        cutile_compiler::type_aliases::normalize_item_fn_param_type_aliases(item, type_aliases)
+            .map_err(|msg| crate::error::syn_err(item.sig.ident.span(), &msg))?;
 
     let (
         required_generics,
@@ -702,7 +727,7 @@ pub fn kernel_launcher(module_ident: &Ident, item: &ItemFn) -> Result<TokenStrea
         device_op_impl,
         kernel_input_info,
     ) = generate_kernel_launcher(
-        item,
+        &launcher_item,
         &module_name,
         &function_name,
         function_entry_name.as_str(),

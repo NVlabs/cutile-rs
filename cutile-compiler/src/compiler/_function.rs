@@ -56,6 +56,11 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
 }
 
+struct FunctionParamTypes {
+    names: Vec<String>,
+    tile_types: Vec<TileRustType>,
+}
+
 impl<'m> CUDATileFunctionCompiler<'m> {
     pub fn new(
         modules: &'m CUDATileModules,
@@ -124,7 +129,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .collect::<HashMap<_, _>>();
 
         // 8. Create GenericVars.
-        let generic_vars = GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
+        let mut generic_vars =
+            GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
+        Self::add_module_const_vars_from_modules(modules, &mut generic_vars);
 
         // 9. generate_entry_point.
         let spec_args_map: HashMap<String, crate::specialization::SpecializationBits> = spec_args
@@ -144,6 +151,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             })
             .collect();
         let (entry, validator) = generate_entry_point(
+            modules,
             &function,
             &generic_vars,
             &stride_args,
@@ -197,6 +205,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     // Error helper methods
     // -----------------------------------------------------------------------
 
+    pub(crate) fn add_module_const_vars(&self, generic_vars: &mut GenericVars) {
+        Self::add_module_const_vars_from_modules(self.modules, generic_vars);
+    }
+
+    fn add_module_const_vars_from_modules(
+        modules: &CUDATileModules,
+        generic_vars: &mut GenericVars,
+    ) {
+        for (name, item) in modules.consts() {
+            if generic_vars.var_type(name).is_some() {
+                continue;
+            }
+            if let Some(value) = crate::type_aliases::const_item_i32_value(item) {
+                generic_vars.inst_i32.insert(name.clone(), value);
+            } else if let Some(value) = crate::type_aliases::const_item_bool_value(item) {
+                generic_vars.inst_bool.insert(name.clone(), value);
+            }
+        }
+    }
+
     pub(crate) fn span_base(&self) -> SpanBase {
         let current_module = &self.module_name_stack[0];
         self.modules
@@ -236,32 +264,72 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     // -----------------------------------------------------------------------
+    // Typeck query helper methods
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn typeck_method_selection(
+        &self,
+        method_call_expr: &syn::ExprMethodCall,
+    ) -> Option<crate::passes::type_inference::MethodSelection> {
+        self.typeck_results
+            .borrow()
+            .as_ref()
+            .and_then(|results| results.method_selection(method_call_expr).cloned())
+    }
+
+    pub(crate) fn typeck_expr_syn_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        self.typeck_results
+            .borrow()
+            .as_ref()
+            .and_then(|results| results.syn_expr_type(expr))
+    }
+
+    pub(crate) fn typeck_expr_tile_type(
+        &self,
+        expr: &syn::Expr,
+        generic_vars: &GenericVars,
+        type_params: &HashMap<String, crate::types::TypeParam>,
+    ) -> Result<Option<TileRustType>, JITError> {
+        let cached_tile_type = self
+            .typeck_results
+            .borrow()
+            .as_ref()
+            .and_then(|results| results.expr_type(expr).cloned());
+        if cached_tile_type.is_some() {
+            return Ok(cached_tile_type);
+        }
+
+        let Some(syn_type) = self.typeck_expr_syn_type(expr) else {
+            return Ok(None);
+        };
+        self.compile_type(&syn_type, generic_vars, type_params)
+    }
+
+    // -----------------------------------------------------------------------
     // Compile
     // -----------------------------------------------------------------------
 
     /// Compile the kernel function into a `cutile_ir::Module`.
     pub fn compile(&self) -> Result<Module, JITError> {
         let mut module = Module::new(&self.module_name);
+        self.emit_module_globals(&mut module)?;
         let entry_op = self.compile_entry_function(&mut module)?;
         module.functions.push(entry_op);
         Ok(module)
     }
 
-    /// Compile the entry function, returning its OpId.
-    fn compile_entry_function(&self, module: &mut Module) -> Result<cutile_ir::ir::OpId, JITError> {
-        let fn_item = &self.entry;
-        let fn_name = fn_item.sig.ident.to_string();
-        let generic_vars = &self.generic_vars;
-
-        // Compile parameter types via the compiler's type machinery.
-        let var_names = get_sig_param_names(&fn_item.sig);
+    fn compile_function_param_types(
+        &self,
+        fn_item: &syn::ItemFn,
+        generic_vars: &GenericVars,
+    ) -> Result<FunctionParamTypes, JITError> {
+        let names = get_sig_param_names(&fn_item.sig);
         let (r_params, _r_result) = get_sig_types(&fn_item.sig, None);
-        let mut cuda_tile_argument_types: Vec<TileRustType> = vec![];
-        let mut arg_tile_ir_types: Vec<Type> = Vec::new();
+        let mut tile_types = Vec::new();
 
         for (i, r_param_type) in r_params.iter().enumerate() {
             let mut type_params: HashMap<String, crate::types::TypeParam> = HashMap::new();
-            if let Some(strides) = self.stride_args.get(var_names[i].as_str()) {
+            if let Some(strides) = self.stride_args.get(names[i].as_str()) {
                 type_params.insert(
                     "strides".to_string(),
                     crate::types::TypeParam::Strides(crate::types::TypeParamStrides::from(
@@ -281,28 +349,101 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     )),
                 );
             }
-            match self.compile_type(&r_param_type, generic_vars, &type_params)? {
-                Some(ty) => {
-                    // Convert type string to tile-ir Type.
-                    let tile_ir_ty = super::_type::convert_type(&ty).ok_or_else(|| {
-                        JITError::Generic(format!(
-                            "compiler2: failed to convert parameter type to tile-ir: {}",
-                            r_param_type.to_token_stream().to_string()
-                        ))
-                    })?;
-                    arg_tile_ir_types.push(tile_ir_ty);
-                    cuda_tile_argument_types.push(ty);
-                }
-                None => {
-                    return self.jit_error_result(
-                        &r_param_type.span(),
-                        &format!(
-                            "unable to compile parameter type `{}`",
-                            r_param_type.to_token_stream().to_string()
-                        ),
-                    );
-                }
-            }
+            let Some(ty) = self.compile_type(r_param_type, generic_vars, &type_params)? else {
+                return self.jit_error_result(
+                    &r_param_type.span(),
+                    &format!(
+                        "unable to compile parameter type `{}`",
+                        r_param_type.to_token_stream()
+                    ),
+                );
+            };
+            tile_types.push(ty);
+        }
+
+        Ok(FunctionParamTypes { names, tile_types })
+    }
+
+    fn initial_typeck_types(
+        &self,
+        param_types: &FunctionParamTypes,
+        generic_vars: &GenericVars,
+    ) -> Result<HashMap<String, TileRustType>, JITError> {
+        let mut initial_types = param_types
+            .names
+            .iter()
+            .cloned()
+            .zip(param_types.tile_types.iter().cloned())
+            .collect::<HashMap<_, _>>();
+
+        let i32_ty: syn::Type = syn::parse_quote!(i32);
+        for key in generic_vars.inst_i32.keys() {
+            let Some(ty) = self.compile_type(&i32_ty, generic_vars, &HashMap::new())? else {
+                return SourceLocation::unknown()
+                    .jit_error_result("unable to compile const generic i32 type");
+            };
+            initial_types.insert(key.clone(), ty);
+        }
+
+        let bool_ty: syn::Type = syn::parse_quote!(bool);
+        for key in generic_vars.inst_bool.keys() {
+            let Some(ty) = self.compile_type(&bool_ty, generic_vars, &HashMap::new())? else {
+                return SourceLocation::unknown()
+                    .jit_error_result("unable to compile const generic bool type");
+            };
+            initial_types.insert(key.clone(), ty);
+        }
+
+        for (key, value) in &generic_vars.inst_array {
+            let arr_ty =
+                syn::parse2::<syn::Type>(format!("[i32;{}]", value.len()).parse().unwrap())
+                    .unwrap();
+            let Some(ty) = self.compile_type(&arr_ty, generic_vars, &HashMap::new())? else {
+                return SourceLocation::unknown()
+                    .jit_error_result("unable to compile const generic array type");
+            };
+            initial_types.insert(key.clone(), ty);
+        }
+
+        Ok(initial_types)
+    }
+
+    #[doc(hidden)]
+    pub fn debug_typeck_dump(&self) -> Result<String, JITError> {
+        let fn_item = self._function;
+        let generic_vars = &self.generic_vars;
+        let param_types = self.compile_function_param_types(fn_item, generic_vars)?;
+        let initial_types = self.initial_typeck_types(&param_types, generic_vars)?;
+
+        let mut typed_fn_item = fn_item.clone();
+        crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);
+        let typeck_results = crate::passes::type_inference::infer_function(
+            self,
+            &typed_fn_item,
+            generic_vars,
+            initial_types,
+        )?;
+        Ok(typeck_results.debug_dump())
+    }
+
+    /// Compile the entry function, returning its OpId.
+    fn compile_entry_function(&self, module: &mut Module) -> Result<cutile_ir::ir::OpId, JITError> {
+        let fn_item = &self.entry;
+        let fn_name = fn_item.sig.ident.to_string();
+        let generic_vars = &self.generic_vars;
+
+        let param_types = self.compile_function_param_types(fn_item, generic_vars)?;
+        let var_names = &param_types.names;
+        let cuda_tile_argument_types = &param_types.tile_types;
+        let mut arg_tile_ir_types = Vec::new();
+        for ty in cuda_tile_argument_types {
+            let tile_ir_ty = super::_type::convert_type(ty).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "compiler2: failed to convert parameter type to tile-ir: {}",
+                    ty.rust_ty.to_token_stream()
+                ))
+            })?;
+            arg_tile_ir_types.push(tile_ir_ty);
         }
 
         let func_type = Type::Func(FuncType {
@@ -329,16 +470,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        let mut initial_types = var_names
-            .iter()
-            .cloned()
-            .zip(cuda_tile_argument_types.iter().cloned())
-            .collect::<HashMap<_, _>>();
+        let initial_types = self.initial_typeck_types(&param_types, generic_vars)?;
 
         // Add const generics as variables.
         for (key, value) in &generic_vars.inst_i32 {
             let tr_val = self.compile_constant(module, block_id, generic_vars, *value)?;
-            initial_types.insert(key.clone(), tr_val.ty.clone());
+            ctx.vars.insert(key.clone(), tr_val);
+        }
+
+        for (key, value) in &generic_vars.inst_bool {
+            let tr_val = self.compile_bool_constant(module, block_id, generic_vars, *value)?;
             ctx.vars.insert(key.clone(), tr_val);
         }
 
@@ -352,7 +493,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let tr_val = self
                 .compile_expression(module, block_id, &arr_expr, generic_vars, &mut ctx, ty)?
                 .expect("Failed to compile CGA as var.");
-            initial_types.insert(key.clone(), tr_val.ty.clone());
             ctx.vars.insert(key.clone(), tr_val);
         }
 
@@ -432,8 +572,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     ) -> Result<Vec<TileRustValue>, JITError> {
         let mut result = vec![];
         for arg in args {
+            let expected = if matches!(arg, syn::Expr::Lit(_) | syn::Expr::Unary(_)) {
+                self.typeck_expr_tile_type(arg, generic_args, &HashMap::new())?
+            } else {
+                None
+            };
             let value = self
-                .compile_expression(module, block_id, &arg, generic_args, ctx, None)?
+                .compile_expression(module, block_id, &arg, generic_args, ctx, expected)?
                 .ok_or(self.jit_error(
                     &arg.span(),
                     &format!(
@@ -471,6 +616,25 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .compile_type(&rust_ty, &generic_vars, &HashMap::new())?
             .ok_or(self.jit_error(&rust_ty.span(), "failed to compile constant"))?;
         self.compile_constant_from_exact_bounds(module, block_id, bounds, tr_ty)
+    }
+
+    pub(crate) fn compile_bool_constant(
+        &self,
+        module: &mut Module,
+        block_id: cutile_ir::ir::BlockId,
+        generic_vars: &GenericVars,
+        x: bool,
+    ) -> Result<TileRustValue, JITError> {
+        let rust_ty: syn::Type = syn::parse_quote!(bool);
+        let tr_ty = self
+            .compile_type(&rust_ty, generic_vars, &HashMap::new())?
+            .ok_or(self.jit_error(&rust_ty.span(), "failed to compile bool constant"))?;
+        self.compile_constant_from_exact_bounds(
+            module,
+            block_id,
+            Bounds::exact(if x { 1 } else { 0 }),
+            tr_ty,
+        )
     }
 
     pub(crate) fn compile_constant_from_exact_bounds(
@@ -546,8 +710,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Ok(tr_val)
     }
 
-    /// Derive the return type for an expression based on type parameters.
-    /// Mechanical port of `CUDATileFunctionCompiler::derive_type`.
+    /// Return the typeck side-table type for an expression when possible, then
+    /// fall back to op-signature derivation for types whose Tile IR params are
+    /// completed from call arguments.
+    ///
+    /// The old recursive type derivation path is still available behind
+    /// `CUTILE_DERIVE_TYPE_LEGACY` for debugging, but the compiler should
+    /// normally consume Pass 2 typeck results instead of re-deriving types.
     pub(crate) fn derive_type(
         &self,
         module: &mut Module,
@@ -561,14 +730,32 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         use crate::types::TypeParam;
         use syn::Expr;
 
+        if std::env::var_os("CUTILE_DERIVE_TYPE_LEGACY").is_none() {
+            let typeck_type_params = maybe_type_params
+                .as_ref()
+                .map(|type_params| {
+                    type_params
+                        .iter()
+                        .filter_map(|type_param| {
+                            type_param
+                                .name()
+                                .map(|name| (name.to_string(), type_param.clone()))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default();
+            if let Some(return_type) =
+                self.typeck_expr_tile_type(expr, generic_vars, &typeck_type_params)?
+            {
+                return Ok(Some(return_type));
+            }
+        }
+
         match expr {
             Expr::MethodCall(method_call_expr) => {
                 let ident = &method_call_expr.method;
                 if let Some(return_type) = self
-                    .typeck_results
-                    .borrow()
-                    .as_ref()
-                    .and_then(|results| results.method_selection(method_call_expr).cloned())
+                    .typeck_method_selection(method_call_expr)
                     .and_then(|selection| selection.return_type)
                 {
                     return Ok(Some(return_type));
@@ -651,7 +838,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &method_call_expr.method.span(),
                         &format!(
                             "Failed to infer all generic parameters for {}",
-                            method_call_expr.to_token_stream().to_string()
+                            user_method_call_tokens(method_call_expr)
                         ),
                     );
                 }
@@ -717,7 +904,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &method_call_expr.method.span(),
                         &format!(
                             "Failed to derive output for {} \ncall_output_type={}",
-                            method_call_expr.to_token_stream().to_string(),
+                            user_method_call_tokens(method_call_expr),
                             call_output_type.to_token_stream().to_string()
                         ),
                     );
@@ -795,7 +982,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             &call_expr.func.span(),
                             &format!(
                                 "Failed to infer all generic parameters for {}",
-                                call_expr.to_token_stream().to_string()
+                                user_call_tokens(call_expr)
                             ),
                         );
                     }
@@ -863,7 +1050,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 &call_expr.func.span(),
                                 &format!(
                                     "Failed to derive output for {} \ngeneric_vars={generic_vars:#?} \ntype_params={type_params:#?}",
-                                    call_expr.to_token_stream().to_string()
+                                    user_call_tokens(call_expr)
                                 ),
                             );
                     }
@@ -876,7 +1063,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 "Closure calls are not supported.\n\
                                  Closures can only be used as arguments to operations like reduce() or scan().\n\
                                  Found: {}",
-                                call_expr.to_token_stream().to_string()
+                                user_call_tokens(call_expr)
                             ),
                         );
                 }
