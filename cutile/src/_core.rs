@@ -416,6 +416,60 @@ pub mod core {
         }
     }
 
+    /// Module-scope mutable global memory.
+    ///
+    /// `Global` is declared as a Rust `static` inside a `#[cutile::module]`.
+    /// The Rust value is an immutable descriptor; mutability lives in the
+    /// device storage and is exposed through ordered memory operations.
+    #[cuda_tile::variadic_struct(N = 6)]
+    #[derive(Copy, Clone)]
+    pub struct Global<E: ElementType, const D: [i32; N]> {
+        _type: PhantomData<E>,
+    }
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    unsafe impl<E: ElementType, const D: [i32; N]> Sync for Global<E, D> {}
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<E: ElementType, const D: [i32; N]> Global<E, D> {
+        /// Declare a global with a scalar initializer.
+        ///
+        /// Today the JIT compiler only lowers scalar globals
+        /// (`Global<E, { [] }>`). Shaped globals are reserved for a follow-up pass.
+        pub const fn new(_value: E) -> Self {
+            Self { _type: PhantomData }
+        }
+
+        /// Load the scalar global. Returns the loaded value and completion token.
+        pub fn load<O: ordering::LoadMode, Sc: scope::Mode>(
+            &self,
+            memory_ordering: O,
+            memory_scope: Sc,
+        ) -> (Tile<E, D>, Token) {
+            unreachable!()
+        }
+
+        /// Store to the scalar global. Returns the completion token.
+        pub fn store<O: ordering::StoreMode, Sc: scope::Mode>(
+            &self,
+            value: Tile<E, D>,
+            memory_ordering: O,
+            memory_scope: Sc,
+        ) -> Token {
+            unreachable!()
+        }
+
+        /// Atomic add on the scalar global. Returns the old value and token.
+        pub fn atomic_add<O: ordering::AtomicMode, Sc: scope::Mode>(
+            &self,
+            value: Tile<E, D>,
+            memory_ordering: O,
+            memory_scope: Sc,
+        ) -> (Tile<E, D>, Token) {
+            unreachable!()
+        }
+    }
+
     // ---- §5.3 TENSOR TYPES (Tile, Tensor, Partition, PartitionMut) ---------
 
     /// Multi-dimensional array stored in registers / shared memory. The unit

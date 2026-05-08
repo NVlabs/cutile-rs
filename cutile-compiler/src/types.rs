@@ -823,6 +823,30 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                                 }
                                             }
                                         }
+                                        Expr::Index(index) => {
+                                            let Expr::Path(path) = index.expr.as_ref() else {
+                                                unimplemented!(
+                                                    "Unexpected const generic array base {elem:#?}"
+                                                );
+                                            };
+                                            let ident = get_ident_from_path_expr(path);
+                                            let Some(shape) = generic_vars
+                                                .inst_array
+                                                .get(ident.to_string().as_str())
+                                            else {
+                                                panic!(
+                                                    "Undefined const generic array parameter {ident}"
+                                                )
+                                            };
+                                            let i = parse_signed_literal_as_i32(&index.index);
+                                            let Some(dim) = shape.get(i as usize) else {
+                                                panic!(
+                                                    "Index {i} out of bounds for const generic array `{ident}` of length {}",
+                                                    shape.len()
+                                                )
+                                            };
+                                            _result.push(*dim);
+                                        }
                                         _ => unimplemented!(
                                             "Unexpected array element {elem:#?} in {array_expr:#?}"
                                         ),
@@ -854,6 +878,23 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
                                             Some(val) => *val,
                                             None => panic!("Undefined generic parameter {ident}")
                                         }
+                                    },
+                                    Expr::Index(index) => {
+                                        let Expr::Path(path) = index.expr.as_ref() else {
+                                            unimplemented!("Unexpected const generic array base {repeat_expr_expr:#?}");
+                                        };
+                                        let ident = get_ident_from_path_expr(path);
+                                        let Some(shape) = generic_vars.inst_array.get(ident.to_string().as_str()) else {
+                                            panic!("Undefined const generic array parameter {ident}")
+                                        };
+                                        let i = parse_signed_literal_as_i32(&index.index);
+                                        let Some(dim) = shape.get(i as usize) else {
+                                            panic!(
+                                                "Index {i} out of bounds for const generic array `{ident}` of length {}",
+                                                shape.len()
+                                            )
+                                        };
+                                        *dim
                                     },
                                     _ => unimplemented!("Unexpected unary expression {repeat_expr_expr:#?} in {repeat_expr:#?}"),
                                 };

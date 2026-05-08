@@ -14,11 +14,14 @@ use std::fmt::Display;
 use std::str::FromStr;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
+use syn::visit_mut::{self, VisitMut};
 use syn::{
     parse_quote, AngleBracketedGenericArguments, Attribute, ConstParam, Expr, ExprCall,
-    ExprClosure, ExprPath, FnArg, GenericArgument, GenericParam, Generics, Item, ItemFn, Lit, Meta,
-    MetaList, Pat, PathArguments, ReturnType, Signature, Token, Type,
+    ExprClosure, ExprMethodCall, ExprPath, FnArg, GenericArgument, GenericParam, Generics, Item,
+    ItemFn, Lit, Meta, MetaList, Pat, PathArguments, ReturnType, Signature, Token, Type,
 };
+
+const CUTILE_INTERNAL_NODE_ID_ATTR: &str = "__cutile_node_id";
 
 /// A parsed attribute meta list (e.g. `#[cuda_tile::ty(name = "f32")]`).
 #[derive(Debug)]
@@ -26,6 +29,91 @@ pub struct SingleMetaList {
     name: Option<String>,
     meta_list: Option<MetaList>,
     variables: Vec<Meta>,
+}
+
+/// Render an expression for user-facing diagnostics.
+///
+/// Compiler-owned `syn` trees carry internal node-id attributes used by
+/// typeck/lowering side tables. Those attributes are intentionally retained in
+/// the AST but should not leak into source-facing error messages.
+pub fn user_expr_tokens(expr: &Expr) -> String {
+    let mut expr = expr.clone();
+    strip_user_hidden_expr_attrs(&mut expr);
+    expr.to_token_stream().to_string()
+}
+
+pub fn user_call_tokens(call_expr: &ExprCall) -> String {
+    user_expr_tokens(&Expr::Call(call_expr.clone()))
+}
+
+pub fn user_method_call_tokens(method_call_expr: &ExprMethodCall) -> String {
+    user_expr_tokens(&Expr::MethodCall(method_call_expr.clone()))
+}
+
+fn strip_user_hidden_expr_attrs(expr: &mut Expr) {
+    let mut stripper = UserHiddenAttrStripper;
+    stripper.visit_expr_mut(expr);
+}
+
+struct UserHiddenAttrStripper;
+
+impl VisitMut for UserHiddenAttrStripper {
+    fn visit_attribute_mut(&mut self, _attr: &mut Attribute) {
+        // Do not recurse into attribute metadata.
+    }
+
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Some(attrs) = expr_attrs_mut(expr) {
+            attrs.retain(|attr| !attr.path().is_ident(CUTILE_INTERNAL_NODE_ID_ATTR));
+        }
+        visit_mut::visit_expr_mut(self, expr);
+    }
+}
+
+fn expr_attrs_mut(expr: &mut Expr) -> Option<&mut Vec<Attribute>> {
+    match expr {
+        Expr::Array(expr) => Some(&mut expr.attrs),
+        Expr::Assign(expr) => Some(&mut expr.attrs),
+        Expr::Async(expr) => Some(&mut expr.attrs),
+        Expr::Await(expr) => Some(&mut expr.attrs),
+        Expr::Binary(expr) => Some(&mut expr.attrs),
+        Expr::Block(expr) => Some(&mut expr.attrs),
+        Expr::Break(expr) => Some(&mut expr.attrs),
+        Expr::Call(expr) => Some(&mut expr.attrs),
+        Expr::Cast(expr) => Some(&mut expr.attrs),
+        Expr::Closure(expr) => Some(&mut expr.attrs),
+        Expr::Const(expr) => Some(&mut expr.attrs),
+        Expr::Continue(expr) => Some(&mut expr.attrs),
+        Expr::Field(expr) => Some(&mut expr.attrs),
+        Expr::ForLoop(expr) => Some(&mut expr.attrs),
+        Expr::Group(expr) => Some(&mut expr.attrs),
+        Expr::If(expr) => Some(&mut expr.attrs),
+        Expr::Index(expr) => Some(&mut expr.attrs),
+        Expr::Infer(expr) => Some(&mut expr.attrs),
+        Expr::Let(expr) => Some(&mut expr.attrs),
+        Expr::Lit(expr) => Some(&mut expr.attrs),
+        Expr::Loop(expr) => Some(&mut expr.attrs),
+        Expr::Macro(expr) => Some(&mut expr.attrs),
+        Expr::Match(expr) => Some(&mut expr.attrs),
+        Expr::MethodCall(expr) => Some(&mut expr.attrs),
+        Expr::Paren(expr) => Some(&mut expr.attrs),
+        Expr::Path(expr) => Some(&mut expr.attrs),
+        Expr::Range(expr) => Some(&mut expr.attrs),
+        Expr::RawAddr(expr) => Some(&mut expr.attrs),
+        Expr::Reference(expr) => Some(&mut expr.attrs),
+        Expr::Repeat(expr) => Some(&mut expr.attrs),
+        Expr::Return(expr) => Some(&mut expr.attrs),
+        Expr::Struct(expr) => Some(&mut expr.attrs),
+        Expr::Try(expr) => Some(&mut expr.attrs),
+        Expr::TryBlock(expr) => Some(&mut expr.attrs),
+        Expr::Tuple(expr) => Some(&mut expr.attrs),
+        Expr::Unary(expr) => Some(&mut expr.attrs),
+        Expr::Unsafe(expr) => Some(&mut expr.attrs),
+        Expr::While(expr) => Some(&mut expr.attrs),
+        Expr::Yield(expr) => Some(&mut expr.attrs),
+        Expr::Verbatim(_) => None,
+        _ => None,
+    }
 }
 
 impl SingleMetaList {
@@ -966,4 +1054,36 @@ pub fn get_closure_captures(
 /// Check if an expression is a closure
 pub fn is_closure(expr: &Expr) -> bool {
     matches!(expr, Expr::Closure(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_expr_tokens_strips_internal_node_id_attrs() {
+        let expr: Expr = syn::parse_quote! {
+            #[__cutile_node_id = 28]
+            make_partition_view_mut(
+                #[__cutile_node_id = 29] & #[__cutile_node_id = 30] z,
+                #[__cutile_node_id = 31] const_shape![BM, BN],
+                #[__cutile_node_id = 32] padding::None,
+                #[__cutile_node_id = 33] z_token,
+            )
+        };
+
+        assert!(expr
+            .to_token_stream()
+            .to_string()
+            .contains("__cutile_node_id"));
+
+        let rendered = user_expr_tokens(&expr);
+        assert!(!rendered.contains("__cutile_node_id"));
+        assert!(rendered.contains("make_partition_view_mut"));
+        assert!(rendered.contains("const_shape"));
+        assert!(expr
+            .to_token_stream()
+            .to_string()
+            .contains("__cutile_node_id"));
+    }
 }

@@ -113,7 +113,10 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
                 let type_name = ident.to_string();
                 if type_name != "Tensor" {
                     ty.err(&format!(
-                        "References to {} as parameters are not supported.",
+                        "References to `{}` as parameters are not supported. \
+                         If this is a type alias for `Tensor`, define the alias in the same \
+                         `#[cutile::module]` as the entry function; imported Tensor aliases are \
+                         not supported by launcher generation.",
                         type_name
                     ))?;
                 }
@@ -142,6 +145,25 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imported_tensor_alias_parameter_error_mentions_same_module_aliases() {
+        let item: ItemFn = syn::parse_quote! {
+            fn kernel(x: &ImportedTensorAlias) {}
+        };
+        let err = validate_entry_point_parameters(&item).expect_err("expected alias rejection");
+        let message = err.to_string();
+        assert!(
+            message.contains("define the alias in the same `#[cutile::module]`")
+                && message.contains("imported Tensor aliases are not supported"),
+            "{message}"
+        );
+    }
 }
 
 // TODO (hme): Implement a comprehensive validation pass on entire module.

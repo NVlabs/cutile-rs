@@ -14,8 +14,9 @@ use super::_value::{BlockTerminator, CompilerContext, TileRustValue};
 use super::shared_types::Kind;
 use super::shared_utils::{
     collect_mutated_variables, collect_mutated_variables_from_block,
-    collect_mutated_variables_loop, collect_mutated_variables_while, dedup,
-    update_outer_block_type_meta, STACK_GROW_SIZE, STACK_RED_ZONE,
+    collect_mutated_variables_from_expr, collect_mutated_variables_loop,
+    collect_mutated_variables_while, dedup, update_outer_block_type_meta, STACK_GROW_SIZE,
+    STACK_RED_ZONE,
 };
 use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
@@ -29,11 +30,12 @@ use cutile_ir::builder::{append_op, build_block, OpBuilder};
 use cutile_ir::bytecode::Opcode;
 use cutile_ir::ir::{Attribute, BlockId, Location, Module, Region};
 
-use proc_macro2::TokenTree;
 use quote::ToTokens;
 use std::collections::{BTreeMap, HashMap};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parse_quote, Expr, Lit, Member, Pat, UnOp};
+use syn::{parse_quote, Expr, ExprMacro, Lit, Member, Pat, Token, UnOp};
 
 impl<'m> CUDATileFunctionCompiler<'m> {
     /// Construct a ZST marker type placeholder from a path expression.
@@ -53,6 +55,123 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         TileRustValue::new_string(Expr::Path(path_expr.clone()), ty)
     }
 
+    fn const_shape_macro_args(
+        &self,
+        mac_expr: &ExprMacro,
+        generic_vars: &GenericVars,
+        ctx: &CompilerContext,
+    ) -> Result<Vec<String>, JITError> {
+        let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+        let exprs = parser.parse2(mac_expr.mac.tokens.clone()).map_err(|err| {
+            self.jit_error(
+                &mac_expr.span(),
+                &format!("failed to parse const-shape macro arguments: {err}"),
+            )
+        })?;
+        let expr_count = exprs.len();
+        let mut args = Vec::new();
+        for expr in exprs {
+            match &expr {
+                Expr::Path(path) if path.path.segments.len() == 1 => {
+                    let name = get_ident_from_path_expr(path).to_string();
+                    if let Some(cga) = generic_vars.inst_array.get(&name) {
+                        if expr_count != 1 {
+                            return self.jit_error_result(
+                                &expr.span(),
+                                &format!(
+                                    "`{name}` names a const generic array; use it alone or index it as `{name}[i]`"
+                                ),
+                            );
+                        }
+                        args.extend(cga.iter().map(|dim| dim.to_string()));
+                        continue;
+                    }
+                    self.require_compile_time_shape_expr(&expr, generic_vars, ctx)?;
+                    args.push(expr.to_token_stream().to_string());
+                }
+                Expr::Index(index) => {
+                    if let Expr::Path(path) = index.expr.as_ref() {
+                        let name = get_ident_from_path_expr(path).to_string();
+                        if let Some(cga) = generic_vars.inst_array.get(&name) {
+                            let i = parse_signed_literal_as_i32(&index.index);
+                            let Some(dim) = cga.get(i as usize) else {
+                                return self.jit_error_result(
+                                    &index.index.span(),
+                                    &format!(
+                                        "index {i} out of bounds for const generic array `{name}` of length {}",
+                                        cga.len()
+                                    ),
+                                );
+                            };
+                            args.push(dim.to_string());
+                            continue;
+                        }
+                    }
+                    return self.jit_error_result(
+                        &expr.span(),
+                        "only const generic array indexing like `S[0]` is supported in `const_shape!` and `const_array!`",
+                    );
+                }
+                _ => {
+                    self.require_compile_time_shape_expr(&expr, generic_vars, ctx)?;
+                    args.push(expr.to_token_stream().to_string());
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    fn require_compile_time_shape_expr(
+        &self,
+        expr: &Expr,
+        generic_vars: &GenericVars,
+        ctx: &CompilerContext,
+    ) -> Result<(), JITError> {
+        match expr {
+            Expr::Lit(_) | Expr::Unary(_) => Ok(()),
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = get_ident_from_path_expr(path).to_string();
+                if generic_vars.get_i32(&name).is_some() {
+                    return Ok(());
+                }
+                if ctx
+                    .vars
+                    .get(&name)
+                    .and_then(|value| value.bounds)
+                    .is_some_and(|bounds| bounds.is_exact())
+                {
+                    return Ok(());
+                }
+                let res = self
+                    .modules
+                    .name_resolver
+                    .resolve_path(&path.path, &self.module_name);
+                if let Res::Def(DefKind::Const, def_id) = res {
+                    if self
+                        .modules
+                        .name_resolver
+                        .get_const(&def_id)
+                        .and_then(crate::type_aliases::const_item_scalar_expr)
+                        .is_some()
+                    {
+                        return Ok(());
+                    }
+                }
+                self.jit_error_result(
+                    &expr.span(),
+                    "all arguments to `const_shape!` must be compile-time constants",
+                )
+            }
+            Expr::Paren(paren) => {
+                self.require_compile_time_shape_expr(&paren.expr, generic_vars, ctx)
+            }
+            _ => self.jit_error_result(
+                &expr.span(),
+                "all arguments to `const_shape!` must be compile-time constants",
+            ),
+        }
+    }
+
     fn make_option_type(rust_ty: syn::Type) -> TileRustType {
         let type_instance = TypeInstance::UserType(TypeInstanceUserType {
             maybe_generic_ty: rust_ty,
@@ -64,6 +183,70 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let payload_rust_ty = &payload_ty.rust_ty;
         let rust_ty: syn::Type = parse_quote!(Option<#payload_rust_ty>);
         Self::make_option_type(rust_ty)
+    }
+
+    fn path_looks_like_associated_const(
+        &self,
+        path_expr: &syn::ExprPath,
+        generic_vars: &GenericVars,
+    ) -> bool {
+        if path_expr.qself.is_some() {
+            return true;
+        }
+        if path_expr.path.segments.len() != 2 {
+            return false;
+        }
+        let qualifier = path_expr.path.segments[0].ident.to_string();
+        generic_vars.var_type(&qualifier).is_some()
+            || self.modules.structs().contains_key(&qualifier)
+            || self
+                .modules
+                .primitives()
+                .keys()
+                .any(|(_, self_name)| self_name == &qualifier)
+    }
+
+    fn expected_array_element_type(
+        &self,
+        expected: &TileRustType,
+        generic_vars: &GenericVars,
+    ) -> Result<Option<TileRustType>, JITError> {
+        let elem_ty = match &expected.rust_ty {
+            syn::Type::Array(array) => Some(&*array.elem),
+            syn::Type::Slice(slice) => Some(&*slice.elem),
+            _ => None,
+        };
+        let Some(elem_ty) = elem_ty else {
+            return Ok(None);
+        };
+        self.compile_type(elem_ty, generic_vars, &HashMap::new())
+    }
+
+    fn compile_else_branch(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        else_expr: &Expr,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        match else_expr {
+            Expr::Block(block_expr) => {
+                self.compile_block(module, block_id, &block_expr.block, generic_vars, ctx, return_type)
+            }
+            Expr::If(_) => {
+                let synthetic_block = syn::Block {
+                    brace_token: Default::default(),
+                    stmts: vec![syn::Stmt::Expr(else_expr.clone(), None)],
+                };
+                self.compile_block(module, block_id, &synthetic_block, generic_vars, ctx, return_type)
+            }
+            _ => self.jit_error_result(
+                &else_expr.span(),
+                "only block expressions (`{ ... }`) and chained `else if` expressions are supported in else branches",
+            ),
+        }
     }
 
     pub fn compile_expression(
@@ -135,13 +318,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "range expression is missing an end bound (e.g. `0..n`)",
                         );
                     };
+                    let start_return_type = self
+                        .typeck_expr_tile_type(start_expr, generic_vars, &HashMap::new())?
+                        .or(return_type.clone());
                     let Some(start_val) = self.compile_expression(
                         module,
                         block_id,
                         start_expr,
                         generic_vars,
                         ctx,
-                        return_type.clone(),
+                        start_return_type,
                     )?
                     else {
                         return self.jit_error_result(
@@ -149,13 +335,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "failed to compile range start expression",
                         );
                     };
+                    let end_return_type = self
+                        .typeck_expr_tile_type(end_expr, generic_vars, &HashMap::new())?
+                        .or(return_type.clone());
                     let Some(end_val) = self.compile_expression(
                         module,
                         block_id,
                         end_expr,
                         generic_vars,
                         ctx,
-                        return_type.clone(),
+                        end_return_type,
                     )?
                     else {
                         return self.jit_error_result(
@@ -498,43 +687,48 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     if let Some(bounds) = conditional_val.bounds {
                         if bounds.is_exact() {
                             // Emit the corresponding conditional, if it's defined.
-                            let branch_block = match (bounds.start, &if_expr.else_branch) {
-                                (1, _) => Some(&if_expr.then_branch),
+                            let mut block_vars = ctx.clone();
+                            // This is inlined, so no need to inject a terminator.
+                            block_vars.default_terminator = None;
+                            let (res, carry_vars) = match (bounds.start, &if_expr.else_branch) {
+                                (1, _) => {
+                                    let res = self.compile_block(
+                                        module,
+                                        block_id,
+                                        &if_expr.then_branch,
+                                        generic_vars,
+                                        &mut block_vars,
+                                        None,
+                                    )?;
+                                    let carry_vars =
+                                        collect_mutated_variables_from_block(&if_expr.then_branch)?
+                                            .into_iter()
+                                            .collect::<Vec<_>>();
+                                    (res, carry_vars)
+                                }
                                 (0, Some((_Else, else_expr))) => {
-                                    let Expr::Block(block_expr) = &**else_expr else {
-                                        return self.jit_error_result(
-                                            &else_expr.span(),
-                                            "only block expressions (`{ ... }`) are supported in else branches",
-                                        );
-                                    };
-                                    Some(&block_expr.block)
+                                    let res = self.compile_else_branch(
+                                        module,
+                                        block_id,
+                                        else_expr,
+                                        generic_vars,
+                                        &mut block_vars,
+                                        None,
+                                    )?;
+                                    let carry_vars =
+                                        collect_mutated_variables_from_expr(else_expr)?
+                                            .into_iter()
+                                            .collect::<Vec<_>>();
+                                    (res, carry_vars)
                                 }
                                 _ => {
                                     // Do nothing since the conditional is false and there is no else branch.
-                                    None
+                                    return Ok(None);
                                 }
                             };
-                            if let Some(branch_block) = branch_block {
-                                let mut block_vars = ctx.clone();
-                                // This is inlined, so no need to inject a terminator.
-                                block_vars.default_terminator = None;
-                                let res = self.compile_block(
-                                    module,
-                                    block_id,
-                                    branch_block,
-                                    generic_vars,
-                                    &mut block_vars,
-                                    None,
-                                )?;
-                                let carry_vars =
-                                    collect_mutated_variables_from_block(branch_block)?
-                                        .into_iter()
-                                        .collect::<Vec<_>>();
-                                let result_values = block_vars.unpack_some_vars(&carry_vars)?;
-                                ctx.repack_some_vars(&carry_vars, &result_values, true)?;
-                                return Ok(res);
-                            }
-                            return Ok(None);
+                            let result_values = block_vars.unpack_some_vars(&carry_vars)?;
+                            ctx.repack_some_vars(&carry_vars, &result_values, true)?;
+                            return Ok(res);
                         }
                     }
 
@@ -545,13 +739,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             .collect::<Vec<_>>();
                     let else_captured_vars = {
                         if let Some((_Else, else_expr)) = &if_expr.else_branch {
-                            let Expr::Block(block_expr) = &**else_expr else {
-                                return self.jit_error_result(
-                                    &else_expr.span(),
-                                    "only block expressions (`{ ... }`) are supported in else branches",
-                                );
-                            };
-                            collect_mutated_variables_from_block(&block_expr.block)?
+                            collect_mutated_variables_from_expr(else_expr)?
                                 .into_iter()
                                 .collect::<Vec<_>>()
                         } else {
@@ -609,20 +797,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // We don't need to check return type. Both Rust and Tile IR compiler perform this check.
                     let (else_region_id, _else_return_type) = {
                         if let Some((_Else, else_expr)) = &if_expr.else_branch {
-                            let Expr::Block(block_expr) = &**else_expr else {
-                                return self.jit_error_result(
-                                    &else_expr.span(),
-                                    "only block expressions (`{ ... }`) are supported in else branches",
-                                );
-                            };
                             let mut block_vars = ctx.clone();
                             block_vars.carry_vars = Some(if_captured_var_names.clone());
                             block_vars.default_terminator = Some(BlockTerminator::Yield);
                             let (else_block_id, _else_block_args) = build_block(module, &[]);
-                            let result = self.compile_block(
+                            let result = self.compile_else_branch(
                                 module,
                                 else_block_id,
-                                &block_expr.block,
+                                else_expr,
                                 generic_vars,
                                 &mut block_vars,
                                 then_return_type.clone(),
@@ -776,16 +958,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             .modules
                             .get_struct_field_type(&struct_name, &field_name);
                         let tile_rust_ty = if let Some(field_type) = field_type {
-                            // TODO (hme): Unclear if this works in general for all structs.
+                            // `Shape` and `Array` are compiler-known structs whose field
+                            // expressions often need a concrete expected type during emission.
                             if ["Shape", "Array"].contains(&struct_name.as_str()) {
                                 self.compile_type(&field_type, generic_vars, &HashMap::new())?
                             } else {
-                                // Returning None here is equivalent to asking the programmer to
-                                // specify the field type.
-                                None
+                                self.typeck_expr_tile_type(
+                                    &field.expr,
+                                    generic_vars,
+                                    &HashMap::new(),
+                                )?
                             }
                         } else {
-                            None
+                            self.typeck_expr_tile_type(&field.expr, generic_vars, &HashMap::new())?
                         };
                         let field_value: TileRustValue = match self.compile_expression(
                             module,
@@ -861,16 +1046,42 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                 }
                 Expr::Tuple(tuple_expr) => {
+                    let expected_elem_types = match return_type.as_ref().map(|ty| &ty.rust_ty) {
+                        Some(syn::Type::Tuple(tuple_ty)) => {
+                            Some(tuple_ty.elems.iter().cloned().collect::<Vec<_>>())
+                        }
+                        _ => None,
+                    };
+                    if let Some(expected_elem_types) = &expected_elem_types {
+                        if expected_elem_types.len() != tuple_expr.elems.len() {
+                            return self.jit_error_result(
+                                &tuple_expr.span(),
+                                &format!(
+                                    "tuple expression has {} elements but expected tuple type has {} elements",
+                                    tuple_expr.elems.len(),
+                                    expected_elem_types.len()
+                                ),
+                            );
+                        }
+                    }
                     let mut rust_types: Vec<syn::Type> = vec![];
                     let mut values: Vec<TileRustValue> = vec![];
-                    for elem in &tuple_expr.elems {
+                    for (idx, elem) in tuple_expr.elems.iter().enumerate() {
+                        let elem_return_type = expected_elem_types
+                            .as_ref()
+                            .and_then(|elem_types| elem_types.get(idx))
+                            .and_then(|elem_ty| {
+                                self.compile_type(elem_ty, generic_vars, &HashMap::new())
+                                    .ok()
+                                    .flatten()
+                            });
                         match self.compile_expression(
                             module,
                             block_id,
                             &elem,
                             generic_vars,
                             ctx,
-                            None,
+                            elem_return_type,
                         )? {
                             Some(value) => {
                                 rust_types.push(value.ty.rust_ty.clone());
@@ -1032,13 +1243,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             len
                         }
                     };
+                    let elem_return_type = match return_type.as_ref() {
+                        Some(return_type) => {
+                            self.expected_array_element_type(return_type, generic_vars)?
+                        }
+                        None => self.typeck_expr_tile_type(
+                            &repeat_expr.expr,
+                            generic_vars,
+                            &HashMap::new(),
+                        )?,
+                    };
                     let Some(value) = self.compile_expression(
                         module,
                         block_id,
                         &repeat_expr.expr,
                         generic_vars,
                         ctx,
-                        None,
+                        elem_return_type,
                     )?
                     else {
                         return self.jit_error_result(
@@ -1117,6 +1338,43 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // Known DSL struct — return as ZST marker placeholder.
                             return Ok(Some(Self::make_zst_marker(path_expr)));
                         }
+                        Res::Def(DefKind::Const, def_id) => {
+                            let Some(const_item) = self.modules.name_resolver.get_const(&def_id)
+                            else {
+                                return self.jit_error_result(
+                                    &path_expr.span(),
+                                    &format!("failed to resolve const `{var_name}`"),
+                                );
+                            };
+                            let const_ty =
+                                self.compile_type(&const_item.ty, generic_vars, &HashMap::new())?;
+                            return self.compile_expression(
+                                module,
+                                block_id,
+                                &const_item.expr,
+                                generic_vars,
+                                ctx,
+                                const_ty,
+                            );
+                        }
+                        Res::Def(DefKind::Static, def_id) => {
+                            let Some(static_item) = self.modules.name_resolver.get_static(&def_id)
+                            else {
+                                return self.jit_error_result(
+                                    &path_expr.span(),
+                                    &format!("failed to resolve static `{var_name}`"),
+                                );
+                            };
+                            let Some(static_ty) =
+                                self.compile_type(&static_item.ty, generic_vars, &HashMap::new())?
+                            else {
+                                return self.jit_error_result(
+                                    &path_expr.span(),
+                                    &format!("failed to compile static `{var_name}` type"),
+                                );
+                            };
+                            return Ok(Some(TileRustValue::new_struct(BTreeMap::new(), static_ty)));
+                        }
                         _ => {}
                     }
 
@@ -1127,6 +1385,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     //    in the DSL AST the resolver indexes. They're valid Rust
                     //    type paths consumed by resolve_static_params.
                     if path_expr.path.segments.len() > 1 {
+                        if self.path_looks_like_associated_const(path_expr, generic_vars) {
+                            return self.jit_error_result(
+                                &path_expr.span(),
+                                "associated const values are not supported in expression position; use a literal or pass supported element constants such as `T::ZERO` directly to a DSL operation that accepts them",
+                            );
+                        }
                         return Ok(Some(Self::make_zst_marker(path_expr)));
                     }
 
@@ -1254,14 +1518,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         }
                     }
                 }
-                Expr::MethodCall(method_call_expr) => Ok(self.inline_method_call(
-                    module,
-                    block_id,
-                    &method_call_expr,
-                    &generic_vars,
-                    ctx,
-                    return_type,
-                )?),
+                Expr::MethodCall(method_call_expr) => {
+                    if let Some(value) = self.compile_global_method_call(
+                        module,
+                        block_id,
+                        &method_call_expr,
+                        &generic_vars,
+                        ctx,
+                        return_type.clone(),
+                    )? {
+                        return Ok(Some(value));
+                    }
+                    Ok(self.inline_method_call(
+                        module,
+                        block_id,
+                        &method_call_expr,
+                        &generic_vars,
+                        ctx,
+                        return_type,
+                    )?)
+                }
                 Expr::Field(field_expr) => {
                     let Some(base) = self.compile_expression(
                         module,
@@ -1456,9 +1732,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 Expr::Lit(lit_expr) => {
                     let return_type = if return_type.is_none() {
-                        match get_lit_type(lit_expr) {
-                            Some(ty) => self.compile_type(&ty, generic_vars, &HashMap::new())?,
-                            None => None,
+                        let typeck_return_type =
+                            self.typeck_expr_tile_type(expr, generic_vars, &HashMap::new())?;
+                        if typeck_return_type.is_some() {
+                            typeck_return_type
+                        } else {
+                            match get_lit_type(lit_expr) {
+                                Some(ty) => {
+                                    self.compile_type(&ty, generic_vars, &HashMap::new())?
+                                }
+                                None => None,
+                            }
                         }
                     } else {
                         return_type
@@ -1569,63 +1853,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         "const_shape" | "const_array" => {
                             // TODO (hme): Remove special case for const_shape here
                             //  and on the proc-macro side (rank_instantiation.rs).
-                            let mut args = vec![];
-                            let mut is_cga = false;
-                            let mut is_consts = false;
-                            for token in mac_expr.mac.tokens.clone() {
-                                if is_cga && is_consts {
-                                    return self.jit_error_result(
-                                        &mac_expr.span(),
-                                        &format!("inconsistent arguments to `{mac_name}!`: cannot mix CGA and literal arguments"),
-                                    );
-                                }
-                                match token {
-                                    TokenTree::Literal(lit) => {
-                                        args.push(lit.to_string());
-                                    }
-                                    TokenTree::Ident(ident) => {
-                                        let const_var = ident.to_string();
-                                        if let Some(cga) = generic_vars.inst_array.get(&const_var) {
-                                            is_cga = true;
-                                            args = cga
-                                                .iter()
-                                                .map(|x| x.to_string())
-                                                .collect::<Vec<String>>();
-                                        } else {
-                                            is_consts = true;
-                                            let mut is_const =
-                                                generic_vars.get_i32(&const_var).is_some();
-                                            let const_var_value = ctx.vars.get(&const_var).unwrap();
-                                            if let Some(bounds) = const_var_value.bounds {
-                                                is_const = is_const || bounds.is_exact();
-                                            }
-                                            if !is_const {
-                                                return self.jit_error_result(
-                                                    &mac_expr.span(),
-                                                    "all arguments to `const_shape!` must be compile-time constants",
-                                                );
-                                            }
-                                            args.push(const_var);
-                                        }
-                                    }
-                                    TokenTree::Punct(punct) => {
-                                        if punct.as_char() == ',' {
-                                            continue;
-                                        } else {
-                                            return self.jit_error_result(
-                                                &mac_expr.span(),
-                                                &format!("unexpected punctuation `{punct}` in macro arguments"),
-                                            );
-                                        }
-                                    }
-                                    _ => {
-                                        return self.jit_error_result(
-                                            &mac_expr.span(),
-                                            "unexpected token in macro arguments",
-                                        )
-                                    }
-                                }
-                            }
+                            let args = self.const_shape_macro_args(mac_expr, generic_vars, ctx)?;
                             let cga_str = format!("{{[{}]}}", args.join(", "));
                             let ty_str = if mac_name == "const_shape" {
                                 "Shape"

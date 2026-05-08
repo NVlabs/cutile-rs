@@ -127,7 +127,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         outer_tile: &TileRustValue,
         generic_vars: &GenericVars,
         ctx: &mut CompilerContext,
-    ) -> Result<TileRustValue, JITError> {
+    ) -> Result<Option<TileRustValue>, JITError> {
         let outer_shape = self.static_shape_from_value(outer_tile, generic_vars, span)?;
         let nested_shape = self.partition_tile_shape(partition_value, span)?;
         if outer_shape.len() != nested_shape.len() {
@@ -147,6 +147,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "nested mutable partition access offsets are only supported up to rank 3",
             );
         }
+        for (i, nested_dim) in nested_shape.iter().enumerate() {
+            if *nested_dim <= 0 {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "nested mutable partition requires static positive nested tile dimensions, got nested dim {nested_dim} at axis {i}"
+                    ),
+                );
+            }
+        }
+        if outer_shape.iter().any(|dim| *dim <= 0) {
+            return Ok(None);
+        }
 
         let i32_ty = self.scalar_i32_type(span)?;
         let scalar_i32_ir_ty = Type::Tile(TileType {
@@ -164,14 +177,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for i in 0..rank {
             let outer_dim = outer_shape[i];
             let nested_dim = nested_shape[i];
-            if outer_dim <= 0 || nested_dim <= 0 {
-                return self.jit_error_result(
-                    span,
-                    &format!(
-                        "nested mutable partition requires static positive tile dimensions, got outer dim {outer_dim} and nested dim {nested_dim} at axis {i}"
-                    ),
-                );
-            }
             let pid = TileRustValue::new_primitive(pid_results[i], i32_ty.clone(), None);
             let ratio = ((outer_dim as i64 + nested_dim as i64 - 1) / nested_dim as i64) as i32;
             let offset = if ratio == 1 {
@@ -195,7 +200,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         let array_ty = self.array_i32_type(rank, generic_vars, span)?;
-        Ok(TileRustValue::new_compound(offsets, array_ty))
+        Ok(Some(TileRustValue::new_compound(offsets, array_ty)))
     }
 
     /// Compiles a `compiler_op` (intrinsic) function call.
@@ -1337,18 +1342,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                let outer_shape =
-                    self.static_shape_from_value(&outer_tile, generic_vars, &call_expr.span())?;
-                if outer_shape.iter().all(|d| *d > 0) {
-                    let access_offset = self.compile_nested_mutable_access_offset_metadata(
-                        module,
-                        block_id,
-                        &call_expr.span(),
-                        &partition_value,
-                        &outer_tile,
-                        generic_vars,
-                        ctx,
-                    )?;
+                let access_offset = self.compile_nested_mutable_access_offset_metadata(
+                    module,
+                    block_id,
+                    &call_expr.span(),
+                    &partition_value,
+                    &outer_tile,
+                    generic_vars,
+                    ctx,
+                )?;
+                if let Some(access_offset) = access_offset {
                     partition_value
                         .insert_type_meta_field(NESTED_MUTABLE_ACCESS_OFFSET_META, access_offset)?;
                 }

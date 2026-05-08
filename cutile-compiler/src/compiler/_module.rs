@@ -20,8 +20,8 @@ use quote::ToTokens;
 use std::collections::{HashMap, HashSet};
 use syn::spanned::Spanned;
 use syn::{
-    Expr, ExprMethodCall, GenericArgument, GenericParam, ImplItem, ImplItemFn, ItemFn, ItemImpl,
-    ItemMod, ItemStruct, PathArguments, Type,
+    Expr, ExprMethodCall, GenericArgument, GenericParam, ImplItem, ImplItemFn, ItemConst, ItemFn,
+    ItemImpl, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemType, PathArguments, Type,
 };
 
 /// Aggregated index of all DSL modules, types, impls, and functions.
@@ -76,16 +76,65 @@ impl CUDATileModules {
         self.name_resolver.structs()
     }
 
+    /// Flat map of all traits: name → ItemTrait.
+    /// Compatibility shim.
+    pub fn traits(&self) -> &HashMap<String, ItemTrait> {
+        self.name_resolver.traits()
+    }
+
+    /// Flat map of all type aliases: name → ItemType.
+    /// Compatibility shim.
+    pub fn type_aliases(&self) -> &HashMap<String, ItemType> {
+        self.name_resolver.type_aliases()
+    }
+
+    /// Flat map of all constants: name → ItemConst.
+    /// Compatibility shim.
+    pub fn consts(&self) -> &HashMap<String, ItemConst> {
+        self.name_resolver.consts()
+    }
+
+    /// Flat map of all static items: name → ItemStatic.
+    /// Compatibility shim.
+    pub fn statics(&self) -> &HashMap<String, ItemStatic> {
+        self.name_resolver.statics()
+    }
+
     /// Flat map of all struct impls: struct_name → [(module, ItemImpl)].
     /// Compatibility shim.
     pub fn struct_impls(&self) -> &HashMap<String, Vec<(String, ItemImpl)>> {
         self.name_resolver.struct_impls()
     }
 
+    /// Flat map of all trait impls: (trait, self_ty) → [(module, ItemImpl)].
+    /// Compatibility shim.
+    pub fn trait_impls(&self) -> &HashMap<(String, String), Vec<(String, ItemImpl)>> {
+        self.name_resolver.trait_impls()
+    }
+
     /// Flat map of all functions: name → (module, ItemFn).
     /// Compatibility shim.
     pub fn functions(&self) -> &HashMap<String, (String, ItemFn)> {
         self.name_resolver.functions()
+    }
+
+    /// Expand DSL-visible type aliases in a Rust type.
+    pub fn normalize_type_aliases(&self, ty: &Type) -> Result<Type, JITError> {
+        let normalized = crate::type_aliases::normalize_type_aliases(ty, self.type_aliases())
+            .map_err(|msg| {
+                SourceLocation::unknown().jit_error(&format!(
+                    "failed to normalize type `{}`: {msg}",
+                    ty.to_token_stream()
+                ))
+            })?;
+        crate::type_aliases::normalize_const_paths_in_type(&normalized, self.consts()).map_err(
+            |msg| {
+                SourceLocation::unknown().jit_error(&format!(
+                    "failed to normalize type `{}`: {msg}",
+                    ty.to_token_stream()
+                ))
+            },
+        )
     }
 
     /// Return the import-catalog hint message for `name` if the name was
@@ -126,7 +175,12 @@ impl CUDATileModules {
             }
 
             module_asts.push((module_name.clone(), module_ast.clone()));
-            span_bases.insert(module_name, module.span_base().clone());
+            let span_base = module.span_base().clone();
+            span_bases.insert(module_name.clone(), span_base.clone());
+            let absolute_path = module.absolute_path();
+            if absolute_path != module_name {
+                span_bases.insert(absolute_path.to_string(), span_base);
+            }
         }
 
         // Pass 1: Build the name resolver (indexes all items, processes imports).
@@ -832,5 +886,80 @@ impl CUDATileModules {
     pub fn get_struct_field_type(&self, struct_name: &str, field_name: &str) -> Option<Type> {
         self.name_resolver
             .get_struct_field_type(struct_name, field_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_records_span_base_by_short_name_and_absolute_path() {
+        let ast: ItemMod = syn::parse_quote! {
+            mod my_module {}
+        };
+        let span_base = SpanBase::new("source.rs".to_string(), 12, 4);
+        let mut module = Module::with_span_base("my_module", ast, span_base.clone());
+        module.set_absolute_path("my_crate::my_module".to_string());
+
+        let modules = CUDATileModules::new(vec![module]).expect("module construction");
+
+        assert_eq!(
+            modules
+                .get_span_base("my_module")
+                .map(|base| base.file.as_str()),
+            Some("source.rs")
+        );
+        assert_eq!(
+            modules
+                .get_span_base("my_crate::my_module")
+                .map(|base| base.file.as_str()),
+            Some("source.rs")
+        );
+    }
+
+    #[test]
+    fn method_lookup_prefers_inherent_impl_before_trait_impl() {
+        let ast: ItemMod = syn::parse_quote! {
+            mod my_module {
+                struct Foo;
+
+                trait Pick {
+                    fn pick(&self) -> i32;
+                }
+
+                impl Foo {
+                    fn pick(&self) -> i64 {
+                        0i64
+                    }
+                }
+
+                impl Pick for Foo {
+                    fn pick(&self) -> i32 {
+                        0i32
+                    }
+                }
+            }
+        };
+        let modules =
+            CUDATileModules::new(vec![Module::new("my_module", ast)]).expect("module construction");
+        let method_call: ExprMethodCall = syn::parse_quote!(foo.pick());
+        let receiver_ty: Type = syn::parse_quote!(Foo);
+        let call_arg_rust_tys = vec![receiver_ty.clone()];
+
+        let Some((_module_name, _impl_item, impl_method)) = modules
+            .get_impl_item_fn(
+                &receiver_ty,
+                &method_call,
+                &GenericVars::empty_unchecked(),
+                &call_arg_rust_tys,
+            )
+            .expect("method lookup")
+        else {
+            panic!("expected method lookup to select a method");
+        };
+        let (_inputs, return_ty) = get_sig_types(&impl_method.sig, Some(&receiver_ty));
+
+        assert_eq!(return_ty.to_token_stream().to_string(), "i64");
     }
 }

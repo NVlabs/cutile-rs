@@ -519,7 +519,8 @@ pub(crate) mod pool {
         attr: cuda_bindings::CUmemPool_attribute,
     ) -> Result<u64, DriverError> {
         let mut value: u64 = 0;
-        cuda_bindings::cuMemPoolGetAttribute(pool, attr, &mut value as *mut _ as *mut _).result()?;
+        cuda_bindings::cuMemPoolGetAttribute(pool, attr, &mut value as *mut _ as *mut _)
+            .result()?;
         Ok(value)
     }
 

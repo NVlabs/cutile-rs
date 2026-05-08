@@ -1452,6 +1452,28 @@ pub fn infer_shape_params_from_tensor_type(
                                         SupportedGenericType::Unknown => {}
                                     }
                                 }
+                                Expr::Index(index) => {
+                                    let Expr::Path(path) = index.expr.as_ref() else {
+                                        return elem.err(
+                                            "Unsupported array element in tensor shape expression.",
+                                        );
+                                    };
+                                    let ident = get_ident_from_path_expr(path).to_string();
+                                    match required_generics.get_ty(&ident) {
+                                        SupportedGenericType::ConstArray => {
+                                            // A projection like `S[0]` does not determine the
+                                            // whole `S`; keep it explicit instead of rejecting the
+                                            // entry signature.
+                                            continue;
+                                        }
+                                        SupportedGenericType::Unknown => {}
+                                        _ => {
+                                            return elem.err(
+                                                "Only const generic array projections like `S[0]` are supported in tensor shape index expressions.",
+                                            );
+                                        }
+                                    }
+                                }
                                 _ => {
                                     return elem.err(
                                         "Unsupported array element in tensor shape expression.",

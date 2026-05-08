@@ -15,6 +15,7 @@ use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
 use crate::error::JITError;
 use crate::generics::{get_cga_from_type, GenericVars};
+use crate::passes::name_resolution::{DefKind, Res};
 use crate::syn_utils::*;
 use crate::types::*;
 
@@ -38,6 +39,21 @@ const NESTED_MUTABLE_ACCESS_OFFSET_META: &str = "nested_mutable_access_offset";
 // ---------------------------------------------------------------------------
 // Helpers ported from old CompilerContext utilities
 // ---------------------------------------------------------------------------
+
+fn dense_const_path_parts(path_expr: &syn::ExprPath) -> Option<(String, String)> {
+    let const_name = path_expr
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())?;
+    if let Some(qself) = &path_expr.qself {
+        return get_type_ident(&qself.ty).map(|ty| (ty.to_string(), const_name));
+    }
+    if path_expr.path.segments.len() != 2 {
+        return None;
+    }
+    Some((path_expr.path.segments[0].ident.to_string(), const_name))
+}
 
 /// Resolves `static_params` from a `#[cuda_tile::op]` attribute against call-site arguments.
 ///
@@ -212,6 +228,44 @@ fn extract_latency_cycles(expr: &Expr, generic_args: &GenericVars) -> Result<i32
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
+    fn dense_module_const_path_value(
+        &self,
+        path_expr: &syn::ExprPath,
+    ) -> Result<Option<String>, JITError> {
+        if path_expr.qself.is_some() || path_expr.path.segments.len() != 1 {
+            return Ok(None);
+        }
+        let res = self
+            .modules
+            .name_resolver
+            .resolve_path(&path_expr.path, &self.module_name);
+        let Res::Def(DefKind::Const, def_id) = res else {
+            return Ok(None);
+        };
+        let Some(item) = self.modules.name_resolver.get_const(&def_id) else {
+            return self.jit_error_result(&path_expr.span(), "failed to resolve constant");
+        };
+        match item.expr.as_ref() {
+            Expr::Lit(lit) => match &lit.lit {
+                Lit::Bool(value) => Ok(Some(value.value.to_string())),
+                Lit::Int(value) => Ok(Some(value.base10_digits().to_string())),
+                Lit::Float(value) => Ok(Some(value.base10_digits().to_string())),
+                _ => Ok(None),
+            },
+            Expr::Unary(unary) if matches!(unary.op, UnOp::Neg(_)) => {
+                let Expr::Lit(lit) = unary.expr.as_ref() else {
+                    return Ok(None);
+                };
+                match &lit.lit {
+                    Lit::Int(value) => Ok(Some(format!("-{}", value.base10_digits()))),
+                    Lit::Float(value) => Ok(Some(format!("-{}", value.base10_digits()))),
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn offset_nested_mutable_indices(
         &self,
         module: &mut Module,
@@ -2045,10 +2099,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "constant" => {
                     return self.jit_error_result(
                         &call_expr.span(),
-                        &format!(
-                            "Return type required for {}",
-                            call_expr.to_token_stream().to_string()
-                        ),
+                        &format!("Return type required for {}", user_call_tokens(call_expr)),
                     )
                 }
                 _ => {}
@@ -2065,7 +2116,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return_type
         };
         if return_type.is_none() {
-            return self.jit_error_result(&call_expr.span(), "Unable to infer return type for op");
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "Unable to infer return type for CUDA Tile op `{}` (Tile IR `{}`) from call `{}`",
+                    rust_function_name,
+                    op_name,
+                    user_call_tokens(call_expr)
+                ),
+            );
         }
         let return_type = return_type.unwrap();
 
@@ -2082,7 +2141,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 for i in 0..param_names.len() {
                     if param_names[i] == field_meta_expr_param {
                         let call_expr_arg = &call_expr.args[i];
-                        let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
+                        let call_expr_arg_str = user_expr_tokens(call_expr_arg);
                         let final_expr_str =
                             field_meta_expr_str.replace(field_meta_expr_param, &call_expr_arg_str);
                         let final_expr =
@@ -2116,7 +2175,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut compiled_args: Vec<TileRustValue> = Vec::new();
         for i in 0..cuda_tile_op_params.len() {
             let call_expr_arg = &call_expr.args[i];
-            let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
+            let call_expr_arg_str = user_expr_tokens(call_expr_arg);
             let op_arg =
                 self.compile_expression(module, block_id, call_expr_arg, generic_args, ctx, None)?;
             if op_arg.is_none() {
@@ -2305,7 +2364,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
                     let call_expr_arg = &call_expr.args[i];
-                    let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
+                    let call_expr_arg_str = user_expr_tokens(call_expr_arg);
                     let op_arg = self.compile_expression(
                         module,
                         block_id,
@@ -2400,36 +2459,39 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             }
                         }
                         Expr::Path(path_expr) => {
-                            let path_expr_string = path_expr.to_token_stream().to_string();
-                            let ty_val_split = path_expr_string.split(" :: ").collect::<Vec<_>>();
-                            if ty_val_split.len() != 2 {
-                                return self.jit_error_result(
-                                    &path_expr.span(),
-                                    "Unexpected dense value.",
-                                );
-                            }
-                            let (ty_raw, const_val) =
-                                (ty_val_split[0].to_string(), ty_val_split[1].to_string());
-                            // Resolve generic type parameters (e.g. `T::ZERO` where
-                            // `T` is a kernel generic) to their concrete
-                            // monomorphized type name before dispatching to
-                            // `get_const_hex`.
-                            let ty = generic_args
-                                .inst_types
-                                .get(&ty_raw)
-                                .cloned()
-                                .unwrap_or(ty_raw);
-                            match const_val.as_str() {
-                                "ZERO" => (get_const_hex(ty.as_str(), "zero")?, ty.clone()),
-                                "ONE" => (get_const_hex(ty.as_str(), "one")?, ty.clone()),
-                                "NEG_INFINITY" => (get_const_hex(ty.as_str(), "min")?, ty.clone()),
-                                "INFINITY" => (get_const_hex(ty.as_str(), "max")?, ty.clone()),
-                                "E" => (get_const_hex(ty.as_str(), "e")?, ty.clone()),
-                                _ => {
+                            if let Some(value) = self.dense_module_const_path_value(path_expr)? {
+                                (value, String::new())
+                            } else {
+                                let Some((ty_raw, const_val)) = dense_const_path_parts(path_expr)
+                                else {
                                     return self.jit_error_result(
-                                        &call_expr.args[i].span(),
-                                        "Constant not supported",
-                                    )
+                                        &path_expr.span(),
+                                        "Unexpected dense value.",
+                                    );
+                                };
+                                // Resolve generic type parameters (e.g. `T::ZERO` where
+                                // `T` is a kernel generic) to their concrete
+                                // monomorphized type name before dispatching to
+                                // `get_const_hex`.
+                                let ty = generic_args
+                                    .inst_types
+                                    .get(&ty_raw)
+                                    .cloned()
+                                    .unwrap_or(ty_raw);
+                                match const_val.as_str() {
+                                    "ZERO" => (get_const_hex(ty.as_str(), "zero")?, ty.clone()),
+                                    "ONE" => (get_const_hex(ty.as_str(), "one")?, ty.clone()),
+                                    "NEG_INFINITY" => {
+                                        (get_const_hex(ty.as_str(), "min")?, ty.clone())
+                                    }
+                                    "INFINITY" => (get_const_hex(ty.as_str(), "max")?, ty.clone()),
+                                    "E" => (get_const_hex(ty.as_str(), "e")?, ty.clone()),
+                                    _ => {
+                                        return self.jit_error_result(
+                                            &call_expr.args[i].span(),
+                                            "Constant not supported",
+                                        )
+                                    }
                                 }
                             }
                         }

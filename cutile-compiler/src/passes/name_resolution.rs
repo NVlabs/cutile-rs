@@ -18,7 +18,10 @@
 use crate::error::JITError;
 use crate::syn_utils::*;
 use std::collections::HashMap;
-use syn::{ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, UseTree};
+use syn::{
+    ImplItem, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemStruct,
+    ItemTrait, ItemType, UseTree,
+};
 
 // ---------------------------------------------------------------------------
 // Core types (rustc equivalents)
@@ -42,6 +45,12 @@ pub enum DefKind {
     Struct,
     /// A trait definition.
     Trait,
+    /// A type alias definition.
+    TypeAlias,
+    /// A module-level constant.
+    Const,
+    /// A module-level static item.
+    Static,
     /// An associated function (method on a struct).
     AssocFn,
 }
@@ -95,6 +104,10 @@ pub enum Namespace {
 pub struct ModuleItems {
     pub functions: HashMap<String, ItemFn>,
     pub structs: HashMap<String, ItemStruct>,
+    pub traits: HashMap<String, ItemTrait>,
+    pub type_aliases: HashMap<String, ItemType>,
+    pub consts: HashMap<String, ItemConst>,
+    pub statics: HashMap<String, ItemStatic>,
     pub struct_impls: HashMap<String, Vec<ItemImpl>>,
     pub trait_impls: HashMap<(String, String), Vec<ItemImpl>>,
     pub primitives: HashMap<(String, String), ItemImpl>,
@@ -105,6 +118,10 @@ impl ModuleItems {
         Self {
             functions: HashMap::new(),
             structs: HashMap::new(),
+            traits: HashMap::new(),
+            type_aliases: HashMap::new(),
+            consts: HashMap::new(),
+            statics: HashMap::new(),
             struct_impls: HashMap::new(),
             trait_impls: HashMap::new(),
             primitives: HashMap::new(),
@@ -138,6 +155,14 @@ pub struct NameResolver {
     cached_functions: HashMap<String, (String, ItemFn)>,
     /// All structs across all modules: name → ItemStruct.
     cached_structs: HashMap<String, ItemStruct>,
+    /// All traits across all modules: name → ItemTrait.
+    cached_traits: HashMap<String, ItemTrait>,
+    /// All type aliases across all modules: name → ItemType.
+    cached_type_aliases: HashMap<String, ItemType>,
+    /// All constants across all modules: name → ItemConst.
+    cached_consts: HashMap<String, ItemConst>,
+    /// All static items across all modules: name → ItemStatic.
+    cached_statics: HashMap<String, ItemStatic>,
     /// All struct impls across all modules: struct_name → [(module_name, ItemImpl)].
     cached_struct_impls: HashMap<String, Vec<(String, ItemImpl)>>,
     /// All trait impls across all modules: (trait, self_ty) → [(module_name, ItemImpl)].
@@ -173,6 +198,10 @@ impl NameResolver {
         has_cuda_tile_ty: &mut bool,
         cached_functions: &mut HashMap<String, (String, ItemFn)>,
         cached_structs: &mut HashMap<String, ItemStruct>,
+        cached_traits: &mut HashMap<String, ItemTrait>,
+        cached_type_aliases: &mut HashMap<String, ItemType>,
+        cached_consts: &mut HashMap<String, ItemConst>,
+        cached_statics: &mut HashMap<String, ItemStatic>,
         cached_struct_impls: &mut HashMap<String, Vec<(String, ItemImpl)>>,
         cached_trait_impls: &mut HashMap<(String, String), Vec<(String, ItemImpl)>>,
         cached_primitives: &mut HashMap<(String, String), ItemImpl>,
@@ -196,6 +225,26 @@ impl NameResolver {
                     let name = s.ident.to_string();
                     mi.structs.insert(name.clone(), s.clone());
                     cached_structs.insert(name, s.clone());
+                }
+                Item::Trait(t) => {
+                    let name = t.ident.to_string();
+                    mi.traits.insert(name.clone(), t.clone());
+                    cached_traits.insert(name, t.clone());
+                }
+                Item::Type(t) => {
+                    let name = t.ident.to_string();
+                    mi.type_aliases.insert(name.clone(), t.clone());
+                    cached_type_aliases.insert(name, t.clone());
+                }
+                Item::Const(c) => {
+                    let name = c.ident.to_string();
+                    mi.consts.insert(name.clone(), c.clone());
+                    cached_consts.insert(name, c.clone());
+                }
+                Item::Static(s) => {
+                    let name = s.ident.to_string();
+                    mi.statics.insert(name.clone(), s.clone());
+                    cached_statics.insert(name, s.clone());
                 }
                 Item::Impl(impl_item) => {
                     let self_ident = get_type_str(&impl_item.self_ty);
@@ -245,6 +294,10 @@ impl NameResolver {
                             has_cuda_tile_ty,
                             cached_functions,
                             cached_structs,
+                            cached_traits,
+                            cached_type_aliases,
+                            cached_consts,
+                            cached_statics,
                             cached_struct_impls,
                             cached_trait_impls,
                             cached_primitives,
@@ -267,6 +320,10 @@ impl NameResolver {
         let mut cached_primitives: HashMap<(String, String), ItemImpl> = HashMap::new();
         let mut cached_functions: HashMap<String, (String, ItemFn)> = HashMap::new();
         let mut cached_structs: HashMap<String, ItemStruct> = HashMap::new();
+        let mut cached_traits: HashMap<String, ItemTrait> = HashMap::new();
+        let mut cached_type_aliases: HashMap<String, ItemType> = HashMap::new();
+        let mut cached_consts: HashMap<String, ItemConst> = HashMap::new();
+        let mut cached_statics: HashMap<String, ItemStatic> = HashMap::new();
         let mut cached_struct_impls: HashMap<String, Vec<(String, ItemImpl)>> = HashMap::new();
         let mut cached_trait_impls: HashMap<(String, String), Vec<(String, ItemImpl)>> =
             HashMap::new();
@@ -293,6 +350,10 @@ impl NameResolver {
                 &mut has_cuda_tile_ty,
                 &mut cached_functions,
                 &mut cached_structs,
+                &mut cached_traits,
+                &mut cached_type_aliases,
+                &mut cached_consts,
+                &mut cached_statics,
                 &mut cached_struct_impls,
                 &mut cached_trait_impls,
                 &mut cached_primitives,
@@ -323,6 +384,10 @@ impl NameResolver {
             cached_primitives,
             cached_functions,
             cached_structs,
+            cached_traits,
+            cached_type_aliases,
+            cached_consts,
+            cached_statics,
             cached_struct_impls,
             cached_trait_impls,
         })
@@ -450,6 +515,42 @@ impl NameResolver {
                 },
             ));
         }
+        if mi.traits.contains_key(name) {
+            return Some(Res::Def(
+                DefKind::Trait,
+                DefId {
+                    module: module.to_string(),
+                    name: name.to_string(),
+                },
+            ));
+        }
+        if mi.type_aliases.contains_key(name) {
+            return Some(Res::Def(
+                DefKind::TypeAlias,
+                DefId {
+                    module: module.to_string(),
+                    name: name.to_string(),
+                },
+            ));
+        }
+        if mi.consts.contains_key(name) {
+            return Some(Res::Def(
+                DefKind::Const,
+                DefId {
+                    module: module.to_string(),
+                    name: name.to_string(),
+                },
+            ));
+        }
+        if mi.statics.contains_key(name) {
+            return Some(Res::Def(
+                DefKind::Static,
+                DefId {
+                    module: module.to_string(),
+                    name: name.to_string(),
+                },
+            ));
+        }
         None
     }
 
@@ -465,6 +566,39 @@ impl NameResolver {
     /// Get a struct by its DefId.
     pub fn get_struct(&self, def_id: &DefId) -> Option<&ItemStruct> {
         self.items.get(&def_id.module)?.structs.get(&def_id.name)
+    }
+
+    /// Get a trait by its DefId.
+    pub fn get_trait(&self, def_id: &DefId) -> Option<&ItemTrait> {
+        self.items.get(&def_id.module)?.traits.get(&def_id.name)
+    }
+
+    /// Get a type alias by its DefId.
+    pub fn get_type_alias(&self, def_id: &DefId) -> Option<&ItemType> {
+        self.items
+            .get(&def_id.module)?
+            .type_aliases
+            .get(&def_id.name)
+    }
+
+    /// Get a module-level constant by its DefId.
+    pub fn get_const(&self, def_id: &DefId) -> Option<&ItemConst> {
+        self.items.get(&def_id.module)?.consts.get(&def_id.name)
+    }
+
+    /// Get a module-level static by its DefId.
+    pub fn get_static(&self, def_id: &DefId) -> Option<&ItemStatic> {
+        self.items.get(&def_id.module)?.statics.get(&def_id.name)
+    }
+
+    /// Iterate all indexed static items with their defining module.
+    pub fn all_statics(&self) -> impl Iterator<Item = (&str, &ItemStatic)> {
+        self.items.iter().flat_map(|(module_name, items)| {
+            items
+                .statics
+                .values()
+                .map(move |item| (module_name.as_str(), item))
+        })
     }
 
     /// Find a method on a struct. Searches all modules' impls.
@@ -592,6 +726,26 @@ impl NameResolver {
         &self.cached_structs
     }
 
+    /// Flat map of all traits: name → ItemTrait.
+    pub fn traits(&self) -> &HashMap<String, ItemTrait> {
+        &self.cached_traits
+    }
+
+    /// Flat map of all type aliases: name → ItemType.
+    pub fn type_aliases(&self) -> &HashMap<String, ItemType> {
+        &self.cached_type_aliases
+    }
+
+    /// Flat map of all constants: name → ItemConst.
+    pub fn consts(&self) -> &HashMap<String, ItemConst> {
+        &self.cached_consts
+    }
+
+    /// Flat map of all static items: name → ItemStatic.
+    pub fn statics(&self) -> &HashMap<String, ItemStatic> {
+        &self.cached_statics
+    }
+
     /// Flat map of all struct impls: struct_name → [(module_name, ItemImpl)].
     pub fn struct_impls(&self) -> &HashMap<String, Vec<(String, ItemImpl)>> {
         &self.cached_struct_impls
@@ -615,7 +769,13 @@ impl NameResolver {
     pub fn find_all_definitions(&self, name: &str) -> Vec<&str> {
         self.items
             .iter()
-            .filter(|(_, mi)| mi.functions.contains_key(name) || mi.structs.contains_key(name))
+            .filter(|(_, mi)| {
+                mi.functions.contains_key(name)
+                    || mi.structs.contains_key(name)
+                    || mi.traits.contains_key(name)
+                    || mi.type_aliases.contains_key(name)
+                    || mi.consts.contains_key(name)
+            })
             .map(|(module_name, _)| module_name.as_str())
             .collect()
     }
@@ -648,6 +808,15 @@ impl NameResolver {
                             imports.insert(name.clone(), source.clone());
                         }
                         for name in mi.structs.keys() {
+                            imports.insert(name.clone(), source.clone());
+                        }
+                        for name in mi.traits.keys() {
+                            imports.insert(name.clone(), source.clone());
+                        }
+                        for name in mi.type_aliases.keys() {
+                            imports.insert(name.clone(), source.clone());
+                        }
+                        for name in mi.consts.keys() {
                             imports.insert(name.clone(), source.clone());
                         }
                     }
