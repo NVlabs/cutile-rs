@@ -540,13 +540,13 @@ let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, const_shape![16, 1
 | `permute(tile, indices, shape)` | `(Tile<E, A>, Array<I>, Shape<R>) -> Tile<E, R>` | Transpose / permute dimensions |
 | `cat(a, b, dim)` | `(Tile<E, SLhs>, Tile<E, SRhs>, i32) -> Tile<E, SOut>` | Concatenate along a dimension |
 | `extract(tile, offsets, shape)` | `(Tile<E, SIn>, [i32; N], Shape<SOut>) -> Tile<E, SOut>` | Extract a sub-tile |
-| `get_shape_dim(shape, dim_idx)` | `(Shape<S>, i32) -> i32` | Read one runtime dimension from a shape |
+| `shape[index]` | `(Shape<S>, usize) -> i32` | Read one runtime dimension from a shape |
 
 ```rust
 let row: Tile<f32, { [128] }> = iota(const_shape![128]);
 let col: Tile<f32, { [128, 1] }> = row.reshape(const_shape![128, 1]);
 let matrix: Tile<f32, { [128, 64] }> = col.broadcast(const_shape![128, 64]);
-let n_cols: i32 = get_shape_dim(matrix.shape(), 1i32);
+let n_cols: i32 = matrix.shape()[1];
 ```
 
 ### Reduction and Scan

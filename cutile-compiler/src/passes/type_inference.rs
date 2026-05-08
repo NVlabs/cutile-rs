@@ -15,7 +15,8 @@ use crate::compiler::shared_utils;
 use crate::compiler::tile_rust_type::TileRustType;
 use crate::error::JITError;
 use crate::generics::{
-    GenericArgInference, GenericArgType, GenericVars, TypeInstance, TypeInstanceUserType,
+    get_cga_from_generic_argument, GenericArgInference, GenericArgType, GenericVars, TypeInstance,
+    TypeInstanceUserType,
 };
 use crate::passes::name_resolution::{DefKind, Res};
 use crate::passes::node_ids::{self, NodeId};
@@ -1938,6 +1939,17 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 self.compiler
                     .compile_type(elem_ty, self.generic_vars, &HashMap::new())
             }
+            Type::Path(path)
+                if path.qself.is_none()
+                    && path.path.segments.last().is_some_and(|segment| {
+                        let ident = segment.ident.to_string();
+                        ident == "Shape" || ident.starts_with("Shape_")
+                    }) =>
+            {
+                let i32_ty: Type = syn::parse_quote!(i32);
+                self.compiler
+                    .compile_type(&i32_ty, self.generic_vars, &HashMap::new())
+            }
             _ => Ok(None),
         }
     }
@@ -2024,6 +2036,38 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
 
     fn infer_for_iter_ty(&mut self, iter_expr: &Expr) -> Result<Option<TileRustType>, JITError> {
         if let Expr::MethodCall(method_call) = iter_expr {
+            if method_call.method == "iter_indices" && method_call.args.is_empty() {
+                if let Some(receiver_ty) = self.infer_expr_syn_type(&method_call.receiver, None)? {
+                    if get_type_ident(&receiver_ty)
+                        .is_some_and(|ident| ident.to_string().starts_with("MappedPartitionMut"))
+                    {
+                        let Some(type_generic_args) = maybe_generic_args(&receiver_ty) else {
+                            return Ok(None);
+                        };
+                        let Some(tile_shape_arg) = type_generic_args.args.iter().nth(1) else {
+                            return Ok(None);
+                        };
+                        let Some(tile_shape) =
+                            get_cga_from_generic_argument(tile_shape_arg, self.generic_vars)
+                        else {
+                            return Ok(None);
+                        };
+                        let shape = tile_shape
+                            .iter()
+                            .map(|dim| dim.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let index_ty: Type =
+                            syn::parse_str(&format!("PartitionIndex<{{ [{shape}] }}>"))
+                                .map_err(|err| JITError::Generic(err.to_string()))?;
+                        return self.compiler.compile_type(
+                            &index_ty,
+                            self.generic_vars,
+                            &HashMap::new(),
+                        );
+                    }
+                }
+            }
             if method_call.method == "step_by" {
                 let receiver = match &*method_call.receiver {
                     Expr::Paren(paren) => &*paren.expr,
@@ -2039,7 +2083,19 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 }
             }
         }
-        self.infer_expr(iter_expr, None)
+        let iter_ty = self.infer_expr(iter_expr, None)?;
+        if iter_ty
+            .as_ref()
+            .and_then(|ty| get_type_ident(&ty.rust_ty))
+            .is_some_and(|ident| ident == "Dim")
+        {
+            return self.compiler.compile_type(
+                &syn::parse_quote!(i32),
+                self.generic_vars,
+                &HashMap::new(),
+            );
+        }
+        Ok(iter_ty)
     }
 
     fn block_tail_syn_type(&self, block: &syn::Block) -> Option<Type> {
@@ -2298,6 +2354,21 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let Expr::Path(path) = &*call.func else {
             return Ok(expected);
         };
+        if is_dim_new_call_path(path) && call.args.len() == 1 {
+            let i32_ty = self.compiler.compile_type(
+                &syn::parse_quote!(i32),
+                self.generic_vars,
+                &HashMap::new(),
+            )?;
+            if let Some(i32_ty) = i32_ty.clone() {
+                let _ = self.infer_expr(&call.args[0], Some(i32_ty.clone()))?;
+                return self.compiler.compile_type(
+                    &syn::parse_quote!(Dim),
+                    self.generic_vars,
+                    &HashMap::new(),
+                );
+            }
+        }
         let ident = get_ident_from_path_expr(path).to_string();
         if ident == "Some" && call.args.len() == 1 {
             if let Some(expected) = expected {
@@ -3707,6 +3778,12 @@ fn type_mentions_any_name(ty: &Type, names: &HashSet<String>) -> bool {
     let mut seen = HashSet::new();
     collect_type_names(ty, names, &mut seen);
     !seen.is_empty()
+}
+
+fn is_dim_new_call_path(path: &syn::ExprPath) -> bool {
+    path.path.segments.len() == 2
+        && path.path.segments[0].ident == "Dim"
+        && path.path.segments[1].ident == "new"
 }
 
 fn bare_type_path_name(ty: &Type) -> Option<String> {

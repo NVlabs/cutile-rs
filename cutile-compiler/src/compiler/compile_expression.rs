@@ -10,32 +10,39 @@
 //! control flow, dispatch logic, and variable binding are identical.
 
 use super::_function::CUDATileFunctionCompiler;
-use super::_value::{BlockTerminator, CompilerContext, TileRustValue};
+use super::_value::{
+    BlockTerminator, CompilerContext, DimOrigin, PartitionAxisOrigin, TileRustValue,
+};
 use super::shared_types::Kind;
 use super::shared_utils::{
     collect_mutated_variables, collect_mutated_variables_from_block,
     collect_mutated_variables_from_expr, collect_mutated_variables_loop,
-    collect_mutated_variables_while, dedup, update_outer_block_type_meta, STACK_GROW_SIZE,
-    STACK_RED_ZONE,
+    collect_mutated_variables_while, dedup, update_outer_block_type_meta, TileBinaryOp,
+    STACK_GROW_SIZE, STACK_RED_ZONE,
 };
 use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
 use crate::error::JITError;
-use crate::generics::{GenericVars, TypeInstance, TypeInstanceUserType};
+use crate::generics::{
+    get_cga_from_generic_argument, GenericVars, TypeInstance, TypeInstanceUserType,
+};
 use crate::passes::name_resolution::{DefKind, Res};
 use crate::syn_utils::*;
 use crate::types::*;
 
 use cutile_ir::builder::{append_op, build_block, OpBuilder};
 use cutile_ir::bytecode::Opcode;
-use cutile_ir::ir::{Attribute, BlockId, Location, Module, Region};
+use cutile_ir::ir::{
+    Attribute, BlockId, Location, Module, Region, ScalarType, TileElementType, TileType,
+    Type as TileIrType,
+};
 
 use quote::ToTokens;
 use std::collections::{BTreeMap, HashMap};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parse_quote, Expr, ExprMacro, Lit, Member, Pat, Token, UnOp};
+use syn::{parse_quote, Expr, ExprForLoop, ExprMacro, Lit, Member, Pat, Token, UnOp};
 
 impl<'m> CUDATileFunctionCompiler<'m> {
     /// Construct a ZST marker type placeholder from a path expression.
@@ -249,6 +256,875 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
     }
 
+    fn cga_type_arg(dims: &[i32]) -> String {
+        let dims = dims
+            .iter()
+            .map(|dim| dim.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{ [{dims}] }}")
+    }
+
+    fn mapped_partition_type_shapes(
+        &self,
+        value: &TileRustValue,
+        generic_vars: &GenericVars,
+        span: &proc_macro2::Span,
+    ) -> Result<(Vec<i32>, Vec<i32>), JITError> {
+        let (type_ident, type_generic_args) = get_ident_generic_args(&value.ty.rust_ty);
+        let Some(type_ident) = type_ident else {
+            return self.jit_error_result(span, "expected a mapped partition type");
+        };
+        if !type_ident.to_string().starts_with("MappedPartitionMut") {
+            return self.jit_error_result(
+                span,
+                &format!(
+                    "`iter_indices()` for loops require a MappedPartitionMut receiver, got `{}`",
+                    value.ty.rust_ty.to_token_stream()
+                ),
+            );
+        }
+        let Some(tile_shape_arg) = type_generic_args.args.iter().nth(1) else {
+            return self.jit_error_result(
+                span,
+                "MappedPartitionMut is missing its tile-shape generic argument",
+            );
+        };
+        let Some(map_shape_arg) = type_generic_args.args.iter().nth(2) else {
+            return self.jit_error_result(
+                span,
+                "MappedPartitionMut is missing its map-shape generic argument",
+            );
+        };
+        let Some(tile_shape) = get_cga_from_generic_argument(tile_shape_arg, generic_vars) else {
+            return self.jit_error_result(
+                span,
+                "failed to resolve MappedPartitionMut tile-shape const generic array",
+            );
+        };
+        let Some(map_shape) = get_cga_from_generic_argument(map_shape_arg, generic_vars) else {
+            return self.jit_error_result(
+                span,
+                "failed to resolve MappedPartitionMut map-shape const generic array",
+            );
+        };
+        if tile_shape.len() != 2 || map_shape.len() != 2 {
+            return self.jit_error_result(
+                span,
+                &format!(
+                    "`iter_indices()` currently supports rank-2 MappedPartitionMut values, got tile rank {} and map rank {}",
+                    tile_shape.len(),
+                    map_shape.len()
+                ),
+            );
+        }
+        Ok((tile_shape, map_shape))
+    }
+
+    fn compile_i32_type(
+        &self,
+        generic_vars: &GenericVars,
+        span: &proc_macro2::Span,
+    ) -> Result<TileRustType, JITError> {
+        self.compile_type(&parse_quote!(i32), generic_vars, &HashMap::new())?
+            .ok_or_else(|| self.jit_error(span, "failed to compile i32 type"))
+    }
+
+    fn scalar_i32_ir_type() -> TileIrType {
+        TileIrType::Tile(TileType {
+            shape: vec![],
+            element_type: TileElementType::Scalar(ScalarType::I32),
+        })
+    }
+
+    fn compile_tile_block_tuple(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        opcode: Opcode,
+        i32_ty: &TileRustType,
+        span: &proc_macro2::Span,
+    ) -> Vec<TileRustValue> {
+        let is_tile_block_id = matches!(opcode, Opcode::GetTileBlockId);
+        let is_num_tile_blocks = matches!(opcode, Opcode::GetNumTileBlocks);
+        let scalar_i32_ty = Self::scalar_i32_ir_type();
+        let mut op_builder = OpBuilder::new(opcode, self.ir_location(span));
+        for _ in 0..3 {
+            op_builder = op_builder.result(scalar_i32_ty.clone());
+        }
+        let (op_id, results) = op_builder.build(module);
+        append_op(module, block_id, op_id);
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(axis, value)| {
+                let bounds = self.const_grid.and_then(|const_grid| {
+                    let axis_size = match axis {
+                        0 => const_grid.0,
+                        1 => const_grid.1,
+                        2 => const_grid.2,
+                        _ => unreachable!(),
+                    } as i64;
+                    if is_num_tile_blocks {
+                        Some(Bounds::exact(axis_size))
+                    } else if is_tile_block_id && axis_size > 0 {
+                        Some(Bounds::new(0, axis_size - 1))
+                    } else {
+                        None
+                    }
+                });
+                TileRustValue::new_primitive(value, i32_ty.clone(), bounds)
+            })
+            .collect()
+    }
+
+    fn compile_index_space_shape_values(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        partition_value: &TileRustValue,
+        i32_ty: &TileRustType,
+        span: &proc_macro2::Span,
+    ) -> Result<Vec<TileRustValue>, JITError> {
+        let view_value = partition_value.value.ok_or_else(|| {
+            self.jit_error(span, "expected a direct value for mapped partition indices")
+        })?;
+        let view_ty = module.value_type(view_value).clone();
+        let TileIrType::PartitionView(pv) = &view_ty else {
+            return self.jit_error_result(
+                span,
+                &format!(
+                    "`iter_indices()` expects a mapped partition view, got `{:?}`",
+                    view_ty
+                ),
+            );
+        };
+        let rank = pv.tile_shape.len();
+        if rank != 2 {
+            return self.jit_error_result(
+                span,
+                &format!("`iter_indices()` currently supports rank-2 partitions, got rank {rank}"),
+            );
+        }
+
+        let scalar_i32_ty = Self::scalar_i32_ir_type();
+        let mut op_builder =
+            OpBuilder::new(Opcode::GetIndexSpaceShape, self.ir_location(span)).operand(view_value);
+        for _ in 0..rank {
+            op_builder = op_builder.result(scalar_i32_ty.clone());
+        }
+        let (op_id, results) = op_builder.build(module);
+        append_op(module, block_id, op_id);
+
+        let mut values = Vec::with_capacity(rank);
+        for axis in 0..rank {
+            let mut value = TileRustValue::new_primitive(results[axis], i32_ty.clone(), None);
+            let parent_axis = pv.dim_map.get(axis).copied().ok_or_else(|| {
+                self.jit_error(
+                    span,
+                    &format!(
+                        "`iter_indices()` axis {axis} is missing from partition dim_map {:?}",
+                        pv.dim_map
+                    ),
+                )
+            })?;
+            if parent_axis < 0 {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "`iter_indices()` axis {axis} maps to invalid parent axis {parent_axis}"
+                    ),
+                );
+            }
+            let parent_axis = parent_axis as usize;
+            let Some(&parent_dim) = pv.tensor_view.shape.get(parent_axis) else {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "`iter_indices()` axis {axis} maps to parent axis {parent_axis}, but parent tensor rank is {}",
+                        pv.tensor_view.shape.len()
+                    ),
+                );
+            };
+            let tile_dim = pv.tile_shape[axis] as i64;
+            if tile_dim <= 0 {
+                return self.jit_error_result(
+                    span,
+                    &format!("`iter_indices()` axis {axis} has invalid tile dimension {tile_dim}"),
+                );
+            }
+            if parent_dim >= 0 {
+                let num_tiles = (parent_dim + tile_dim - 1) / tile_dim;
+                value.bounds = Some(Bounds::exact(num_tiles));
+            }
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    fn simple_path_name(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Path(path)
+                if path.qself.is_none()
+                    && path.path.leading_colon.is_none()
+                    && path.path.segments.len() == 1 =>
+            {
+                Some(path.path.segments[0].ident.to_string())
+            }
+            Expr::Paren(paren) => Self::simple_path_name(&paren.expr),
+            _ => None,
+        }
+    }
+
+    fn is_dim_new_call(func: &Expr) -> bool {
+        let Expr::Path(path) = func else {
+            return false;
+        };
+        path.path.segments.len() == 2
+            && path.path.segments[0].ident == "Dim"
+            && path.path.segments[1].ident == "new"
+    }
+
+    fn compile_dim_new_call(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &syn::ExprCall,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 1 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "`Dim::new` expects 1 argument, got {}",
+                    call_expr.args.len()
+                ),
+            );
+        }
+        let i32_type = self
+            .compile_type(&parse_quote!(i32), generic_vars, &HashMap::new())?
+            .ok_or_else(|| self.jit_error(&call_expr.span(), "failed to compile i32 type"))?;
+        let mut value = self
+            .compile_expression(
+                module,
+                block_id,
+                &call_expr.args[0],
+                generic_vars,
+                ctx,
+                Some(i32_type),
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[0].span(),
+                    "failed to compile dimension size",
+                )
+            })?;
+        let value_id = value.value.ok_or_else(|| {
+            self.jit_error(
+                &call_expr.args[0].span(),
+                "dimension size must compile to a scalar value",
+            )
+        })?;
+        value.dim_origin = Some(DimOrigin::Value(value_id));
+        let dim_type = match return_type {
+            Some(return_type) => return_type,
+            None => self
+                .compile_type(&parse_quote!(Dim), generic_vars, &HashMap::new())?
+                .ok_or_else(|| self.jit_error(&call_expr.span(), "failed to compile Dim type"))?,
+        };
+        let dim_origin = value.dim_origin.clone();
+        let mut fields = BTreeMap::new();
+        fields.insert("size".to_string(), value);
+        let mut dim = TileRustValue::new_struct(fields, dim_type);
+        dim.dim_origin = dim_origin;
+        Ok(Some(dim))
+    }
+
+    fn wrap_scalar_as_dim(
+        &self,
+        mut value: TileRustValue,
+        generic_vars: &GenericVars,
+        return_type: Option<TileRustType>,
+        span: &proc_macro2::Span,
+    ) -> Result<TileRustValue, JITError> {
+        let value_id = value
+            .value
+            .ok_or_else(|| self.jit_error(span, "dimension size must compile to a scalar value"))?;
+        if value.dim_origin.is_none() {
+            value.dim_origin = Some(DimOrigin::Value(value_id));
+        }
+        let dim_type = match return_type {
+            Some(return_type) => return_type,
+            None => self
+                .compile_type(&parse_quote!(Dim), generic_vars, &HashMap::new())?
+                .ok_or_else(|| self.jit_error(span, "failed to compile Dim type"))?,
+        };
+        let dim_origin = value.dim_origin.clone();
+        let bounds = value.bounds.clone();
+        let mut fields = BTreeMap::new();
+        fields.insert("size".to_string(), value);
+        let mut dim = TileRustValue::new_struct(fields, dim_type);
+        dim.dim_origin = dim_origin;
+        dim.bounds = bounds;
+        Ok(dim)
+    }
+
+    fn compile_into_dim_method(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        method_call: &syn::ExprMethodCall,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if method_call.method != "into_dim" {
+            return Ok(None);
+        }
+        if !method_call.args.is_empty() {
+            return self.jit_error_result(
+                &method_call.args.span(),
+                "`IntoDim::into_dim` does not take arguments",
+            );
+        }
+        let receiver = self
+            .compile_expression(
+                module,
+                block_id,
+                &method_call.receiver,
+                generic_vars,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &method_call.receiver.span(),
+                    "failed to compile IntoDim receiver",
+                )
+            })?;
+        if get_type_ident(&receiver.ty.rust_ty).is_some_and(|ident| ident == "Dim") {
+            return Ok(Some(receiver));
+        }
+        Ok(Some(self.wrap_scalar_as_dim(
+            receiver,
+            generic_vars,
+            return_type,
+            &method_call.span(),
+        )?))
+    }
+
+    fn compile_partition_with_bounds_method(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        method_call: &syn::ExprMethodCall,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if method_call.method != "with_bounds" {
+            return Ok(None);
+        }
+        if method_call.args.len() != 1 {
+            return self.jit_error_result(
+                &method_call.args.span(),
+                "`Partition::with_bounds` expects exactly one tuple argument",
+            );
+        }
+        let mut partition = self
+            .compile_expression(
+                module,
+                block_id,
+                &method_call.receiver,
+                generic_vars,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &method_call.receiver.span(),
+                    "failed to compile Partition::with_bounds receiver",
+                )
+            })?;
+        let bounds = self
+            .compile_expression(
+                module,
+                block_id,
+                &method_call.args[0],
+                generic_vars,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &method_call.args[0].span(),
+                    "failed to compile Partition::with_bounds tuple",
+                )
+            })?;
+        let Some(bound_values) = bounds.values else {
+            return self.jit_error_result(
+                &method_call.args[0].span(),
+                "`Partition::with_bounds` expects a rank-2 tuple",
+            );
+        };
+        if bound_values.len() != 2 {
+            return self.jit_error_result(
+                &method_call.args[0].span(),
+                &format!(
+                    "`Partition::with_bounds` expects rank-2 bounds, got rank {}",
+                    bound_values.len()
+                ),
+            );
+        }
+        let mut dim_origins = Vec::with_capacity(bound_values.len());
+        for (axis, value) in bound_values.into_iter().enumerate() {
+            let origin = Self::value_dim_origin(&value);
+            let Some(origin) = origin else {
+                return self.jit_error_result(
+                    &method_call.args[0].span(),
+                    &format!(
+                        "`Partition::with_bounds` bound {axis} must come from `num_tiles`, `Dim::new`, or `IntoDim::into_dim`"
+                    ),
+                );
+            };
+            dim_origins.push(origin);
+        }
+        let return_type = match return_type {
+            Some(return_type) => return_type,
+            None => {
+                let mut bounded_ty = partition.ty.rust_ty.clone();
+                let syn::Type::Path(path_ty) = &mut bounded_ty else {
+                    return self.jit_error_result(
+                        &method_call.receiver.span(),
+                        "expected a partition type for `Partition::with_bounds`",
+                    );
+                };
+                let Some(segment) = path_ty.path.segments.last_mut() else {
+                    return self.jit_error_result(
+                        &method_call.receiver.span(),
+                        "expected a partition type path for `Partition::with_bounds`",
+                    );
+                };
+                segment.ident = syn::Ident::new("BoundedPartition", segment.ident.span());
+                let mut return_type = partition.ty.clone();
+                return_type.rust_ty = bounded_ty;
+                return_type
+            }
+        };
+        partition.ty = return_type;
+        partition.bounded_axes = Some(dim_origins);
+        Ok(Some(partition))
+    }
+
+    fn value_dim_origin(value: &TileRustValue) -> Option<DimOrigin> {
+        value.dim_origin.clone().or_else(|| {
+            value
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("size"))
+                .and_then(|size| size.dim_origin.clone())
+        })
+    }
+
+    fn dim_size_value(
+        &self,
+        dim_value: &TileRustValue,
+        span: &proc_macro2::Span,
+    ) -> Result<cutile_ir::ir::Value, JITError> {
+        if let Some(value) = dim_value.value {
+            return Ok(value);
+        }
+        let Some(fields) = dim_value.fields.as_ref() else {
+            return self.jit_error_result(span, "dimension value is missing its scalar size");
+        };
+        let Some(size) = fields.get("size") else {
+            return self.jit_error_result(span, "dimension value is missing its `size` field");
+        };
+        size.value
+            .ok_or_else(|| self.jit_error(span, "dimension size must compile to a scalar value"))
+    }
+
+    /// Special lowering for `for idx in mapped_partition.iter_indices()`.
+    ///
+    /// This is intentionally separate from normal range-loop lowering. The
+    /// iterator is a DSL proof boundary: the compiler lowers it to a persistent
+    /// flat tile-id loop and mints `PartitionIndex` values branded with the
+    /// mapped partition that produced them.
+    fn try_compile_mapped_partition_indices_for_loop(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        for_expr: &ExprForLoop,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<bool, JITError> {
+        let Expr::MethodCall(method_call) = &*for_expr.expr else {
+            return Ok(false);
+        };
+        if method_call.method != "iter_indices" {
+            return Ok(false);
+        }
+        if !method_call.args.is_empty() {
+            return self.jit_error_result(
+                &method_call.args.span(),
+                "MappedPartitionMut::iter_indices does not take arguments",
+            );
+        }
+        let Pat::Ident(iterand_ident) = &*for_expr.pat else {
+            return self.jit_error_result(
+                &for_expr.pat.span(),
+                "MappedPartitionMut::iter_indices loops must bind a simple index variable",
+            );
+        };
+
+        let partition_value = self
+            .compile_expression(
+                module,
+                block_id,
+                &method_call.receiver,
+                generic_vars,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &method_call.receiver.span(),
+                    "failed to compile mapped partition receiver",
+                )
+            })?;
+        let partition_origin = partition_value.value.ok_or_else(|| {
+            self.jit_error(
+                &method_call.receiver.span(),
+                "mapped partition receiver did not produce a direct value",
+            )
+        })?;
+        let (tile_shape, map_shape) = self.mapped_partition_type_shapes(
+            &partition_value,
+            generic_vars,
+            &method_call.receiver.span(),
+        )?;
+        let i32_ty = self.compile_i32_type(generic_vars, &for_expr.span())?;
+        let index_space = self.compile_index_space_shape_values(
+            module,
+            block_id,
+            &partition_value,
+            &i32_ty,
+            &method_call.receiver.span(),
+        )?;
+        let num_bid_m = index_space[0].clone();
+        let num_bid_n = index_space[1].clone();
+        let total_tiles = self.compile_binary_op_from_values(
+            module,
+            block_id,
+            num_bid_m.clone(),
+            num_bid_n.clone(),
+            &TileBinaryOp::Mul,
+            generic_vars,
+            ctx,
+            None,
+            &for_expr.span(),
+        )?;
+        let total_tiles_value = total_tiles.value.ok_or_else(|| {
+            self.jit_error(
+                &for_expr.span(),
+                "failed to compute mapped partition tile count",
+            )
+        })?;
+
+        let pid = self.compile_tile_block_tuple(
+            module,
+            block_id,
+            Opcode::GetTileBlockId,
+            &i32_ty,
+            &for_expr.span(),
+        );
+        let grid = self.compile_tile_block_tuple(
+            module,
+            block_id,
+            Opcode::GetNumTileBlocks,
+            &i32_ty,
+            &for_expr.span(),
+        );
+        let lower_bound = pid[0]
+            .value
+            .ok_or_else(|| self.jit_error(&for_expr.span(), "failed to compute tile-block id"))?;
+        let step = grid[0].value.ok_or_else(|| {
+            self.jit_error(&for_expr.span(), "failed to compute tile-block grid size")
+        })?;
+
+        let loop_carry_vars = collect_mutated_variables(for_expr)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
+        let loop_carry_arg_tys = loop_carry_args
+            .iter()
+            .map(|val| module.value_type(*val).clone())
+            .collect::<Vec<_>>();
+
+        let for_iterand_type = Self::scalar_i32_ir_type();
+        let loop_block_arg_tys = [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+        let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
+
+        let mut for_variables = ctx.clone();
+        let block_args: Vec<cutile_ir::ir::Value> = loop_block_args[1..].to_vec();
+        for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+        for_variables.carry_vars = Some(loop_carry_vars.clone());
+        for_variables.default_terminator = Some(BlockTerminator::Continue);
+
+        let tile_id_name = "__cutile_mapped_partition_tile_id";
+        let num_bid_m_name = "__cutile_mapped_partition_num_bid_m";
+        let num_bid_n_name = "__cutile_mapped_partition_num_bid_n";
+        let tile_id = TileRustValue::new_primitive(loop_block_args[0], i32_ty.clone(), None);
+        for_variables.vars.insert(tile_id_name.to_string(), tile_id);
+        for_variables
+            .vars
+            .insert(num_bid_m_name.to_string(), num_bid_m);
+        for_variables
+            .vars
+            .insert(num_bid_n_name.to_string(), num_bid_n);
+
+        let tile_shape_arg = Self::cga_type_arg(&tile_shape);
+        let map_shape_arg = Self::cga_type_arg(&map_shape);
+        let index_ty: syn::Type = syn::parse_str(&format!("PartitionIndex<{tile_shape_arg}>"))
+            .map_err(|err| {
+                self.jit_error(
+                    &for_expr.span(),
+                    &format!("failed to build mapped partition index type: {err}"),
+                )
+            })?;
+        let index_return_ty = self
+            .compile_type(&index_ty, generic_vars, &HashMap::new())?
+            .ok_or_else(|| {
+                self.jit_error(&for_expr.span(), "failed to compile PartitionIndex type")
+            })?;
+        let swizzle_expr: Expr = syn::parse_str(&format!(
+            "swizzle_partition_index_2d::<{tile_shape_arg}, {map_shape_arg}>({tile_id_name}, {num_bid_m_name}, {num_bid_n_name})"
+        ))
+        .map_err(|err| {
+            self.jit_error(
+                &for_expr.span(),
+                &format!("failed to build mapped partition index expression: {err}"),
+            )
+        })?;
+        let mut index_value = self
+            .compile_expression(
+                module,
+                loop_block_id,
+                &swizzle_expr,
+                generic_vars,
+                &mut for_variables,
+                Some(index_return_ty),
+            )?
+            .ok_or_else(|| {
+                self.jit_error(&for_expr.span(), "failed to compile mapped partition index")
+            })?;
+        index_value.partition_origin = Some(partition_origin);
+        let index_tensor_origin = Self::simple_path_name(&method_call.receiver)
+            .or_else(|| partition_value.tensor_origin.clone());
+        if let (Some(tensor_origin), Some(fields)) =
+            (index_tensor_origin, index_value.fields.as_mut())
+        {
+            if let Some(coords) = fields.get_mut("coords") {
+                if let Some(values) = coords.values.as_mut() {
+                    for (axis, value) in values.iter_mut().enumerate() {
+                        let dim_origin = DimOrigin::PartitionAxis {
+                            view: partition_origin,
+                            axis,
+                            tile_dim: tile_shape[axis],
+                        };
+                        value.partition_axis_origin = Some(PartitionAxisOrigin {
+                            tensor: tensor_origin.clone(),
+                            axis,
+                            tile_dim: tile_shape[axis],
+                        });
+                        value.index_origin = Some(dim_origin);
+                    }
+                }
+            }
+        }
+        for_variables
+            .vars
+            .insert(iterand_ident.ident.to_string(), index_value);
+
+        self.compile_block(
+            module,
+            loop_block_id,
+            &for_expr.body,
+            generic_vars,
+            &mut for_variables,
+            return_type,
+        )?;
+
+        let region_id = module.alloc_region(Region {
+            blocks: vec![loop_block_id],
+        });
+        let (for_op_id, result_values) =
+            OpBuilder::new(Opcode::For, self.ir_location(&for_expr.span()))
+                .operands([lower_bound, total_tiles_value, step].iter().copied())
+                .operands(loop_carry_args.iter().copied())
+                .results(loop_carry_arg_tys.iter().cloned())
+                .region(region_id)
+                .build(module);
+        append_op(module, block_id, for_op_id);
+
+        if result_values.len() != loop_carry_args.len() {
+            return self.jit_error_result(
+                &for_expr.span(),
+                &format!(
+                    "mapped partition indices loop produces {} results but {} mutable variables are carried across iterations",
+                    result_values.len(),
+                    loop_carry_args.len()
+                ),
+            );
+        }
+        ctx.repack_some_vars(&loop_carry_vars, &result_values, true)?;
+        Ok(true)
+    }
+
+    /// Special lowering for `for idx in dim`.
+    ///
+    /// A `Dim` is the source-level iterable proof object. Iterating it lowers
+    /// to `for idx in 0..dim`, while the loop variable is tagged as an index
+    /// produced by that dimension. Plain `i32` values, including `num_tiles`
+    /// results, continue through normal range lowering.
+    fn try_compile_dim_for_loop(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        for_expr: &ExprForLoop,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<bool, JITError> {
+        let Some(dim_name) = Self::simple_path_name(&for_expr.expr) else {
+            return Ok(false);
+        };
+        let Some(dim_value) = ctx.vars.get(&dim_name).cloned() else {
+            return Ok(false);
+        };
+        if !get_type_ident(&dim_value.ty.rust_ty).is_some_and(|ident| ident == "Dim") {
+            return Ok(false);
+        }
+        let Some(dim_origin) = Self::value_dim_origin(&dim_value) else {
+            return Ok(false);
+        };
+        let upper_bound = self.dim_size_value(&dim_value, &for_expr.expr.span())?;
+        let maybe_iterand_ident = match &*for_expr.pat {
+            Pat::Wild(_) => None,
+            Pat::Ident(ident_pat) => Some(ident_pat),
+            _ => {
+                return self.jit_error_result(
+                    &for_expr.pat.span(),
+                    "dimension loops must bind a simple index variable or `_`",
+                );
+            }
+        };
+
+        let zero = self.compile_constant(module, block_id, generic_vars, 0i32)?;
+        let one = self.compile_constant(module, block_id, generic_vars, 1i32)?;
+        let lower_bound = zero.value.ok_or_else(|| {
+            self.jit_error(
+                &for_expr.span(),
+                "failed to compile dimension loop lower bound",
+            )
+        })?;
+        let step = one.value.ok_or_else(|| {
+            self.jit_error(&for_expr.span(), "failed to compile dimension loop step")
+        })?;
+
+        let loop_carry_vars = collect_mutated_variables(for_expr)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
+        let loop_carry_arg_tys = loop_carry_args
+            .iter()
+            .map(|val| module.value_type(*val).clone())
+            .collect::<Vec<_>>();
+
+        let for_iterand_type = module.value_type(upper_bound).clone();
+        let loop_block_arg_tys = [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+        let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
+
+        let mut for_variables = ctx.clone();
+        let block_args: Vec<cutile_ir::ir::Value> = loop_block_args[1..].to_vec();
+        for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+        if let Some(iterand_ident) = maybe_iterand_ident {
+            let iterand_name = iterand_ident.ident.to_string();
+            let i32_type = self
+                .compile_type(&parse_quote!(i32), generic_vars, &HashMap::new())?
+                .ok_or_else(|| self.jit_error(&for_expr.span(), "failed to compile i32 type"))?;
+            let upper_bounds = dim_value.bounds.clone().or_else(|| {
+                dim_value
+                    .fields
+                    .as_ref()
+                    .and_then(|fields| fields.get("size"))
+                    .and_then(|size| size.bounds.clone())
+            });
+            let mut iterand_val = if let Some(bounds) = upper_bounds {
+                let upper = bounds.end - 1;
+                if upper >= 0 {
+                    let bounds = Bounds::new(0, upper);
+                    let mut value = self.compile_value_assumption(
+                        module,
+                        loop_block_id,
+                        loop_block_args[0],
+                        "assume_bounds",
+                        &[bounds.start as i32, bounds.end as i32],
+                        i32_type.clone(),
+                        &for_expr.span(),
+                    )?;
+                    value.bounds = Some(bounds);
+                    value
+                } else {
+                    TileRustValue::new_value_kind_like(loop_block_args[0], i32_type.clone())
+                }
+            } else {
+                TileRustValue::new_value_kind_like(loop_block_args[0], i32_type.clone())
+            };
+            iterand_val.index_origin = Some(dim_origin);
+            for_variables.vars.insert(iterand_name, iterand_val);
+        }
+        for_variables.carry_vars = Some(loop_carry_vars.clone());
+        for_variables.default_terminator = Some(BlockTerminator::Continue);
+
+        self.compile_block(
+            module,
+            loop_block_id,
+            &for_expr.body,
+            generic_vars,
+            &mut for_variables,
+            return_type,
+        )?;
+
+        let region_id = module.alloc_region(Region {
+            blocks: vec![loop_block_id],
+        });
+        let (for_op_id, result_values) =
+            OpBuilder::new(Opcode::For, self.ir_location(&for_expr.span()))
+                .operands([lower_bound, upper_bound, step].iter().copied())
+                .operands(loop_carry_args.iter().copied())
+                .results(loop_carry_arg_tys.iter().cloned())
+                .region(region_id)
+                .build(module);
+        append_op(module, block_id, for_op_id);
+
+        if result_values.len() != loop_carry_args.len() {
+            return self.jit_error_result(
+                &for_expr.span(),
+                &format!(
+                    "dimension loop produces {} results but {} mutable variables are carried across iterations",
+                    result_values.len(),
+                    loop_carry_args.len()
+                ),
+            );
+        }
+        ctx.repack_some_vars(&loop_carry_vars, &result_values, true)?;
+        Ok(true)
+    }
+
     pub fn compile_expression(
         &self,
         module: &mut Module,
@@ -262,6 +1138,27 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let _expr_debug_str = expr.to_token_stream().to_string();
             match expr {
                 Expr::ForLoop(for_expr) => {
+                    if self.try_compile_mapped_partition_indices_for_loop(
+                        module,
+                        block_id,
+                        for_expr,
+                        generic_vars,
+                        ctx,
+                        return_type.clone(),
+                    )? {
+                        return Ok(None);
+                    }
+                    if self.try_compile_dim_for_loop(
+                        module,
+                        block_id,
+                        for_expr,
+                        generic_vars,
+                        ctx,
+                        return_type.clone(),
+                    )? {
+                        return Ok(None);
+                    }
+
                     // A for loop: for pat in expr { ... }.
                     let maybe_iterand_ident = match &*for_expr.pat {
                         Pat::Wild(_) => {
@@ -417,7 +1314,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         let iterand_ty = start_val.ty.clone();
                         // If the loop bounds are const, then we can put a bound on the iterand.
                         // Subtract upper bound by 1, since it is the open end of the interval [start, end).
-                        let iterand_val = match (iterand_lower_const, iterand_upper_const) {
+                        let mut iterand_val = match (iterand_lower_const, iterand_upper_const) {
                             (Some(iterand_lower_const), Some(iterand_upper_const)) => {
                                 let bounds = Bounds::new(
                                     iterand_lower_const.start,
@@ -458,6 +1355,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 start_val.ty.clone(),
                             ),
                         };
+                        if start_val
+                            .bounds
+                            .as_ref()
+                            .is_some_and(|bounds| bounds.is_exact() && bounds.start == 0)
+                        {
+                            iterand_val.index_origin = Self::value_dim_origin(&end_val);
+                        }
                         for_variables.vars.insert(iterand_name, iterand_val);
                     }
                     for_variables.carry_vars = Some(loop_carry_vars.clone());
@@ -1416,6 +2320,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let _args_str = call_expr.args.to_token_stream().to_string();
                     match &*call_expr.func {
                         Expr::Path(path_expr) => {
+                            if Self::is_dim_new_call(&call_expr.func) {
+                                return self.compile_dim_new_call(
+                                    module,
+                                    block_id,
+                                    call_expr,
+                                    generic_vars,
+                                    ctx,
+                                    return_type,
+                                );
+                            }
                             let ident = get_ident_from_path_expr(&path_expr);
                             // Handle Some(...) specially - it's a Rust Option constructor, not a function call
                             if ident.to_string() == "Some" {
@@ -1519,6 +2433,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                 }
                 Expr::MethodCall(method_call_expr) => {
+                    if let Some(value) = self.compile_into_dim_method(
+                        module,
+                        block_id,
+                        method_call_expr,
+                        generic_vars,
+                        ctx,
+                        return_type.clone(),
+                    )? {
+                        return Ok(Some(value));
+                    }
+                    if let Some(value) = self.compile_partition_with_bounds_method(
+                        module,
+                        block_id,
+                        method_call_expr,
+                        generic_vars,
+                        ctx,
+                        return_type.clone(),
+                    )? {
+                        return Ok(Some(value));
+                    }
                     if let Some(value) = self.compile_global_method_call(
                         module,
                         block_id,
@@ -1918,12 +2852,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "failed to compile the indexed expression",
                         );
                     };
-                    if expr_val.kind != Kind::Compound {
-                        return self.jit_error_result(
-                            &index_expr.expr.span(),
-                            "indexing is only supported on tuple/compound values",
-                        );
-                    }
                     // TODO (hme): Revisit this once we have proper type inference.
                     let i32_type: syn::Type = parse_quote! { i32 };
                     let i32_type = self.compile_type(&i32_type, generic_vars, &HashMap::new())?;
@@ -1962,13 +2890,50 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             &format!("index must be non-negative, got {idx}"),
                         );
                     }
-                    let Some(mut values) = expr_val.values else {
-                        return self.jit_error_result(
-                            &index_expr.expr.span(),
-                            "internal: compound value is missing its element list during index access",
-                        );
-                    };
-                    return Ok(Some(values.remove(idx as usize)));
+                    if expr_val.kind == Kind::Compound {
+                        let Some(mut values) = expr_val.values else {
+                            return self.jit_error_result(
+                                &index_expr.expr.span(),
+                                "internal: compound value is missing its element list during index access",
+                            );
+                        };
+                        let index = idx as usize;
+                        if index >= values.len() {
+                            return self.jit_error_result(
+                                &index_expr.index.span(),
+                                &format!(
+                                    "index {idx} out of bounds for compound value of length {}",
+                                    values.len()
+                                ),
+                            );
+                        }
+                        return Ok(Some(values.remove(index)));
+                    }
+                    if let Some(fields) = expr_val.fields.as_ref() {
+                        if let Some(dims) = fields.get("dims") {
+                            let Some(mut values) = dims.values.clone() else {
+                                return self.jit_error_result(
+                                    &index_expr.expr.span(),
+                                    "shape-like value has a `dims` field that is not indexable",
+                                );
+                            };
+                            let index = idx as usize;
+                            if index >= values.len() {
+                                return self.jit_error_result(
+                                    &index_expr.index.span(),
+                                    &format!(
+                                        "index {idx} out of bounds for shape of rank {}",
+                                        values.len()
+                                    ),
+                                );
+                            }
+                            return Ok(Some(values.remove(index)));
+                        }
+                    }
+                    return self.jit_error_result(
+                        &index_expr.expr.span(),
+                        "indexing is only supported on tuple/compound values and shape-like descriptors",
+                    );
                 }
                 _ => {
                     return self

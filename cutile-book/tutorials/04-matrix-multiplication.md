@@ -244,9 +244,75 @@ As a general rule: if every const generic appears somewhere in the kernel's `&Te
 
 ## Optimization: Achieving Speed-of-Light Performance
 
-The GEMM kernel above is correct but does not reach the GPU's theoretical peak (speed-of-light, or SoL) throughput. There are two approaches to close the gap: disabling bounds checks with architecture-specific hints (unsafe), and making all dimensions static (safe). Both can achieve SoL performance on matrix multiplication.
+The GEMM kernel above is correct but does not reach the GPU's theoretical peak
+(speed-of-light, or SoL) throughput. The recommended safe path is mapped
+persistent GEMM: the output partition produces bounded, disjoint indices, and
+the input partitions carry matching logical bounds. This avoids `unsafe` and
+does not require making full tensor dimensions const generics.
 
-### Approach 1: Disabling Bounds Checks (Unsafe)
+### Approach 1: Mapped Persistent GEMM (Safe, Recommended)
+
+Mapped output partitions expose an iterator over output tile indices. The
+indices are produced by the partition itself, so stores are bounded and
+disjoint. Input partitions can be marked with the same logical grid using
+`with_bounds(...)`:
+
+```rust
+#[cutile::entry(
+    optimization_hints = (
+        sm_120 = (num_cta_in_cga = 2,),
+    )
+)]
+fn gemm_persistent<
+    T: ElementType,
+    const BM: i32,
+    const BN: i32,
+    const BK: i32,
+    const MAP_SHAPE: [i32; 2],
+>(
+    mut z: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
+    x: &Tensor<T, { [-1, -1] }>,
+    y: &Tensor<T, { [-1, -1] }>,
+) {
+    let m = num_tiles(&z, 0);
+    let n = num_tiles(&z, 1);
+    let k = Dim::new(x.shape()[1] / BK);
+
+    let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
+    let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+
+    for out_idx in z.iter_indices() {
+        let (bid_m, bid_n) = out_idx.components();
+
+        let mut tile_z: Tile<T, { [BM, BN] }> =
+            constant(T::ZERO, const_shape![BM, BN]);
+        for k_tile in k {
+            let tile_x = part_x.load(coord((bid_m, k_tile)));
+            let tile_y = part_y.load(coord((k_tile, bid_n)));
+            tile_z = mma(tile_x, tile_y, tile_z);
+        }
+        z.store(tile_z, out_idx);
+    }
+}
+```
+
+On the host side, `.map(...)` selects the mapped output traversal and the launch
+grid is inferred from the mapped partition:
+
+```rust
+let z = z.partition([BM, BN]).map([4, 1], num_tile_blocks);
+let (z, _x, _y) = gemm_persistent(z, x, y)
+    .generics(generics)
+    .sync_on(&stream)?;
+```
+
+Changing the full runtime tensor dimensions does not require recompilation.
+Only the type-level parameters, such as tile sizes and the map shape, specialize
+the JIT compilation.
+
+See [`cutile-examples/examples/persistent_gemm.rs`](https://github.com/nvlabs/cutile-rs/tree/main/cutile-examples/examples/persistent_gemm.rs) for the complete example.
+
+### Approach 2: Disabling Bounds Checks (Unsafe)
 
 The `#[cutile::entry()]` attribute accepts `unchecked_accesses` and `optimization_hints` to squeeze out maximum performance. Setting `unchecked_accesses = true` disables runtime bounds checks on all tensor loads and stores, and `optimization_hints` provides architecture-specific tuning parameters. Because bounds checks are disabled, the entry point must be marked `unsafe`:
 
@@ -296,9 +362,12 @@ unsafe {
 
 See [`cutile-benchmarks/benches/gemm.rs`](https://github.com/nvlabs/cutile-rs/tree/main/cutile-benchmarks/benches/gemm.rs) for a full benchmark comparing optimized and unoptimized variants.
 
-### Approach 2: Fully Static GEMM (Safe)
+### Approach 3: Fully Static GEMM (Safe, Legacy)
 
-An alternative way to achieve SoL performance is to make **all** tensor dimensions static const generics. When the compiler knows every dimension at JIT time, it can prove that all accesses are in bounds and optimize the bounds checks away entirely — no `unsafe` required:
+The older safe performance path is to make **all** tensor dimensions static const
+generics. When the compiler knows every dimension and the launch grid at JIT
+time, it can prove direct `get_tile_block_id()` partition accesses are in bounds
+and optimize the checks away entirely - no `unsafe` required:
 
 ```rust
 #[cutile::entry()]
@@ -339,19 +408,22 @@ let (z, _x, _y) = gemm(z, x, y)
     .sync_on(&stream)?;
 ```
 
-See [`cutile-examples/examples/gemm_static.rs`](https://github.com/nvlabs/cutile-rs/tree/main/cutile-examples/examples/gemm_static.rs) for the complete example.
+See [`cutile-examples/examples/gemm_static.rs`](https://github.com/nvlabs/cutile-rs/tree/main/cutile-examples/examples/gemm_static.rs) for the legacy static example.
 
-### Choosing Between the Two Approaches
+### Choosing Between the Approaches
 
-| | Unsafe + Hints | Fully Static |
-|---|---|---|
-| **Safety** | `unsafe` — programmer must ensure correct dimensions | Safe — compiler verifies all accesses |
-| **JIT recompilation** | Only tile sizes (`BM`, `BN`, `BK`) trigger recompilation | Every dimension change (`M`, `N`, `K`, `BM`, `BN`, `BK`) triggers recompilation |
-| **Flexibility** | Problem sizes can change freely at runtime | Each new problem size is a new compilation |
-| **Compile-time checks** | Tile shapes and types still checked at compile time | All shapes and types checked at compile time |
-| **Best for** | Workloads with many different problem sizes (e.g., variable sequence lengths) | Workloads with a small, fixed set of problem sizes |
+| | Mapped Persistent | Unsafe + Hints | Fully Static |
+|---|---|---|---|
+| **Safety** | Safe bounded/disjoint output iteration | `unsafe` - programmer must ensure correct dimensions | Safe - compiler verifies direct static accesses |
+| **JIT recompilation** | Tile sizes and map shape trigger recompilation | Tile sizes trigger recompilation | Every full tensor shape triggers recompilation |
+| **Flexibility** | Problem sizes can change at runtime | Problem sizes can change at runtime | Each new problem size is a new compilation |
+| **Compile-time checks** | Tile shapes, types, and mapped index proofs | Tile shapes and types still checked | All shapes and types checked |
+| **Best for** | Default high-performance safe GEMM | Escape hatch for manually proven kernels | Legacy fixed-size kernels |
 
-Use the fully static approach when safety is a priority and problem dimensions are known ahead of time or come from a small set of values (the JIT cache makes repeated sizes free). Use the unsafe approach when problem sizes vary widely and you want to avoid the compilation overhead of many specializations.
+Use mapped persistent GEMM as the default high-performance safe approach. Use
+the unsafe approach only when the access pattern is manually proven and not yet
+expressible in the safe DSL. Use the fully static approach for older kernels or
+for workloads with a small, fixed set of full tensor shapes.
 
 ---
 
@@ -366,8 +438,9 @@ Use the fully static approach when safety is a priority and problem dimensions a
 | **Const generic inference** | Generics appearing in `&mut Tensor` / `&Tensor` parameter types are inferred from host-side `Partition` shapes and tensor shapes; generics used only inside the kernel body (like `BK`) must be passed explicitly |
 | **Dynamic dimensions (`-1`)** | Can vary across launches without recompilation |
 | **Arithmetic intensity** | Ratio of compute to memory ops — higher is better |
+| **Mapped output iteration** | Recommended safe performance path for persistent GEMM |
 | **`unchecked_accesses`** | Disables runtime bounds checks for peak performance; requires `unsafe` |
-| **Fully static shapes** | Making all dimensions const generics lets the compiler eliminate bounds checks safely |
+| **Fully static shapes** | Legacy safe path that lets the compiler eliminate direct block-id bounds checks |
 
 ---
 

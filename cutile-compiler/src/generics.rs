@@ -18,7 +18,7 @@ use crate::types::{
     parse_signed_literal_as_i32, try_extract_cga,
 };
 use quote::ToTokens;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use syn::{
     AngleBracketedGenericArguments, Expr, ExprCall, ExprMethodCall, GenericArgument, GenericParam,
@@ -86,6 +86,46 @@ pub struct GenericVars {
 }
 
 impl GenericVars {
+    fn ordered_map_keys<'a, T>(&'a self, map: &'a HashMap<String, T>) -> Vec<&'a String> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+
+        for param in &self.ordered_param_vars {
+            if map.contains_key(param) && seen.insert(param.as_str()) {
+                keys.push(param);
+            }
+        }
+
+        let mut remaining = map
+            .keys()
+            .filter(|key| !seen.contains(key.as_str()))
+            .collect::<Vec<_>>();
+        remaining.sort();
+        keys.extend(remaining);
+        keys
+    }
+
+    pub fn ordered_inst_i32(&self) -> Vec<(&str, i32)> {
+        self.ordered_map_keys(&self.inst_i32)
+            .into_iter()
+            .map(|key| (key.as_str(), self.inst_i32[key]))
+            .collect()
+    }
+
+    pub fn ordered_inst_bool(&self) -> Vec<(&str, bool)> {
+        self.ordered_map_keys(&self.inst_bool)
+            .into_iter()
+            .map(|key| (key.as_str(), self.inst_bool[key]))
+            .collect()
+    }
+
+    pub fn ordered_inst_array(&self) -> Vec<(&str, &[i32])> {
+        self.ordered_map_keys(&self.inst_array)
+            .into_iter()
+            .map(|key| (key.as_str(), self.inst_array[key].as_slice()))
+            .collect()
+    }
+
     /// Returns the kind of generic variable for the given name, if it exists.
     pub fn var_type(&self, var: &str) -> Option<GenericVarType> {
         if self.inst_types.contains_key(var) {
@@ -875,6 +915,11 @@ impl Instantiable for TypeInstanceStructuredType {
         let mut instance_ty = maybe_generic_ty.clone();
         let mut primitive_type: Option<TypInstancePrimitiveType> = None;
         let mut shape: Option<Vec<i32>> = None;
+        let structured_type_name = get_type_ident(maybe_generic_ty).map(|ident| ident.to_string());
+        let allows_extra_cga = matches!(
+            structured_type_name.as_deref(),
+            Some("MappedPartitionMut" | "PartitionIndices")
+        );
 
         let inst_mut_ref = if let Type::Reference(inner_elem) = &mut instance_ty {
             &mut *inner_elem.elem
@@ -913,10 +958,12 @@ impl Instantiable for TypeInstanceStructuredType {
                                 // This is something like Shape<D> for const generic array D: [i32; N].
                                 let array_instance =
                                     generic_vars.inst_array.get(&last_ident).unwrap();
-                                if shape.is_some() {
+                                if shape.is_some() && !allows_extra_cga {
                                     panic!("Unexpected array arg: {last_ident:#?}")
                                 }
-                                shape = Some(array_instance.clone());
+                                if shape.is_none() {
+                                    shape = Some(array_instance.clone());
+                                }
                                 let shape_str = array_instance
                                     .iter()
                                     .map(|x| x.to_string())
@@ -957,9 +1004,19 @@ impl Instantiable for TypeInstanceStructuredType {
                                 *generic_arg = GenericArgument::Type(
                                     syn::parse2::<Type>(last_ident.parse().unwrap()).unwrap(),
                                 );
-                            } else if generic_vars.inst_i32.contains_key(&last_ident) {
+                            } else if let Some(value) = generic_vars.inst_i32.get(&last_ident) {
                                 // This is something like N for const generic N: i32.
-                                panic!("Unexpected const arg {last_ident} for variadic type {maybe_generic_ty:#?}");
+                                if structured_type_name.as_deref() == Some("MappedPartitionMut") {
+                                    *generic_arg = GenericArgument::Const(
+                                        syn::parse2::<Expr>(value.to_string().parse().unwrap())
+                                            .unwrap(),
+                                    );
+                                } else {
+                                    panic!("Unexpected const arg {last_ident} for variadic type {maybe_generic_ty:#?}");
+                                }
+                            } else if allows_extra_cga {
+                                // Map-shape metadata beyond the tile shape does not affect
+                                // TileRustType's element or shape instantiation.
                             } else {
                                 panic!("Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}", maybe_generic_ty.to_token_stream().to_string());
                             }
@@ -984,6 +1041,21 @@ impl Instantiable for TypeInstanceStructuredType {
                 GenericArgument::Const(const_expr) => {
                     // println!("expand GenericArgument::Const? {const_param:#?}");
                     match const_expr {
+                        Expr::Lit(_) | Expr::Unary(_) if allows_extra_cga => {
+                            // Map-shape metadata beyond the tile shape does not affect
+                            // TileRustType's element or shape instantiation.
+                        }
+                        Expr::Path(path) if allows_extra_cga => {
+                            let ident = get_ident_from_path_expr(path);
+                            if let Some(value) =
+                                generic_vars.inst_i32.get(ident.to_string().as_str())
+                            {
+                                *generic_arg = GenericArgument::Const(
+                                    syn::parse2::<Expr>(value.to_string().parse().unwrap())
+                                        .unwrap(),
+                                );
+                            }
+                        }
                         Expr::Block(block_expr) => {
                             // This is something like Tensor<E, {[...]}>
                             assert_eq!(block_expr.block.stmts.len(), 1);
@@ -1036,7 +1108,14 @@ impl Instantiable for TypeInstanceStructuredType {
                                         )
                                         .unwrap(),
                                     );
-                                    shape = Some(_shape);
+                                    if shape.is_some() && !allows_extra_cga {
+                                        panic!(
+                                            "Unexpected array arg in structured type {maybe_generic_ty:#?}"
+                                        )
+                                    }
+                                    if shape.is_none() {
+                                        shape = Some(_shape);
+                                    }
                                 }
                                 Expr::Repeat(repeat_expr) => {
                                     // println!("Expr::Repeat: {:?}", repeat_expr.expr);
@@ -1094,7 +1173,14 @@ impl Instantiable for TypeInstanceStructuredType {
                                     *generic_arg = GenericArgument::Const(
                                         syn::parse2::<Expr>(repeat_str.parse().unwrap()).unwrap(),
                                     );
-                                    shape = Some(vec![thing_to_repeat; num_rep as usize]);
+                                    if shape.is_some() && !allows_extra_cga {
+                                        panic!(
+                                            "Unexpected array arg in structured type {maybe_generic_ty:#?}"
+                                        )
+                                    }
+                                    if shape.is_none() {
+                                        shape = Some(vec![thing_to_repeat; num_rep as usize]);
+                                    }
                                 }
                                 _ => panic!("Unexpected block expression."),
                             }
@@ -1632,6 +1718,17 @@ impl GenericArgInference {
 
         // Once generic arguments have been computed, this method can also be used to infer generic arguments to a function call.
 
+        if let (syn::Type::Tuple(param_tuple), syn::Type::Tuple(arg_tuple)) = (type_param, type_arg)
+        {
+            if param_tuple.elems.len() != arg_tuple.elems.len() {
+                return;
+            }
+            for (param_elem, arg_elem) in param_tuple.elems.iter().zip(arg_tuple.elems.iter()) {
+                self.add_generic_args(param_elem, arg_elem);
+            }
+            return;
+        }
+
         let (Some(mut param_generic_args), Some(mut arg_generic_args)) =
             (maybe_generic_args(type_param), maybe_generic_args(type_arg))
         else {
@@ -1671,6 +1768,11 @@ impl GenericArgInference {
                     self.add_generic_type(param_type, arg_type);
                     match (arg_type, param_type) {
                         (syn::Type::Path(_arg_type_path), syn::Type::Path(param_type_path)) => {
+                            if maybe_generic_args(param_type).is_some()
+                                && maybe_generic_args(arg_type).is_some()
+                            {
+                                self.add_generic_args(param_type, arg_type);
+                            }
                             // Something like (Tensor<f32, ...>, Tensor<E, ...>)
                             let param_ident = &param_type_path
                                 .path
@@ -1801,6 +1903,12 @@ impl GenericArgInference {
                                 }
                                 _ => panic!("Unexpected block expression:\nparam=\n{param_stmt_expr:#?}\narg=\n{arg_stmt_expr:#?}")
                             }
+                        }
+                        (Expr::Lit(arg_lit), Expr::Lit(param_lit)) => {
+                            assert_eq!(
+                                arg_lit.to_token_stream().to_string(),
+                                param_lit.to_token_stream().to_string()
+                            );
                         }
                         _ => unimplemented!(
                             "Unsupported Const inference {param_const:#?} {arg_const:#?}"
