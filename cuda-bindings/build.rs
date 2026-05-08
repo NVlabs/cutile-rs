@@ -83,7 +83,7 @@ fn generate_type_bindings(cuda_toolkit: &str, out_dir: &Path) -> Result<(), Box<
     Ok(())
 }
 
-// Detect whether bindgen wrapped `CUmemLocation_st::id` in an anonymous union (e.g. CUDA 13.2+) 
+// Detect whether bindgen wrapped `CUmemLocation_st::id` in an anonymous union (e.g. CUDA 13.2+)
 // or left it as a plain `int` (e.g. 13.0/13.1), so the helper in lib.rs can pick the right access path.
 fn emit_layout_cfgs(generated_source: &str) {
     println!("cargo:rustc-check-cfg=cfg(cu_mem_location_anon_union)");

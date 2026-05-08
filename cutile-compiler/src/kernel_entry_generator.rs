@@ -7,6 +7,7 @@
 //! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
 
 use crate::ast::SourceLocation;
+use crate::compiler::_module::CUDATileModules;
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
 use crate::hints::OptimizationHints;
@@ -368,8 +369,18 @@ impl TensorInput {
     }
 }
 
+fn normalized_fn_arg_type(param: &FnArg, ty: syn::Type) -> Result<FnArg, JITError> {
+    let FnArg::Typed(typed_param) = param else {
+        return SourceLocation::unknown().jit_error_result("Unexpected receiver argument.");
+    };
+    let mut typed_param = typed_param.clone();
+    typed_param.ty = Box::new(ty);
+    Ok(FnArg::Typed(typed_param))
+}
+
 /// Generates an MLIR entry-point wrapper for a kernel function, including tensor argument unpacking.
 pub fn generate_entry_point(
+    modules: &CUDATileModules,
     fn_item: &ItemFn,
     generic_vars: &GenericVars,
     stride_args: &HashMap<String, Vec<i32>>,
@@ -397,12 +408,14 @@ pub fn generate_entry_point(
                 return SourceLocation::unknown().jit_error_result("Unexpected receiver argument.");
             }
             FnArg::Typed(typed_param) => {
-                let ty = &*typed_param.ty;
+                let normalized_ty = modules.normalize_type_aliases(&typed_param.ty)?;
+                let normalized_param = normalized_fn_arg_type(param, normalized_ty.clone())?;
+                let ty = &normalized_ty;
                 match ty {
                     syn::Type::Reference(_type_ref) => {
                         let tensor_input = TensorInput::new(
                             fn_name.clone(),
-                            param,
+                            &normalized_param,
                             generic_vars,
                             stride_args,
                             spec_args,
@@ -630,6 +643,36 @@ pub fn get_tensor_shape(
                                                         ));
                                                 }
                                             }
+                                        }
+                                        Expr::Index(index) => {
+                                            let Expr::Path(path) = index.expr.as_ref() else {
+                                                return SourceLocation::unknown().jit_error_result(
+                                                    &format!(
+                                                    "Unexpected const generic array base {elem:#?}"
+                                                ),
+                                                );
+                                            };
+                                            let ident = get_ident_from_path_expr(path);
+                                            let Some(shape) = generic_vars
+                                                .inst_array
+                                                .get(ident.to_string().as_str())
+                                            else {
+                                                return SourceLocation::unknown()
+                                                    .jit_error_result(&format!(
+                                                        "Undefined const generic array parameter {ident}"
+                                                    ));
+                                            };
+                                            let i = crate::types::parse_signed_literal_as_i32(
+                                                &index.index,
+                                            );
+                                            let Some(dim) = shape.get(i as usize) else {
+                                                return SourceLocation::unknown()
+                                                    .jit_error_result(&format!(
+                                                        "Index {i} out of bounds for const generic array `{ident}` of length {}",
+                                                        shape.len()
+                                                    ));
+                                            };
+                                            _shape.push(dim.to_string());
                                         }
                                         _ => {
                                             return SourceLocation::unknown().jit_error_result(

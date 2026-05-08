@@ -20,6 +20,7 @@ pub mod kernel_naming;
 pub mod registry;
 pub mod syn_utils;
 pub mod train_map;
+pub mod type_aliases;
 pub mod types;
 pub mod use_classifier;
 

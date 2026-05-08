@@ -199,6 +199,36 @@ mod control_flow_ops_module {
         output.store(result);
     }
 
+    /// else-if as a tile expression: nested ifs in Rust source syntax.
+    #[cutile::entry()]
+    fn else_if_tile_expr_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, flag: i32) {
+        let ones: Tile<f32, S> = constant(1.0f32, output.shape());
+        let twos: Tile<f32, S> = constant(2.0f32, output.shape());
+        let threes: Tile<f32, S> = constant(3.0f32, output.shape());
+        let result: Tile<f32, S> = if flag < 0i32 {
+            ones
+        } else if flag < 1i32 {
+            twos
+        } else {
+            threes
+        };
+        output.store(result);
+    }
+
+    /// else-if carrying a mutable variable through every branch.
+    #[cutile::entry()]
+    fn else_if_carry_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>, flag: i32) {
+        let mut acc: Tile<f32, S> = constant(0.0f32, output.shape());
+        if flag < 0i32 {
+            acc = acc + constant(1.0f32, output.shape());
+        } else if flag < 1i32 {
+            acc = acc + constant(2.0f32, output.shape());
+        } else {
+            acc = acc + constant(3.0f32, output.shape());
+        }
+        output.store(acc);
+    }
+
     /// Nested mutation: for-in-if with runtime condition.
     /// The for loop mutates `acc` inside a dynamic if branch.
     #[cutile::entry()]
@@ -259,9 +289,10 @@ mod control_flow_ops_module {
 }
 
 use control_flow_ops_module::{
-    __module_ast_self, break_test_kernel, if_else_tile_expr_kernel, if_for_carry_const_kernel,
-    if_for_carry_kernel, if_return_test_kernel, nested_for_in_if_const_kernel,
-    nested_for_in_if_kernel, nested_if_for_if_kernel,
+    __module_ast_self, break_test_kernel, else_if_carry_kernel, else_if_tile_expr_kernel,
+    if_else_tile_expr_kernel, if_for_carry_const_kernel, if_for_carry_kernel,
+    if_return_test_kernel, nested_for_in_if_const_kernel, nested_for_in_if_kernel,
+    nested_if_for_if_kernel,
 };
 
 #[test]
@@ -689,6 +720,42 @@ fn if_else_tile_expr_returns_value() {
             host[0]
         );
     });
+}
+
+#[test]
+fn else_if_tile_expr_returns_value() {
+    for (flag, expected) in [(-1i32, 1.0f32), (0i32, 2.0f32), (1i32, 3.0f32)] {
+        common::with_test_stack(move || {
+            let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+            else_if_tile_expr_kernel((&mut output).partition([128]), flag)
+                .sync()
+                .expect("kernel");
+            let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+            assert!(
+                (host[0] - expected).abs() < 1e-3,
+                "flag={flag}: expected {expected}, got {}",
+                host[0]
+            );
+        });
+    }
+}
+
+#[test]
+fn else_if_carries_mutable_values() {
+    for (flag, expected) in [(-1i32, 1.0f32), (0i32, 2.0f32), (1i32, 3.0f32)] {
+        common::with_test_stack(move || {
+            let mut output = cutile::api::zeros::<f32>(&[128]).sync().expect("alloc");
+            else_if_carry_kernel((&mut output).partition([128]), flag)
+                .sync()
+                .expect("kernel");
+            let host: Vec<f32> = output.dup().to_host_vec().sync().expect("to_host");
+            assert!(
+                (host[0] - expected).abs() < 1e-3,
+                "flag={flag}: expected {expected}, got {}",
+                host[0]
+            );
+        });
+    }
 }
 
 // ---- Nested mutation tests ------------------------------------------------
