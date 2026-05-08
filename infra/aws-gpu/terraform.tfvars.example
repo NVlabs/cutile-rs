@@ -1,0 +1,5 @@
+aws_region    = "us-east-1"
+aws_profile   = "cutile"
+instance_type = "g5.xlarge"
+project_name  = "cutile-rs"
+ssh_user      = "ubuntu"
