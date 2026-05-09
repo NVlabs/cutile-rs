@@ -67,7 +67,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             })?;
             let value_ty = TileIrType::Tile(TileType {
                 shape: vec![1],
-                element_type: TileElementType::Scalar(scalar.clone()),
+                element_type: TileElementType::Scalar(scalar),
             });
             let init_expr = self.global_static_initializer(item)?;
             let init_value = self.global_scalar_initializer_value(&init_expr, module_name)?;
@@ -205,6 +205,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_global_store(
         &self,
         module: &mut Module,
@@ -290,6 +291,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_global_atomic_add(
         &self,
         module: &mut Module,

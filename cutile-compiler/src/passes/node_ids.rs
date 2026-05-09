@@ -83,7 +83,7 @@ impl VisitMut for NodeIdAssigner {
         match expr {
             Expr::Assign(assign) => {
                 // The destination is binding syntax, not a value expression.
-                self.visit_expr_mut(&mut *assign.right);
+                self.visit_expr_mut(&mut assign.right);
             }
             Expr::Call(call) => {
                 // The callee is name-resolution syntax in this DSL.

@@ -286,6 +286,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn offset_nested_mutable_indices(
         &self,
         module: &mut Module,
@@ -654,7 +655,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         let element_type = tensor_value
             .ty
-            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .get_instantiated_rust_element_type(self.modules.primitives())
             .ok_or_else(|| {
                 self.jit_error(
                     &call_expr.args[0].span(),

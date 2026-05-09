@@ -861,7 +861,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         })?,
                 };
                 let dim_origin = value.dim_origin.clone();
-                let bounds = value.bounds.clone();
+                let bounds = value.bounds;
                 let mut fields = BTreeMap::new();
                 fields.insert("size".to_string(), value);
                 let mut dim = TileRustValue::new_struct(fields, return_type);

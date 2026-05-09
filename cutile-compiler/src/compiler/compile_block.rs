@@ -97,7 +97,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                for (pat, value) in tuple.elems.iter().zip(elements.into_iter()) {
+                for (pat, value) in tuple.elems.iter().zip(elements) {
                     self.bind_pattern_value(pat, value, inherited_mutability, ctx)?;
                 }
                 Ok(())
@@ -152,7 +152,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 ),
                             );
                         }
-                        for (pat, value) in pats.into_iter().zip(elements.into_iter()) {
+                        for (pat, value) in pats.into_iter().zip(elements) {
                             self.bind_pattern_value(pat, value, inherited_mutability, ctx)?;
                         }
                     }
@@ -206,7 +206,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                for (pat, value) in tuple_struct.elems.iter().zip(elements.into_iter()) {
+                for (pat, value) in tuple_struct.elems.iter().zip(elements) {
                     self.bind_pattern_value(pat, value, inherited_mutability, ctx)?;
                 }
                 Ok(())
@@ -260,7 +260,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         let Some(value) = self.compile_expression(
                             module,
                             block_id,
-                            &*init.expr,
+                            &init.expr,
                             generic_args,
                             ctx,
                             init_ty,
