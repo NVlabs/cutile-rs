@@ -417,8 +417,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         append_op(module, block_id, op_id);
 
         let mut values = Vec::with_capacity(rank);
-        for axis in 0..rank {
-            let mut value = TileRustValue::new_primitive(results[axis], i32_ty.clone(), None);
+        for (axis, result) in results.into_iter().enumerate().take(rank) {
+            let mut value = TileRustValue::new_primitive(result, i32_ty.clone(), None);
             let parent_axis = pv.dim_map.get(axis).copied().ok_or_else(|| {
                 self.jit_error(
                     span,
@@ -562,7 +562,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .ok_or_else(|| self.jit_error(span, "failed to compile Dim type"))?,
         };
         let dim_origin = value.dim_origin.clone();
-        let bounds = value.bounds.clone();
+        let bounds = value.bounds;
         let mut fields = BTreeMap::new();
         fields.insert("size".to_string(), value);
         let mut dim = TileRustValue::new_struct(fields, dim_type);
@@ -1005,7 +1005,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let Some(dim_value) = ctx.vars.get(&dim_name).cloned() else {
             return Ok(false);
         };
-        if !get_type_ident(&dim_value.ty.rust_ty).is_some_and(|ident| ident == "Dim") {
+        if get_type_ident(&dim_value.ty.rust_ty).is_none_or(|ident| ident != "Dim") {
             return Ok(false);
         }
         let Some(dim_origin) = Self::value_dim_origin(&dim_value) else {
@@ -1056,12 +1056,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let i32_type = self
                 .compile_type(&parse_quote!(i32), generic_vars, &HashMap::new())?
                 .ok_or_else(|| self.jit_error(&for_expr.span(), "failed to compile i32 type"))?;
-            let upper_bounds = dim_value.bounds.clone().or_else(|| {
+            let upper_bounds = dim_value.bounds.or_else(|| {
                 dim_value
                     .fields
                     .as_ref()
                     .and_then(|fields| fields.get("size"))
-                    .and_then(|size| size.bounds.clone())
+                    .and_then(|size| size.bounds)
             });
             let mut iterand_val = if let Some(bounds) = upper_bounds {
                 let upper = bounds.end - 1;
@@ -2453,8 +2453,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     if let Some(value) = self.compile_global_method_call(
                         module,
                         block_id,
-                        &method_call_expr,
-                        &generic_vars,
+                        method_call_expr,
+                        generic_vars,
                         ctx,
                         return_type.clone(),
                     )? {
@@ -2925,10 +2925,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             return Ok(Some(values.remove(index)));
                         }
                     }
-                    return self.jit_error_result(
+                    self.jit_error_result(
                         &index_expr.expr.span(),
                         "indexing is only supported on tuple/compound values and shape-like descriptors",
-                    );
+                    )
                 }
                 _ => self.jit_error_result(&expr.span(), "this expression form is not supported"),
             }

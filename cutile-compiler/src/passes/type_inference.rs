@@ -363,7 +363,7 @@ enum InferVarKind {
 
 #[derive(Clone, Debug)]
 enum InferredTy {
-    Known(TileRustType),
+    Known(Box<TileRustType>),
     Var(InferVarId),
     Unknown,
 }
@@ -559,7 +559,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                         self.infer_expr(&init.expr, annotated_type.clone())?
                     } else {
                         match self.infer_expr_term(&init.expr, None)? {
-                            InferredTy::Known(ty) => Some(ty),
+                            InferredTy::Known(ty) => Some(*ty),
                             term @ InferredTy::Var(_) => {
                                 if let Some(name) = local_binding_name(&local.pat) {
                                     self.bind_inferred_var(name, term);
@@ -797,7 +797,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     self.infer_bool_binary(binary)?
                 } else if expected.is_none() && binary_result_matches_operands(&binary.op) {
                     match self.infer_expr_term(expr, None)? {
-                        InferredTy::Known(ty) => Some(ty),
+                        InferredTy::Known(ty) => Some(*ty),
                         term @ InferredTy::Var(_) => {
                             self.record_expr_term(expr, term);
                             None
@@ -826,7 +826,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             Expr::Unary(unary) => {
                 if expected.is_none() && matches!(unary.op, syn::UnOp::Neg(_)) {
                     match self.infer_expr_term(expr, None)? {
-                        InferredTy::Known(ty) => Some(ty),
+                        InferredTy::Known(ty) => Some(*ty),
                         term @ InferredTy::Var(_) => {
                             self.record_expr_term(expr, term);
                             None
@@ -861,7 +861,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     then_ty.or(else_ty).or(Some(expected))
                 } else {
                     match self.infer_if_expr_term(if_expr)? {
-                        InferredTy::Known(ty) => Some(ty),
+                        InferredTy::Known(ty) => Some(*ty),
                         term @ InferredTy::Var(_) => {
                             self.record_expr_term(expr, term);
                             None
@@ -913,7 +913,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         };
 
         if let Some(ty) = inferred.clone() {
-            self.record_expr_term(expr, InferredTy::Known(ty.clone()));
+            self.record_expr_term(expr, InferredTy::Known(Box::new(ty.clone())));
             self.results.insert_expr_type(expr, ty);
         }
         Ok(inferred)
@@ -922,7 +922,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
     fn bind_tile_var(&mut self, name: String, ty: TileRustType) {
         self.syn_vars.insert(name.clone(), ty.rust_ty.clone());
         self.local_terms
-            .insert(name.clone(), InferredTy::Known(ty.clone()));
+            .insert(name.clone(), InferredTy::Known(Box::new(ty.clone())));
         self.vars.insert(name, ty);
     }
 
@@ -967,14 +967,15 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let _ = self.infer_expr(source_expr, None)?;
         self.results
             .insert_resolved_expr_type(cast_expr, ResolvedType::from_syn_type(target_ty));
-        match self
-            .compiler
+        self.compiler
             .compile_type(target_ty, self.generic_vars, &HashMap::new())
-        {
-            Ok(ty) => Ok(ty),
-            Err(err) if is_surface_only_scalar_type(target_ty) => Ok(None),
-            Err(err) => Err(err),
-        }
+            .or_else(|e| {
+                if is_surface_only_scalar_type(target_ty) {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            })
     }
 
     fn infer_bool_binary(
@@ -1267,23 +1268,24 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 if pats.len().saturating_sub(1) > exprs.len() {
                     return Ok(());
                 }
-                for idx in 0..rest_pos {
-                    pairs.push((pats[idx], idx));
-                }
-                let suffix_len = pats.len() - rest_pos - 1;
-                for suffix_idx in 0..suffix_len {
-                    pairs.push((
-                        pats[rest_pos + 1 + suffix_idx],
-                        exprs.len() - suffix_len + suffix_idx,
-                    ));
+                for (idx, pat) in pats.iter().enumerate() {
+                    if idx == rest_pos {
+                        continue;
+                    }
+                    let idx = if idx < rest_pos {
+                        idx
+                    } else {
+                        exprs.len() - pats.len() + idx
+                    };
+                    pairs.push((pat, idx));
                 }
             }
             None => {
                 if pats.len() != exprs.len() {
                     return Ok(());
                 }
-                for idx in 0..pats.len() {
-                    pairs.push((pats[idx], idx));
+                for (idx, pat) in pats.iter().enumerate() {
+                    pairs.push((pat, idx));
                 }
             }
         }
@@ -1357,9 +1359,9 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 return Ok(term);
             }
             if let Some(ty) = self.infer_expr(expr, Some(expected.clone()))? {
-                return Ok(InferredTy::Known(ty));
+                return Ok(InferredTy::Known(Box::new(ty)));
             }
-            return Ok(InferredTy::Known(expected));
+            return Ok(InferredTy::Known(Box::new(expected)));
         }
 
         if let Some(existing) = self.expr_term(expr) {
@@ -1373,16 +1375,16 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     self.record_expr_term(expr, term.clone());
                     Ok(term)
                 } else if let Some(ty) = self.vars.get(&name).cloned() {
-                    Ok(InferredTy::Known(ty))
+                    Ok(InferredTy::Known(Box::new(ty)))
                 } else if let Some(ty) = self.infer_global_const_type(path)? {
-                    Ok(InferredTy::Known(ty))
+                    Ok(InferredTy::Known(Box::new(ty)))
                 } else {
                     Ok(InferredTy::Unknown)
                 }
             }
             Expr::Path(path) => {
                 if let Some(ty) = self.infer_associated_const_type(path)? {
-                    Ok(InferredTy::Known(ty))
+                    Ok(InferredTy::Known(Box::new(ty)))
                 } else {
                     Ok(InferredTy::Unknown)
                 }
@@ -1395,7 +1397,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     else {
                         return Ok(InferredTy::Unknown);
                     };
-                    Ok(InferredTy::Known(ty))
+                    Ok(InferredTy::Known(Box::new(ty)))
                 } else {
                     Ok(self.literal_infer_var(expr, lit))
                 }
@@ -1414,7 +1416,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 let term = self.infer_block_term(&block.block)?;
                 if matches!(term, InferredTy::Unknown) {
                     if let Some(ty) = self.infer_expr(expr, None)? {
-                        return Ok(InferredTy::Known(ty));
+                        return Ok(InferredTy::Known(Box::new(ty)));
                     }
                 }
                 self.record_expr_term(expr, term.clone());
@@ -1424,7 +1426,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 let term = self.infer_block_term(&unsafe_expr.block)?;
                 if matches!(term, InferredTy::Unknown) {
                     if let Some(ty) = self.infer_expr(expr, None)? {
-                        return Ok(InferredTy::Known(ty));
+                        return Ok(InferredTy::Known(Box::new(ty)));
                     }
                 }
                 self.record_expr_term(expr, term.clone());
@@ -1442,7 +1444,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     return Ok(InferredTy::Unknown);
                 };
                 let _ = self.infer_bool_binary(binary)?;
-                let term = InferredTy::Known(bool_ty);
+                let term = InferredTy::Known(Box::new(bool_ty));
                 self.record_expr_term(expr, term.clone());
                 Ok(term)
             }
@@ -1450,7 +1452,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 let Some(ty) = self.infer_cast_target(expr, &cast.expr, &cast.ty)? else {
                     return Ok(InferredTy::Unknown);
                 };
-                let term = InferredTy::Known(ty);
+                let term = InferredTy::Known(Box::new(ty));
                 self.record_expr_term(expr, term.clone());
                 Ok(term)
             }
@@ -1461,7 +1463,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 Ok(term)
             }
             _ => match self.infer_expr(expr, None)? {
-                Some(ty) => Ok(InferredTy::Known(ty)),
+                Some(ty) => Ok(InferredTy::Known(Box::new(ty))),
                 None => Ok(InferredTy::Unknown),
             },
         }
@@ -1621,7 +1623,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
 
     fn term_known_type(&self, term: &InferredTy) -> Option<TileRustType> {
         match self.normalize_term(term.clone()) {
-            InferredTy::Known(ty) => Some(ty.clone()),
+            InferredTy::Known(ty) => Some(*ty),
             InferredTy::Var(id) => {
                 let root_id = self.find_var_id(id)?;
                 self.inference
@@ -1672,7 +1674,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             }
             (InferredTy::Known(known), term @ InferredTy::Var(_))
             | (term @ InferredTy::Var(_), InferredTy::Known(known)) => {
-                self.unify_with_known(term, known)
+                self.unify_with_known(term, *known)
             }
             (InferredTy::Var(lhs), InferredTy::Var(rhs)) => self.unify_vars(lhs, rhs),
         }
@@ -1750,7 +1752,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
     ) -> Result<InferredTy, JITError> {
         match self.normalize_term(term) {
             InferredTy::Known(known) => Ok(InferredTy::Known(known)),
-            InferredTy::Unknown => Ok(InferredTy::Known(expected)),
+            InferredTy::Unknown => Ok(InferredTy::Known(Box::new(expected))),
             InferredTy::Var(id) => {
                 let Some(root_id) = self.find_var_id(id) else {
                     return Ok(InferredTy::Unknown);
@@ -1759,12 +1761,12 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     return Ok(InferredTy::Unknown);
                 };
                 if let Some(known) = &var.value {
-                    return Ok(InferredTy::Known(known.clone()));
+                    return Ok(InferredTy::Known(Box::new(known.clone())));
                 }
                 if literal_kind_accepts_type(var.kind, &expected.rust_ty) {
                     var.value = Some(expected.clone());
                     var.origin_propagated = false;
-                    Ok(InferredTy::Known(expected))
+                    Ok(InferredTy::Known(Box::new(expected)))
                 } else {
                     Ok(InferredTy::Var(id))
                 }
@@ -2452,7 +2454,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             if let Expr::Closure(closure) = arg {
                 if let Some(signature) = signature {
                     if let Some((param_types, return_type)) =
-                        self.instantiate_closure_signature(&signature, &generic_arg_inf)
+                        self.instantiate_closure_signature(signature, &generic_arg_inf)
                     {
                         self.infer_closure(closure, &param_types, return_type)?;
                     } else {
@@ -2797,7 +2799,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             }
         }
 
-        for ((trait_name, self_name), _impls) in self.compiler.modules.trait_impls() {
+        for (trait_name, self_name) in self.compiler.modules.trait_impls().keys() {
             if self_name == &qualifier_name {
                 if let Some(ty) =
                     self.trait_associated_const_syn_type(trait_name, &const_name, &self_ty)
@@ -2806,7 +2808,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 }
             }
         }
-        for ((trait_name, self_name), _impl_item) in self.compiler.modules.primitives() {
+        for (trait_name, self_name) in self.compiler.modules.primitives().keys() {
             if self_name == &qualifier_name {
                 if let Some(ty) =
                     self.trait_associated_const_syn_type(trait_name, &const_name, &self_ty)
