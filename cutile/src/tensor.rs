@@ -262,6 +262,81 @@ impl<T> Partition<T> {
     pub fn unpartition(self) -> T {
         self.object
     }
+
+    /// Attach a host-side partition map to this partition.
+    ///
+    /// Mapped partitions separate the logical partition grid from the CUDA
+    /// tile-block grid. The map validates that the requested physical
+    /// tile-block count can safely traverse the logical partition grid before
+    /// the kernel launches. Launch-grid inference uses the mapped partition's
+    /// physical tile-block grid, `(num_tile_blocks, 1, 1)`, rather than the
+    /// logical partition grid. An explicit `.grid(...)` or `.const_grid(...)`
+    /// may still be used as a checked override.
+    ///
+    /// ```rust,ignore
+    /// let z = api::zeros::<f32>(&[128, 256]).await;
+    ///
+    /// // Launch 8 tile blocks to traverse the mapped output tiles.
+    /// let output = z.partition([32, 64]).map([4, 1], 8);
+    /// ```
+    pub fn map<const RANK: usize>(
+        self,
+        map_shape: [usize; RANK],
+        num_tile_blocks: u32,
+    ) -> MappedLaunchPartition<Self> {
+        MappedLaunchPartition {
+            partition: self,
+            map_shape: map_shape.to_vec(),
+            num_tile_blocks,
+        }
+    }
+}
+
+/// Host-side mapped partition launch argument.
+///
+/// This wrapper is intentionally separate from the device-side
+/// `MappedPartitionMut<T, D, M>` DSL type. The host wrapper owns validation and
+/// launch-policy inference; the device type should expose map-specific
+/// partition indices inside a kernel.
+pub struct MappedLaunchPartition<P> {
+    pub(crate) partition: P,
+    pub(crate) map_shape: Vec<usize>,
+    pub(crate) num_tile_blocks: u32,
+}
+
+impl<P> MappedLaunchPartition<P> {
+    fn validate(
+        &self,
+        partition_grid: (u32, u32, u32),
+        num_tile_blocks: u32,
+    ) -> Result<(u32, u32, u32), Error> {
+        if self.map_shape.len() != 2 {
+            return tensor_error_result("mapped partitions currently require a 2D map shape.");
+        }
+        if self.map_shape.iter().any(|&dim| dim == 0) {
+            return tensor_error_result("mapped partition requires positive map dimensions.");
+        }
+        if partition_grid.0 == 0 || partition_grid.1 == 0 || partition_grid.2 != 1 {
+            return tensor_error_result(
+                "mapped partition requires a non-empty 2D logical partition grid.",
+            );
+        }
+        let total_tiles = partition_grid
+            .0
+            .checked_mul(partition_grid.1)
+            .ok_or_else(|| {
+                crate::error::tensor_error("mapped partition logical grid is too large")
+            })?;
+        if num_tile_blocks == 0 {
+            return tensor_error_result("mapped partition requires num_tile_blocks > 0.");
+        }
+        if num_tile_blocks > total_tiles {
+            return tensor_error_result(
+                "mapped partition num_tile_blocks cannot exceed the logical partition tile count.",
+            );
+        }
+        Ok((num_tile_blocks, 1, 1))
+    }
 }
 
 impl<T: DType> Partition<Tensor<T>> {
@@ -1209,6 +1284,24 @@ impl<T: DType> IntoDeviceOp<Partition<Tensor<T>>> for Partition<Tensor<T>> {
     }
 }
 
+impl<T: DType> IntoDeviceOp<MappedLaunchPartition<Partition<Tensor<T>>>>
+    for MappedLaunchPartition<Partition<Tensor<T>>>
+{
+    type Op = Value<MappedLaunchPartition<Partition<Tensor<T>>>>;
+    fn into_op(self) -> Value<MappedLaunchPartition<Partition<Tensor<T>>>> {
+        value(self)
+    }
+}
+
+impl<'a, T: DType + Sync> IntoDeviceOp<MappedLaunchPartition<Partition<&'a mut Tensor<T>>>>
+    for MappedLaunchPartition<Partition<&'a mut Tensor<T>>>
+{
+    type Op = Value<MappedLaunchPartition<Partition<&'a mut Tensor<T>>>>;
+    fn into_op(self) -> Value<MappedLaunchPartition<Partition<&'a mut Tensor<T>>>> {
+        value(self)
+    }
+}
+
 impl<T: DType> IntoDeviceOp<Tensor<T>> for Tensor<T> {
     type Op = Value<Tensor<T>>;
     fn into_op(self) -> Value<Tensor<T>> {
@@ -1241,6 +1334,9 @@ use cuda_async::launch::AsyncKernelLaunch;
 pub trait KernelOutputStored<T: DType>: Send {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn grid(&self) -> Result<(u32, u32, u32), Error>;
+    fn map_shape_as_i32(&self) -> Option<Vec<i32>> {
+        None
+    }
     fn dtype_str(&self) -> &'static str;
     fn partition_shape_as_i32(&self) -> Vec<i32>;
     fn strides_hint(&self) -> Vec<i32>;
@@ -1379,6 +1475,74 @@ impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
     }
 }
 
+impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<T>>> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        self.partition.push_kernel_args(launcher);
+    }
+
+    fn grid(&self) -> Result<(u32, u32, u32), Error> {
+        self.validate(self.partition.grid()?, self.num_tile_blocks)
+    }
+
+    fn map_shape_as_i32(&self) -> Option<Vec<i32>> {
+        Some(self.map_shape.iter().map(|&dim| dim as i32).collect())
+    }
+
+    fn dtype_str(&self) -> &'static str {
+        self.partition.dtype_str()
+    }
+
+    fn partition_shape_as_i32(&self) -> Vec<i32> {
+        self.partition.partition_shape_as_i32()
+    }
+
+    fn strides_hint(&self) -> Vec<i32> {
+        self.partition.strides_hint()
+    }
+
+    fn spec(&self) -> &SpecializationBits {
+        self.partition.spec()
+    }
+
+    fn shape_as_i32(&self) -> Vec<i32> {
+        self.partition.shape_as_i32()
+    }
+}
+
+impl<'a, T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&'a mut Tensor<T>>> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        self.partition.push_kernel_args(launcher);
+    }
+
+    fn grid(&self) -> Result<(u32, u32, u32), Error> {
+        self.validate(self.partition.grid()?, self.num_tile_blocks)
+    }
+
+    fn map_shape_as_i32(&self) -> Option<Vec<i32>> {
+        Some(self.map_shape.iter().map(|&dim| dim as i32).collect())
+    }
+
+    fn dtype_str(&self) -> &'static str {
+        self.partition.dtype_str()
+    }
+
+    fn partition_shape_as_i32(&self) -> Vec<i32> {
+        self.partition.partition_shape_as_i32()
+    }
+
+    fn strides_hint(&self) -> Vec<i32> {
+        self.partition.strides_hint()
+    }
+
+    fn spec(&self) -> &SpecializationBits {
+        self.partition.spec()
+    }
+
+    fn shape_as_i32(&self) -> Vec<i32> {
+        self.partition.shape_as_i32()
+    }
+}
+
 impl<T: DType> KernelOutput<T> for Partition<Tensor<T>> {
     type Stored = Partition<Tensor<T>>;
     type Returned = Partition<Tensor<T>>;
@@ -1398,6 +1562,32 @@ impl<'a, T: DType> KernelOutput<T> for Partition<&'a mut Tensor<T>> {
     }
     fn recover(stored: Self::Stored) -> Self::Returned {
         stored
+    }
+}
+
+impl<T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<Tensor<T>>> {
+    type Stored = MappedLaunchPartition<Partition<Tensor<T>>>;
+    type Returned = Partition<Tensor<T>>;
+
+    fn prepare(self) -> Self::Stored {
+        self
+    }
+
+    fn recover(stored: Self::Stored) -> Self::Returned {
+        stored.partition
+    }
+}
+
+impl<'a, T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<&'a mut Tensor<T>>> {
+    type Stored = MappedLaunchPartition<Partition<&'a mut Tensor<T>>>;
+    type Returned = Partition<&'a mut Tensor<T>>;
+
+    fn prepare(self) -> Self::Stored {
+        self
+    }
+
+    fn recover(stored: Self::Stored) -> Self::Returned {
+        stored.partition
     }
 }
 
@@ -1567,5 +1757,58 @@ impl<'a, T: DType + Sync> IntoDeviceOp<&'a TensorView<'a, T>> for &'a TensorView
     type Op = Value<&'a TensorView<'a, T>>;
     fn into_op(self) -> Value<&'a TensorView<'a, T>> {
         value(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swizzle_accepts_tile_block_count() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![4, 1],
+            num_tile_blocks: 3,
+        };
+        let launch_grid = partition.validate((2, 3, 1), 3).unwrap();
+        assert_eq!(launch_grid, (3, 1, 1));
+    }
+
+    #[test]
+    fn swizzle_rejects_tile_block_count_larger_than_logical_grid() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![4, 1],
+            num_tile_blocks: 7,
+        };
+        let err = partition.validate((2, 3, 1), 7).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("num_tile_blocks cannot exceed the logical partition tile count"));
+    }
+
+    #[test]
+    fn swizzle_rejects_zero_tile_blocks() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![4, 1],
+            num_tile_blocks: 0,
+        };
+        let err = partition.validate((2, 3, 1), 0).unwrap_err();
+        assert!(err.to_string().contains("num_tile_blocks > 0"));
+    }
+
+    #[test]
+    fn swizzle_rejects_non_2d_partition_grid() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![4, 1],
+            num_tile_blocks: 3,
+        };
+        let err = partition.validate((2, 3, 4), 3).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires a non-empty 2D logical partition grid"));
     }
 }

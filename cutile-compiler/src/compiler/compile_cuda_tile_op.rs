@@ -14,7 +14,9 @@ use super::shared_utils::{get_const_hex, AtomicMode, TileBinaryOp};
 use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
 use crate::error::JITError;
-use crate::generics::{get_cga_from_type, GenericVars};
+use crate::generics::{
+    get_cga_from_generic_argument, get_cga_from_type, GenericVars, TypeInstance,
+};
 use crate::passes::name_resolution::{DefKind, Res};
 use crate::syn_utils::*;
 use crate::types::*;
@@ -25,7 +27,9 @@ use super::utils::*;
 
 use cutile_ir::builder::{append_op, build_block, OpBuilder};
 use cutile_ir::bytecode::Opcode;
-use cutile_ir::ir::{Attribute, BlockId, Module, Region, Type as TileIrType, Value};
+use cutile_ir::ir::{
+    Attribute, BlockId, Module, PartitionViewType, Region, Type as TileIrType, Value,
+};
 
 use quote::ToTokens;
 use regex::Regex;
@@ -53,6 +57,22 @@ fn dense_const_path_parts(path_expr: &syn::ExprPath) -> Option<(String, String)>
         return None;
     }
     Some((path_expr.path.segments[0].ident.to_string(), const_name))
+}
+
+fn generic_arg_to_cga_const_string(
+    arg: &syn::GenericArgument,
+    generic_args: &GenericVars,
+) -> String {
+    if let Some(cga) = get_cga_from_generic_argument(arg, generic_args) {
+        let dims = cga
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{[{dims}]}}")
+    } else {
+        arg.to_token_stream().to_string()
+    }
 }
 
 /// Resolves `static_params` from a `#[cuda_tile::op]` attribute against call-site arguments.
@@ -446,6 +466,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         return_type: Option<TileRustType>,
     ) -> Result<Option<TileRustValue>, JITError> {
         match op_name {
+            "cuda_tile.make_partition_view"
+                if fn_item.sig.ident == "make_mapped_partition_view" =>
+            {
+                self.compile_make_mapped_partition_view(
+                    module,
+                    block_id,
+                    call_expr,
+                    generic_args,
+                    ctx,
+                )
+            }
             "cuda_tile.load_ptr_tko" => self.compile_load_ptr_tko(
                 module,
                 block_id,
@@ -521,6 +552,186 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn mapped_partition_map_shape_arg(
+        &self,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+    ) -> Result<String, JITError> {
+        let Expr::Path(path) = &*call_expr.func else {
+            return self.jit_error_result(
+                &call_expr.func.span(),
+                "expected make_mapped_partition_view to be called as a function path",
+            );
+        };
+        let Some(last_segment) = path.path.segments.last() else {
+            return self.jit_error_result(
+                &call_expr.func.span(),
+                "expected make_mapped_partition_view function path",
+            );
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments else {
+            return self.jit_error_result(
+                &call_expr.func.span(),
+                "make_mapped_partition_view requires explicit map shape arguments",
+            );
+        };
+        let Some(map_shape) = args.args.iter().nth(3) else {
+            return self.jit_error_result(
+                &call_expr.func.span(),
+                "make_mapped_partition_view expects map shape as generic argument 4",
+            );
+        };
+        Ok(generic_arg_to_cga_const_string(map_shape, generic_args))
+    }
+
+    fn compile_make_mapped_partition_view(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 4 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "make_mapped_partition_view expects 4 arguments, got {}",
+                    call_expr.args.len()
+                ),
+            );
+        }
+
+        let Some(tensor_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[0],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "failed to compile mapped partition tensor view",
+            );
+        };
+        let Some(tensor_view_value) = tensor_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "mapped partition tensor view must be an SSA value",
+            );
+        };
+        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value.ty.tile_ir_ty.clone()
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "mapped partition source must be a tensor view",
+            );
+        };
+
+        let Some(shape_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[1],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[1].span(),
+                "failed to compile mapped partition tile shape",
+            );
+        };
+        let tile_shape = match &shape_value.ty.type_instance {
+            TypeInstance::StructuredType(instance) => instance.shape.clone(),
+            _ => get_cga_from_type(&shape_value.ty.rust_ty, generic_args).ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[1].span(),
+                    "mapped partition tile shape must be static",
+                )
+            })?,
+        };
+        let element_type = tensor_value
+            .ty
+            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[0].span(),
+                    "failed to determine mapped partition element type",
+                )
+            })?;
+        let map_shape = self.mapped_partition_map_shape_arg(call_expr, generic_args)?;
+        let shape_expr = format!(
+            "{{[{}]}}",
+            tile_shape
+                .iter()
+                .map(|dim| dim.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rust_ty: Type = syn::parse2(
+            format!("MappedPartitionMut<{element_type}, {shape_expr}, {map_shape}>")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let type_instance = generic_args.instantiate_type(&rust_ty, self.modules.primitives())?;
+        let return_type = TileRustType {
+            cuda_tile_ty_str: None,
+            tile_ir_ty: Some(TileIrType::PartitionView(PartitionViewType {
+                tile_shape: tile_shape.clone(),
+                tensor_view: tensor_view_ty,
+                dim_map: (0..tile_shape.len()).map(|i| i as i32).collect(),
+                padding_value: None,
+            })),
+            cuda_tile_name: Some("!cuda_tile.partition_view".to_string()),
+            params: vec![],
+            rust_ty,
+            type_instance,
+            kind: Kind::StructuredType,
+        };
+
+        let Some(token_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[3],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[3].span(),
+                "failed to compile mapped partition token",
+            );
+        };
+        let mut type_meta = TypeMeta {
+            fields: BTreeMap::new(),
+        };
+        type_meta.fields.insert("token".to_string(), token_value);
+
+        let result_ir_ty = super::_type::convert_type(&return_type).ok_or_else(|| {
+            self.jit_error(
+                &call_expr.span(),
+                "failed to convert mapped partition return type to Tile IR",
+            )
+        })?;
+        let (op_id, results) = OpBuilder::new(
+            Opcode::MakePartitionView,
+            self.ir_location(&call_expr.span()),
+        )
+        .operand(tensor_view_value)
+        .result(result_ir_ty)
+        .build(module);
+        append_op(module, block_id, op_id);
+        let mut result =
+            TileRustValue::new_structured_type(results[0], return_type, Some(type_meta));
+        result.tensor_origin = tensor_value.tensor_origin;
+        Ok(Some(result))
     }
 
     fn compile_load_ptr_tko(
@@ -2099,7 +2310,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "constant" => {
                     return self.jit_error_result(
                         &call_expr.span(),
-                        &format!("Return type required for {}", user_call_tokens(call_expr)),
+                        &format!(
+                            "Return type required for {}",
+                            call_expr.to_token_stream().to_string()
+                        ),
                     )
                 }
                 _ => {}
@@ -2122,7 +2336,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     "Unable to infer return type for CUDA Tile op `{}` (Tile IR `{}`) from call `{}`",
                     rust_function_name,
                     op_name,
-                    user_call_tokens(call_expr)
+                    call_expr.to_token_stream()
                 ),
             );
         }
@@ -2141,7 +2355,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 for i in 0..param_names.len() {
                     if param_names[i] == field_meta_expr_param {
                         let call_expr_arg = &call_expr.args[i];
-                        let call_expr_arg_str = user_expr_tokens(call_expr_arg);
+                        let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
                         let final_expr_str =
                             field_meta_expr_str.replace(field_meta_expr_param, &call_expr_arg_str);
                         let final_expr =
@@ -2175,7 +2389,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut compiled_args: Vec<TileRustValue> = Vec::new();
         for i in 0..cuda_tile_op_params.len() {
             let call_expr_arg = &call_expr.args[i];
-            let call_expr_arg_str = user_expr_tokens(call_expr_arg);
+            let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
             let op_arg =
                 self.compile_expression(module, block_id, call_expr_arg, generic_args, ctx, None)?;
             if op_arg.is_none() {
@@ -2364,7 +2578,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     maybe_next_attr_param = cuda_tile_op_attr_params_iter.next();
                     let call_expr_arg = &call_expr.args[i];
-                    let call_expr_arg_str = user_expr_tokens(call_expr_arg);
+                    let call_expr_arg_str = call_expr_arg.to_token_stream().to_string();
                     let op_arg = self.compile_expression(
                         module,
                         block_id,
@@ -2651,11 +2865,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     op_builder = op_builder.result(result_ir_ty);
                     let (op_id, results) = op_builder.build(module);
                     append_op(module, block_id, op_id);
-                    match return_type.kind {
-                        Kind::PrimitiveType => Ok(Some(TileRustValue::new_primitive(results[0], return_type, None))),
-                        Kind::StructuredType => Ok(Some(TileRustValue::new_structured_type(results[0], return_type, type_meta))),
+                    let mut result = match return_type.kind {
+                        Kind::PrimitiveType => {
+                            TileRustValue::new_primitive(results[0], return_type, None)
+                        }
+                        Kind::StructuredType => {
+                            TileRustValue::new_structured_type(results[0], return_type, type_meta)
+                        }
                         _ => unreachable!(),
+                    };
+                    if op_name == "cuda_tile.make_partition_view" {
+                        result.tensor_origin =
+                            compiled_args.first().and_then(|arg| arg.tensor_origin.clone());
                     }
+                    Ok(Some(result))
                 }
                 Kind::Compound => {
                     if let Type::Tuple(tuple_type) = &return_type.rust_ty {

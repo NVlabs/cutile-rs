@@ -28,7 +28,7 @@ The generated launcher code accepts `Partition<Tensor<T>>` for every `&mut Tenso
 
 **Grid dimensions.** A host-side partition's grid is computed by dividing the tensor's shape by the partition shape, rounding up: `grid[i] = ceil(tensor_shape[i] / partition_shape[i])`. The result is mapped to a 3D tuple `(x, y, z)`, with trailing dimensions set to 1 for tensors of rank less than 3. For example, a `[128, 256]` tensor partitioned with `[32, 64]` produces a grid of `(4, 4, 1)`.
 
-**Launch grid inference.** At kernel launch time, the launcher calls `.grid()` on each `&mut Tensor` parameter's host-side `Partition` and collects the resulting grids. If no explicit grid is specified via `.grid()` or `.const_grid()`, the launch grid is **inferred** from these partition grids. When multiple `&mut Tensor` parameters are present, all of their inferred grids must match or the launch will fail with an error. This is how partitioning a tensor on the host side determines how many tile blocks the kernel runs.
+**Launch grid inference.** At kernel launch time, the launcher calls `.grid()` on each mutable output argument's host-side wrapper and collects the resulting grids. For ordinary `&mut Tensor` parameters, this is the host-side `Partition` grid. For `MappedPartitionMut` parameters, this is the mapped physical tile-block grid. If no explicit grid is specified via `.grid()` or `.const_grid()`, the launch grid is **inferred** from these grids. When multiple mutable output parameters are present, all inferred grids must match or the launch will fail with an error. This is how partitioning a tensor on the host side determines how many tile blocks the kernel runs.
 
 ## Tile Block
 

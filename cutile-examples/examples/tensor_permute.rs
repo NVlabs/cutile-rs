@@ -41,7 +41,7 @@ mod my_module {
 
         // Tile dimensions BB and BH are collapsed into a single dimension.
         // Partition indices corresponding to those dimensions are recovered as follows.
-        let h = get_shape_dim(src.shape(), 1i32);
+        let h = src.shape()[1];
         let b_idx = pid.0 / (h / BH); // \in [0, b/BB)
         let h_idx = pid.0 % (h / BH); // \in [0, h/BH)
         let d_idx = pid.1; // \in [0, d/BD)

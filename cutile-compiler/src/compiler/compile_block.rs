@@ -29,6 +29,16 @@ use syn::spanned::Spanned;
 use syn::{Expr, Item, Pat, Stmt};
 
 impl<'m> CUDATileFunctionCompiler<'m> {
+    fn carries_partition_axis_proof_origin(value: &TileRustValue) -> bool {
+        let Some(ident) = get_type_ident(&value.ty.rust_ty) else {
+            return false;
+        };
+        matches!(
+            ident.to_string().as_str(),
+            "Tensor" | "Partition" | "BoundedPartition" | "PartitionMut" | "MappedPartitionMut"
+        )
+    }
+
     fn bind_pattern_value(
         &self,
         pat: &Pat,
@@ -44,6 +54,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 } else {
                     Mutability::Immutable
                 };
+                if value.tensor_origin.is_none()
+                    && Self::carries_partition_axis_proof_origin(&value)
+                {
+                    value.tensor_origin = Some(ident.ident.to_string());
+                }
                 ctx.vars.insert(ident.ident.to_string(), value.clone());
                 if let Some((_at, subpat)) = &ident.subpat {
                     self.bind_pattern_value(subpat, value, inherited_mutability, ctx)?;

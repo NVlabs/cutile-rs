@@ -84,8 +84,8 @@ use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
 use std::collections::HashMap;
 use syn::{
-    parse_quote, AngleBracketedGenericArguments, Expr, ExprBlock, FnArg, GenericArgument,
-    GenericParam, Generics, ImplItemFn, ItemFn, PatType, Stmt, Type, TypeParam, TypeReference,
+    parse_quote, AngleBracketedGenericArguments, Expr, ExprBlock, ExprCall, FnArg, GenericArgument,
+    GenericParam, Generics, ImplItemFn, ItemFn, Lit, PatType, Stmt, Type, TypeParam, TypeReference,
     WherePredicate,
 };
 
@@ -514,6 +514,7 @@ pub fn generate_kernel_launcher(
     let mut arg_types: Vec<Type> = vec![];
     // Track element type per param (Some for &Tensor params, None for others).
     let mut param_element_types: Vec<Option<String>> = vec![];
+    let mut tensor_param_kinds: HashMap<String, TensorParamKind> = HashMap::new();
 
     let mut required_generics: RequiredGenerics = RequiredGenerics::new(&item.sig.generics);
     for (i, ty) in input_types.iter().enumerate() {
@@ -521,6 +522,12 @@ pub fn generate_kernel_launcher(
         match ty {
             Type::Reference(ref_ty) => {
                 let res = get_tensor_code(i, var_name, ref_ty, &mut required_generics)?;
+                let tensor_kind = if ref_ty.mutability.is_some() {
+                    TensorParamKind::Output
+                } else {
+                    TensorParamKind::Input
+                };
+                tensor_param_kinds.insert(var_name.clone(), tensor_kind);
                 arg_types.push(res.fn_arg.ty.as_ref().clone());
                 param_element_types.push(res.element_type_name);
                 stride_args.push(res.stride_expr_str);
@@ -532,6 +539,19 @@ pub fn generate_kernel_launcher(
             Type::Path(path_ty) => {
                 let ident = get_ident_from_path(&path_ty.path);
                 let type_name = ident.to_string();
+                if type_name == "MappedPartitionMut" {
+                    let ref_ty: TypeReference = parse_quote!(&mut #path_ty);
+                    let res = get_tensor_code(i, var_name, &ref_ty, &mut required_generics)?;
+                    tensor_param_kinds.insert(var_name.clone(), TensorParamKind::Output);
+                    arg_types.push(res.fn_arg.ty.as_ref().clone());
+                    param_element_types.push(res.element_type_name);
+                    stride_args.push(res.stride_expr_str);
+                    spec_args.push(res.spec_expr_str);
+                    builder_statements.extend(res.builder_statements);
+                    launch_grid_expr_strs.extend(res.launch_grid_expr_strs);
+                    validator_statements.extend(res.validator_statements.block.stmts);
+                    continue;
+                }
                 arg_types.push(syn::parse2::<Type>(type_name.parse().unwrap()).unwrap());
                 if required_generics.is_required(&type_name) {
                     required_generics
@@ -593,6 +613,11 @@ pub fn generate_kernel_launcher(
             }
         }
     }
+    let preconditions = parse_metadata_preconditions(item)?;
+    validator_statements.extend(metadata_precondition_validation_stmts(
+        &preconditions,
+        &tensor_param_kinds,
+    )?);
 
     // Build KernelInput metadata: which params are &Tensor (Arc) and need
     // KernelInput type params on the launcher struct.
@@ -1170,6 +1195,218 @@ struct TensorLaunchCode {
     element_type_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TensorParamKind {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DimEqualityPrecondition {
+    lhs: String,
+    lhs_axis: usize,
+    rhs: String,
+    rhs_axis: usize,
+}
+
+fn parse_metadata_preconditions(item: &ItemFn) -> Result<Vec<DimEqualityPrecondition>, Error> {
+    let Some(entry_attrs) = get_meta_list_by_last_segment("entry", &item.attrs) else {
+        return Ok(Vec::new());
+    };
+    let Some(expr) = entry_attrs.parse_custom_expr("preconditions") else {
+        return Ok(Vec::new());
+    };
+    let calls = match expr {
+        Expr::Tuple(tuple) => tuple.elems.iter().collect::<Vec<_>>(),
+        Expr::Paren(paren) => vec![paren.expr.as_ref()],
+        Expr::Binary(_) => vec![expr],
+        Expr::Call(call)
+            if precondition_call_name(call).as_deref() == Some("same_partition_axis") =>
+        {
+            return call.err(
+                "`same_partition_axis` preconditions have been replaced by `dim(lhs, axis) == dim(rhs, axis)`",
+            );
+        }
+        _ => {
+            return item
+                .sig
+                .ident
+                .err("`preconditions` must be an equality or tuple of equalities")
+        }
+    };
+    let mut preconditions = Vec::new();
+    for expr in calls {
+        let Expr::Binary(binary) = expr else {
+            return item
+                .sig
+                .ident
+                .err("each `preconditions` entry must be a metadata equality");
+        };
+        preconditions.push(parse_dim_equality_precondition(binary)?);
+    }
+    Ok(preconditions)
+}
+
+fn parse_dim_equality_precondition(
+    binary: &syn::ExprBinary,
+) -> Result<DimEqualityPrecondition, Error> {
+    if !matches!(binary.op, syn::BinOp::Eq(_)) {
+        return binary.err("precondition predicates must use `==`");
+    }
+    let (lhs, lhs_axis) = parse_dim_precondition_expr(&binary.left)?;
+    let (rhs, rhs_axis) = parse_dim_precondition_expr(&binary.right)?;
+    Ok(DimEqualityPrecondition {
+        lhs,
+        lhs_axis,
+        rhs,
+        rhs_axis,
+    })
+}
+
+fn parse_dim_precondition_expr(expr: &Expr) -> Result<(String, usize), Error> {
+    let Expr::Call(call) = expr else {
+        return expr
+            .err("precondition metadata expressions must be calls like `dim(tensor, axis)`");
+    };
+    let Some(func_name) = precondition_call_name(call) else {
+        return call
+            .func
+            .err("precondition metadata expressions must use a function path");
+    };
+    if func_name != "dim" {
+        return call.func.err(&format!(
+            "unsupported precondition metadata expression `{func_name}`; expected `dim`"
+        ));
+    }
+    if call.args.len() != 2 {
+        return call.err(&format!(
+            "`dim` expects 2 arguments, got {}",
+            call.args.len()
+        ));
+    }
+    Ok((
+        parse_precondition_tensor_arg(&call.args[0])?,
+        parse_precondition_axis_arg(&call.args[1])?,
+    ))
+}
+
+fn precondition_call_name(call: &ExprCall) -> Option<String> {
+    let Expr::Path(func_path) = call.func.as_ref() else {
+        return None;
+    };
+    func_path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn parse_precondition_tensor_arg(expr: &Expr) -> Result<String, Error> {
+    let Expr::Path(path) = expr else {
+        return expr.err("precondition tensor arguments must be parameter names");
+    };
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return expr.err("precondition tensor arguments must be simple parameter names");
+    }
+    Ok(path.path.segments[0].ident.to_string())
+}
+
+fn parse_precondition_axis_arg(expr: &Expr) -> Result<usize, Error> {
+    let Expr::Lit(lit_expr) = expr else {
+        return expr.err("precondition axes must be integer literals");
+    };
+    let Lit::Int(lit_int) = &lit_expr.lit else {
+        return expr.err("precondition axes must be integer literals");
+    };
+    lit_int
+        .base10_parse::<usize>()
+        .map_err(|err| crate::error::syn_err(lit_int.span(), &err.to_string()))
+}
+
+fn precondition_shape_expr(name: &str, kind: TensorParamKind) -> TokenStream2 {
+    let ident = Ident::new(name, Span::call_site());
+    match kind {
+        TensorParamKind::Input => quote! { #ident.shape().to_vec() },
+        TensorParamKind::Output => quote! { KernelOutputStored::shape_as_i32(&#ident) },
+    }
+}
+
+fn metadata_precondition_validation_stmts(
+    preconditions: &[DimEqualityPrecondition],
+    tensor_param_kinds: &HashMap<String, TensorParamKind>,
+) -> Result<Vec<Stmt>, Error> {
+    let mut statements = Vec::new();
+    for precondition in preconditions {
+        let Some(&lhs_kind) = tensor_param_kinds.get(&precondition.lhs) else {
+            return Err(crate::error::syn_err(
+                Span::call_site(),
+                &format!(
+                    "precondition references unknown tensor parameter `{}`",
+                    precondition.lhs
+                ),
+            ));
+        };
+        let Some(&rhs_kind) = tensor_param_kinds.get(&precondition.rhs) else {
+            return Err(crate::error::syn_err(
+                Span::call_site(),
+                &format!(
+                    "precondition references unknown tensor parameter `{}`",
+                    precondition.rhs
+                ),
+            ));
+        };
+        let lhs_name = &precondition.lhs;
+        let rhs_name = &precondition.rhs;
+        let lhs_axis = precondition.lhs_axis;
+        let rhs_axis = precondition.rhs_axis;
+        let lhs_shape_expr = precondition_shape_expr(lhs_name, lhs_kind);
+        let rhs_shape_expr = precondition_shape_expr(rhs_name, rhs_kind);
+        let validation = syn::parse2::<ExprBlock>(quote! {{
+            {
+                let lhs_shape: Vec<i32> = #lhs_shape_expr;
+                let rhs_shape: Vec<i32> = #rhs_shape_expr;
+                kernel_launch_assert(
+                    #lhs_axis < lhs_shape.len(),
+                    format!(
+                        "dim({}, {}) == dim({}, {}) failed: left axis is out of range for shape {:?}",
+                        #lhs_name,
+                        #lhs_axis,
+                        #rhs_name,
+                        #rhs_axis,
+                        lhs_shape
+                    ).as_str(),
+                )?;
+                kernel_launch_assert(
+                    #rhs_axis < rhs_shape.len(),
+                    format!(
+                        "dim({}, {}) == dim({}, {}) failed: right axis is out of range for shape {:?}",
+                        #lhs_name,
+                        #lhs_axis,
+                        #rhs_name,
+                        #rhs_axis,
+                        rhs_shape
+                    ).as_str(),
+                )?;
+                kernel_launch_assert(
+                    lhs_shape[#lhs_axis] == rhs_shape[#rhs_axis],
+                    format!(
+                        "dim({}, {}) == dim({}, {}) failed: axis extents differ ({} vs {})",
+                        #lhs_name,
+                        #lhs_axis,
+                        #rhs_name,
+                        #rhs_axis,
+                        lhs_shape[#lhs_axis],
+                        rhs_shape[#rhs_axis],
+                    ).as_str(),
+                )?;
+            }
+        }})
+        .unwrap();
+        statements.extend(validation.block.stmts);
+    }
+    Ok(statements)
+}
+
 /// Generates launcher code for a tensor kernel parameter.
 ///
 /// Analyzes a tensor parameter and generates all the necessary code for:
@@ -1198,8 +1435,19 @@ fn get_tensor_code(
     let Some(type_ident) = type_ident else {
         return ty.err("Expected a named type identifier for tensor parameter.");
     };
-    if type_ident != "Tensor" {
+    let type_ident = type_ident.to_string();
+    if type_ident != "Tensor" && type_ident != "MappedPartitionMut" {
         return ty.err(&format!("Expected Tensor type, got {}.", type_ident));
+    }
+    if type_ident == "MappedPartitionMut" && ty.mutability.is_none() {
+        return ty.err("internal error: MappedPartitionMut launcher lowering must use mutable output metadata.");
+    }
+    let is_mapped_partition = type_ident == "MappedPartitionMut";
+    if is_mapped_partition {
+        let Some(map_shape) = type_generic_args.args.iter().nth(2) else {
+            return ty.err("MappedPartitionMut expects map shape as its third generic argument.");
+        };
+        infer_mapped_partition_map_generics(var_name, map_shape, required_generics)?;
     }
     let Some(GenericArgument::Type(syn::Type::Path(element_type_path))) =
         type_generic_args.args.first()
@@ -1208,9 +1456,15 @@ fn get_tensor_code(
     };
 
     // Infer generics from type data available in this type.
+    let mut shape_generic_args = type_generic_args.clone();
+    if is_mapped_partition {
+        while shape_generic_args.args.len() > 2 {
+            shape_generic_args.args.pop();
+        }
+    }
     infer_shape_params_from_tensor_type(
         var_name,
-        &type_generic_args,
+        &shape_generic_args,
         required_generics,
         ty.mutability.is_some(),
     )?;
@@ -1263,7 +1517,6 @@ fn get_tensor_code(
         )"#
         )
     };
-
     // Builder and validator statements.
     let var_ident = Ident::new(var_name, Span::call_site());
     let mut builder_statements = vec![];
@@ -1329,6 +1582,71 @@ fn get_tensor_code(
         validator_statements,
         element_type_name,
     })
+}
+
+fn infer_mapped_partition_map_generics(
+    var_name: &str,
+    map_shape: &GenericArgument,
+    required_generics: &mut RequiredGenerics,
+) -> Result<(), Error> {
+    let mapped_shape_expr = |dim: usize| {
+        format!(
+            "vec![KernelOutputStored::map_shape_as_i32(&{var_name}).expect(\"MappedPartitionMut missing map shape\")[{dim}].to_string()]"
+        )
+    };
+    match map_shape {
+        GenericArgument::Type(Type::Path(path)) => {
+            let Some(segment) = path.path.segments.last() else {
+                return map_shape
+                    .err("MappedPartitionMut map shape must be a const generic array.");
+            };
+            let ident = segment.ident.to_string();
+            match required_generics.get_ty(&ident) {
+                SupportedGenericType::ConstArray => {
+                    required_generics.expressions.insert(
+                        ident,
+                        Some(format!(
+                            "KernelOutputStored::map_shape_as_i32(&{var_name}).expect(\"MappedPartitionMut missing map shape\").iter().map(|x| x.to_string()).collect::<Vec<String>>()"
+                        )),
+                    );
+                    Ok(())
+                }
+                SupportedGenericType::Unknown => Ok(()),
+                _ => map_shape.err(
+                    "MappedPartitionMut map shape generic must be a const generic array parameter.",
+                ),
+            }
+        }
+        GenericArgument::Const(Expr::Block(block)) => {
+            if block.block.stmts.len() != 1 {
+                return block
+                    .err("MappedPartitionMut map shape block must contain one expression.");
+            }
+            let Stmt::Expr(Expr::Array(array), _) = &block.block.stmts[0] else {
+                return block.err("MappedPartitionMut map shape must be an array expression.");
+            };
+            for (dim, elem) in array.elems.iter().enumerate() {
+                if let Expr::Path(path) = elem {
+                    let ident = get_ident_from_path_expr(path).to_string();
+                    match required_generics.get_ty(&ident) {
+                        SupportedGenericType::ConstScalar => {
+                            required_generics
+                                .expressions
+                                .insert(ident, Some(mapped_shape_expr(dim)));
+                        }
+                        SupportedGenericType::Unknown => {}
+                        _ => {
+                            return elem.err(
+                                "MappedPartitionMut map shape elements must be i32 const scalar parameters.",
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => map_shape.err("MappedPartitionMut map shape must be a const generic array."),
+    }
 }
 
 /// Infers and registers runtime expressions for tensor shape parameters.

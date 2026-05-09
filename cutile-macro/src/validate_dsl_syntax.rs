@@ -100,7 +100,8 @@ use crate::error::{Error, SpannedError};
 /// //         partitioned tensors or &Tensor for tensor references."
 /// ```
 // Ensure only valid parameters have been specified in function signatures.
-// Currently only supporting scalars, &Tensor, and &mut Tensor for safe kernels.
+// Currently only supporting scalars, &Tensor, &mut Tensor,
+// MappedPartitionMut, and *mut T for unsafe kernels.
 // * mut T for unsafe kernels.
 pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
     let (input_types, _output_type) = get_sig_types(&item.sig, None);
@@ -111,6 +112,9 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
                     return ty.err("Not a supported parameter type.");
                 };
                 let type_name = ident.to_string();
+                if type_name == "MappedPartitionMut" {
+                    ty.err("MappedPartitionMut parameters are passed by value; use `mut z: MappedPartitionMut<...>`, not `&mut MappedPartitionMut<...>`.")?;
+                }
                 if type_name != "Tensor" {
                     ty.err(&format!(
                         "References to `{}` as parameters are not supported. \
@@ -128,6 +132,9 @@ pub fn validate_entry_point_parameters(item: &ItemFn) -> Result<(), Error> {
                     ty.err("Tensors cannot be moved into kernel functions. \
                                   &mut Tensor corresponds to a partitioned tensor argument (e.g. x.partition([...])), \
                                   and &Tensor corresponds to a tensor reference argument (e.g. Arc::new(x) or x.into()).")?;
+                }
+                if type_name == "MappedPartitionMut" {
+                    continue;
                 }
             }
             Type::Ptr(ptr_type) => {
