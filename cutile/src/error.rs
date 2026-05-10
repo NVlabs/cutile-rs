@@ -55,6 +55,8 @@ pub enum Error {
     Anyhow(anyhow::Error),
 }
 
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
 impl fmt::Debug for Error {
     fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
         // Delegate to Display so that `.unwrap()` produces the same
