@@ -242,7 +242,7 @@ fn process_items(
     items: &[syn::Item],
     parent_name: &Ident,
     tile_rust_crate_root: &Ident,
-) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
+) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>, Vec<(String, String)>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
     let type_aliases = cutile_compiler::type_aliases::collect_type_aliases(items);
@@ -308,7 +308,7 @@ fn process_items(
                          not supported because the macro needs the body at expansion time.",
                     );
                 };
-                let (sub_concrete, sub_entries) =
+                let (sub_concrete, sub_entries, _sub_metas) =
                     process_items(&sub_content.1, &submod.ident, tile_rust_crate_root)?;
                 let sub_name = &submod.ident;
                 let sub_attrs = &submod.attrs;
@@ -327,7 +327,7 @@ fn process_items(
             }
         }
     }
-    Ok((concrete_items, entry_functions))
+    Ok((concrete_items, entry_functions, entry_metas))
 }
 
 /// Fallible inner implementation of the `module` macro.
@@ -340,7 +340,7 @@ fn module_inner(
         return module_item.err("Non-empty module expected.");
     };
     let name = &module_item.ident;
-    let (concrete_items, entry_functions) = process_items(&content.1, name, tile_rust_crate_root)?;
+    let (concrete_items, entry_functions, entry_metas) = process_items(&content.1, name, tile_rust_crate_root)?;
     let ast_path = get_ast_path(tile_rust_crate_root);
     let ast_module_item: ItemMod = module_item.clone();
     let ast_module_tokens = emit_module_ast_self_and_registry_entry(
@@ -394,7 +394,7 @@ fn module_inner(
             specs: &[#tile_rust_crate_root::tile_kernel::WarmupSpec],
         ) -> Result<(), #tile_rust_crate_root::error::Error> {
             #tile_rust_crate_root::tile_kernel::compile_warmup(
-                || _module_asts(),
+                || __module_ast_self(),
                 &_entries(),
                 #module_name_str,
                 _SOURCE_HASH,

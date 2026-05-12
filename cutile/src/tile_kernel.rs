@@ -397,7 +397,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
                 "{module_name}::{function_name} → disk cache hit ({} bytes)",
                 cubin_bytes.len()
             );
-            let modules = CUDATileModules::new(module_asts())?;
+            let modules = CUDATileModules::from_kernel(kernel_ast())?;
             let compiler = CUDATileFunctionCompiler::new(
                 &modules,
                 module_name,
@@ -408,6 +408,10 @@ pub fn compile_from_context<F: Fn() -> Module>(
                     .map(|x| (x.0.as_str(), x.1.as_slice()))
                     .collect::<Vec<_>>(),
                 &key.spec_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
+                &key.scalar_hints
                     .iter()
                     .map(|x| (x.0.as_str(), &x.1))
                     .collect::<Vec<_>>(),
@@ -448,7 +452,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
         // Full JIT compilation.
         jit_log!("{module_name}::{function_name} → JIT compiling...");
         let t0 = std::time::Instant::now();
-        let modules = CUDATileModules::new(module_asts())?;
+        let modules = CUDATileModules::from_kernel(kernel_ast())?;
         let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
             module_name,
             function_name,
@@ -583,14 +587,14 @@ pub fn compile_from_context<F: Fn() -> Module>(
                 "CUTILE_JIT_TIMING module={} function={} key={} stage1_ms={:.3} stage2_ms={:.3} stage3_ms={:.3} generics={}",
                 module_name,
                 function_name,
-                cache_hash_str,
+                key_str,
                 stage1_ms,
                 stage2_ms,
                 stage3_ms,
                 key.function_generics.join(","),
             );
         }
-        insert_cuda_function(device_id, &key, (module, function.clone()))?;
+        insert_cuda_function(device_id, &key, (module.clone(), function.clone()))?;
         insert_function_validator(device_id, &key, validator.clone())?;
         Ok(CompiledKernel {
             module,
@@ -624,6 +628,7 @@ pub struct WarmupSpec {
     pub function_generics: Vec<String>,
     pub stride_args: Vec<(String, Vec<i32>)>,
     pub spec_args: Vec<(String, SpecializationBits)>,
+    pub scalar_hints: Vec<(String, DivHint)>,
     pub const_grid: Option<(u32, u32, u32)>,
 }
 
@@ -635,6 +640,7 @@ impl WarmupSpec {
             function_generics: generics,
             stride_args: vec![],
             spec_args: vec![],
+            scalar_hints: vec![],
             const_grid: None,
         }
     }
@@ -648,6 +654,12 @@ impl WarmupSpec {
     /// Set specialization arguments for this spec.
     pub fn with_spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
         self.spec_args = spec_args;
+        self
+    }
+
+    /// Set scalar divisibility hints for this spec.
+    pub fn with_scalar_hints(mut self, scalar_hints: Vec<(String, DivHint)>) -> Self {
+        self.scalar_hints = scalar_hints;
         self
     }
 
@@ -668,7 +680,7 @@ impl WarmupSpec {
 ///
 /// ```rust,ignore
 /// compile_warmup(
-///     || linalg::_module_asts(),
+///     || linalg::__module_ast_self(),
 ///     &linalg::_entries(),
 ///     "linalg",
 ///     linalg::_SOURCE_HASH,
@@ -679,7 +691,7 @@ impl WarmupSpec {
 ///     ],
 /// )?;
 /// ```
-pub fn compile_warmup<F: Fn() -> Vec<Module>>(
+pub fn compile_warmup<F: Fn() -> Module>(
     module_asts: F,
     entries: &[EntryMeta],
     module_name: &str,
@@ -694,7 +706,7 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
     let cuda_toolkit_version = get_cuda_toolkit_version();
 
     // Build module ASTs once, shared across all specs in this warmup call.
-    let modules = CUDATileModules::new(module_asts())?;
+    let modules = CUDATileModules::from_kernel(module_asts())?;
 
     for spec in specs {
         // Find matching entry metadata.
@@ -714,6 +726,7 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
             spec.function_generics.clone(),
             spec.stride_args.clone(),
             spec.spec_args.clone(),
+            spec.scalar_hints.clone(),
             spec.const_grid,
             CompileOptions::default(),
             source_hash.to_string(),
@@ -760,6 +773,11 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                         .collect::<Vec<_>>(),
                     &spec
                         .spec_args
+                        .iter()
+                        .map(|x| (x.0.as_str(), &x.1))
+                        .collect::<Vec<_>>(),
+                    &spec
+                        .scalar_hints
                         .iter()
                         .map(|x| (x.0.as_str(), &x.1))
                         .collect::<Vec<_>>(),
@@ -815,13 +833,18 @@ pub fn compile_warmup<F: Fn() -> Vec<Module>>(
                     .iter()
                     .map(|x| (x.0.as_str(), &x.1))
                     .collect::<Vec<_>>(),
+                &spec
+                    .scalar_hints
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
                 spec.const_grid,
                 gpu_name.clone(),
                 &key.compile_options,
             )?;
             let validator = Arc::new(compiler.get_validator());
             let module_op = compiler.compile()?;
-            let cubin_filename = compile_module(&module_op, &gpu_name);
+            let cubin_filename = compile_tile_ir_module(&module_op, &gpu_name);
             let jit_elapsed = t0.elapsed();
 
             // Persist to disk cache.

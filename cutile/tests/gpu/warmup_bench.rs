@@ -39,8 +39,8 @@ mod bench_module {
         x: &Tensor<T, { [-1] }>,
         y: &Tensor<T, { [-1] }>,
     ) {
-        let tile_x = load_tile_like_1d(x, z);
-        let tile_y = load_tile_like_1d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }

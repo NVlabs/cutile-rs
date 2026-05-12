@@ -35,8 +35,8 @@ mod warmup_test_module {
         x: &Tensor<T, { [-1] }>,
         y: &Tensor<T, { [-1] }>,
     ) {
-        let tile_x = load_tile_like_1d(x, z);
-        let tile_y = load_tile_like_1d(y, z);
+        let tile_x = load_tile_like(x, z);
+        let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
 }
@@ -528,7 +528,7 @@ fn load_module_from_bytes_concurrent() {
 
         // Get cubin bytes by compiling the kernel and reading the output file.
         let modules =
-            cutile_compiler::compiler::CUDATileModules::new(warmup_test_module::_module_asts())
+            cutile_compiler::compiler::CUDATileModules::new(vec![warmup_test_module::__module_ast_self()])
                 .unwrap();
         let compiler = cutile_compiler::compiler::CUDATileFunctionCompiler::new(
             &modules,
@@ -541,6 +541,7 @@ fn load_module_from_bytes_concurrent() {
                 ("y", &[1i32][..]),
             ],
             &[],
+            &[],
             None,
             gpu_name.clone(),
             &CompileOptions::default(),
@@ -548,7 +549,7 @@ fn load_module_from_bytes_concurrent() {
         .unwrap();
         let module_op = compiler.compile().unwrap();
         let cubin_filename =
-            cutile_compiler::cuda_tile_runtime_utils::compile_module(&module_op, &gpu_name);
+            cutile_compiler::cuda_tile_runtime_utils::compile_tile_ir_module(&module_op, &gpu_name);
         let cubin_bytes = std::fs::read(&cubin_filename).expect("failed to read cubin");
 
         // Spawn multiple threads, each loading the same cubin bytes.

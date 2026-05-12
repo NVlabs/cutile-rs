@@ -170,8 +170,6 @@ pub struct AsyncDeviceContext {
     deallocator_stream: Arc<Stream>,
     policy: Arc<dyn SchedulingPolicy>,
     pool: Option<Arc<MemPool>>,
-    functions: DeviceFunctions,
-    validators: DeviceFunctionValidators,
 }
 
 pub struct AsyncDeviceContexts {
@@ -245,8 +243,6 @@ pub fn new_device_context(
         deallocator_stream,
         policy,
         pool: None,
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     })
 }
 
@@ -286,8 +282,6 @@ pub fn init_with_default_policy(
         deallocator_stream,
         policy: Arc::new(policy),
         pool: None,
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     };
     let pred = hashmap.insert(device_id, device_context).is_none();
     device_assert(device_id, pred, "Device is already initialized.")

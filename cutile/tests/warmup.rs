@@ -9,7 +9,7 @@
 //! - `warmup_*` tests require GPU (compile + launch).
 
 use cutile::tile_kernel::{CompileOptions, EntryMeta, FunctionKey, TileFunctionKey, WarmupSpec};
-use cutile_compiler::specialization::SpecializationBits;
+use cutile_compiler::specialization::{DivHint, SpecializationBits};
 
 fn default_key() -> cutile::tile_kernel::TileFunctionKeyBuilder {
     TileFunctionKey::builder("m", "f")
@@ -127,17 +127,17 @@ fn cache_key_source_hash_change_invalidates() {
 #[test]
 fn cache_key_different_spec_args() {
     let spec_aligned = SpecializationBits {
-        shape_div: vec![16, 16],
-        stride_div: vec![16, 16],
+        shape_div: vec![DivHint::from_value(16), DivHint::from_value(16)],
+        stride_div: vec![DivHint::from_value(16), DivHint::from_value(16)],
         stride_one: vec![false, true],
-        base_ptr_div: 16,
+        base_ptr_div: DivHint::from_ptr(16),
         elements_disjoint: true,
     };
     let spec_misaligned = SpecializationBits {
-        shape_div: vec![4, 4],
-        stride_div: vec![4, 4],
+        shape_div: vec![DivHint::from_value(4), DivHint::from_value(4)],
+        stride_div: vec![DivHint::from_value(4), DivHint::from_value(4)],
         stride_one: vec![false, true],
-        base_ptr_div: 4,
+        base_ptr_div: DivHint::from_ptr(4),
         elements_disjoint: true,
     };
     let key_a = default_key()
