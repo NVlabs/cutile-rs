@@ -7,6 +7,7 @@
 //! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
 
 use crate::ast::SourceLocation;
+use crate::compiler::_module::CUDATileModules;
 use crate::error::{JITError, SpannedJITError};
 use crate::generics::{GenericVars, TypeInstance};
 use crate::hints::OptimizationHints;
@@ -24,6 +25,12 @@ use syn::punctuated::Punctuated;
 use syn::visit_mut::VisitMut;
 use syn::{Expr, FnArg, GenericArgument, ItemFn, ItemImpl, Lit, Stmt, Token};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TensorParamKind {
+    Tensor,
+    MappedPartitionMut { map_shape: String },
+}
+
 struct TensorInput {
     pub fn_name: String,
     pub var_name: String,
@@ -31,6 +38,7 @@ struct TensorInput {
     pub dim_type: String,
     pub rank: i32,
     input_tensor_shape: InputTensorShape,
+    param_kind: TensorParamKind,
     static_strides: Vec<String>,
     pub mutable: bool,
     pub max_divisibility: Option<i32>,
@@ -54,6 +62,7 @@ impl TensorInput {
         let Some(element_type) = get_tensor_element_type(ty, primitives, generic_vars)? else {
             return SourceLocation::unknown().jit_error_result("Failed to get element type.");
         };
+        let param_kind = get_tensor_param_kind(ty)?;
         let var_name = get_fn_arg_var_name(src_fn_arg);
         let input_tensor_shape = get_tensor_shape(ty, generic_vars)?;
         let static_strides = stride_args
@@ -64,7 +73,8 @@ impl TensorInput {
             .collect::<Vec<_>>();
         let dim_type = "i32".to_string();
         let rank = input_tensor_shape.shape.len() as i32;
-        let mutable = get_type_mutability(ty);
+        let mutable = get_type_mutability(ty)
+            || matches!(param_kind, TensorParamKind::MappedPartitionMut { .. });
         let max_divisibility = opt_hints
             .target_gpu_name
             .as_ref()
@@ -78,6 +88,7 @@ impl TensorInput {
             dim_type,
             rank,
             input_tensor_shape,
+            param_kind,
             static_strides,
             mutable,
             max_divisibility,
@@ -108,6 +119,12 @@ impl TensorInput {
     }
 
     pub fn validate(&self) -> Result<(), JITError> {
+        if let TensorParamKind::MappedPartitionMut { .. } = &self.param_kind {
+            if self.rank != 2 {
+                return SourceLocation::unknown()
+                    .jit_error_result("swizzled MappedPartitionMut parameters must have rank 2.");
+            }
+        }
         if self.mutable {
             // If it's mutable, it must be at most rank 3.
             if self.rank > 3 {
@@ -355,21 +372,88 @@ impl TensorInput {
 
         let final_shape_var = shape_var.clone();
 
-        let tensor_stmnt = syn::parse2::<syn::Stmt>(
-            format!("let {var_name}: Tensor<{element_type}, {shape_param}> = unsafe {{ make_tensor_view({final_ptr_var}, {final_shape_var}, {strides_array_var}, {token_var}) }};").parse().unwrap()
-        ).unwrap();
-        statements.push(tensor_stmnt);
+        match &self.param_kind {
+            TensorParamKind::Tensor => {
+                let tensor_stmnt = syn::parse2::<syn::Stmt>(
+                    format!("let {var_name}: Tensor<{element_type}, {shape_param}> = unsafe {{ make_tensor_view({final_ptr_var}, {final_shape_var}, {strides_array_var}, {token_var}) }};").parse().unwrap()
+                ).unwrap();
+                statements.push(tensor_stmnt);
+            }
+            TensorParamKind::MappedPartitionMut { map_shape } => {
+                let tensor_var = format!("{var_name}_tensor");
+                let tensor_stmnt = syn::parse2::<syn::Stmt>(
+                    format!("let {tensor_var}: Tensor<{element_type}, {shape_param}> = unsafe {{ make_tensor_view({final_ptr_var}, {final_shape_var}, {strides_array_var}, {token_var}) }};").parse().unwrap()
+                ).unwrap();
+                statements.push(tensor_stmnt);
+
+                let partition_shape_var = format!("{var_name}_partition_shape");
+                let partition_shape_stmnt = syn::parse2::<syn::Stmt>(
+                    format!("let {partition_shape_var}: Shape<{shape_param}> = Shape::<{shape_param}>{{ dims: &[] }};").parse().unwrap()
+                ).unwrap();
+                statements.push(partition_shape_stmnt);
+
+                let scheduled_stmnt = syn::parse2::<syn::Stmt>(
+                    format!("let mut {var_name}: MappedPartitionMut<{element_type}, {shape_param}, {map_shape}> = unsafe {{ make_mapped_partition_view::<{element_type}, {shape_param}, {shape_param}, {map_shape}, padding::None>(&{tensor_var}, {partition_shape_var}, padding::None, {token_var}) }};").parse().unwrap()
+                ).unwrap();
+                statements.push(scheduled_stmnt);
+            }
+        }
         statements
     }
     fn generate_arg(&self) -> Expr {
-        let ref_type = if self.mutable { "&mut" } else { "&" };
         let var_name = self.var_name.clone();
+        if matches!(self.param_kind, TensorParamKind::MappedPartitionMut { .. }) {
+            return syn::parse2::<syn::Expr>(var_name.parse().unwrap()).unwrap();
+        }
+        let ref_type = if self.mutable { "&mut" } else { "&" };
         syn::parse2::<syn::Expr>(format!("{ref_type} {var_name}").parse().unwrap()).unwrap()
+    }
+}
+
+fn normalized_fn_arg_type(param: &FnArg, ty: syn::Type) -> Result<FnArg, JITError> {
+    let FnArg::Typed(typed_param) = param else {
+        return SourceLocation::unknown().jit_error_result("Unexpected receiver argument.");
+    };
+    let mut typed_param = typed_param.clone();
+    typed_param.ty = Box::new(ty);
+    Ok(FnArg::Typed(typed_param))
+}
+
+fn get_tensor_param_kind(ty: &syn::Type) -> Result<TensorParamKind, JITError> {
+    let (type_ident, type_generic_args) = get_ident_generic_args(ty);
+    let Some(type_ident) = type_ident else {
+        return SourceLocation::unknown().jit_error_result("Expected tensor parameter type.");
+    };
+    match type_ident.to_string().as_str() {
+        "Tensor" => Ok(TensorParamKind::Tensor),
+        "MappedPartitionMut" => {
+            let Some(map_shape) = type_generic_args.args.iter().nth(2) else {
+                return SourceLocation::unknown().jit_error_result(
+                    "MappedPartitionMut expects map shape as its third generic argument.",
+                );
+            };
+            Ok(TensorParamKind::MappedPartitionMut {
+                map_shape: generic_arg_to_const_array_string(map_shape)?,
+            })
+        }
+        other => SourceLocation::unknown().jit_error_result(&format!(
+            "Unsupported tensor-like parameter type `{other}`."
+        )),
+    }
+}
+
+fn generic_arg_to_const_array_string(arg: &GenericArgument) -> Result<String, JITError> {
+    match arg {
+        GenericArgument::Const(expr) => Ok(expr.to_token_stream().to_string()),
+        GenericArgument::Type(syn::Type::Path(path)) => Ok(path.to_token_stream().to_string()),
+        _ => SourceLocation::unknown()
+            .jit_error_result("MappedPartitionMut map shape must be an i32 const generic array."),
     }
 }
 
 /// Generates an MLIR entry-point wrapper for a kernel function, including tensor argument unpacking.
 pub fn generate_entry_point(
+    modules: &CUDATileModules,
     fn_item: &ItemFn,
     generic_vars: &GenericVars,
     stride_args: &HashMap<String, Vec<i32>>,
@@ -397,12 +481,14 @@ pub fn generate_entry_point(
                 return SourceLocation::unknown().jit_error_result("Unexpected receiver argument.");
             }
             FnArg::Typed(typed_param) => {
-                let ty = &*typed_param.ty;
+                let normalized_ty = modules.normalize_type_aliases(&typed_param.ty)?;
+                let normalized_param = normalized_fn_arg_type(param, normalized_ty.clone())?;
+                let ty = &normalized_ty;
                 match ty {
                     syn::Type::Reference(_type_ref) => {
                         let tensor_input = TensorInput::new(
                             fn_name.clone(),
-                            param,
+                            &normalized_param,
                             generic_vars,
                             stride_args,
                             spec_args,
@@ -429,6 +515,44 @@ pub fn generate_entry_point(
                         }))
                     }
                     syn::Type::Path(type_path) => {
+                        let type_name = get_ident_from_path_expr(&syn::ExprPath {
+                            attrs: vec![],
+                            qself: None,
+                            path: type_path.path.clone(),
+                        })
+                        .to_string();
+                        if type_name == "MappedPartitionMut" {
+                            let tensor_input = TensorInput::new(
+                                fn_name.clone(),
+                                &normalized_param,
+                                generic_vars,
+                                stride_args,
+                                spec_args,
+                                primitives,
+                                opt_hints,
+                            )?;
+                            statements.extend(tensor_input.generate_statements());
+                            final_stmnt_args.push(tensor_input.generate_arg());
+                            fn_entry.sig.inputs.extend(tensor_input.generate_args());
+                            fn_params_concrete_types.push(ValidParamType::Tensor(
+                                TensorParamType {
+                                    element_type: tensor_input.element_type,
+                                    shape: tensor_input
+                                        .input_tensor_shape
+                                        .shape
+                                        .iter()
+                                        .map(|s| {
+                                            if s == "- 1" {
+                                                -1
+                                            } else {
+                                                s.parse::<i32>().expect(format!("{s}").as_str())
+                                            }
+                                        })
+                                        .collect::<Vec<i32>>(),
+                                },
+                            ));
+                            continue;
+                        }
                         let var_name = get_fn_arg_var_name(param);
                         final_stmnt_args
                             .push(syn::parse2::<Expr>(var_name.parse().unwrap()).unwrap());
@@ -569,7 +693,7 @@ pub fn get_tensor_shape(
                     syn::Type::Path(type_path) => {
                         let last_ident = type_path.path.segments.last().unwrap().ident.to_string();
                         // println!("get_variadic_type_args: Type::Path: {}", last_ident);
-                        if generic_vars.inst_array.contains_key(&last_ident) {
+                        if shape.is_none() && generic_vars.inst_array.contains_key(&last_ident) {
                             // This is something like Shape<D> for const generic array D: [i32; N].
                             let array_instance = generic_vars.inst_array.get(&last_ident).unwrap();
                             shape = Some(InputTensorShape {
@@ -631,6 +755,36 @@ pub fn get_tensor_shape(
                                                 }
                                             }
                                         }
+                                        Expr::Index(index) => {
+                                            let Expr::Path(path) = index.expr.as_ref() else {
+                                                return SourceLocation::unknown().jit_error_result(
+                                                    &format!(
+                                                    "Unexpected const generic array base {elem:#?}"
+                                                ),
+                                                );
+                                            };
+                                            let ident = get_ident_from_path_expr(path);
+                                            let Some(shape) = generic_vars
+                                                .inst_array
+                                                .get(ident.to_string().as_str())
+                                            else {
+                                                return SourceLocation::unknown()
+                                                    .jit_error_result(&format!(
+                                                        "Undefined const generic array parameter {ident}"
+                                                    ));
+                                            };
+                                            let i = crate::types::parse_signed_literal_as_i32(
+                                                &index.index,
+                                            );
+                                            let Some(dim) = shape.get(i as usize) else {
+                                                return SourceLocation::unknown()
+                                                    .jit_error_result(&format!(
+                                                        "Index {i} out of bounds for const generic array `{ident}` of length {}",
+                                                        shape.len()
+                                                    ));
+                                            };
+                                            _shape.push(dim.to_string());
+                                        }
                                         _ => {
                                             return SourceLocation::unknown().jit_error_result(
                                                 &format!(
@@ -640,11 +794,13 @@ pub fn get_tensor_shape(
                                         }
                                     }
                                 }
-                                shape = Some(InputTensorShape {
-                                    generic_cga_var: None,
-                                    shape_param: block_expr.block.to_token_stream().to_string(),
-                                    shape: _shape,
-                                });
+                                if shape.is_none() {
+                                    shape = Some(InputTensorShape {
+                                        generic_cga_var: None,
+                                        shape_param: block_expr.block.to_token_stream().to_string(),
+                                        shape: _shape,
+                                    });
+                                }
                             }
                             Expr::Repeat(repeat_expr) => {
                                 // println!("Expr::Repeat: {:?}", repeat_expr.expr);
@@ -663,14 +819,16 @@ pub fn get_tensor_shape(
                                             );
                                         }
                                         let num_rep = generic_vars.get_i32(&num_rep_var).unwrap();
-                                        shape = Some(InputTensorShape {
-                                            generic_cga_var: None,
-                                            shape_param: block_expr
-                                                .block
-                                                .to_token_stream()
-                                                .to_string(),
-                                            shape: vec![thing_to_repeat; num_rep as usize],
-                                        });
+                                        if shape.is_none() {
+                                            shape = Some(InputTensorShape {
+                                                generic_cga_var: None,
+                                                shape_param: block_expr
+                                                    .block
+                                                    .to_token_stream()
+                                                    .to_string(),
+                                                shape: vec![thing_to_repeat; num_rep as usize],
+                                            });
+                                        }
                                     }
                                     Expr::Lit(len_lit) => {
                                         // This is something like Tensor<E, {[-1; 3]}>
@@ -679,14 +837,16 @@ pub fn get_tensor_shape(
                                             .to_string()
                                             .parse::<u32>()
                                             .unwrap();
-                                        shape = Some(InputTensorShape {
-                                            generic_cga_var: None,
-                                            shape_param: block_expr
-                                                .block
-                                                .to_token_stream()
-                                                .to_string(),
-                                            shape: vec![thing_to_repeat; num_rep as usize],
-                                        });
+                                        if shape.is_none() {
+                                            shape = Some(InputTensorShape {
+                                                generic_cga_var: None,
+                                                shape_param: block_expr
+                                                    .block
+                                                    .to_token_stream()
+                                                    .to_string(),
+                                                shape: vec![thing_to_repeat; num_rep as usize],
+                                            });
+                                        }
                                     }
                                     _ => {
                                         return SourceLocation::unknown().jit_error_result(

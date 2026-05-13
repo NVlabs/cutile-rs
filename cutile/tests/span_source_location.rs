@@ -40,8 +40,12 @@ use cutile_compiler::error::JITError;
 
 mod common;
 
+fn unsupported_dsl_call() -> i32 {
+    0
+}
+
 // ---------------------------------------------------------------------------
-// Test 1 – Comment-free module: untyped numeric literal produces a Located
+// Test 1 – Comment-free module: unsupported DSL expression produces a Located
 //           error with the EXACT source file, line number, and column number.
 // ---------------------------------------------------------------------------
 //
@@ -54,7 +58,7 @@ mod span_error_module {
     use cutile::core::*;
     #[cutile::entry()]
     fn untyped_literal_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
-        let _x = 42;
+        let _x = super::unsupported_dsl_call();
         let tile = load_tile_mut(output);
         output.store(tile);
     }
@@ -87,12 +91,14 @@ fn untyped_literal_error_has_correct_source_location() {
         let err = match compile_result {
             Err(e) => e,
             Ok(_) => {
-                panic!("Expected compilation to fail for an untyped literal, but it succeeded.")
+                panic!(
+                    "Expected compilation to fail for an unsupported DSL call, but it succeeded."
+                )
             }
         };
 
         let err_string = format!("{err}");
-        println!("\n=== UNTYPED LITERAL ERROR ===\n{err_string}");
+        println!("\n=== UNSUPPORTED DSL CALL ERROR ===\n{err_string}");
 
         // The error must be a Located variant carrying a real source location.
         match &err {
@@ -109,7 +115,7 @@ fn untyped_literal_error_has_correct_source_location() {
                     loc.file
                 );
 
-                // Find the expected line for `let _x = 42;` by scanning this
+                // Find the expected line for the unsupported helper call by scanning this
                 // file's own source text.  This avoids hard-coding a line
                 // number that would break whenever the file is edited.
                 let source = include_str!("span_source_location.rs");
@@ -121,33 +127,33 @@ fn untyped_literal_error_has_correct_source_location() {
                     // comments contain `//` or `///` before it.
                     .find(|(_, line)| {
                         let trimmed = line.trim_start();
-                        trimmed.starts_with("let _x = 42;")
+                        trimmed.starts_with("let _x = super::unsupported_dsl_call();")
                     })
                     .map(|(idx, _)| idx + 1) // 1-indexed
-                    .expect("Could not find 'let _x = 42;' marker in test source");
+                    .expect("Could not find unsupported helper call marker in test source");
 
                 assert_eq!(
                     loc.line, expected_line,
-                    "Expected error on line {expected_line} ('let _x = 42;'), got line {}",
+                    "Expected error on line {expected_line} ('let _x = super::unsupported_dsl_call();'), got line {}",
                     loc.line
                 );
 
-                // Column: should point to `42`, which comes after `let _x = `.
+                // Column: should point into the unsupported call.
                 // We verify it is non-zero and plausible.
                 assert!(
                     loc.column > 0,
-                    "Expected a non-zero column for the literal, got {}",
+                    "Expected a non-zero column for the unsupported call, got {}",
                     loc.column
                 );
 
-                // The error message should mention the literal.
+                // The error message should mention the unsupported call.
                 assert!(
-                    msg.contains("42"),
-                    "Expected error message to mention the literal '42', got: {msg}"
+                    msg.contains("unsupported_dsl_call") || msg.contains("not supported"),
+                    "Expected error message to mention the unsupported call, got: {msg}"
                 );
 
                 println!(
-                    "\n✓ Untyped literal error correctly located at {}:{}:{}\n  message: {msg}",
+                    "\n✓ Unsupported DSL call error correctly located at {}:{}:{}\n  message: {msg}",
                     loc.file, loc.line, loc.column
                 );
             }
@@ -167,7 +173,7 @@ fn untyped_literal_error_has_correct_source_location() {
 // should be exact even with comments everywhere.  We verify:
 //   a) The error is a Located variant with a known source location.
 //   b) The file path is correct.
-//   c) The reported line matches the EXACT line of `let _y = 99;`.
+//   c) The reported line matches the EXACT line of the unsupported helper call.
 //   d) The column is non-zero.
 
 // A comment OUTSIDE the macro — shifts the module's base_line but must not
@@ -196,7 +202,7 @@ mod span_comments_module {
     ) {
         // Comment inside body.
         // Yet another comment.
-        let _y = 99;
+        let _y = super::unsupported_dsl_call();
         let tile = load_tile_mut(output);
         output.store(tile);
     }
@@ -227,7 +233,7 @@ fn comments_do_not_break_span_tracking() {
         let err = match compile_result {
             Err(e) => e,
             Ok(_) => panic!(
-                "Expected compilation to fail for an untyped literal inside \
+                "Expected compilation to fail for an unsupported DSL call inside \
                  commented module, but it succeeded."
             ),
         };
@@ -252,7 +258,7 @@ fn comments_do_not_break_span_tracking() {
                 );
 
                 // (c) The reported line must EXACTLY match the line containing
-                //     `let _y = 99;`.  Because `Span::source_text()` preserves
+                //     the unsupported helper call. Because `Span::source_text()` preserves
                 //     comments in the captured text, the span-base arithmetic
                 //     produces the correct absolute line even when comments
                 //     appear inside the module body.
@@ -263,14 +269,14 @@ fn comments_do_not_break_span_tracking() {
                     // Match the actual code line, not comments that mention it.
                     .find(|(_, line)| {
                         let trimmed = line.trim_start();
-                        trimmed.starts_with("let _y = 99;")
+                        trimmed.starts_with("let _y = super::unsupported_dsl_call();")
                     })
                     .map(|(idx, _)| idx + 1)
-                    .expect("Could not find 'let _y = 99;' marker in test source");
+                    .expect("Could not find unsupported helper call marker in test source");
 
                 assert_eq!(
                     loc.line, expected_line,
-                    "Expected error on line {expected_line} ('let _y = 99;'), got line {}.\n\
+                    "Expected error on line {expected_line} ('let _y = super::unsupported_dsl_call();'), got line {}.\n\
                      Comments should NOT affect line numbers when source_text() is used.",
                     loc.line
                 );
@@ -282,10 +288,10 @@ fn comments_do_not_break_span_tracking() {
                     loc.column
                 );
 
-                // The error message should reference the literal value.
+                // The error message should reference the unsupported call.
                 assert!(
-                    msg.contains("99"),
-                    "Expected error message to reference '99', got: {msg}"
+                    msg.contains("unsupported_dsl_call") || msg.contains("not supported"),
+                    "Expected error message to reference the unsupported call, got: {msg}"
                 );
 
                 println!(

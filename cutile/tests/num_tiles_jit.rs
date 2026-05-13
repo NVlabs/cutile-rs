@@ -62,6 +62,15 @@ mod num_tiles_kernels {
         out.store(tile);
     }
 
+    /// Reads shape dimensions through ordinary indexing syntax.
+    #[cutile::entry()]
+    fn shape_index_queries(input: &Tensor<f32, { [-1, -1] }>, out: &mut Tensor<i32, { [1] }>) {
+        let m: i32 = input.shape()[0];
+        let n: i32 = input.shape()[1];
+        let tile: Tile<i32, { [1] }> = broadcast_scalar(m * 100i32 + n, const_shape![1]);
+        out.store(tile);
+    }
+
     /// Uses a dynamic `num_tiles` loop bound over a statically-shaped tensor.
     ///
     /// The returned value must remain the SSA result from
@@ -76,6 +85,21 @@ mod num_tiles_kernels {
         let nk: i32 = num_tiles(&part, 0);
         let mut tile: Tile<f32, { [BK] }> = broadcast_scalar(0.0f32, const_shape![BK]);
         for i in 0i32..nk {
+            tile = tile + part.load([i]);
+        }
+        out.store(tile);
+    }
+
+    /// Explicit `Dim` values are source-level iterable proof objects.
+    #[cutile::entry()]
+    fn explicit_dim_loop_bounds<const BK: i32, const K: i32>(
+        input: &Tensor<f32, { [K] }>,
+        out: &mut Tensor<f32, { [BK] }>,
+    ) {
+        let part = input.partition(const_shape![BK]);
+        let nk = num_tiles(&part, 0).into_dim();
+        let mut tile: Tile<f32, { [BK] }> = broadcast_scalar(0.0f32, const_shape![BK]);
+        for i in nk {
             tile = tile + part.load([i]);
         }
         out.store(tile);
@@ -160,6 +184,21 @@ fn raw_view_shape_queries_emit_view_ops() {
 }
 
 #[test]
+fn shape_index_queries_compile_as_shape_value_access() {
+    common::with_test_stack(|| {
+        let mlir = compile(
+            "shape_index_queries",
+            &[],
+            &[("input", &[-1, -1]), ("out", &[1])],
+        );
+        assert!(
+            mlir.contains("muli") && mlir.contains("addi"),
+            "expected shape indexing to compile as arithmetic over shape dimension values"
+        );
+    });
+}
+
+#[test]
 fn static_num_tiles_loop_keeps_dynamic_upper_bound_but_proves_access() {
     common::with_test_stack(|| {
         let mlir = compile(
@@ -190,6 +229,25 @@ fn static_num_tiles_loop_keeps_dynamic_upper_bound_but_proves_access() {
         assert!(
             !mlir.contains("partition access out of bounds"),
             "expected static bounds on `num_tiles` to discharge the partition access check"
+        );
+    });
+}
+
+#[test]
+fn explicit_dim_loop_iterates_as_dynamic_upper_bound_and_proves_access() {
+    common::with_test_stack(|| {
+        let mlir = compile(
+            "explicit_dim_loop_bounds",
+            &[8.to_string(), 32.to_string()],
+            &[("input", &[1]), ("out", &[1])],
+        );
+        assert!(
+            mlir.contains("get_index_space_shape"),
+            "expected `num_tiles` to lower to a dynamic `get_index_space_shape` result"
+        );
+        assert!(
+            !mlir.contains("partition access out of bounds"),
+            "expected explicit Dim iteration to discharge the partition access check"
         );
     });
 }

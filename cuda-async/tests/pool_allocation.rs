@@ -357,7 +357,6 @@ fn mem_stats_initially_zero() {
     });
 }
 
-
 #[test]
 fn mem_stats_track_alloc_and_free() {
     on_fresh_thread(|| {

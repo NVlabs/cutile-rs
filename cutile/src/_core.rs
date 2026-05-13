@@ -416,6 +416,60 @@ pub mod core {
         }
     }
 
+    /// Module-scope mutable global memory.
+    ///
+    /// `Global` is declared as a Rust `static` inside a `#[cutile::module]`.
+    /// The Rust value is an immutable descriptor; mutability lives in the
+    /// device storage and is exposed through ordered memory operations.
+    #[cuda_tile::variadic_struct(N = 6)]
+    #[derive(Copy, Clone)]
+    pub struct Global<E: ElementType, const D: [i32; N]> {
+        _type: PhantomData<E>,
+    }
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    unsafe impl<E: ElementType, const D: [i32; N]> Sync for Global<E, D> {}
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<E: ElementType, const D: [i32; N]> Global<E, D> {
+        /// Declare a global with a scalar initializer.
+        ///
+        /// Today the JIT compiler only lowers scalar globals
+        /// (`Global<E, { [] }>`). Shaped globals are reserved for a follow-up pass.
+        pub const fn new(_value: E) -> Self {
+            Self { _type: PhantomData }
+        }
+
+        /// Load the scalar global. Returns the loaded value and completion token.
+        pub fn load<O: ordering::LoadMode, Sc: scope::Mode>(
+            &self,
+            memory_ordering: O,
+            memory_scope: Sc,
+        ) -> (Tile<E, D>, Token) {
+            unreachable!()
+        }
+
+        /// Store to the scalar global. Returns the completion token.
+        pub fn store<O: ordering::StoreMode, Sc: scope::Mode>(
+            &self,
+            value: Tile<E, D>,
+            memory_ordering: O,
+            memory_scope: Sc,
+        ) -> Token {
+            unreachable!()
+        }
+
+        /// Atomic add on the scalar global. Returns the old value and token.
+        pub fn atomic_add<O: ordering::AtomicMode, Sc: scope::Mode>(
+            &self,
+            value: Tile<E, D>,
+            memory_ordering: O,
+            memory_scope: Sc,
+        ) -> (Tile<E, D>, Token) {
+            unreachable!()
+        }
+    }
+
     // ---- §5.3 TENSOR TYPES (Tile, Tensor, Partition, PartitionMut) ---------
 
     /// Multi-dimensional array stored in registers / shared memory. The unit
@@ -534,7 +588,7 @@ pub mod core {
             // TODO (hme): Bounds checks.
             let tensor_token: Token = get_tensor_token(self);
             let p: Partition<E, R> =
-                make_partition_view(self, tile, padding::None, dim_map, tensor_token);
+                make_partition_view(self, tile, padding::Zero, dim_map, tensor_token);
             p
         }
         pub unsafe fn partition_mut<'a, const R: [i32; N]>(
@@ -550,12 +604,193 @@ pub mod core {
             p
         }
 
+        /// Build a mutable partition over the full tensor view.
+        ///
+        /// Unlike [`Tensor::partition_mut`], this does not offset accesses by
+        /// the current tile-block id. It is intended for schedule-driven
+        /// kernels that store through private `PartitionIndex` values.
+        pub unsafe fn partition_full_mut<'a, const R: [i32; N]>(
+            &'a self,
+            tile: Shape<R>,
+        ) -> PartitionMut<'a, E, R> {
+            let tensor_token: Token = get_tensor_token(self);
+            unsafe { make_partition_view_mut(self, tile, padding::None, tensor_token) }
+        }
+
         /// Returns the shape of this tensor.
         pub fn shape<'b>(&self) -> Shape<'b, S> {
             get_tensor_shape_meta(self)
         }
         pub fn load_tile<const R: [i32; N]>(&self, shape: Shape<R>, idx: [i32; N]) -> Tile<E, R> {
             load_tile(self, shape, idx)
+        }
+    }
+
+    /// Private logical index into a tensor partition grid.
+    ///
+    /// `PartitionIndex` values are produced by cutile schedule helpers. Safe
+    /// mutable partition stores accept this type instead of raw coordinates so
+    /// schedule construction is the boundary where bounds and disjointness are
+    /// established.
+    #[cuda_tile::variadic_struct(N = 6)]
+    #[derive(Copy, Clone)]
+    pub struct PartitionIndex<const D: [i32; N]> {
+        _type: PhantomData<()>,
+    }
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<const D: [i32; N]> PartitionIndex<D> {
+        pub fn coords(self) -> [i32; N] {
+            partition_index_coords(self)
+        }
+    }
+
+    impl<const D: [i32; 2]> PartitionIndex<D> {
+        pub fn components(self) -> (i32, i32) {
+            let coords = self.coords();
+            (coords[0], coords[1])
+        }
+    }
+
+    /// Bounded partition dimension.
+    ///
+    /// Iterating a `Dim` produces index values branded by the JIT as bounded by
+    /// that dimension.
+    #[derive(Copy, Clone)]
+    pub struct Dim {}
+
+    impl Dim {
+        pub fn new(size: i32) -> Dim {
+            dim_new(size)
+        }
+
+        pub fn value(self) -> i32 {
+            dim_value(self)
+        }
+    }
+
+    pub trait IntoDim {
+        fn into_dim(self) -> Dim;
+    }
+
+    impl IntoDim for Dim {
+        fn into_dim(self) -> Dim {
+            self
+        }
+    }
+
+    impl IntoDim for i32 {
+        fn into_dim(self) -> Dim {
+            dim_from_i32(self)
+        }
+    }
+
+    impl From<i32> for Dim {
+        fn from(value: i32) -> Self {
+            dim_from_i32(value)
+        }
+    }
+
+    pub struct DimIter {}
+
+    impl Iterator for DimIter {
+        type Item = i32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            unreachable!()
+        }
+    }
+
+    impl IntoIterator for Dim {
+        type Item = i32;
+        type IntoIter = DimIter;
+
+        fn into_iter(self) -> Self::IntoIter {
+            unreachable!()
+        }
+    }
+
+    /// Proof-carrying 2D coordinate produced from branded dimension indices.
+    #[derive(Copy, Clone)]
+    pub struct Coord2 {
+        _type: PhantomData<()>,
+    }
+
+    #[cuda_tile::compiler_op(name = "coord")]
+    pub fn coord(index: (i32, i32)) -> Coord2 {
+        unreachable!()
+    }
+
+    /// Iterator marker for mapped partition indices.
+    ///
+    /// This is a zero-sized Rust/shadow-typing surface. The JIT compiler
+    /// special-cases `for idx in mapped_partition.iter_indices()` and lowers it to
+    /// a persistent tile-block loop that mints private [`PartitionIndex`]
+    /// values.
+    #[cuda_tile::variadic_struct(N = 6)]
+    #[derive(Copy, Clone)]
+    pub struct PartitionIndices<const D: [i32; N], const M: [i32; N]> {
+        _type: PhantomData<()>,
+    }
+
+    impl<const D: [i32; 2], const M: [i32; 2]> Iterator for PartitionIndices<D, M> {
+        type Item = PartitionIndex<D>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            unreachable!()
+        }
+    }
+
+    /// Mutable partition view whose valid indices are produced by a partition map.
+    ///
+    /// A `MappedPartitionMut` lowers to the same Tile IR partition-view type as
+    /// `PartitionMut`, but its safe stores require a private [`PartitionIndex`]
+    /// generated by the matching partition map.
+    #[cuda_tile::ty(name="!cuda_tile.partition_view",
+                    type_params=["tile"],
+                    type_params_optional=["padding_value", "tensor_view"],
+                    type_meta=["token"])]
+    #[cuda_tile::variadic_struct(N = 6)]
+    pub struct MappedPartitionMut<E: ElementType, const D: [i32; N], const M: [i32; N]> {
+        _type: PhantomData<E>,
+    }
+
+    impl<E: ElementType, const D: [i32; 2], const M: [i32; 2]> MappedPartitionMut<E, D, M> {
+        /// Iterate the private disjoint indices generated by this partition map.
+        pub fn iter_indices(&self) -> PartitionIndices<D, M> {
+            unreachable!()
+        }
+
+        /// Map a flat persistent tile id into this partition's swizzled index.
+        ///
+        /// # Safety
+        ///
+        /// The caller must guarantee `tile_id` is in `0..num_bid_m*num_bid_n`
+        /// and both partition-grid dimensions are positive. Prefer
+        /// [`MappedPartitionMut::iter_indices`] when possible.
+        pub unsafe fn index(
+            &self,
+            tile_id: i32,
+            num_bid_m: i32,
+            num_bid_n: i32,
+        ) -> PartitionIndex<D> {
+            unsafe { swizzle_partition_index_2d::<D, M>(tile_id, num_bid_m, num_bid_n) }
+        }
+
+        /// Store `tile` at a map-produced disjoint partition index.
+        pub fn store(&mut self, tile: Tile<E, D>, index: PartitionIndex<D>) -> Token {
+            validate_partition_index(self, index);
+            unsafe {
+                store_view_tko_mapped_mut(
+                    self,
+                    tile,
+                    index.coords(),
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                )
+            }
         }
     }
 
@@ -583,6 +818,47 @@ pub mod core {
                 tma::Enabled,
             );
             result
+        }
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 2]> Partition<'a, E, D> {
+        pub fn with_bounds<A: IntoDim, B: IntoDim>(
+            self,
+            bounds: (A, B),
+        ) -> BoundedPartition<'a, E, D> {
+            partition_with_bounds(self, (bounds.0.into_dim(), bounds.1.into_dim()))
+        }
+
+        pub fn load_index(&self, index: PartitionIndex<D>) -> Tile<E, D> {
+            self.load(index.coords())
+        }
+    }
+
+    /// Read-only partition whose valid axes have been tied to `Dim` values.
+    ///
+    /// Safe loads require `coord((...))` built from indices produced by those
+    /// dimensions.
+    #[cuda_tile::ty(name="!cuda_tile.partition_view",
+                    type_params=["tile"],
+                    type_params_optional=["padding_value", "tensor_view", "dim_map"],
+                    type_meta=["token", "tensor_view.shape()"])]
+    #[cuda_tile::variadic_struct(N = 6)]
+    pub struct BoundedPartition<'a, E: ElementType, const D: [i32; N]> {
+        _type: PhantomData<E>,
+        _tensor: PhantomData<&'a ()>,
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 2]> BoundedPartition<'a, E, D> {
+        pub fn load(&self, index: Coord2) -> Tile<E, D> {
+            check_bounded_partition_access(self, index);
+            load_view_tko_bounded(
+                self,
+                coord2_as_array(index),
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            )
         }
     }
 
@@ -639,6 +915,12 @@ pub mod core {
         }
     }
 
+    impl<'a, E: ElementType, const D: [i32; 2]> PartitionMut<'a, E, D> {
+        pub fn store_index(&mut self, tile: Tile<E, D>, index: PartitionIndex<D>) -> Token {
+            unsafe { self.store(tile, index.coords()) }
+        }
+    }
+
     /// Memory-ordering token. Threaded through async memory ops to express
     /// dependencies; managed automatically by the load/store/partition APIs.
     #[cuda_tile::ty(name="!cuda_tile.token", params=[])]
@@ -655,6 +937,15 @@ pub mod core {
     #[derive(Copy, Clone)]
     pub struct Shape<'a, const D: [i32; N]> {
         pub dims: &'a [i32],
+    }
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<'a, const D: [i32; N]> ops::Index<usize> for Shape<'a, D> {
+        type Output = i32;
+
+        fn index(&self, index: usize) -> &Self::Output {
+            &self.dims[index]
+        }
     }
 
     /// Construct a compile-time `Shape` from literal dims (0–4D supported).
@@ -786,6 +1077,78 @@ pub mod core {
         part: &Partition<E, S>,
         index: [i32; N],
     ) {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "dim_new")]
+    pub fn dim_new(size: i32) -> Dim {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "dim_from_i32")]
+    pub fn dim_from_i32(size: i32) -> Dim {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "dim_value")]
+    pub fn dim_value(dim: Dim) -> i32 {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "coord_as_array")]
+    pub fn coord2_as_array(index: Coord2) -> [i32; 2] {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "partition_with_bounds")]
+    pub fn partition_with_bounds<'a, E: ElementType, const S: [i32; 2]>(
+        part: Partition<'a, E, S>,
+        bounds: (Dim, Dim),
+    ) -> BoundedPartition<'a, E, S> {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "check_bounded_partition_access")]
+    pub fn check_bounded_partition_access<E: ElementType, const S: [i32; 2]>(
+        part: &BoundedPartition<E, S>,
+        index: Coord2,
+    ) {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "partition_index_coords")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn partition_index_coords<const D: [i32; N]>(index: PartitionIndex<D>) -> [i32; N] {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "validate_partition_index")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn validate_partition_index<E: ElementType, const D: [i32; N], const M: [i32; N]>(
+        view: &MappedPartitionMut<E, D, M>,
+        index: PartitionIndex<D>,
+    ) {
+        unreachable!()
+    }
+
+    /// Map a flat tile id to a swizzled 2D partition index without checks.
+    ///
+    /// This is the map primitive used by persistent GEMM-style kernels:
+    /// CTAs iterate a flat tile-id stream, then this helper shapes each tile id
+    /// into an in-bounds `[m, n]` partition index with swizzled ordering.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee `tile_id` is in `0..num_bid_m*num_bid_n` and
+    /// both partition-grid dimensions are positive. The returned
+    /// `PartitionIndex` is a proof object, so constructing it with invalid
+    /// inputs can make later safe partition stores out of bounds.
+    #[cuda_tile::compiler_op(name = "swizzle_partition_index_2d")]
+    pub unsafe fn swizzle_partition_index_2d<const D: [i32; 2], const M: [i32; 2]>(
+        tile_id: i32,
+        num_bid_m: i32,
+        num_bid_n: i32,
+    ) -> PartitionIndex<D> {
         unreachable!()
     }
 
@@ -976,7 +1339,8 @@ pub mod core {
         unreachable!()
     }
 
-    /// Extract a dimension size from a `Shape`.
+    #[doc(hidden)]
+    /// Low-level compiler helper; prefer `shape[index]`.
     #[cuda_tile::variadic_op(N = 6)]
     #[cuda_tile::compiler_op(name = "shape")]
     pub fn get_shape_dim<const S: [i32; N]>(shape: Shape<S>, dim_idx: i32) -> i32 {
@@ -1044,8 +1408,7 @@ pub mod core {
     /// `axis` must be a compile-time constant in `0..N`. Lowers to
     /// `cuda_tile.get_index_space_shape` with axis-th result extracted.
     #[cuda_tile::compiler_op(name = "num_tiles")]
-    #[cuda_tile::variadic_op(N = 6)]
-    pub fn num_tiles<E: ElementType, const S: [i32; N]>(view: &Partition<E, S>, axis: i32) -> i32 {
+    pub fn num_tiles<V>(view: &V, axis: i32) -> i32 {
         unreachable!()
     }
 
@@ -1841,6 +2204,25 @@ pub mod core {
         unreachable!()
     }
 
+    /// `load_view_tko` for a proof-bounded read-only partition.
+    #[cuda_tile::op(name = "load_view_tko", params = ["view", "index"])]
+    pub fn load_view_tko_bounded<
+        E: ElementType,
+        const D: [i32; 2],
+        O: ordering::LoadMode,
+        Sc: scope::Mode,
+        T: tma::Mode,
+    >(
+        view: &BoundedPartition<E, D>,
+        index: [i32; 2],
+        memory_ordering: O,
+        memory_scope: Sc,
+        latency: Option<i32>,
+        tma: T,
+    ) -> Tile<E, D> {
+        unreachable!()
+    }
+
     /// `load_view_tko` for `PartitionMut`. Caller must ensure no aliasing.
     // TODO (hme): document safety
     #[cuda_tile::op(name = "load_view_tko", params = ["view", "index"])]
@@ -1875,6 +2257,29 @@ pub mod core {
         T: tma::Mode,
     >(
         view: &mut PartitionMut<E, D>,
+        tile: Tile<E, D>,
+        index: [i32; N],
+        memory_ordering: O,
+        memory_scope: Sc,
+        latency: Option<i32>,
+        tma: T,
+    ) -> Token {
+        unreachable!()
+    }
+
+    /// Store a tile into a mapped mutable partition at `index`.
+    /// `memory_ordering` ⊆ {Weak, Relaxed, Release}.
+    #[cuda_tile::op(name = "store_view_tko", params = ["view", "tile", "index"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn store_view_tko_mapped_mut<
+        E: ElementType,
+        const D: [i32; N],
+        const M: [i32; N],
+        O: ordering::StoreMode,
+        Sc: scope::Mode,
+        T: tma::Mode,
+    >(
+        view: &mut MappedPartitionMut<E, D, M>,
         tile: Tile<E, D>,
         index: [i32; N],
         memory_ordering: O,
@@ -1959,6 +2364,31 @@ pub mod core {
         padding_value: P,
         token: Token,
     ) -> PartitionMut<'a, E, TILE_SHAPE> {
+        unreachable!()
+    }
+
+    /// Build a mapped mutable partition view.
+    ///
+    /// This is used by generated entry wrappers for
+    /// `MappedPartitionMut<_, _, _>` parameters.
+    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+                    params=["tensor_view"],
+                    output_type_params=["tensor_view", "padding_value"],
+                    output_type_meta=["token"]
+    )]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn make_mapped_partition_view<
+        E: ElementType,
+        const TENSOR_SHAPE: [i32; N],
+        const TILE_SHAPE: [i32; N],
+        const MAP_SHAPE: [i32; N],
+        P: padding::Mode,
+    >(
+        tensor_view: &Tensor<E, TENSOR_SHAPE>,
+        shape: Shape<TILE_SHAPE>,
+        padding_value: P,
+        token: Token,
+    ) -> MappedPartitionMut<E, TILE_SHAPE, MAP_SHAPE> {
         unreachable!()
     }
 
@@ -2379,8 +2809,8 @@ pub mod core {
         fn load_tile_like(&self, y: &Y) -> Self::Out;
     }
 
-    impl<E1: ElementType, E2: ElementType, const S: [i32; 1]> LoadTileLike<Tensor<E2, S>>
-        for Tensor<E1, { [-1] }>
+    impl<E1: ElementType, E2: ElementType, const X: [i32; 1], const S: [i32; 1]>
+        LoadTileLike<Tensor<E2, S>> for Tensor<E1, X>
     {
         type Out = Tile<E1, S>;
 
@@ -2392,7 +2822,7 @@ pub mod core {
             let x_partition: Partition<E1, S> = make_partition_view(
                 x,
                 tile_shape,
-                padding::None,
+                padding::Zero,
                 dim_map::Identity,
                 tensor_token,
             );
@@ -2408,8 +2838,8 @@ pub mod core {
         }
     }
 
-    impl<E1: ElementType, E2: ElementType, const S: [i32; 2]> LoadTileLike<Tensor<E2, S>>
-        for Tensor<E1, { [-1, -1] }>
+    impl<E1: ElementType, E2: ElementType, const X: [i32; 2], const S: [i32; 2]>
+        LoadTileLike<Tensor<E2, S>> for Tensor<E1, X>
     {
         type Out = Tile<E1, S>;
 
@@ -2421,7 +2851,7 @@ pub mod core {
             let x_partition: Partition<E1, S> = make_partition_view(
                 x,
                 tile_shape,
-                padding::None,
+                padding::Zero,
                 dim_map::Identity,
                 tensor_token,
             );
@@ -2437,8 +2867,8 @@ pub mod core {
         }
     }
 
-    impl<E1: ElementType, E2: ElementType, const S: [i32; 3]> LoadTileLike<Tensor<E2, S>>
-        for Tensor<E1, { [-1, -1, -1] }>
+    impl<E1: ElementType, E2: ElementType, const X: [i32; 3], const S: [i32; 3]>
+        LoadTileLike<Tensor<E2, S>> for Tensor<E1, X>
     {
         type Out = Tile<E1, S>;
 
@@ -2450,7 +2880,7 @@ pub mod core {
             let x_partition: Partition<E1, S> = make_partition_view(
                 x,
                 tile_shape,
-                padding::None,
+                padding::Zero,
                 dim_map::Identity,
                 tensor_token,
             );

@@ -23,5 +23,6 @@
 
 pub mod name_resolution;
 pub mod node_ids;
+pub mod proof_analysis;
 pub mod type_inference;
 pub mod typed_dispatch_lowering;

@@ -24,6 +24,7 @@ use super::_value::{BlockTerminator, CompilerContext, Mutability, TileRustValue}
 use super::optimization_hints::{build_entry_optimization_hints, OptimizationHints};
 use super::shared_types::EntryAttrs;
 use super::tile_rust_type::TileRustType;
+use crate::passes::proof_analysis::ProofResults;
 
 use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
 use cutile_ir::bytecode::Opcode;
@@ -47,6 +48,7 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) entry: syn::ItemFn,
     pub(crate) entry_attrs: EntryAttrs,
     pub(crate) const_grid: Option<(u32, u32, u32)>,
+    pub(crate) proof_results: ProofResults,
     pub(crate) gpu_name: String,
     pub(crate) optimization_hints: OptimizationHints,
     pub(crate) stride_args: HashMap<String, Vec<i32>>,
@@ -54,6 +56,11 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) validator: Validator,
     pub(crate) module_name_stack: Vec<String>,
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
+}
+
+struct FunctionParamTypes {
+    names: Vec<String>,
+    tile_types: Vec<TileRustType>,
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
@@ -95,6 +102,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 ))
             })?;
         let entry_attrs = EntryAttrs { entry_attrs };
+        let proof_results = ProofResults::analyze_entry_attrs(&entry_attrs)?;
 
         // 5. Check unchecked_accesses.
         if entry_attrs.get_entry_arg_bool("unchecked_accesses") && function.sig.unsafety.is_none() {
@@ -124,7 +132,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .collect::<HashMap<_, _>>();
 
         // 8. Create GenericVars.
-        let generic_vars = GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
+        let mut generic_vars =
+            GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
+        Self::add_module_const_vars_from_modules(modules, &mut generic_vars);
 
         // 9. generate_entry_point.
         let spec_args_map: HashMap<String, crate::specialization::SpecializationBits> = spec_args
@@ -144,6 +154,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             })
             .collect();
         let (entry, validator) = generate_entry_point(
+            modules,
             &function,
             &generic_vars,
             &stride_args,
@@ -181,6 +192,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             _function_name: function_name.to_string(),
             entry_attrs,
             const_grid,
+            proof_results,
             gpu_name,
             optimization_hints,
             _function: function,
@@ -196,6 +208,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     // -----------------------------------------------------------------------
     // Error helper methods
     // -----------------------------------------------------------------------
+
+    pub(crate) fn add_module_const_vars(&self, generic_vars: &mut GenericVars) {
+        Self::add_module_const_vars_from_modules(self.modules, generic_vars);
+    }
+
+    fn add_module_const_vars_from_modules(
+        modules: &CUDATileModules,
+        generic_vars: &mut GenericVars,
+    ) {
+        for (name, item) in modules.consts() {
+            if generic_vars.var_type(name).is_some() {
+                continue;
+            }
+            if let Some(value) = crate::type_aliases::const_item_i32_value(item) {
+                generic_vars.inst_i32.insert(name.clone(), value);
+            } else if let Some(value) = crate::type_aliases::const_item_bool_value(item) {
+                generic_vars.inst_bool.insert(name.clone(), value);
+            }
+        }
+    }
 
     pub(crate) fn span_base(&self) -> SpanBase {
         let current_module = &self.module_name_stack[0];
@@ -236,32 +268,72 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     // -----------------------------------------------------------------------
+    // Typeck query helper methods
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn typeck_method_selection(
+        &self,
+        method_call_expr: &syn::ExprMethodCall,
+    ) -> Option<crate::passes::type_inference::MethodSelection> {
+        self.typeck_results
+            .borrow()
+            .as_ref()
+            .and_then(|results| results.method_selection(method_call_expr).cloned())
+    }
+
+    pub(crate) fn typeck_expr_syn_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        self.typeck_results
+            .borrow()
+            .as_ref()
+            .and_then(|results| results.syn_expr_type(expr))
+    }
+
+    pub(crate) fn typeck_expr_tile_type(
+        &self,
+        expr: &syn::Expr,
+        generic_vars: &GenericVars,
+        type_params: &HashMap<String, crate::types::TypeParam>,
+    ) -> Result<Option<TileRustType>, JITError> {
+        let cached_tile_type = self
+            .typeck_results
+            .borrow()
+            .as_ref()
+            .and_then(|results| results.expr_type(expr).cloned());
+        if cached_tile_type.is_some() {
+            return Ok(cached_tile_type);
+        }
+
+        let Some(syn_type) = self.typeck_expr_syn_type(expr) else {
+            return Ok(None);
+        };
+        self.compile_type(&syn_type, generic_vars, type_params)
+    }
+
+    // -----------------------------------------------------------------------
     // Compile
     // -----------------------------------------------------------------------
 
     /// Compile the kernel function into a `cutile_ir::Module`.
     pub fn compile(&self) -> Result<Module, JITError> {
         let mut module = Module::new(&self.module_name);
+        self.emit_module_globals(&mut module)?;
         let entry_op = self.compile_entry_function(&mut module)?;
         module.functions.push(entry_op);
         Ok(module)
     }
 
-    /// Compile the entry function, returning its OpId.
-    fn compile_entry_function(&self, module: &mut Module) -> Result<cutile_ir::ir::OpId, JITError> {
-        let fn_item = &self.entry;
-        let fn_name = fn_item.sig.ident.to_string();
-        let generic_vars = &self.generic_vars;
-
-        // Compile parameter types via the compiler's type machinery.
-        let var_names = get_sig_param_names(&fn_item.sig);
+    fn compile_function_param_types(
+        &self,
+        fn_item: &syn::ItemFn,
+        generic_vars: &GenericVars,
+    ) -> Result<FunctionParamTypes, JITError> {
+        let names = get_sig_param_names(&fn_item.sig);
         let (r_params, _r_result) = get_sig_types(&fn_item.sig, None);
-        let mut cuda_tile_argument_types: Vec<TileRustType> = vec![];
-        let mut arg_tile_ir_types: Vec<Type> = Vec::new();
+        let mut tile_types = Vec::new();
 
         for (i, r_param_type) in r_params.iter().enumerate() {
             let mut type_params: HashMap<String, crate::types::TypeParam> = HashMap::new();
-            if let Some(strides) = self.stride_args.get(var_names[i].as_str()) {
+            if let Some(strides) = self.stride_args.get(names[i].as_str()) {
                 type_params.insert(
                     "strides".to_string(),
                     crate::types::TypeParam::Strides(crate::types::TypeParamStrides::from(
@@ -281,28 +353,101 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     )),
                 );
             }
-            match self.compile_type(&r_param_type, generic_vars, &type_params)? {
-                Some(ty) => {
-                    // Convert type string to tile-ir Type.
-                    let tile_ir_ty = super::_type::convert_type(&ty).ok_or_else(|| {
-                        JITError::Generic(format!(
-                            "compiler2: failed to convert parameter type to tile-ir: {}",
-                            r_param_type.to_token_stream().to_string()
-                        ))
-                    })?;
-                    arg_tile_ir_types.push(tile_ir_ty);
-                    cuda_tile_argument_types.push(ty);
-                }
-                None => {
-                    return self.jit_error_result(
-                        &r_param_type.span(),
-                        &format!(
-                            "unable to compile parameter type `{}`",
-                            r_param_type.to_token_stream().to_string()
-                        ),
-                    );
-                }
-            }
+            let Some(ty) = self.compile_type(r_param_type, generic_vars, &type_params)? else {
+                return self.jit_error_result(
+                    &r_param_type.span(),
+                    &format!(
+                        "unable to compile parameter type `{}`",
+                        r_param_type.to_token_stream()
+                    ),
+                );
+            };
+            tile_types.push(ty);
+        }
+
+        Ok(FunctionParamTypes { names, tile_types })
+    }
+
+    fn initial_typeck_types(
+        &self,
+        param_types: &FunctionParamTypes,
+        generic_vars: &GenericVars,
+    ) -> Result<HashMap<String, TileRustType>, JITError> {
+        let mut initial_types = param_types
+            .names
+            .iter()
+            .cloned()
+            .zip(param_types.tile_types.iter().cloned())
+            .collect::<HashMap<_, _>>();
+
+        let i32_ty: syn::Type = syn::parse_quote!(i32);
+        for (key, _) in generic_vars.ordered_inst_i32() {
+            let Some(ty) = self.compile_type(&i32_ty, generic_vars, &HashMap::new())? else {
+                return SourceLocation::unknown()
+                    .jit_error_result("unable to compile const generic i32 type");
+            };
+            initial_types.insert(key.to_string(), ty);
+        }
+
+        let bool_ty: syn::Type = syn::parse_quote!(bool);
+        for (key, _) in generic_vars.ordered_inst_bool() {
+            let Some(ty) = self.compile_type(&bool_ty, generic_vars, &HashMap::new())? else {
+                return SourceLocation::unknown()
+                    .jit_error_result("unable to compile const generic bool type");
+            };
+            initial_types.insert(key.to_string(), ty);
+        }
+
+        for (key, value) in generic_vars.ordered_inst_array() {
+            let arr_ty =
+                syn::parse2::<syn::Type>(format!("[i32;{}]", value.len()).parse().unwrap())
+                    .unwrap();
+            let Some(ty) = self.compile_type(&arr_ty, generic_vars, &HashMap::new())? else {
+                return SourceLocation::unknown()
+                    .jit_error_result("unable to compile const generic array type");
+            };
+            initial_types.insert(key.to_string(), ty);
+        }
+
+        Ok(initial_types)
+    }
+
+    #[doc(hidden)]
+    pub fn debug_typeck_dump(&self) -> Result<String, JITError> {
+        let fn_item = self._function;
+        let generic_vars = &self.generic_vars;
+        let param_types = self.compile_function_param_types(fn_item, generic_vars)?;
+        let initial_types = self.initial_typeck_types(&param_types, generic_vars)?;
+
+        let mut typed_fn_item = fn_item.clone();
+        crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);
+        let typeck_results = crate::passes::type_inference::infer_function(
+            self,
+            &typed_fn_item,
+            generic_vars,
+            initial_types,
+        )?;
+        Ok(typeck_results.debug_dump())
+    }
+
+    /// Compile the entry function, returning its OpId.
+    fn compile_entry_function(&self, module: &mut Module) -> Result<cutile_ir::ir::OpId, JITError> {
+        let fn_item = &self.entry;
+        let fn_name = fn_item.sig.ident.to_string();
+        let generic_vars = &self.generic_vars;
+
+        let param_types = self.compile_function_param_types(fn_item, generic_vars)?;
+        let var_names = &param_types.names;
+        let cuda_tile_argument_types = &param_types.tile_types;
+        let mut arg_tile_ir_types = Vec::new();
+        for ty in cuda_tile_argument_types {
+            let tile_ir_ty = super::_type::convert_type(ty).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "compiler2: failed to convert parameter type to tile-ir: {}",
+                    ty.rust_ty.to_token_stream()
+                ))
+            })?;
+            arg_tile_ir_types.push(tile_ir_ty);
         }
 
         let func_type = Type::Func(FuncType {
@@ -329,21 +474,21 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
-        let mut initial_types = var_names
-            .iter()
-            .cloned()
-            .zip(cuda_tile_argument_types.iter().cloned())
-            .collect::<HashMap<_, _>>();
+        let initial_types = self.initial_typeck_types(&param_types, generic_vars)?;
 
         // Add const generics as variables.
-        for (key, value) in &generic_vars.inst_i32 {
-            let tr_val = self.compile_constant(module, block_id, generic_vars, *value)?;
-            initial_types.insert(key.clone(), tr_val.ty.clone());
-            ctx.vars.insert(key.clone(), tr_val);
+        for (key, value) in generic_vars.ordered_inst_i32() {
+            let tr_val = self.compile_constant(module, block_id, generic_vars, value)?;
+            ctx.vars.insert(key.to_string(), tr_val);
+        }
+
+        for (key, value) in generic_vars.ordered_inst_bool() {
+            let tr_val = self.compile_bool_constant(module, block_id, generic_vars, value)?;
+            ctx.vars.insert(key.to_string(), tr_val);
         }
 
         // Add arrays as variables.
-        for (key, value) in &generic_vars.inst_array {
+        for (key, value) in generic_vars.ordered_inst_array() {
             let arr_expr = syn::parse2::<syn::Expr>(format!("{value:?}").parse().unwrap()).unwrap();
             let arr_ty =
                 syn::parse2::<syn::Type>(format!("[i32;{}]", value.len()).parse().unwrap())
@@ -352,8 +497,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let tr_val = self
                 .compile_expression(module, block_id, &arr_expr, generic_vars, &mut ctx, ty)?
                 .expect("Failed to compile CGA as var.");
-            initial_types.insert(key.clone(), tr_val.ty.clone());
-            ctx.vars.insert(key.clone(), tr_val);
+            ctx.vars.insert(key.to_string(), tr_val);
         }
 
         ctx.default_terminator = Some(BlockTerminator::Return);
@@ -432,8 +576,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     ) -> Result<Vec<TileRustValue>, JITError> {
         let mut result = vec![];
         for arg in args {
+            let expected = if matches!(arg, syn::Expr::Lit(_) | syn::Expr::Unary(_)) {
+                self.typeck_expr_tile_type(arg, generic_args, &HashMap::new())?
+            } else {
+                None
+            };
             let value = self
-                .compile_expression(module, block_id, &arg, generic_args, ctx, None)?
+                .compile_expression(module, block_id, &arg, generic_args, ctx, expected)?
                 .ok_or(self.jit_error(
                     &arg.span(),
                     &format!(
@@ -444,17 +593,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             result.push(value);
         }
         Ok(result)
-    }
-
-    pub fn compile_call_args_no_side_effect(
-        &self,
-        module: &mut Module,
-        block_id: cutile_ir::ir::BlockId,
-        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
-        generic_args: &GenericVars,
-        ctx: &mut CompilerContext,
-    ) -> Result<Vec<TileRustValue>, JITError> {
-        self.compile_call_args(module, block_id, args, generic_args, ctx)
     }
 
     pub(crate) fn compile_constant<T: Into<i64>>(
@@ -471,6 +609,25 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .compile_type(&rust_ty, &generic_vars, &HashMap::new())?
             .ok_or(self.jit_error(&rust_ty.span(), "failed to compile constant"))?;
         self.compile_constant_from_exact_bounds(module, block_id, bounds, tr_ty)
+    }
+
+    pub(crate) fn compile_bool_constant(
+        &self,
+        module: &mut Module,
+        block_id: cutile_ir::ir::BlockId,
+        generic_vars: &GenericVars,
+        x: bool,
+    ) -> Result<TileRustValue, JITError> {
+        let rust_ty: syn::Type = syn::parse_quote!(bool);
+        let tr_ty = self
+            .compile_type(&rust_ty, generic_vars, &HashMap::new())?
+            .ok_or(self.jit_error(&rust_ty.span(), "failed to compile bool constant"))?;
+        self.compile_constant_from_exact_bounds(
+            module,
+            block_id,
+            Bounds::exact(if x { 1 } else { 0 }),
+            tr_ty,
+        )
     }
 
     pub(crate) fn compile_constant_from_exact_bounds(
@@ -546,403 +703,33 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Ok(tr_val)
     }
 
-    /// Derive the return type for an expression based on type parameters.
-    /// Mechanical port of `CUDATileFunctionCompiler::derive_type`.
+    /// Return the Pass 2 side-table type for an expression.
+    ///
+    /// This path must not compile arguments or emit IR. A missing result means
+    /// the type inference pass needs to learn the expression form.
     pub(crate) fn derive_type(
         &self,
-        module: &mut Module,
-        block_id: cutile_ir::ir::BlockId,
+        _module: &mut Module,
+        _block_id: cutile_ir::ir::BlockId,
         expr: &syn::Expr,
         maybe_type_params: Option<Vec<crate::types::TypeParam>>,
         generic_vars: &GenericVars,
-        ctx: &mut CompilerContext,
+        _ctx: &mut CompilerContext,
     ) -> Result<Option<TileRustType>, JITError> {
-        use crate::generics::GenericArgInference;
-        use crate::types::TypeParam;
-        use syn::Expr;
-
-        match expr {
-            Expr::MethodCall(method_call_expr) => {
-                let ident = &method_call_expr.method;
-                if let Some(return_type) = self
-                    .typeck_results
-                    .borrow()
-                    .as_ref()
-                    .and_then(|results| results.method_selection(method_call_expr).cloned())
-                    .and_then(|selection| selection.return_type)
-                {
-                    return Ok(Some(return_type));
-                }
-                let mut args = method_call_expr.args.clone();
-                args.insert(0, *method_call_expr.receiver.clone());
-                let call_arg_values = self.compile_call_args_no_side_effect(
-                    module,
-                    block_id,
-                    &args,
-                    generic_vars,
-                    ctx,
-                )?;
-                let call_arg_rust_tys = call_arg_values
+        let typeck_type_params = maybe_type_params
+            .as_ref()
+            .map(|type_params| {
+                type_params
                     .iter()
-                    .map(|arg| arg.ty.rust_ty.clone())
-                    .collect::<Vec<_>>();
-                let receiver_rust_ty = &call_arg_rust_tys[0];
-                let Some((_, impl_item, impl_method)) = self.modules.get_impl_item_fn(
-                    receiver_rust_ty,
-                    method_call_expr,
-                    generic_vars,
-                    &call_arg_rust_tys,
-                )?
-                else {
-                    return self.jit_error_result(
-                        &method_call_expr.method.span(),
-                        &format!("Undefined method {ident}"),
-                    );
-                };
-                let self_ty = &*impl_item.self_ty;
-                let (fn_arg_types, return_type) = get_sig_types(&impl_method.sig, Some(self_ty));
+                    .filter_map(|type_param| {
+                        type_param
+                            .name()
+                            .map(|name| (name.to_string(), type_param.clone()))
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
 
-                if call_arg_values.len() != fn_arg_types.len() {
-                    return self.jit_error_result(
-                        &method_call_expr.method.span(),
-                        &format!(
-                            "Argument count mismatch for method {}: expected {} args, got {} compiled values",
-                            method_call_expr.method.to_string(),
-                            fn_arg_types.len(),
-                            call_arg_values.len()
-                        ),
-                    );
-                }
-
-                let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
-                let mut arg_string_values: HashMap<String, String> = HashMap::new();
-                let mut arg_zst_values: HashMap<String, String> = HashMap::new();
-                for (i, param_name) in get_sig_param_names(&impl_method.sig).iter().enumerate() {
-                    if i < call_arg_values.len() {
-                        let call_arg_val = &call_arg_values[i];
-                        let call_arg_ty = call_arg_val.ty.clone();
-                        if let Some(ref string_lit_expr) = call_arg_val.string_literal {
-                            if let Some(value) = super::shared_utils::zst_type_name(string_lit_expr)
-                            {
-                                arg_zst_values.insert(param_name.to_string(), value);
-                            }
-                            if let Expr::Lit(lit_expr) = string_lit_expr {
-                                if let syn::Lit::Str(s) = &lit_expr.lit {
-                                    arg_string_values.insert(param_name.to_string(), s.value());
-                                }
-                            } else if param_name == "padding_value" {
-                                if let Some(value) =
-                                    super::shared_utils::padding_zst_value(string_lit_expr)
-                                {
-                                    arg_string_values.insert(param_name.to_string(), value);
-                                }
-                            }
-                        }
-                        arg_types.insert(param_name.to_string(), call_arg_ty);
-                    }
-                }
-
-                let mut generic_arg_inf = GenericArgInference::new_method(&impl_item, &impl_method);
-                generic_arg_inf.map_args_to_params(&call_arg_rust_tys, Some(self_ty));
-                generic_arg_inf
-                    .apply_provided_generics_method_call(&method_call_expr, generic_vars);
-                if !generic_arg_inf.verify() {
-                    return self.jit_error_result(
-                        &method_call_expr.method.span(),
-                        &format!(
-                            "Failed to infer all generic parameters for {}",
-                            method_call_expr.to_token_stream().to_string()
-                        ),
-                    );
-                }
-
-                let call_output_type: syn::Type =
-                    generic_arg_inf.infer_type(&return_type, generic_vars);
-                let mut type_params: HashMap<String, TypeParam> = HashMap::new();
-                if let Some(given_type_params) = maybe_type_params {
-                    for type_param in given_type_params {
-                        if let Some(name) = type_param.name() {
-                            type_params.insert(name.to_string(), type_param.clone());
-                        } else {
-                            return self.jit_error_result(
-                                &method_call_expr.method.span(),
-                                &format!("Failed to get name for type param {type_param:?}"),
-                            );
-                        }
-                    }
-                }
-                if let Some(op_attrs) = self
-                    .modules
-                    .get_cuda_tile_op_attrs(ident.to_string().as_str())
-                {
-                    if let Some(output_type_params) =
-                        op_attrs.parse_string_arr("output_type_params")
-                    {
-                        for type_param_name in output_type_params {
-                            if should_skip_optional_output_type_param(
-                                &type_param_name,
-                                &arg_zst_values,
-                            ) {
-                                continue;
-                            }
-                            match arg_types.get(&type_param_name) {
-                                Some(arg_type) => {
-                                    let cuda_tile_type_str = arg_type.get_cuda_tile_type_str();
-                                    let type_instance = Some(arg_type.type_instance.clone());
-                                    let mut type_param = TypeParam::derive_param_from_type(
-                                        type_param_name.clone(),
-                                        arg_type.rust_ty.clone(),
-                                        cuda_tile_type_str,
-                                        type_instance,
-                                    );
-                                    if let TypeParam::Padding(ref mut padding) = type_param {
-                                        padding.padding_value =
-                                            arg_string_values.get(&type_param_name).cloned();
-                                    }
-                                    type_params.insert(type_param_name.to_string(), type_param);
-                                }
-                                None => {
-                                    return self.jit_error_result(
-                                        &method_call_expr.method.span(),
-                                        &format!("Unable to find output type: {type_param_name}"),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                let ct_type = self.compile_type(&call_output_type, generic_vars, &type_params)?;
-                if ct_type.is_none() {
-                    return self.jit_error_result(
-                        &method_call_expr.method.span(),
-                        &format!(
-                            "Failed to derive output for {} \ncall_output_type={}",
-                            method_call_expr.to_token_stream().to_string(),
-                            call_output_type.to_token_stream().to_string()
-                        ),
-                    );
-                }
-                Ok(ct_type)
-            }
-            Expr::Call(call_expr) => match &*call_expr.func {
-                Expr::Path(path_expr) => {
-                    let ident = get_ident_from_path_expr(&path_expr);
-                    let Some((_, fn_item)) = self.modules.get_function_by_name(&ident.to_string())
-                    else {
-                        return self.jit_error_result(
-                            &call_expr.func.span(),
-                            &format!("Undefined function {ident}"),
-                        );
-                    };
-                    let call_arg_values = self.compile_call_args_no_side_effect(
-                        module,
-                        block_id,
-                        &call_expr.args,
-                        generic_vars,
-                        ctx,
-                    )?;
-                    let (fn_arg_types, return_type) = get_sig_types(&fn_item.sig, None);
-
-                    if call_arg_values.len() != fn_arg_types.len() {
-                        return self.jit_error_result(
-                                &call_expr.func.span(),
-                                &format!(
-                                    "Argument count mismatch for {}: expected {} args, got {} compiled values",
-                                    ident.to_string(),
-                                    fn_arg_types.len(),
-                                    call_arg_values.len()
-                                ),
-                            );
-                    }
-
-                    let mut call_arg_rust_tys = vec![];
-                    let mut arg_types: HashMap<String, TileRustType> = HashMap::new();
-                    let mut arg_string_values: HashMap<String, String> = HashMap::new();
-                    let mut arg_zst_values: HashMap<String, String> = HashMap::new();
-                    for (i, param_name) in get_sig_param_names(&fn_item.sig).iter().enumerate() {
-                        if i < call_arg_values.len() {
-                            let call_arg_val = &call_arg_values[i];
-                            let call_arg_ty = call_arg_val.ty.clone();
-                            call_arg_rust_tys.push(call_arg_ty.rust_ty.clone());
-                            if let Some(ref string_lit_expr) = call_arg_val.string_literal {
-                                if let Some(value) =
-                                    super::shared_utils::zst_type_name(string_lit_expr)
-                                {
-                                    arg_zst_values.insert(param_name.to_string(), value);
-                                }
-                                if let Expr::Lit(lit_expr) = string_lit_expr {
-                                    if let syn::Lit::Str(s) = &lit_expr.lit {
-                                        arg_string_values.insert(param_name.to_string(), s.value());
-                                    }
-                                } else if param_name == "padding_value" {
-                                    if let Some(value) =
-                                        super::shared_utils::padding_zst_value(string_lit_expr)
-                                    {
-                                        arg_string_values.insert(param_name.to_string(), value);
-                                    }
-                                }
-                            }
-                            arg_types.insert(param_name.to_string(), call_arg_ty);
-                        }
-                    }
-
-                    let mut generic_arg_inf =
-                        GenericArgInference::new_function(fn_item.sig.clone());
-                    generic_arg_inf.map_args_to_params(&call_arg_rust_tys, None);
-                    generic_arg_inf.apply_provided_generics_fn_call(&call_expr, generic_vars);
-                    if !generic_arg_inf.verify() {
-                        return self.jit_error_result(
-                            &call_expr.func.span(),
-                            &format!(
-                                "Failed to infer all generic parameters for {}",
-                                call_expr.to_token_stream().to_string()
-                            ),
-                        );
-                    }
-
-                    let call_output_type: syn::Type =
-                        generic_arg_inf.infer_type(&return_type, generic_vars);
-                    let mut type_params: HashMap<String, TypeParam> = HashMap::new();
-                    if let Some(given_type_params) = maybe_type_params {
-                        for type_param in given_type_params {
-                            if let Some(name) = type_param.name() {
-                                type_params.insert(name.to_string(), type_param.clone());
-                            } else {
-                                return self.jit_error_result(
-                                    &call_expr.func.span(),
-                                    &format!("Failed to get name for type param {type_param:?}"),
-                                );
-                            }
-                        }
-                    }
-                    if let Some(op_attrs) = self
-                        .modules
-                        .get_cuda_tile_op_attrs(ident.to_string().as_str())
-                    {
-                        if let Some(output_type_params) =
-                            op_attrs.parse_string_arr("output_type_params")
-                        {
-                            for type_param_name in output_type_params {
-                                if should_skip_optional_output_type_param(
-                                    &type_param_name,
-                                    &arg_zst_values,
-                                ) {
-                                    continue;
-                                }
-                                match arg_types.get(&type_param_name) {
-                                    Some(arg_type) => {
-                                        let cuda_tile_type_str = arg_type.get_cuda_tile_type_str();
-                                        let mut type_param = TypeParam::derive_param_from_type(
-                                            type_param_name.clone(),
-                                            arg_type.rust_ty.clone(),
-                                            cuda_tile_type_str,
-                                            Some(arg_type.type_instance.clone()),
-                                        );
-                                        if let TypeParam::Padding(ref mut padding) = type_param {
-                                            padding.padding_value =
-                                                arg_string_values.get(&type_param_name).cloned();
-                                        }
-                                        type_params.insert(type_param_name.to_string(), type_param);
-                                    }
-                                    None => {
-                                        return self.jit_error_result(
-                                            &call_expr.func.span(),
-                                            &format!(
-                                                "Unable to find output type: {type_param_name}"
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let ct_type =
-                        self.compile_type(&call_output_type, generic_vars, &type_params)?;
-                    if ct_type.is_none() {
-                        return self.jit_error_result(
-                                &call_expr.func.span(),
-                                &format!(
-                                    "Failed to derive output for {} \ngeneric_vars={generic_vars:#?} \ntype_params={type_params:#?}",
-                                    call_expr.to_token_stream().to_string()
-                                ),
-                            );
-                    }
-                    Ok(ct_type)
-                }
-                Expr::Closure(_) => {
-                    return self.jit_error_result(
-                            &call_expr.func.span(),
-                            &format!(
-                                "Closure calls are not supported.\n\
-                                 Closures can only be used as arguments to operations like reduce() or scan().\n\
-                                 Found: {}",
-                                call_expr.to_token_stream().to_string()
-                            ),
-                        );
-                }
-                _ => {
-                    return self.jit_error_result(
-                        &call_expr.func.span(),
-                        &format!(
-                            "Type derivation for {} not supported.",
-                            call_expr.func.to_token_stream().to_string()
-                        ),
-                    )
-                }
-            },
-            Expr::Field(field_expr) => {
-                let Some(base) = self.compile_expression(
-                    module,
-                    block_id,
-                    &field_expr.base,
-                    generic_vars,
-                    ctx,
-                    None,
-                )?
-                else {
-                    return self.jit_error_result(
-                        &field_expr.base.span(),
-                        &format!(
-                            "Failed to compile {}",
-                            field_expr.to_token_stream().to_string()
-                        ),
-                    );
-                };
-                let syn::Member::Named(field_name) = &field_expr.member else {
-                    return self.jit_error_result(
-                        &field_expr.member.span(),
-                        "Only named member accesses are supported.",
-                    );
-                };
-                if !base.fields.is_some() {
-                    return self.jit_error_result(
-                        &field_expr.base.span(),
-                        &format!("Expected struct value, found: {base:#?}"),
-                    );
-                }
-                let fields = &base.fields.clone().unwrap();
-                let Some(field_value) = fields.get(&field_name.to_string()) else {
-                    return self.jit_error_result(
-                        &field_expr.member.span(),
-                        &format!("{} is not a field in {base:#?}.", field_name.to_string()),
-                    );
-                };
-                Ok(Some(field_value.ty.clone()))
-            }
-            _ => Ok(None),
-        }
+        self.typeck_expr_tile_type(expr, generic_vars, &typeck_type_params)
     }
-}
-
-fn should_skip_optional_output_type_param(
-    type_param_name: &str,
-    arg_zst_values: &HashMap<String, String>,
-) -> bool {
-    matches!(
-        (
-            type_param_name,
-            arg_zst_values.get(type_param_name).map(String::as_str)
-        ),
-        ("padding_value", Some("None")) | ("dim_map", Some("Identity"))
-    )
 }

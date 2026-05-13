@@ -63,6 +63,23 @@ impl TypeMeta {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartitionAxisOrigin {
+    pub(crate) tensor: String,
+    pub(crate) axis: usize,
+    pub(crate) tile_dim: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DimOrigin {
+    PartitionAxis {
+        view: Value,
+        axis: usize,
+        tile_dim: i32,
+    },
+    Value(Value),
+}
+
 /// A compiled value: wraps a `cutile_ir::ir::Value` together with its Rust type, kind, bounds,
 /// and metadata.
 ///
@@ -81,6 +98,12 @@ pub struct TileRustValue {
     pub(crate) string_literal: Option<syn::Expr>,
     pub(crate) enum_variant: Option<String>,
     pub(crate) enum_payload: Option<Box<syn::Expr>>,
+    pub(crate) partition_origin: Option<Value>,
+    pub(crate) tensor_origin: Option<String>,
+    pub(crate) partition_axis_origin: Option<PartitionAxisOrigin>,
+    pub(crate) dim_origin: Option<DimOrigin>,
+    pub(crate) index_origin: Option<DimOrigin>,
+    pub(crate) bounded_axes: Option<Vec<DimOrigin>>,
 }
 
 impl TileRustValue {
@@ -97,6 +120,12 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 
@@ -113,6 +142,12 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 
@@ -133,6 +168,12 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 
@@ -153,6 +194,12 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 
@@ -169,6 +216,12 @@ impl TileRustValue {
             string_literal: Some(string_literal),
             enum_variant: None,
             enum_payload: None,
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 
@@ -189,6 +242,12 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: Some(variant.into()),
             enum_payload: payload.map(Box::new),
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 
@@ -214,6 +273,12 @@ impl TileRustValue {
                 string_literal: None,
                 enum_variant: None,
                 enum_payload: None,
+                partition_origin: None,
+                tensor_origin: None,
+                partition_axis_origin: None,
+                dim_origin: None,
+                index_origin: None,
+                bounded_axes: None,
             },
         }
     }
@@ -231,6 +296,12 @@ impl TileRustValue {
             string_literal: Some(literal_expr),
             enum_variant: None,
             enum_payload: None,
+            partition_origin: None,
+            tensor_origin: None,
+            partition_axis_origin: None,
+            dim_origin: None,
+            index_origin: None,
+            bounded_axes: None,
         }
     }
 

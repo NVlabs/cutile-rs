@@ -429,8 +429,13 @@ impl RankPolyOpSpec {
                 return true;
             }
         }
-        if let Some(ret_cga) = &self.return_cga {
-            if !self.args.iter().any(|a| a.cga.as_ref() == Some(ret_cga)) {
+        for ret_cga in &self.cgas {
+            if type_references_ident(&self.return_type, &ret_cga.cga_ident)
+                && !self
+                    .args
+                    .iter()
+                    .any(|a| a.cga.as_ref() == Some(&ret_cga.cga_ident))
+            {
                 return true;
             }
         }
@@ -1399,7 +1404,7 @@ fn rewrite_ty_for_rank(ty: &Type, combo: &RankCombo, cgas: &[CgaInfo]) -> Type {
             let mut new_tp = tp.clone();
             if let Some(last_seg) = new_tp.path.segments.last_mut() {
                 let original_base = last_seg.ident.clone();
-                let mut cga_for_this_seg: Option<&CgaInfo> = None;
+                let mut cgas_for_this_seg: Vec<&CgaInfo> = Vec::new();
                 let mut already_has_lifetime = false;
                 if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
                     args, ..
@@ -1409,16 +1414,18 @@ fn rewrite_ty_for_rank(ty: &Type, combo: &RankCombo, cgas: &[CgaInfo]) -> Type {
                         if matches!(arg, GenericArgument::Lifetime(_)) {
                             already_has_lifetime = true;
                         }
-                        if cga_for_this_seg.is_none() {
-                            if let Some(cga) = match_arg_to_cga(arg, cgas) {
-                                cga_for_this_seg = Some(cga);
-                            }
+                        if let Some(cga) = match_arg_to_cga(arg, cgas) {
+                            cgas_for_this_seg.push(cga);
                         }
                     }
                 }
-                if let Some(cga) = cga_for_this_seg {
-                    let rank = combo.rank_of(&cga.cga_ident);
-                    last_seg.ident = format_ident!("{}_{}", last_seg.ident, rank);
+                if !cgas_for_this_seg.is_empty() {
+                    let rank_suffix = cgas_for_this_seg
+                        .iter()
+                        .map(|cga| combo.rank_of(&cga.cga_ident).to_string())
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    last_seg.ident = format_ident!("{}_{}", last_seg.ident, rank_suffix);
                     let needs_lifetime = base_has_lifetime(&original_base) && !already_has_lifetime;
                     if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
                         args,
@@ -1467,12 +1474,18 @@ fn rewrite_ty_for_rank(ty: &Type, combo: &RankCombo, cgas: &[CgaInfo]) -> Type {
                     // *literal* CGA like `Tile<E, {[128, 64]}>`. If so, suffix
                     // the segment by the literal rank and inline the array
                     // elements as individual const generics, e.g. `Tile_2<E, 128, 64>`.
-                    let literal_rank = args
+                    let literal_ranks = args
                         .iter()
-                        .find_map(|a| literal_cga_rank_with_combo(a, combo));
-                    if let Some(rank) = literal_rank {
+                        .filter_map(|a| literal_cga_rank_with_combo(a, combo))
+                        .collect::<Vec<_>>();
+                    if !literal_ranks.is_empty() {
                         let original_base = last_seg.ident.clone();
-                        last_seg.ident = format_ident!("{}_{}", last_seg.ident, rank);
+                        let rank_suffix = literal_ranks
+                            .iter()
+                            .map(|rank| rank.to_string())
+                            .collect::<Vec<_>>()
+                            .join("_");
+                        last_seg.ident = format_ident!("{}_{}", last_seg.ident, rank_suffix);
                         let already_has_lifetime = args
                             .iter()
                             .any(|a| matches!(a, GenericArgument::Lifetime(_)));

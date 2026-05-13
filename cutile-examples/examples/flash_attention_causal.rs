@@ -57,7 +57,7 @@ mod my_module {
             .load([batch_idx, q_head_idx, q_m_idx, 0i32])
             .reshape(const_shape![BM, D]);
 
-        let k_seqlen: i32 = get_shape_dim(k.shape(), 2i32);
+        let k_seqlen: i32 = k.shape()[2];
         let m_end: i32 = input_pos + (q_m_idx + 1i32) * BM;
         let mut mask_start: i32 = k_seqlen / BN;
         let mut tc: i32 = ceil_div(k_seqlen, BN);

@@ -122,7 +122,7 @@ let part_x = x.partition(const_shape![BM, BK]);
 let tile_x = part_x.load([pid.0, i]);  // Loads tile at row pid.0, column i
 ```
 
-At kernel launch time, the launcher calls `.grid()` on each `&mut Tensor` parameter's host-side `Partition` and collects the resulting grids. If no explicit grid is specified via `.grid()` or `.const_grid()`, the launch grid is **inferred** from these partition grids:
+At kernel launch time, the launcher calls `.grid()` on each mutable output argument's host-side wrapper and collects the resulting grids. For ordinary `&mut Tensor` parameters, this is the host-side `Partition` grid. For mapped mutable partitions, this is the mapped physical tile-block grid. If no explicit grid is specified via `.grid()` or `.const_grid()`, the launch grid is **inferred** from these grids:
 
 ```rust
 // Grid is inferred from z's partition: (16, 16, 1)

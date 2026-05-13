@@ -65,17 +65,19 @@
 use crate::error::{syn_err, Error};
 use cutile_compiler::syn_utils::*;
 use cutile_compiler::types::parse_signed_literal_as_i32;
-use proc_macro2::{Ident, Span, TokenTree};
+use proc_macro2::{Ident, Span};
 use quote::{format_ident, ToTokens};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use syn::{
+    parse::Parser,
     parse_quote,
+    punctuated::Punctuated,
     spanned::Spanned,
     visit_mut::{self, VisitMut},
     AngleBracketedGenericArguments, Expr, ExprPath, ExprStruct, FnArg, GenericArgument,
-    GenericParam, Generics, ImplItem, ImplItemFn, ItemFn, ItemImpl, ItemStruct, Macro, Path,
-    PathArguments, PathSegment, ReturnType, Signature, Stmt, Type,
+    GenericParam, Generics, ImplItem, ImplItemFn, ItemFn, ItemImpl, ItemStatic, ItemStruct,
+    ItemType, Macro, Path, PathArguments, PathSegment, ReturnType, Signature, Stmt, Token, Type,
 };
 
 /// Rank suffix string from a list of dimension counts:
@@ -880,6 +882,7 @@ fn instantiate_cga_args(
 ) -> Result<(Ident, AngleBracketedGenericArguments), Error> {
     let mut instantiated_param_name = type_ident.to_string();
     let mut generic_args_result: Vec<String> = vec![];
+    let mut rank_suffixes: Vec<u32> = vec![];
 
     for generic_arg in &generic_args.args {
         match generic_arg {
@@ -903,11 +906,7 @@ fn instantiate_cga_args(
                             for j in 0..cga.length {
                                 generic_args_result.push(format!("{}{}", cga.name, j));
                             }
-                            instantiated_param_name = if skip_suffix {
-                                type_ident.to_string()
-                            } else {
-                                concrete_name(&type_ident.to_string(), &[cga.length])
-                            };
+                            rank_suffixes.push(cga.length);
                         } else {
                             // Not a const generic array instance, just convert to string
                             // This handles regular types like Tile<i1, S>, Token, etc.
@@ -948,19 +947,15 @@ fn instantiate_cga_args(
                                 // This is something like Tensor<E, {[1, 2, -1]}>
                                 let rank = array_expr.elems.len();
                                 for elem in &array_expr.elems {
-                                    let val = elem.to_token_stream().to_string();
-                                    generic_args_result.push(val);
+                                    generic_args_result
+                                        .push(format_rank_const_expr(elem, instances)?);
                                 }
-                                instantiated_param_name = if skip_suffix {
-                                    type_ident.to_string()
-                                } else {
-                                    concrete_name(&type_ident.to_string(), &[rank as u32])
-                                };
+                                rank_suffixes.push(rank as u32);
                             }
                             Expr::Repeat(repeat_expr) => {
                                 // println!("Expr::Repeat: {:?}", repeat_expr.expr);
                                 let thing_to_repeat =
-                                    repeat_expr.expr.to_token_stream().to_string();
+                                    format_rank_const_expr(&repeat_expr.expr, instances)?;
                                 let num_repetitions = match &*repeat_expr.len {
                                     Expr::Path(len_path) => {
                                         // This is something like Tensor<E, {[-1; N]}>
@@ -1007,11 +1002,7 @@ fn instantiate_cga_args(
                                         ))
                                     }
                                 };
-                                instantiated_param_name = if skip_suffix {
-                                    type_ident.to_string()
-                                } else {
-                                    concrete_name(&type_ident.to_string(), &[num_repetitions])
-                                };
+                                rank_suffixes.push(num_repetitions);
                             }
                             _ => {
                                 return Err(syn_err(
@@ -1034,6 +1025,9 @@ fn instantiate_cga_args(
             }
         }
     }
+    if !skip_suffix && !rank_suffixes.is_empty() {
+        instantiated_param_name = concrete_name(&type_ident.to_string(), &rank_suffixes);
+    }
     let instantiated_param_ident = Ident::new(instantiated_param_name.as_str(), type_ident.span());
     let formatted = format!("<{}>", generic_args_result.join(","));
     Ok((
@@ -1051,6 +1045,33 @@ fn instantiate_cga_args(
             )
         })?,
     ))
+}
+
+fn format_rank_const_expr(expr: &Expr, instances: &RankBindings) -> Result<String, Error> {
+    if let Expr::Index(index) = expr {
+        if let Expr::Path(path) = index.expr.as_ref() {
+            let name = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .unwrap_or_default();
+            if let Some(cga) = instances.inst_array.get(&name) {
+                let i = parse_signed_literal_as_i32(&index.index);
+                if !(0 <= i && (i as u32) < cga.length) {
+                    return Err(syn_err(
+                        index.index.span(),
+                        &format!(
+                            "Index {i} out of bounds for CGA `{}` of length {}",
+                            cga.name, cga.length
+                        ),
+                    ));
+                }
+                return Ok(format!("{}{}", cga.name, i as u32));
+            }
+        }
+    }
+    Ok(expr.to_token_stream().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,29 +1222,58 @@ impl RankInstantiator {
     /// macro that name an in-scope CGA expand to rank-instance dim refs.
     fn expand_shape_macro(&self, mac: &Macro, kind: &str) -> Result<Expr, Error> {
         let mut args: Vec<String> = Vec::new();
-        for token in mac.tokens.clone() {
-            match token {
-                TokenTree::Literal(lit) => args.push(lit.to_string()),
-                TokenTree::Ident(ident) => {
+        let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+        let exprs = parser
+            .parse2(mac.tokens.clone())
+            .map_err(|e| syn_err(mac.span(), &format!("Failed to parse {kind}! args: {e}")))?;
+        let expr_count = exprs.len();
+        for expr in exprs {
+            match &expr {
+                Expr::Path(path) if path.path.segments.len() == 1 => {
+                    let ident = &path.path.segments[0].ident;
                     let name = ident.to_string();
-                    if self.bindings.inst_array.contains_key(&name) {
-                        let path: Path = parse_quote! { #ident };
-                        let expanded = instantiate_cga(&path, &self.bindings)?;
-                        for arg in &expanded.args {
-                            args.push(arg.to_token_stream().to_string());
+                    if let Some(cga) = self.bindings.inst_array.get(&name) {
+                        if expr_count != 1 {
+                            return Err(syn_err(
+                                expr.span(),
+                                &format!(
+                                    "`{name}` names a const generic array; use it alone or index it as `{name}[i]`"
+                                ),
+                            ));
                         }
-                    } else {
-                        args.push(name);
+                        for i in 0..cga.length {
+                            args.push(format!("{}{}", cga.name, i));
+                        }
+                        continue;
                     }
                 }
-                TokenTree::Punct(p) if p.as_char() == ',' => continue,
-                other => {
-                    return Err(syn_err(
-                        mac.span(),
-                        &format!("Unexpected token in {kind}!: {:?}", other),
-                    ));
+                Expr::Index(index) => {
+                    if let Expr::Path(path) = index.expr.as_ref() {
+                        let name = path
+                            .path
+                            .segments
+                            .last()
+                            .map(|segment| segment.ident.to_string())
+                            .unwrap_or_default();
+                        if let Some(cga) = self.bindings.inst_array.get(&name) {
+                            let i = parse_signed_literal_as_i32(&index.index);
+                            if !(0 <= i && (i as u32) < cga.length) {
+                                return Err(syn_err(
+                                    index.index.span(),
+                                    &format!(
+                                        "Index {i} out of bounds for CGA `{}` of length {}",
+                                        cga.name, cga.length
+                                    ),
+                                ));
+                            }
+                            args.push(format!("{}{}", cga.name, i as u32));
+                            continue;
+                        }
+                    }
                 }
+                _ => {}
             }
+            args.push(expr.to_token_stream().to_string());
         }
         let cga_str = format!("{{[{}]}}", args.join(", "));
         let ty_str = if kind == "const_shape" {
@@ -1384,6 +1434,69 @@ pub fn instantiate_struct_for_rank(item: &ItemStruct) -> Result<ItemStruct, Erro
 pub fn instantiate_function_for_rank(item: &ItemFn) -> Result<ItemFn, Error> {
     let bindings = RankBindings::from_generics(&item.sig.generics)?;
     RankInstantiator::new(bindings).rewrite_function(item)
+}
+
+/// Desugars const generic array syntax in a type alias.
+///
+/// This keeps same-module concrete aliases usable in rustc-visible expanded
+/// code, e.g. `type Block = Tensor<f32, {[4]}>`.
+pub fn instantiate_type_alias_for_rank(item: &ItemType) -> Result<ItemType, Error> {
+    let bindings = RankBindings::from_generics(&item.generics)?;
+    let mut item = item.clone();
+    rewrite_generics_for_rank(&mut item.generics, &bindings)?;
+    item.ty = Box::new(rewrite_type_for_rank(&item.ty, &bindings)?);
+    Ok(item)
+}
+
+/// Desugars const generic array syntax in a static item.
+///
+/// This keeps `static COUNTER: Global<i32, { [] }> = Global::new(0i32);`
+/// valid in rustc-visible expanded code while preserving the original source
+/// text for the JIT.
+pub fn instantiate_static_for_rank(item: &ItemStatic) -> Result<ItemStatic, Error> {
+    let bindings = RankBindings::new();
+    let mut item = item.clone();
+    item.ty = Box::new(rewrite_type_for_rank(&item.ty, &bindings)?);
+    let concrete_type_ident = concrete_type_ident(&item.ty);
+    let mut instantiator = RankInstantiator::new(bindings);
+    instantiator.visit_expr_mut(&mut item.expr);
+    let mut item = instantiator.into_result(item)?;
+    if let Some(concrete_type_ident) = concrete_type_ident {
+        rewrite_static_constructor_path(&mut item.expr, &concrete_type_ident);
+    }
+    Ok(item)
+}
+
+fn concrete_type_ident(ty: &Type) -> Option<Ident> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.clone())
+}
+
+fn rewrite_static_constructor_path(expr: &mut Expr, concrete_type_ident: &Ident) {
+    let Expr::Call(call) = expr else {
+        return;
+    };
+    let Expr::Path(path) = &mut *call.func else {
+        return;
+    };
+    if path.path.segments.len() < 2 {
+        return;
+    }
+    let Some(last) = path.path.segments.last() else {
+        return;
+    };
+    if last.ident != "new" {
+        return;
+    }
+    if let Some(first) = path.path.segments.first_mut() {
+        first.ident = concrete_type_ident.clone();
+    }
 }
 
 /// Desugars const generic array syntax in an impl block.

@@ -12,14 +12,16 @@ use syn::spanned::Spanned;
 
 use super::_function::CUDATileFunctionCompiler;
 use super::_type as types;
-use super::_value::{CompilerContext, Mutability, TileRustValue};
+use super::_value::{CompilerContext, DimOrigin, Mutability, TileRustValue};
 use super::shared_types::Kind;
 use super::shared_utils::{get_binary_op_from_op_str, get_const_hex, TileBinaryOp};
 use super::tile_rust_type::TileRustType;
 use super::utils::{int_attr, rounding_mode_attr, signedness_attr};
 use crate::bounds::Bounds;
 use crate::error::JITError;
-use crate::generics::{get_cga_from_type, GenericVars, TypeInstance};
+use crate::generics::{
+    get_cga_from_generic_argument, get_cga_from_type, GenericVars, TypeInstance,
+};
 use crate::syn_utils::*;
 use crate::types::*;
 
@@ -30,7 +32,7 @@ use cutile_ir::ir::{
 };
 
 use quote::ToTokens;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use syn::{Expr, ExprCall, ExprPath, GenericArgument, ItemFn, Lit, PathArguments};
 
 const NESTED_MUTABLE_ACCESS_OFFSET_META: &str = "nested_mutable_access_offset";
@@ -127,7 +129,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         outer_tile: &TileRustValue,
         generic_vars: &GenericVars,
         ctx: &mut CompilerContext,
-    ) -> Result<TileRustValue, JITError> {
+    ) -> Result<Option<TileRustValue>, JITError> {
         let outer_shape = self.static_shape_from_value(outer_tile, generic_vars, span)?;
         let nested_shape = self.partition_tile_shape(partition_value, span)?;
         if outer_shape.len() != nested_shape.len() {
@@ -147,6 +149,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "nested mutable partition access offsets are only supported up to rank 3",
             );
         }
+        for (i, nested_dim) in nested_shape.iter().enumerate() {
+            if *nested_dim <= 0 {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "nested mutable partition requires static positive nested tile dimensions, got nested dim {nested_dim} at axis {i}"
+                    ),
+                );
+            }
+        }
+        if outer_shape.iter().any(|dim| *dim <= 0) {
+            return Ok(None);
+        }
 
         let i32_ty = self.scalar_i32_type(span)?;
         let scalar_i32_ir_ty = Type::Tile(TileType {
@@ -164,14 +179,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for i in 0..rank {
             let outer_dim = outer_shape[i];
             let nested_dim = nested_shape[i];
-            if outer_dim <= 0 || nested_dim <= 0 {
-                return self.jit_error_result(
-                    span,
-                    &format!(
-                        "nested mutable partition requires static positive tile dimensions, got outer dim {outer_dim} and nested dim {nested_dim} at axis {i}"
-                    ),
-                );
-            }
             let pid = TileRustValue::new_primitive(pid_results[i], i32_ty.clone(), None);
             let ratio = ((outer_dim as i64 + nested_dim as i64 - 1) / nested_dim as i64) as i32;
             let offset = if ratio == 1 {
@@ -195,7 +202,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         let array_ty = self.array_i32_type(rank, generic_vars, span)?;
-        Ok(TileRustValue::new_compound(offsets, array_ty))
+        Ok(Some(TileRustValue::new_compound(offsets, array_ty)))
     }
 
     /// Compiles a `compiler_op` (intrinsic) function call.
@@ -498,12 +505,392 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                 }
             }
+            "dim_new" => {
+                if call_expr.args.len() != 1 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`Dim::new` expects 1 argument, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let i32_tr_type = self
+                    .compile_type(&syn::parse_quote!(i32), generic_vars, &HashMap::new())?
+                    .ok_or_else(|| {
+                        self.jit_error(&call_expr.span(), "failed to synthesize `i32` type")
+                    })?;
+                let mut value = self
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[0],
+                        generic_vars,
+                        ctx,
+                        Some(i32_tr_type),
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.args[0].span(),
+                            "failed to compile dimension size",
+                        )
+                    })?;
+                let dim_value = value.value.ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.args[0].span(),
+                        "dimension size must compile to a scalar value",
+                    )
+                })?;
+                value.dim_origin = Some(DimOrigin::Value(dim_value));
+                let return_type = match return_type {
+                    Some(return_type) => return_type,
+                    None => self
+                        .compile_type(&syn::parse_quote!(Dim), generic_vars, &HashMap::new())?
+                        .ok_or_else(|| {
+                            self.jit_error(
+                                &call_expr.span(),
+                                "unable to infer return type for `Dim::new`",
+                            )
+                        })?,
+                };
+                let dim_origin = value.dim_origin.clone();
+                let mut fields = BTreeMap::new();
+                fields.insert("size".to_string(), value);
+                let mut dim = TileRustValue::new_struct(fields, return_type);
+                dim.dim_origin = dim_origin;
+                Ok(Some(dim))
+            }
+            "dim_from_i32" => {
+                if call_expr.args.len() != 1 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`IntoDim::into_dim` expects 1 argument, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let i32_tr_type = self
+                    .compile_type(&syn::parse_quote!(i32), generic_vars, &HashMap::new())?
+                    .ok_or_else(|| {
+                        self.jit_error(&call_expr.span(), "failed to synthesize `i32` type")
+                    })?;
+                let mut value = self
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[0],
+                        generic_vars,
+                        ctx,
+                        Some(i32_tr_type),
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.args[0].span(),
+                            "failed to compile dimension size",
+                        )
+                    })?;
+                let dim_value = value.value.ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.args[0].span(),
+                        "dimension size must compile to a scalar value",
+                    )
+                })?;
+                if value.dim_origin.is_none() {
+                    value.dim_origin = Some(DimOrigin::Value(dim_value));
+                }
+                let return_type = match return_type {
+                    Some(return_type) => return_type,
+                    None => self
+                        .compile_type(&syn::parse_quote!(Dim), generic_vars, &HashMap::new())?
+                        .ok_or_else(|| {
+                            self.jit_error(
+                                &call_expr.span(),
+                                "unable to infer return type for `IntoDim::into_dim`",
+                            )
+                        })?,
+                };
+                let dim_origin = value.dim_origin.clone();
+                let bounds = value.bounds.clone();
+                let mut fields = BTreeMap::new();
+                fields.insert("size".to_string(), value);
+                let mut dim = TileRustValue::new_struct(fields, return_type);
+                dim.dim_origin = dim_origin;
+                dim.bounds = bounds;
+                Ok(Some(dim))
+            }
+            "dim_value" => {
+                if call_expr.args.len() != 1 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`Dim::value` expects 1 argument, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let mut args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+                let dim = args.remove(0);
+                let Some(fields) = dim.fields else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "`Dim::value` expects a compiler-created Dim",
+                    );
+                };
+                let Some(mut size) = fields.get("size").cloned() else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "Dim is missing scalar size metadata",
+                    );
+                };
+                if size.dim_origin.is_none() {
+                    size.dim_origin = dim.dim_origin;
+                }
+                Ok(Some(size))
+            }
+            "coord" => {
+                if call_expr.args.len() != 1 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!("`coord` expects 1 argument, got {}", call_expr.args.len()),
+                    );
+                }
+                let tuple_type = self
+                    .compile_type(
+                        &syn::parse_quote!((i32, i32)),
+                        generic_vars,
+                        &HashMap::new(),
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(&call_expr.span(), "failed to synthesize coordinate type")
+                    })?;
+                let index = self
+                    .compile_expression(
+                        module,
+                        block_id,
+                        &call_expr.args[0],
+                        generic_vars,
+                        ctx,
+                        Some(tuple_type),
+                    )?
+                    .ok_or_else(|| {
+                        self.jit_error(&call_expr.args[0].span(), "failed to compile coordinate")
+                    })?;
+                let Some(values) = index.values else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "`coord` expects a 2D tuple coordinate",
+                    );
+                };
+                if values.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!(
+                            "`coord` expects a 2D tuple coordinate, got rank {}",
+                            values.len()
+                        ),
+                    );
+                }
+                let return_type = match return_type {
+                    Some(return_type) => return_type,
+                    None => self
+                        .compile_type(&syn::parse_quote!(Coord2), generic_vars, &HashMap::new())?
+                        .ok_or_else(|| {
+                            self.jit_error(
+                                &call_expr.span(),
+                                "unable to infer return type for `coord`",
+                            )
+                        })?,
+                };
+                let array_ty = self.array_i32_type(2, generic_vars, &call_expr.span())?;
+                let coords = TileRustValue::new_compound(values, array_ty);
+                let mut fields = BTreeMap::new();
+                fields.insert("coords".to_string(), coords);
+                Ok(Some(TileRustValue::new_struct(fields, return_type)))
+            }
+            "coord_as_array" => {
+                if call_expr.args.len() != 1 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`coord_as_array` expects 1 argument, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let mut args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+                let coord = args.remove(0);
+                let Some(fields) = coord.fields else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "`coord_as_array` expects a compiler-created Coord2",
+                    );
+                };
+                let Some(coords) = fields.get("coords").cloned() else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "Coord2 is missing coordinate metadata",
+                    );
+                };
+                Ok(Some(coords))
+            }
+            "partition_with_bounds" => {
+                if call_expr.args.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`Partition::with_bounds` expects 2 arguments, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let mut args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+                let mut partition = args.remove(0);
+                let bounds = args.remove(0);
+                let Some(bound_values) = bounds.values else {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "`Partition::with_bounds` expects a 2D tuple of dimensions",
+                    );
+                };
+                if bound_values.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        &format!(
+                            "`Partition::with_bounds` expects rank-2 bounds, got rank {}",
+                            bound_values.len()
+                        ),
+                    );
+                }
+                let mut dim_origins = Vec::with_capacity(bound_values.len());
+                for (axis, value) in bound_values.into_iter().enumerate() {
+                    let origin = value.dim_origin.or_else(|| {
+                        value
+                            .fields
+                            .as_ref()
+                            .and_then(|fields| fields.get("size"))
+                            .and_then(|size| size.dim_origin.clone())
+                    });
+                    let Some(origin) = origin else {
+                        return self.jit_error_result(
+                            &call_expr.args[1].span(),
+                            &format!(
+                                "`Partition::with_bounds` bound {axis} must come from `num_tiles` or `Dim::new`"
+                            ),
+                        );
+                    };
+                    dim_origins.push(origin);
+                }
+                let return_type = match return_type {
+                    Some(return_type) => return_type,
+                    None => {
+                        let mut bounded_ty = partition.ty.rust_ty.clone();
+                        let syn::Type::Path(path_ty) = &mut bounded_ty else {
+                            return self.jit_error_result(
+                                &call_expr.args[0].span(),
+                                "expected a partition type for `Partition::with_bounds`",
+                            );
+                        };
+                        let Some(segment) = path_ty.path.segments.last_mut() else {
+                            return self.jit_error_result(
+                                &call_expr.args[0].span(),
+                                "expected a partition type path for `Partition::with_bounds`",
+                            );
+                        };
+                        segment.ident = syn::Ident::new("BoundedPartition", segment.ident.span());
+                        let mut return_type = partition.ty.clone();
+                        return_type.rust_ty = bounded_ty;
+                        return_type
+                    }
+                };
+                partition.ty = return_type;
+                partition.bounded_axes = Some(dim_origins);
+                Ok(Some(partition))
+            }
+            "check_bounded_partition_access" => {
+                if call_expr.args.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`check_bounded_partition_access` expects 2 arguments, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let mut args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+                let partition = args.remove(0);
+                let coord = args.remove(0);
+                let Some(bound_axes) = partition.bounded_axes else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "bounded partition load requires bounds established by `Partition::with_bounds`",
+                    );
+                };
+                let Some(fields) = coord.fields else {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "bounded partition load requires a coordinate created by `coord(...)`",
+                    );
+                };
+                let Some(coords) = fields.get("coords") else {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "Coord2 is missing coordinate metadata",
+                    );
+                };
+                let Some(coord_values) = coords.values.as_ref() else {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "Coord2 coordinates must be a compound value",
+                    );
+                };
+                if coord_values.len() != bound_axes.len() {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        &format!(
+                            "coordinate rank {} does not match bounded partition rank {}",
+                            coord_values.len(),
+                            bound_axes.len()
+                        ),
+                    );
+                }
+                for (axis, (coord_value, bound_origin)) in
+                    coord_values.iter().zip(bound_axes.iter()).enumerate()
+                {
+                    match coord_value.index_origin.as_ref() {
+                        Some(index_origin) if index_origin == bound_origin => {}
+                        Some(_) => {
+                            return self.jit_error_result(
+                                &call_expr.args[1].span(),
+                                &format!(
+                                    "bounded partition coordinate axis {axis} was produced by a different dimension"
+                                ),
+                            );
+                        }
+                        None => {
+                            return self.jit_error_result(
+                                &call_expr.args[1].span(),
+                                &format!(
+                                    "bounded partition coordinate axis {axis} must come from iterating the matching dimension"
+                                ),
+                            );
+                        }
+                    }
+                }
+                Ok(None)
+            }
             "num_tiles" => {
-                // Signature: fn num_tiles(view: &Partition<E, S>, axis: i32) -> i32
+                // Signature: fn num_tiles(view: &V, axis: i32) -> i32
                 //
                 // Lowers to `cuda_tile.get_index_space_shape` producing N scalar
                 // i32 results (one per partition-view axis), then returns
-                // result[axis]. `axis` must be a compile-time constant.
+                // result[axis]. The returned scalar carries DimOrigin metadata
+                // so explicit `IntoDim::into_dim` can turn it into a Dim.
+                // `axis` must be a compile-time constant.
                 if call_expr.args.len() != 2 {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -652,7 +1039,498 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let num_tiles = (parent_dim + tile_dim - 1) / tile_dim;
                     tr_value.bounds = Some(Bounds::exact(num_tiles));
                 }
+                tr_value.dim_origin = Some(DimOrigin::PartitionAxis {
+                    view: view_value,
+                    axis,
+                    tile_dim: tile_dim as i32,
+                });
                 Ok(Some(tr_value))
+            }
+            "partition_index_coords" => {
+                if call_expr.args.len() != 1 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`partition_index_coords` expects 1 argument, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let mut args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+                let index = args.remove(0);
+                let Some(fields) = index.fields else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "`partition_index_coords` expects a compiler-created PartitionIndex",
+                    );
+                };
+                let Some(coords) = fields.get("coords").cloned() else {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        "PartitionIndex is missing coordinate metadata",
+                    );
+                };
+                Ok(Some(coords))
+            }
+            "validate_partition_index" => {
+                if call_expr.args.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`validate_partition_index` expects 2 arguments, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let mut args =
+                    self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+                let view = args.remove(0);
+                let index = args.remove(0);
+                let view_value = view.value.ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.args[0].span(),
+                        "expected a direct value for mapped partition index validation",
+                    )
+                })?;
+                let Some(origin_value) = index.partition_origin else {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "MappedPartitionMut::store requires an index produced by this partition's iter_indices() iterator",
+                    );
+                };
+                if origin_value != view_value {
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        "MappedPartitionMut::store index was produced by a different mapped partition",
+                    );
+                }
+                Ok(None)
+            }
+            "swizzle_partition_index_2d" => {
+                if call_expr.args.len() != 3 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "`swizzle_partition_index_2d` expects 3 arguments, got {}",
+                            call_expr.args.len()
+                        ),
+                    );
+                }
+                let Expr::Path(path) = &*call_expr.func else {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        "expected swizzle partition-index call to use a function path",
+                    );
+                };
+                let Some(last_segment) = path.path.segments.last() else {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        "expected swizzle partition-index function path",
+                    );
+                };
+                let PathArguments::AngleBracketed(generic_args_for_call) = &last_segment.arguments
+                else {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        "swizzle_partition_index_2d requires explicit map-shape const generics",
+                    );
+                };
+                let Some(map_shape_arg) = generic_args_for_call.args.iter().nth(1) else {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        "swizzle_partition_index_2d missing map-shape generic argument",
+                    );
+                };
+                let Some(map_shape) = get_cga_from_generic_argument(map_shape_arg, generic_vars)
+                else {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        "failed to resolve swizzle_partition_index_2d map-shape const generic",
+                    );
+                };
+                if map_shape.len() != 2 {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        &format!(
+                            "swizzle_partition_index_2d expects a rank-2 map shape, got rank {}",
+                            map_shape.len()
+                        ),
+                    );
+                }
+                let swizzle_m_value = map_shape[0];
+                let swizzle_n_value = map_shape[1];
+                if swizzle_m_value <= 0 || swizzle_n_value <= 0 {
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        &format!(
+                            "swizzle_partition_index_2d map shape dimensions must be positive, got [{swizzle_m_value}, {swizzle_n_value}]"
+                        ),
+                    );
+                }
+                let i32_tr_type = self
+                    .compile_type(&syn::parse_quote!(i32), generic_vars, &HashMap::new())?
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.span(),
+                            "failed to synthesize `i32` type for swizzle partition index",
+                        )
+                    })?;
+                let mut args = Vec::with_capacity(3);
+                for arg in &call_expr.args {
+                    args.push(
+                        self.compile_expression(
+                            module,
+                            block_id,
+                            arg,
+                            generic_vars,
+                            ctx,
+                            Some(i32_tr_type.clone()),
+                        )?
+                        .ok_or_else(|| {
+                            self.jit_error(
+                                &arg.span(),
+                                "failed to compile swizzle partition-index argument",
+                            )
+                        })?,
+                    );
+                }
+                let tile_id = args.remove(0);
+                let num_bid_m = args.remove(0);
+                let num_bid_n = args.remove(0);
+                let (mut bid_m, mut bid_n) = if swizzle_m_value == 1 && swizzle_n_value == 1 {
+                    let bid_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_id.clone(),
+                        num_bid_n.clone(),
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let bid_n = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_id.clone(),
+                        num_bid_n.clone(),
+                        &TileBinaryOp::Rem,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    (bid_m, bid_n)
+                } else if swizzle_n_value == 1 {
+                    let swizzle_m =
+                        self.compile_constant(module, block_id, generic_vars, swizzle_m_value)?;
+                    let num_bid_in_m_band = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        swizzle_m.clone(),
+                        num_bid_n.clone(),
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let group_m_id = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_id.clone(),
+                        num_bid_in_m_band.clone(),
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let first_bid_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        group_m_id.clone(),
+                        swizzle_m.clone(),
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let remaining_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        num_bid_m.clone(),
+                        first_bid_m.clone(),
+                        &TileBinaryOp::Sub,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let actual_group_size_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        remaining_m,
+                        swizzle_m,
+                        &TileBinaryOp::Min,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let m_band_start = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        group_m_id,
+                        num_bid_in_m_band,
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let tile_in_m_band = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_id.clone(),
+                        m_band_start,
+                        &TileBinaryOp::Sub,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let tile_in_group_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_in_m_band.clone(),
+                        actual_group_size_m.clone(),
+                        &TileBinaryOp::Rem,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let bid_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        first_bid_m,
+                        tile_in_group_m,
+                        &TileBinaryOp::Add,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let bid_n = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_in_m_band,
+                        actual_group_size_m,
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    (bid_m, bid_n)
+                } else {
+                    let swizzle_m =
+                        self.compile_constant(module, block_id, generic_vars, swizzle_m_value)?;
+                    let swizzle_n =
+                        self.compile_constant(module, block_id, generic_vars, swizzle_n_value)?;
+                    let num_bid_in_m_band = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        swizzle_m.clone(),
+                        num_bid_n.clone(),
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let group_m_id = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_id.clone(),
+                        num_bid_in_m_band.clone(),
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let first_bid_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        group_m_id.clone(),
+                        swizzle_m.clone(),
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let remaining_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        num_bid_m.clone(),
+                        first_bid_m.clone(),
+                        &TileBinaryOp::Sub,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let actual_group_size_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        remaining_m,
+                        swizzle_m,
+                        &TileBinaryOp::Min,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let m_band_start = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        group_m_id,
+                        num_bid_in_m_band,
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let tile_in_m_band = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_id.clone(),
+                        m_band_start,
+                        &TileBinaryOp::Sub,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let n_group_capacity = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        actual_group_size_m.clone(),
+                        swizzle_n.clone(),
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let group_n_id = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_in_m_band.clone(),
+                        n_group_capacity.clone(),
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let first_bid_n = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        group_n_id,
+                        swizzle_n,
+                        &TileBinaryOp::Mul,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let tile_in_n_group = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_in_m_band,
+                        n_group_capacity,
+                        &TileBinaryOp::Rem,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let tile_in_group_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_in_n_group.clone(),
+                        actual_group_size_m.clone(),
+                        &TileBinaryOp::Rem,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let bid_m = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        first_bid_m,
+                        tile_in_group_m,
+                        &TileBinaryOp::Add,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let tile_in_group_n = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        tile_in_n_group,
+                        actual_group_size_m,
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    let bid_n = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        first_bid_n,
+                        tile_in_group_n,
+                        &TileBinaryOp::Add,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &call_expr.span(),
+                    )?;
+                    (bid_m, bid_n)
+                };
+
+                if let Some(bounds) = num_bid_m.bounds {
+                    if bounds.is_exact() && bounds.start > 0 {
+                        bid_m.bounds = Some(Bounds::new(0, bounds.start - 1));
+                    }
+                }
+                if let Some(bounds) = num_bid_n.bounds {
+                    if bounds.is_exact() && bounds.start > 0 {
+                        bid_n.bounds = Some(Bounds::new(0, bounds.start - 1));
+                    }
+                }
+
+                let return_type = return_type.ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.span(),
+                        "unable to infer return type for swizzle partition index",
+                    )
+                })?;
+                let array_ty = self.array_i32_type(2, generic_vars, &call_expr.span())?;
+                let coords = TileRustValue::new_compound(vec![bid_m, bid_n], array_ty);
+                let mut fields = BTreeMap::new();
+                fields.insert("coords".to_string(), coords);
+                Ok(Some(TileRustValue::new_struct(fields, return_type)))
             }
             "reduce" => {
                 if call_expr.args.len() != 2 {
@@ -1337,22 +2215,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                let outer_shape =
-                    self.static_shape_from_value(&outer_tile, generic_vars, &call_expr.span())?;
-                if outer_shape.iter().all(|d| *d > 0) {
-                    let access_offset = self.compile_nested_mutable_access_offset_metadata(
-                        module,
-                        block_id,
-                        &call_expr.span(),
-                        &partition_value,
-                        &outer_tile,
-                        generic_vars,
-                        ctx,
-                    )?;
+                let access_offset = self.compile_nested_mutable_access_offset_metadata(
+                    module,
+                    block_id,
+                    &call_expr.span(),
+                    &partition_value,
+                    &outer_tile,
+                    generic_vars,
+                    ctx,
+                )?;
+                if let Some(access_offset) = access_offset {
                     partition_value
                         .insert_type_meta_field(NESTED_MUTABLE_ACCESS_OFFSET_META, access_offset)?;
+                    ctx.vars.insert(var_name, partition_value);
                 }
-                ctx.vars.insert(var_name, partition_value);
                 Ok(None)
             }
             "set_type_meta_field" => {
@@ -1587,6 +2463,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 r
             }
         };
+        let partition_tensor_origin = partition_value.tensor_origin.clone();
+        let partition_view_value = partition_value.value;
 
         // Get dynamic shape values.
         let tensor_shape_value = partition_value
@@ -1637,6 +2515,32 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let static_shape_dim = static_shape[remapped_i];
             let is_static_shape_dim = static_shape_dim != -1;
             let index_value = indexes.remove(0);
+            if let (Some(index_origin), Some(target_origin)) = (
+                index_value.partition_axis_origin.as_ref(),
+                partition_tensor_origin.as_ref(),
+            ) {
+                if self.proof_results.proves_partition_axis_access(
+                    index_origin,
+                    target_origin,
+                    i,
+                    static_tile_dim,
+                ) {
+                    continue;
+                }
+            }
+            if let (
+                Some(DimOrigin::PartitionAxis {
+                    view,
+                    axis,
+                    tile_dim,
+                }),
+                Some(partition_view_value),
+            ) = (index_value.index_origin.as_ref(), partition_view_value)
+            {
+                if *view == partition_view_value && *axis == i && *tile_dim == static_tile_dim {
+                    continue;
+                }
+            }
             if index_value.bounds.is_some() && is_static_shape_dim {
                 // We can do a static bounds check.
                 let bounds = index_value.bounds.unwrap();
@@ -1651,7 +2555,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
-                return Ok(None);
+                continue;
             }
             // In the rest of the cases, we need to generate a dynamic bounds check.
             let tile_dim_value =
@@ -1665,7 +2569,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let shape_dim_value = if is_static_shape_dim {
                 self.compile_constant(module, block_id, generic_vars, static_shape_dim)?
             } else {
-                dynamic_shape[remapped_i].clone()
+                let dynamic_shape_index = static_shape
+                    .iter()
+                    .take(remapped_i + 1)
+                    .filter(|&&dim| dim == -1)
+                    .count()
+                    .checked_sub(1)
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.span(),
+                            "internal: dynamic partition dimension was not found in tensor shape metadata",
+                        )
+                    })?;
+                dynamic_shape.get(dynamic_shape_index).cloned().ok_or_else(|| {
+                    self.jit_error(
+                        &call_expr.span(),
+                        &format!(
+                            "internal: tensor shape metadata is missing dynamic dimension {dynamic_shape_index}"
+                        ),
+                    )
+                })?
             };
             // Compute ceil_div(shape, tile) as (shape + tile - 1) / tile
             // using floor division. This avoids positive_inf rounding which

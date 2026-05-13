@@ -237,7 +237,8 @@ pub fn compile_from_context<F: Fn() -> Module>(
             .iter()
             .map(|x| (x.0.as_str(), &x.1))
             .collect();
-        let (cubin_filename, validator) = {
+        let stage1_start = std::time::Instant::now();
+        let (tile_module, validator) = {
             let compiler = CUDATileFunctionCompiler::new(
                 &modules,
                 module_name,
@@ -253,6 +254,12 @@ pub fn compile_from_context<F: Fn() -> Module>(
             let validator: Validator = compiler.get_validator();
             let validator = Arc::new(validator);
             let tile_module = compiler.compile()?;
+            (tile_module, validator)
+        };
+        let stage1_ms = stage1_start.elapsed().as_secs_f64() * 1000.0;
+
+        let stage2_start = std::time::Instant::now();
+        let cubin_filename = {
             let mlir = tile_module.to_mlir_text();
             if modules.get_entry_arg_bool_by_function_name(
                 module_name,
@@ -275,9 +282,9 @@ pub fn compile_from_context<F: Fn() -> Module>(
                     mlir.as_str(),
                 );
             }
-            let cubin_filename = compile_tile_ir_module(&tile_module, &gpu_name);
-            (cubin_filename, validator)
+            compile_tile_ir_module(&tile_module, &gpu_name)
         };
+        let stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
         // if let Some(path) = compiler.get_entry_arg_string_by_function_name(
         //     module_name,
         //     function_name,
@@ -297,12 +304,26 @@ pub fn compile_from_context<F: Fn() -> Module>(
         //     println!("{ptx}");
         //     println!();
         // }
+        let stage3_start = std::time::Instant::now();
         let module = load_module_from_file(&cubin_filename, device_id)?;
         let function = Arc::new(
             module
                 .load_function(function_entry)
                 .expect("Failed to compile function."),
         );
+        let stage3_ms = stage3_start.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("CUTILE_JIT_TIMING").is_some() {
+            eprintln!(
+                "CUTILE_JIT_TIMING module={} function={} key={} stage1_ms={:.3} stage2_ms={:.3} stage3_ms={:.3} generics={}",
+                module_name,
+                function_name,
+                cache_hash_str,
+                stage1_ms,
+                stage2_ms,
+                stage3_ms,
+                key.function_generics.join(","),
+            );
+        }
         insert_cuda_function(device_id, &key, (module, function.clone()))?;
         insert_function_validator(device_id, &key, validator.clone())?;
         Ok((function, validator))

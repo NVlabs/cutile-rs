@@ -284,7 +284,7 @@ mod fmha_module {
         qk_scale: f32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let h = get_shape_dim(q.shape(), 1i32);
+        let h = q.shape()[1];
         let batch_idx = pid.0 / h;
         let head_idx = pid.0 % h;
         let q_m_idx = pid.1;
@@ -305,7 +305,7 @@ mod fmha_module {
         let tq: Tile<f32, { [1, 1, BM, D] }> = q_part.load([batch_idx, head_idx, q_m_idx, 0i32]);
         let tq: Tile<f32, { [BM, D] }> = tq.reshape(const_shape![BM, D]);
 
-        let n: i32 = get_shape_dim(k.shape(), 2i32);
+        let n: i32 = k.shape()[2];
         let num_tiles: i32 = ceil_div(n, BN);
 
         let k_part = k.partition(const_shape![1, 1, BN, D]);

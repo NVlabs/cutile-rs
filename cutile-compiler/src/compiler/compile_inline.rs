@@ -69,6 +69,25 @@ impl VisitMut for CallSiteSpanSetter {
     fn visit_span_mut(&mut self, span: &mut Span) {
         *span = self.target_span;
     }
+
+    fn visit_expr_lit_mut(&mut self, expr: &mut syn::ExprLit) {
+        syn::visit_mut::visit_expr_lit_mut(self, expr);
+        set_lit_span(&mut expr.lit, self.target_span);
+    }
+}
+
+fn set_lit_span(lit: &mut syn::Lit, span: Span) {
+    match lit {
+        syn::Lit::Str(lit) => lit.set_span(span),
+        syn::Lit::ByteStr(lit) => lit.set_span(span),
+        syn::Lit::Byte(lit) => lit.set_span(span),
+        syn::Lit::Char(lit) => lit.set_span(span),
+        syn::Lit::Int(lit) => lit.set_span(span),
+        syn::Lit::Float(lit) => lit.set_span(span),
+        syn::Lit::Bool(lit) => lit.span = span,
+        syn::Lit::Verbatim(_) => {}
+        _ => {}
+    }
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
@@ -83,7 +102,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         ctx: &mut CompilerContext,
         return_type: Option<TileRustType>,
     ) -> Result<Option<TileRustValue>, JITError> {
+        let normalized_fn_item = crate::type_aliases::normalize_item_fn_param_type_aliases(
+            fn_item,
+            self.modules.type_aliases(),
+        )
+        .map_err(JITError::Generic)?;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            let fn_item = &normalized_fn_item;
             let _inline_function_call_debug_str = call_expr.to_token_stream().to_string();
             // println!("enter_function_call: {}", call_expr.to_token_stream().to_string());
 
@@ -127,7 +152,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             // Remap generic parameters.
             let expr_generic_args = get_call_expression_generics(call_expr);
-            let call_generic_vars = if GenericVars::is_empty(&fn_item.sig.generics) {
+            let mut call_generic_vars = if GenericVars::is_empty(&fn_item.sig.generics) {
                 // If there are no generics, we're done.
                 GenericVars::empty(&fn_item.sig.generics)?
             } else if expr_generic_args.is_some() {
@@ -146,13 +171,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 generic_arg_inference
                     .get_generic_vars_instance(&generic_vars, &self.modules.primitives())
             };
+            self.add_module_const_vars(&mut call_generic_vars);
             // Add function call const generics as variables.
-            for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(module, block_id, &call_generic_vars, *value)?;
-                call_variables.vars.insert(key.clone(), tr_val);
+            for (key, value) in call_generic_vars.ordered_inst_i32() {
+                let tr_val = self.compile_constant(module, block_id, &call_generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
+            }
+            for (key, value) in call_generic_vars.ordered_inst_bool() {
+                let tr_val =
+                    self.compile_bool_constant(module, block_id, &call_generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
             // Add function call CGAs arrays as variables.
-            for (key, value) in &call_generic_vars.inst_array {
+            for (key, value) in call_generic_vars.ordered_inst_array() {
                 let arr_expr = syn::parse2::<Expr>(format!("{value:?}").parse().unwrap()).unwrap();
                 let arr_ty =
                     syn::parse2::<Type>(format!("[i32;{}]", value.len()).parse().unwrap()).unwrap();
@@ -167,7 +198,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ty,
                     )?
                     .expect("Failed to compile CGA as var.");
-                call_variables.vars.insert(key.clone(), tr_val);
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
             let initial_types = call_variables
                 .vars
@@ -175,6 +206,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .map(|(name, value)| (name.clone(), value.ty.clone()))
                 .collect::<HashMap<_, _>>();
             let mut typed_fn_item = fn_item.clone();
+            if !same_module_identity(module_name, &self.module_name) {
+                let mut setter = CallSiteSpanSetter {
+                    target_span: call_expr.func.span(),
+                };
+                setter.visit_item_fn_mut(&mut typed_fn_item);
+            }
             crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);
             let typeck_results = crate::passes::type_inference::infer_function(
                 self,
@@ -223,8 +260,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     ctx,
                 )?
                 else {
-                    return self
-                        .jit_error_result(&call_expr.func.span(), "Failed to derive return type");
+                    return self.jit_error_result(
+                        &call_expr.func.span(),
+                        &format!(
+                            "Failed to determine typeck return type for inlined function call `{}`",
+                            call_expr.to_token_stream()
+                        ),
+                    );
                 };
                 res.ty = derived_ret_ty;
                 Ok(Some(res))
@@ -258,18 +300,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .iter()
                 .map(|arg| arg.ty.rust_ty.clone())
                 .collect::<Vec<_>>();
-            let selected_method = self
-                .typeck_results
-                .borrow()
-                .as_ref()
-                .and_then(|results| results.method_selection(method_call_expr).cloned());
+            let selected_method = self.typeck_method_selection(method_call_expr);
             let (module_name, impl_item, impl_method, selected_generic_vars) =
                 if let Some(selection) = selected_method {
                     (
                         selection.module_name,
                         selection.impl_item,
                         selection.impl_method,
-                        None,
+                        Some(selection.generic_vars),
                     )
                 } else {
                     let impl_item_fn = self.modules.get_impl_item_fn(
@@ -328,7 +366,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // Remap generic parameters.
             // This is different from a function call, because passing generics to a method
             // does not capture all generics available within the method.
-            let call_generic_vars = if let Some(selected_generic_vars) = selected_generic_vars {
+            let mut call_generic_vars = if let Some(selected_generic_vars) = selected_generic_vars {
                 selected_generic_vars
             } else {
                 let generic_arg_inference =
@@ -348,13 +386,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     )?
                 }
             };
+            self.add_module_const_vars(&mut call_generic_vars);
 
             // Add method call const generics as variables.
-            for (key, value) in &call_generic_vars.inst_i32 {
-                let tr_val = self.compile_constant(module, block_id, generic_vars, *value)?;
-                call_variables.vars.insert(key.clone(), tr_val);
+            for (key, value) in call_generic_vars.ordered_inst_i32() {
+                let tr_val = self.compile_constant(module, block_id, generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
-            for (key, value) in &call_generic_vars.inst_array {
+            for (key, value) in call_generic_vars.ordered_inst_bool() {
+                let tr_val = self.compile_bool_constant(module, block_id, generic_vars, value)?;
+                call_variables.vars.insert(key.to_string(), tr_val);
+            }
+            for (key, value) in call_generic_vars.ordered_inst_array() {
                 let arr_expr = syn::parse2::<Expr>(format!("{value:?}").parse().unwrap()).unwrap();
                 let arr_ty =
                     syn::parse2::<Type>(format!("[i32;{}]", value.len()).parse().unwrap()).unwrap();
@@ -369,7 +412,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ty,
                     )?
                     .expect("Failed to compile CGA as var.");
-                call_variables.vars.insert(key.clone(), tr_val);
+                call_variables.vars.insert(key.to_string(), tr_val);
             }
             // println!("inline_method_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ncall_generic_args={call_generic_args:#?}", impl_method.sig.ident.to_string());
             // Method calls are always core/library methods (user kernel code
@@ -381,7 +424,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 target_span: method_call_expr.span(),
             };
             setter.visit_block_mut(&mut compile_block);
-            let previous_typeck_results = self.typeck_results.replace(None);
+            crate::passes::node_ids::assign_block_expr_ids(&mut compile_block);
+            let initial_types = call_variables
+                .vars
+                .iter()
+                .map(|(name, value)| (name.clone(), value.ty.clone()))
+                .collect::<HashMap<_, _>>();
+            let mut typed_method = impl_method.clone();
+            typed_method.block = compile_block.clone();
+            let typeck_results = crate::passes::type_inference::infer_method(
+                self,
+                &impl_item,
+                &typed_method,
+                self_ty,
+                &call_generic_vars,
+                initial_types,
+            )?;
+            let previous_typeck_results = self.typeck_results.replace(Some(typeck_results));
             let result = self.compile_block(
                 module,
                 block_id,
@@ -420,7 +479,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 else {
                     return self.jit_error_result(
                         &method_call_expr.method.span(),
-                        "Failed to derive return type",
+                        &format!(
+                            "Failed to determine typeck return type for inlined method call `{}`",
+                            method_call_expr.to_token_stream()
+                        ),
                     );
                 };
                 res.ty = derived_ret_ty;
@@ -430,4 +492,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }) // stacker::maybe_grow
     }
+}
+
+fn same_module_identity(a: &str, b: &str) -> bool {
+    a == b || a.rsplit("::").next() == b.rsplit("::").next()
 }
