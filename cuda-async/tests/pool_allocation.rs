@@ -17,6 +17,7 @@ use cuda_async::device_context::{
 };
 use cuda_async::device_operation::{value, DeviceOp};
 use cuda_async::prelude::*;
+use std::future::IntoFuture;
 
 fn on_fresh_thread<F: FnOnce() + Send + 'static>(f: F) {
     std::thread::spawn(f).join().expect("test thread panicked");
@@ -151,9 +152,16 @@ fn alloc_with_custom_pool_via_device_op() {
             .expect("pool creation failed");
         pool.set_release_threshold(u64::MAX)
             .expect("set threshold failed");
+        let pool_ptr = pool.cu_pool() as usize;
         set_device_pool(0, pool).expect("set pool failed");
 
-        let op = with_context(|ctx| {
+        let op = with_context(move |ctx| {
+            let p = ctx.get_pool().expect("pool must be present in ExecutionContext via sync()");
+            assert_eq!(
+                p.cu_pool() as usize,
+                pool_ptr,
+                "sync() must route allocation through the registered pool"
+            );
             let num_bytes = 1024;
             let dptr = unsafe { ctx.alloc_async(num_bytes) };
             assert!(dptr != 0, "allocation returned null pointer");
@@ -161,6 +169,32 @@ fn alloc_with_custom_pool_via_device_op() {
         });
         let dptr = op.sync().expect("device op failed");
         assert!(dptr != 0);
+    });
+}
+
+#[test]
+fn alloc_with_custom_pool_via_into_future() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        pool.set_release_threshold(u64::MAX)
+            .expect("set threshold failed");
+        let pool_ptr = pool.cu_pool() as usize;
+        set_device_pool(0, pool).expect("set pool failed");
+
+        let op = with_context(move |ctx| {
+            let p = ctx.get_pool().expect("pool must be present in ExecutionContext via into_future()");
+            assert_eq!(
+                p.cu_pool() as usize,
+                pool_ptr,
+                "into_future() must route allocation through the registered pool"
+            );
+            value(())
+        });
+        futures::executor::block_on(op.into_future()).expect("future failed");
     });
 }
 
