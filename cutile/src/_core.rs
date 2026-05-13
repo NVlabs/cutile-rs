@@ -588,7 +588,7 @@ pub mod core {
             // TODO (hme): Bounds checks.
             let tensor_token: Token = get_tensor_token(self);
             let p: Partition<E, R> =
-                make_partition_view(self, tile, padding::None, dim_map, tensor_token);
+                make_partition_view(self, tile, padding::Zero, dim_map, tensor_token);
             p
         }
         pub unsafe fn partition_mut<'a, const R: [i32; N]>(
@@ -2822,7 +2822,7 @@ pub mod core {
             let x_partition: Partition<E1, S> = make_partition_view(
                 x,
                 tile_shape,
-                padding::None,
+                padding::Zero,
                 dim_map::Identity,
                 tensor_token,
             );
@@ -2851,7 +2851,7 @@ pub mod core {
             let x_partition: Partition<E1, S> = make_partition_view(
                 x,
                 tile_shape,
-                padding::None,
+                padding::Zero,
                 dim_map::Identity,
                 tensor_token,
             );
@@ -2880,7 +2880,7 @@ pub mod core {
             let x_partition: Partition<E1, S> = make_partition_view(
                 x,
                 tile_shape,
-                padding::None,
+                padding::Zero,
                 dim_map::Identity,
                 tensor_token,
             );
