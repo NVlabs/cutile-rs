@@ -331,10 +331,8 @@ pub trait DeviceOp:
     fn graph(
         self,
     ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
-        with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            self.graph_on(stream)
-        })?
+        let stream = with_default_device_policy(|policy| policy.next_stream())??;
+        self.graph_on(stream)
     }
     /// Capture this operation into a replayable [`CudaGraph`](crate::cuda_graph::CudaGraph)
     /// on an **explicit stream**.
@@ -353,10 +351,8 @@ pub trait DeviceOp:
     /// The policy picks a stream (round-robin by default), submits the work, and blocks
     /// until the GPU finishes. Equivalent to `.await` but blocking.
     fn sync(self) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            self.sync_on(&stream)
-        })?
+        let stream = with_default_device_policy(|policy| policy.next_stream())??;
+        self.sync_on(&stream)
     }
     /// Execute on a stream without synchronizing. The GPU may still be
     /// writing to the output when this returns.
@@ -435,17 +431,14 @@ impl<T: Send> IntoFuture for BoxedDeviceOp<T> {
     type Output = Result<T, DeviceError>;
     type IntoFuture = DeviceFuture<T, Self>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -503,17 +496,14 @@ impl<T: Send + Sync> IntoFuture for SharedDeviceOp<T> {
     type Output = Result<Arc<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Arc<T>, SharedDeviceOp<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -667,17 +657,14 @@ where
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, AndThen<I, DI, O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -709,17 +696,14 @@ impl<T: Send> IntoFuture for Value<T> {
     type Output = Result<T, DeviceError>;
     type IntoFuture = DeviceFuture<T, Value<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -770,17 +754,14 @@ impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> IntoFuture for Empty<
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, Empty<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -829,17 +810,14 @@ impl<T1: Send, T2: Send, A: DeviceOp<Output = T1>, B: DeviceOp<Output = T2>> Int
     type Output = Result<(T1, T2), DeviceError>;
     type IntoFuture = DeviceFuture<(T1, T2), Zip<T1, T2, A, B>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -1045,17 +1023,14 @@ where
     type Output = Result<T1, DeviceError>;
     type IntoFuture = DeviceFuture<T1, SelectLeft<T1, T2, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -1092,17 +1067,14 @@ where
     type Output = Result<T2, DeviceError>;
     type IntoFuture = DeviceFuture<T2, SelectRight<T1, T2, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -1362,17 +1334,14 @@ impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce(&ExecutionContext) -> DO + Sen
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, StreamOperation<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -1423,17 +1392,14 @@ where
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, AndThenWithContext<I, DI, O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
@@ -1492,17 +1458,14 @@ impl<T: Send> IntoFuture for DeviceOpVec<T> {
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, Self>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
     }
 }
 
