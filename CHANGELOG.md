@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-16
+
+This is the first cuTile Rust beta release with stable host-side and
+device-side APIs. We do not plan further breaking changes to the kernel
+authoring model, tensor launch API, `DeviceOp` execution model, or core device
+operation surface; future work is expected to extend these APIs compatibly
+unless a correctness issue requires otherwise.
+
+### Highlights
+
+- Stabilized the public host API around lazy `DeviceOp`s, borrowed/shared
+  tensors, mutable partitions, async execution, CUDA graph capture, and CUDA
+  interop.
+- Stabilized the public device DSL around Tile IR-aligned operations,
+  rank-polymorphic helpers such as `load_tile_like`, tensor views, partition
+  views, memory ordering, atomics, tokens, shape operations, and tile math.
+- Added type-check-driven JIT lowering with stable node IDs, richer expression
+  type inference, static dispatch lowering, type aliases, global constants,
+  `Global`, `else if`, and source-location preserving diagnostics.
+- Added mapped partition support for safe persistent scheduling, including
+  proof-carrying partition indexes and examples for persistent GEMM-style
+  output traversal.
+- Improved dynamic-shape performance by propagating `num_tiles` bounds, fixing
+  nested partition overhangs, supporting static-shaped `load_tile_like`, and
+  using zero-padded read-only tile-like loads where they generate better code.
+- Added CUDA runtime ergonomics: dynamically loaded CUDA bindings, configurable
+  `tileiras` binary override, custom memory pools, memory accounting, and JIT
+  timing support.
+- Updated the book, README, examples, and internal release/docs material to
+  describe the stable host/device APIs and current interop story.
+
+### Fixed
+
+- Restored scalar divisibility hint lowering for kernel arguments.
+- Fixed compile-only kernel compiler hooks and several JIT/type inference
+  failures exposed by examples and downstream kernels.
+- Fixed CUDA 13.0-13.2 `CUmemLocation` layout compatibility.
+- Fixed custom memory pool resolution outside the default device policy
+  closure.
+
 ## [0.0.2] - 2026-04-26
 
 This release is a broad API and compiler update focused on making kernel

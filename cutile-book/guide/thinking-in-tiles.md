@@ -1,6 +1,6 @@
 # Thinking in Tiles
 
-The fundamental unit of computation in cuTile Rust is the **tile** — an immutable multi-dimensional array fragment that lives in GPU registers during kernel execution. You load data from tensors into tiles, compute on tiles, and store the results back. The compiler maps tiles onto the hardware memory hierarchy — including shared memory, caches, and registers — so you never manage these resources yourself.
+The fundamental unit of computation in cuTile Rust is the **tile**: an immutable multi-dimensional array fragment that lives in GPU registers during kernel execution. You load data from tensors into tiles, compute on tiles, and store the results back. The compiler maps tiles onto the hardware memory hierarchy (shared memory, caches, and registers) so you never manage these resources yourself.
 
 ![Thread-centric vs Tile-centric programming mental model](../_static/images/mental-model-shift.svg)
 
@@ -47,9 +47,9 @@ let pid: (i32, i32, i32) = get_tile_block_id();    // This block's (x, y, z) coo
 let npids: (i32, i32, i32) = get_num_tile_blocks(); // Total grid dimensions
 ```
 
-The cuTile Rust compiler maps each tile block to one or more underlying CUDA execution units (thread blocks, clusters, or warps) depending on the target architecture — but from the programmer's perspective, a tile block is simply a single-threaded context that processes one tile of data. The terms **tile block** and **tile thread** are interchangeable: the API uses `get_tile_block_id()` and `get_num_tile_blocks()`, while the guides often say "tile thread" to emphasize the single-threaded programming model.
+The cuTile Rust compiler maps each tile block to one or more underlying CUDA execution units (thread blocks, clusters, or warps) depending on the target architecture. From the programmer's perspective, a tile block is simply a single-threaded context that processes one tile of data. The terms **tile block** and **tile thread** are interchangeable: the API uses `get_tile_block_id()` and `get_num_tile_blocks()`, while the guides often say "tile thread" to emphasize the single-threaded programming model.
 
-When a kernel launches, the GPU's hardware scheduler assigns tile blocks to Streaming Multiprocessors (SMs) as resources become available. Tile blocks that fit on available SMs run **in parallel** — simultaneously on separate hardware units. The full set of tile blocks runs **concurrently** — their relative order of execution is unspecified and they are independent of one another. This matches Rust's distinction between concurrency and parallelism: parallelism is work happening at the exact same time on different hardware, while concurrency is independently executing tasks making progress over time.
+When a kernel launches, the GPU's hardware scheduler assigns tile blocks to Streaming Multiprocessors (SMs) as resources become available. Tile blocks that fit on available SMs run **in parallel**: simultaneously on separate hardware units. The full set of tile blocks runs **concurrently**: relative order of execution is unspecified and tile blocks are independent of one another. This matches Rust's distinction between concurrency and parallelism: parallelism is work happening at the exact same time on different hardware, while concurrency is independently executing tasks making progress over time.
 
 ---
 
