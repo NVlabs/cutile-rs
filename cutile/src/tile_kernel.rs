@@ -188,7 +188,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
         compile_options,
     );
     let cache_hash_str = key.get_hash_string();
-    if contains_cuda_function(device_id, &key) {
+    if contains_cuda_function(device_id, &key)? {
         // A hit to the thread local kernel cache returns the compiled function.
         let func = get_cuda_function(device_id, &key)?;
         let validator = get_function_validator(device_id, &key)?;
@@ -731,14 +731,15 @@ where
     type Output = Result<Partition<I>, DeviceError>;
     type IntoFuture = DeviceFuture<Partition<I>, DeviceOperationPartition<RANK, I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
+        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
     }
 }
 
@@ -796,14 +797,15 @@ where
     type Output = Result<I, DeviceError>;
     type IntoFuture = DeviceFuture<I, UnwrapPartition<I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
+        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
     }
 }
 
@@ -872,14 +874,15 @@ where
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, TensorToHostVec<T, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
+        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
     }
 }
 
