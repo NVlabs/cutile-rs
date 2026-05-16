@@ -142,7 +142,7 @@ pub fn normalize_item_fn_param_type_aliases(
         let FnArg::Typed(PatType { ty, .. }) = arg else {
             continue;
         };
-        *ty = Box::new(normalize_type_aliases(ty, aliases)?);
+        **ty = normalize_type_aliases(ty, aliases)?;
     }
     Ok(item)
 }
@@ -292,7 +292,7 @@ fn build_alias_substitution(
     }
 
     let mut subst = AliasSubstitution::default();
-    for (formal, actual) in formals.into_iter().zip(actual_args.into_iter()) {
+    for (formal, actual) in formals.into_iter().zip(actual_args) {
         match (formal, actual) {
             (GenericParam::Type(param), GenericArgument::Type(ty)) => {
                 subst.types.insert(param.ident.to_string(), ty);

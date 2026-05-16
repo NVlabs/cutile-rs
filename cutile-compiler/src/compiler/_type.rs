@@ -131,6 +131,6 @@ fn rust_scalar_type(name: &str) -> Option<ScalarType> {
 fn extract_pointer_element_type(ty_str: &str) -> Option<String> {
     let after_mut = ty_str.split("mut").nth(1)?;
     let trimmed = after_mut.trim();
-    let end = trimmed.find(|c: char| c == ',' || c == '>' || c == ' ')?;
+    let end = trimmed.find([',', '>', ' '])?;
     Some(trimmed[..end].to_string())
 }

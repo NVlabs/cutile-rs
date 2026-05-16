@@ -120,6 +120,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_nested_mutable_access_offset_metadata(
         &self,
         module: &mut Module,
@@ -185,7 +186,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 pid
             } else {
                 let ratio_value =
-                    self.compile_constant(module, block_id, generic_vars, ratio as i32)?;
+                    self.compile_constant(module, block_id, generic_vars, ratio)?;
                 self.compile_binary_op_from_values(
                     module,
                     block_id,
@@ -213,6 +214,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// with `#[cuda_tile::compiler_op(...)]`. These are internal operations
     /// like mma, tile ops, shape ops, reduce, arithmetic, cast, convert,
     /// return_type_meta_field, set_type_meta_field, check, and assume.
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_compiler_op_call(
         &self,
         module: &mut Module,
@@ -226,7 +228,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         return_type: Option<TileRustType>,
     ) -> Result<Option<TileRustValue>, JITError> {
         let call_expr_func_str = call_expr.func.to_token_stream().to_string();
-        let ident = get_ident_from_path_expr(&path_expr);
+        let ident = get_ident_from_path_expr(path_expr);
         let Some(compiler_op_name) = compiler_op_attrs.parse_string("name") else {
             return self.jit_error_result(
                 &call_expr.span(),
@@ -242,7 +244,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let out = operands.remove(0);
                 let out_type = out.ty.clone();
                 let Some(out_rust_element_type) =
-                    out_type.get_instantiated_rust_element_type(&self.modules.primitives())
+                    out_type.get_instantiated_rust_element_type(self.modules.primitives())
                 else {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -262,7 +264,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 };
                 let Some(out_cuda_tile_element_type) =
-                    out_type.get_cuda_tile_element_type(&self.modules.primitives())?
+                    out_type.get_cuda_tile_element_type(self.modules.primitives())?
                 else {
                     return self.jit_error_result(
                         &call_expr.span(),
@@ -273,13 +275,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 };
                 let out_is_float = super::_type::scalar_from_name(&out_cuda_tile_element_type)
-                    .map_or(false, |s| s.is_float());
+                    .is_some_and(|s| s.is_float());
                 let (opcode, attrs) = if out_is_float {
                     (Opcode::MmaF, vec![])
                 } else if !out_is_float {
                     let Some(lhs_elem_ty) = lhs
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives())
+                        .get_instantiated_rust_element_type(self.modules.primitives())
                     else {
                         return self.jit_error_result(
                             &call_expr.span(),
@@ -288,7 +290,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     };
                     let Some(rhs_elem_ty) = lhs
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives())
+                        .get_instantiated_rust_element_type(self.modules.primitives())
                     else {
                         return self.jit_error_result(
                             &call_expr.span(),
@@ -472,7 +474,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     "expected a structured type for the dimension map argument",
                                 );
                             };
-                            let Some(dim_map) = type_inst.try_extract_cga(&generic_vars) else {
+                            let Some(dim_map) = type_inst.try_extract_cga(generic_vars) else {
                                 return self.jit_error_result(
                                     &call_expr.args[1].span(),
                                     "dimension map must be a const generic array type",
@@ -497,12 +499,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         };
                         Ok(Some(dst_slice))
                     }
-                    _ => {
-                        return self.jit_error_result(
-                            &call_expr.span(),
-                            &format!("unrecognized shape operation `{}`", compiler_op_function),
-                        );
-                    }
+                    _ => self.jit_error_result(
+                        &call_expr.span(),
+                        &format!("unrecognized shape operation `{}`", compiler_op_function),
+                    ),
                 }
             }
             "dim_new" => {
@@ -611,7 +611,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         })?,
                 };
                 let dim_origin = value.dim_origin.clone();
-                let bounds = value.bounds.clone();
+                let bounds = value.bounds;
                 let mut fields = BTreeMap::new();
                 fields.insert("size".to_string(), value);
                 let mut dim = TileRustValue::new_struct(fields, return_type);
@@ -1667,7 +1667,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ir_operand_type.clone(), // operand_i_prev_iter
                     ];
                     let (local_block_id, local_block_args) = build_block(module, local_var_types);
-                    let local_var_names = vec!["curr", "prev"];
+                    let local_var_names = ["curr", "prev"];
                     let mut local_vars = CompilerContext::empty();
                     for i in 0..local_block_args.len() {
                         let value: Value = local_block_args[i];
@@ -1776,12 +1776,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             &call_expr.span(),
                         )?))
                     }
-                    _ => {
-                        return self.jit_error_result(
-                            &call_expr.span(),
-                            &format!("arithmetic ops with {num_operands} operands not supported"),
-                        );
-                    }
+                    _ => self.jit_error_result(
+                        &call_expr.span(),
+                        &format!("arithmetic ops with {num_operands} operands not supported"),
+                    ),
                 }
             }
             "cast" => {
@@ -1812,22 +1810,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     "tile_to_scalar" => {
                         let Some(element_type) =
-                            get_element_type_structured(&old_type, &self.modules.primitives())
+                            get_element_type_structured(&old_type, self.modules.primitives())
                         else {
                             return self.jit_error_result(
                                 &call_expr.span(),
                                 &format!(
                                     "Failed to cast from {} to {}",
-                                    old_type.to_token_stream().to_string(),
-                                    get_sig_output_type(&fn_item.sig)
-                                        .to_token_stream()
-                                        .to_string()
+                                    old_type.to_token_stream(),
+                                    get_sig_output_type(&fn_item.sig).to_token_stream()
                                 ),
                             );
                         };
                         new_value.ty.rust_ty =
-                            syn::parse2::<syn::Type>(format!("{element_type}").parse().unwrap())
-                                .unwrap();
+                            syn::parse2::<syn::Type>(element_type.parse().unwrap()).unwrap();
                     }
                     "pointer_to_tile" => {
                         let element_type = get_rust_element_type_primitive(&old_type);
@@ -1842,16 +1837,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     "tile_to_pointer" => {
                         let Some(element_type) =
-                            get_element_type_structured(&old_type, &self.modules.primitives())
+                            get_element_type_structured(&old_type, self.modules.primitives())
                         else {
                             return self.jit_error_result(
                                 &call_expr.span(),
                                 &format!(
                                     "Failed to cast from {} to {}",
-                                    old_type.to_token_stream().to_string(),
-                                    get_sig_output_type(&fn_item.sig)
-                                        .to_token_stream()
-                                        .to_string()
+                                    old_type.to_token_stream(),
+                                    get_sig_output_type(&fn_item.sig).to_token_stream()
                                 ),
                             );
                         };
@@ -1887,8 +1880,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             );
                         }
                         let mut arg = args.pop().unwrap();
-                        let new_type_compiled = if return_type.is_some() {
-                            return_type.unwrap()
+                        let new_type_compiled = if let Some(return_type) = return_type {
+                            return_type
                         } else {
                             let PathArguments::AngleBracketed(generic_args) =
                                 &path_expr.path.segments.last().unwrap().arguments
@@ -1897,7 +1890,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     &path_expr.span(),
                                     &format!(
                                         "Failed to get type parameters for {}",
-                                        path_expr.to_token_stream().to_string()
+                                        path_expr.to_token_stream()
                                     ),
                                 );
                             };
@@ -1915,18 +1908,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     &path_expr.span(),
                                     &format!(
                                         "Failed to get type parameters for {}",
-                                        path_expr.to_token_stream().to_string()
+                                        path_expr.to_token_stream()
                                     ),
                                 );
                             };
                             let Some(new_type_compiled) =
-                                self.compile_type(&new_type, &generic_vars, &HashMap::new())?
+                                self.compile_type(new_type, generic_vars, &HashMap::new())?
                             else {
                                 return self.jit_error_result(
                                     &call_expr.span(),
                                     &format!(
                                         "{compiler_op_function} failed to compile new type: {}",
-                                        new_type.to_token_stream().to_string()
+                                        new_type.to_token_stream()
                                     ),
                                 );
                             };
@@ -1957,16 +1950,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             return Ok(Some(arg));
                         }
                         let output_type =
-                            tile_ir_type_from_trt(&new_type_compiled, &self.modules.primitives())
+                            tile_ir_type_from_trt(&new_type_compiled, self.modules.primitives())
                                 .ok_or_else(|| {
-                                self.jit_error(
-                                    &call_expr.span(),
-                                    &format!(
-                                        "Failed to obtain tile-ir type for convert {}",
-                                        call_expr.to_token_stream().to_string()
-                                    ),
-                                )
-                            })?;
+                                    self.jit_error(
+                                        &call_expr.span(),
+                                        &format!(
+                                            "Failed to obtain tile-ir type for convert {}",
+                                            call_expr.to_token_stream()
+                                        ),
+                                    )
+                                })?;
                         // These aren't required for all ops.
                         let (op_id, results) = match (
                             old_element_type_str.as_str(),
@@ -1994,9 +1987,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // Integer → float: IToF with signedness from source type.
                             (from, to)
                                 if super::_type::scalar_from_name(from)
-                                    .map_or(false, |s| s.is_integer())
+                                    .is_some_and(|s| s.is_integer())
                                     && super::_type::scalar_from_name(to)
-                                        .map_or(false, |s| s.is_float()) =>
+                                        .is_some_and(|s| s.is_float()) =>
                             {
                                 let signedness = signedness_attr(
                                     "signedness",
@@ -2011,7 +2004,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             call_expr
                                                 .args
                                                 .to_token_stream()
-                                                .to_string()
                                         ),
                                     );
                                 };
@@ -2024,9 +2016,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // Float → integer: FToI with signedness from target type.
                             (from, to)
                                 if super::_type::scalar_from_name(from)
-                                    .map_or(false, |s| s.is_float())
+                                    .is_some_and(|s| s.is_float())
                                     && super::_type::scalar_from_name(to)
-                                        .map_or(false, |s| s.is_integer()) =>
+                                        .is_some_and(|s| s.is_integer()) =>
                             {
                                 let signedness = signedness_attr(
                                     "signedness",
@@ -2040,7 +2032,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             call_expr
                                                 .args
                                                 .to_token_stream()
-                                                .to_string()
                                         ),
                                     );
                                 };
@@ -2058,9 +2049,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // cutile-python's _get_type_conversion_encoder.
                             (from, to)
                                 if super::_type::scalar_from_name(from)
-                                    .map_or(false, |s| s.is_float())
+                                    .is_some_and(|s| s.is_float())
                                     && super::_type::scalar_from_name(to)
-                                        .map_or(false, |s| s.is_float()) =>
+                                        .is_some_and(|s| s.is_float()) =>
                             {
                                 let rounding = rounding_mode_attr("nearest_even");
                                 let Some(input_value) = arg.value else {
@@ -2071,7 +2062,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                             call_expr
                                                 .args
                                                 .to_token_stream()
-                                                .to_string()
                                         ),
                                     );
                                 };
@@ -2097,12 +2087,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             new_type_compiled,
                         )))
                     }
-                    _ => {
-                        return self.jit_error_result(
-                            &call_expr.span(),
-                            &format!("Unsupported convert compiler_op: {}", compiler_op_function),
-                        );
-                    }
+                    _ => self.jit_error_result(
+                        &call_expr.span(),
+                        &format!("Unsupported convert compiler_op: {}", compiler_op_function),
+                    ),
                 }
             }
             "return_type_meta_field" => {
@@ -2253,19 +2241,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &call_expr.args[0].span(),
                         &format!(
                             "first argument to `set_type_meta_field` must be a simple variable path, got `{}`",
-                            call_expr.to_token_stream().to_string()
+                            call_expr.to_token_stream()
                         ),
                     );
                 };
                 let var_name = get_ident_from_path_expr(var_arg)
                     .to_token_stream()
                     .to_string();
-                if ctx.vars.get(var_name.as_str()).is_none() {
+                if !ctx.vars.contains_key(var_name.as_str()) {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
                         &format!(
                             "first argument to `set_type_meta_field` must be a known variable, got `{}`",
-                            call_expr.to_token_stream().to_string()
+                            call_expr.to_token_stream()
                         ),
                     );
                 }
@@ -2303,7 +2291,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 }
                 ctx.vars.insert(var_name.clone(), result_value);
-                return Ok(None);
+                Ok(None)
             }
             "check" => {
                 if self.entry_attrs.get_entry_arg_bool("unchecked_accesses") {
@@ -2320,12 +2308,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         generic_vars,
                         ctx,
                     )?),
-                    _ => {
-                        return self.jit_error_result(
-                            &call_expr.span(),
-                            &format!("Unexpected compiler_op call {}", &call_expr_func_str),
-                        );
-                    }
+                    _ => self.jit_error_result(
+                        &call_expr.span(),
+                        &format!("Unexpected compiler_op call {}", &call_expr_func_str),
+                    ),
                 }
             }
             "assume" => {
@@ -2333,12 +2319,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     self.compile_assumption_call(call_expr, module, block_id, generic_vars, ctx)?;
                 Ok(Some(tr_value))
             }
-            _ => {
-                return self.jit_error_result(
-                    &call_expr.span(),
-                    &format!("Unexpected compiler_op {compiler_op_attrs:#?}"),
-                );
-            }
+            _ => self.jit_error_result(
+                &call_expr.span(),
+                &format!("Unexpected compiler_op {compiler_op_attrs:#?}"),
+            ),
         }
     }
 
@@ -2449,7 +2433,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &call_expr.span(),
                         &format!(
                             "expected a structured type instance for dimension map, got `{}`",
-                            dim_map.rust_ty.to_token_stream().to_string()
+                            dim_map.rust_ty.to_token_stream()
                         ),
                     );
                 };
@@ -2541,9 +2525,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     continue;
                 }
             }
-            if index_value.bounds.is_some() && is_static_shape_dim {
+            if let (Some(bounds), true) = (index_value.bounds, is_static_shape_dim) {
                 // We can do a static bounds check.
-                let bounds = index_value.bounds.unwrap();
                 let num_partitions =
                     (static_shape_dim as i64 + static_tile_dim as i64 - 1) / static_tile_dim as i64;
                 if !(0 <= bounds.start && bounds.end < num_partitions) {
@@ -2649,6 +2632,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .build(module);
             append_op(module, block_id, assert_op_id);
         }
-        return Ok(None);
+        Ok(None)
     }
 }

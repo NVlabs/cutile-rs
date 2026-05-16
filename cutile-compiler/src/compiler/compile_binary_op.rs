@@ -138,6 +138,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )?))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_binary_op_from_values(
         &self,
         module: &mut Module,
@@ -156,8 +157,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &format!(
                     "binary `{:?}` requires operands of the same type, but got `{}` and `{}`",
                     tile_rust_arithmetic_op,
-                    lhs.ty.rust_ty.to_token_stream().to_string(),
-                    rhs.ty.rust_ty.to_token_stream().to_string()
+                    lhs.ty.rust_ty.to_token_stream(),
+                    rhs.ty.rust_ty.to_token_stream()
                 ),
             );
         }
@@ -180,14 +181,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let operand_type = lhs.ty.clone();
         let operand_rust_ty = &operand_type.rust_ty;
         let Some(operand_rust_element_type) =
-            operand_type.get_instantiated_rust_element_type(&self.modules.primitives())
+            operand_type.get_instantiated_rust_element_type(self.modules.primitives())
         else {
             return self.jit_error_result(
                 span,
                 &format!(
                     "unable to determine element type for `{:?}` on `{}`",
                     tile_rust_arithmetic_op,
-                    operand_type.rust_ty.to_token_stream().to_string()
+                    operand_type.rust_ty.to_token_stream()
                 ),
             );
         };
@@ -196,7 +197,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 span,
                 &format!(
                     "type `{}` cannot be used with binary `{:?}`",
-                    operand_type.rust_ty.to_token_stream().to_string(),
+                    operand_type.rust_ty.to_token_stream(),
                     tile_rust_arithmetic_op
                 ),
             );
@@ -206,7 +207,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let operand_result_ty = module.value_type(lhs_value).clone();
 
         let Some(operand_cuda_tile_element_type) =
-            operand_type.get_cuda_tile_element_type(&self.modules.primitives())?
+            operand_type.get_cuda_tile_element_type(self.modules.primitives())?
         else {
             return self.jit_error_result(
                 span,
@@ -414,7 +415,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     span,
                     &format!(
                         "Binary operation is not implemented for {}",
-                        operand_rust_ty.to_token_stream().to_string()
+                        operand_rust_ty.to_token_stream()
                     ),
                 );
             }
@@ -426,7 +427,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // Try to infer from lhs/rhs.
                 if is_cmp {
                     let bool_ty = syn::parse2::<syn::Type>("bool".parse().unwrap()).unwrap();
-                    self.compile_type(&bool_ty, &generic_vars, &HashMap::new())?
+                    self.compile_type(&bool_ty, generic_vars, &HashMap::new())?
                         .unwrap()
                 } else {
                     operand_type
@@ -448,17 +449,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         } else {
             None
         };
-        if let Some(bounds) = &op_bounds {
+        if let Some(bounds) = op_bounds {
             if bounds.is_exact() {
                 // The lower/upper bounds are equivalent — emit a constant
                 // instead. The op allocated above becomes dead (not appended
                 // to any block).
-                return Ok(self.compile_constant_from_exact_bounds(
+                return self.compile_constant_from_exact_bounds(
                     module,
                     block_id,
-                    bounds.clone(),
+                    bounds,
                     return_type,
-                )?);
+                );
             }
         }
 

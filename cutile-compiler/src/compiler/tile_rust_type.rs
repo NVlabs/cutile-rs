@@ -21,7 +21,7 @@ use syn::ItemImpl;
 /// Build a `TypeInstance::StructuredType` for a synthetic tile type with element info.
 fn synthetic_tile_instance(rust_ty: syn::Type, element_name: &str, shape: &[i32]) -> TypeInstance {
     let elem_ty = syn::parse_str::<syn::Type>(element_name).unwrap_or(rust_ty.clone());
-    TypeInstance::StructuredType(crate::generics::TypeInstanceStructuredType {
+    TypeInstance::StructuredType(Box::new(crate::generics::TypeInstanceStructuredType {
         generic_ty: rust_ty.clone(),
         instance_ty: rust_ty,
         primitive_type: Some(crate::generics::TypInstancePrimitiveType::ElementType(
@@ -32,12 +32,12 @@ fn synthetic_tile_instance(rust_ty: syn::Type, element_name: &str, shape: &[i32]
             },
         )),
         shape: shape.to_vec(),
-    })
+    }))
 }
 
 /// Build a `TypeInstance::StructuredType` for a synthetic pointer tile type.
 fn synthetic_ptr_instance(rust_ty: syn::Type, element_name: &str) -> TypeInstance {
-    TypeInstance::StructuredType(crate::generics::TypeInstanceStructuredType {
+    TypeInstance::StructuredType(Box::new(crate::generics::TypeInstanceStructuredType {
         generic_ty: rust_ty.clone(),
         instance_ty: rust_ty.clone(),
         primitive_type: Some(crate::generics::TypInstancePrimitiveType::PtrType(
@@ -49,7 +49,7 @@ fn synthetic_ptr_instance(rust_ty: syn::Type, element_name: &str) -> TypeInstanc
             },
         )),
         shape: vec![],
-    })
+    }))
 }
 
 /// A compiled type binding: maps a Rust `syn::Type` to its CUDA Tile type metadata.
@@ -107,12 +107,10 @@ impl TileRustType {
             .ok_or_else(|| {
                 JITError::generic_err(&format!(
                     "unable to determine element type for `{}`",
-                    self.rust_ty.to_token_stream().to_string()
+                    self.rust_ty.to_token_stream()
                 ))
             })?;
-        Ok(super::shared_utils::ElementTypePrefix::new(
-            &cuda_elem_ty_str,
-        )?)
+        super::shared_utils::ElementTypePrefix::new(&cuda_elem_ty_str)
     }
     pub(crate) fn get_cuda_tile_type_str(&self) -> Option<String> {
         self.cuda_tile_ty_str.clone()
@@ -132,7 +130,7 @@ impl TileRustType {
         let rust_ty = type_instance.get_source_type().clone();
         let type_param_str = params
             .iter_mut()
-            .map(|tp| tp.instantiate(generic_vars, &primitives))
+            .map(|tp| tp.instantiate(generic_vars, primitives))
             .collect::<Result<Vec<_>, _>>()?
             .join(",");
         let type_str = format!("{}<{}>", cuda_tile_name, type_param_str);
@@ -156,12 +154,12 @@ impl TileRustType {
         type_instance: TypeInstance,
     ) -> Result<TileRustType, JITError> {
         let rust_ty = type_instance.get_source_type().clone();
-        let type_str = if params.len() == 0 {
-            format!("{}", cuda_tile_name)
+        let type_str = if params.is_empty() {
+            cuda_tile_name.to_string()
         } else {
             let type_param_str = params
                 .iter_mut()
-                .map(|tp| tp.instantiate(generic_args, &primitives))
+                .map(|tp| tp.instantiate(generic_args, primitives))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(",");
             format!("{}<{}>", cuda_tile_name, type_param_str)
