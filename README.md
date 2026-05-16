@@ -6,63 +6,62 @@
 
 [![Crates.io](https://img.shields.io/crates/v/cutile.svg)](https://crates.io/crates/cutile)
 [![Build](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pr.yml?event=push&label=build)](https://github.com/NVlabs/cutile-rs/actions/workflows/pr.yml)
+[![Docs](https://img.shields.io/badge/docs-book-blue.svg)](https://nvlabs.github.io/cutile-rs/)
 
 </div>
 
-cuTile Rust (`cutile-rs`) is a research project which lets you write tile-based GPU kernels in Rust.
-The workspace combines:
-
-- a safe user-facing DSL for authoring kernels
-- a safe host-side API for asynchronously executing kernel functions
-- a pure Rust compiler pipeline backed by the CUDA Tile compiler
+cuTile Rust (`cutile-rs`) lets you write tile-based GPU kernels in Rust. Rust's ownership discipline is preserved across the GPU launch boundary: mutable tensors are partitioned into disjoint pieces before launch, immutable tensors are shared, and the generated launcher returns ownership when GPU work completes. Tile kernels lower to PTX through Tile IR.
 
 ## Project Status
-We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
+We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
+Please check out [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing.
 
 ## Quick Start
 
 ```rust
 use cutile::prelude::*;
-use my_module::add;
 
 #[cutile::module]
-mod my_module {
+mod kernel {
     use cutile::core::*;
 
     #[cutile::entry()]
-    fn add<const S: [i32; 2]>(
-        z: &mut Tensor<f32, S>,
-        x: &Tensor<f32, { [-1, -1] }>,
-        y: &Tensor<f32, { [-1, -1] }>,
+    fn add<const B: i32>(
+        z: &mut Tensor<f32, { [B] }>,
+        x: &Tensor<f32, { [-1] }>,
+        y: &Tensor<f32, { [-1] }>,
     ) {
-        let tile_x = load_tile_like(x, z);
-        let tile_y = load_tile_like(y, z);
-        z.store(tile_x + tile_y);
+        let tx = load_tile_like(x, z);
+        let ty = load_tile_like(y, z);
+        z.store(tx + ty);
     }
 }
 
-fn main() -> Result<(), cuda_async::error::DeviceError> {
-    let x = api::ones::<f32>(&[32, 32]).sync()?;
-    let y = api::ones::<f32>(&[32, 32]).sync()?;
-    let mut z = api::zeros::<f32>(&[32, 32]).sync()?;
+fn main() -> Result<(), Error> {
+    let x = api::ones::<f32>(&[1024]);
+    let y = api::ones::<f32>(&[1024]);
+    let z = api::zeros::<f32>(&[1024]).partition([128]);
 
-    add((&mut z).partition([4, 4]), &x, &y).sync()?;
+    let (_z, _x, _y) = kernel::add(z, x, y).sync()?;
     Ok(())
 }
 ```
 
-The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. On the host side, `add(...)` constructs a lazy kernel launcher that accepts borrowed tensors: `(&mut z).partition([4, 4])` borrows the output and partitions it into 4×4 sub-tensors, while `&x` and `&y` borrow the inputs.
+The `#[cutile::module]` macro transforms `add` into a GPU kernel and generates a host-side launcher. The host code constructs lazy tensor operations, partitions the mutable output into 128-element chunks, and calls `.sync()` to JIT-compile and execute the kernel.
 
-`.sync()` JIT-compiles the kernel (cached after first use) and executes it. The launch grid `(8, 8, 1)` is inferred from the partition: 32÷4 = 8 tiles per dimension.
+The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result. The launch grid `(8, 1, 1)` is inferred from the partition: 1024÷128 = 8 tiles.
 
-- Run the above example via `cargo run -p cutile-examples --example add_refs`.
+- Run a similar example via `cargo run -p cutile-examples --example add_basic`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
-## Built with cuTile Rust
+## Related Projects
 
-- [Grout](https://github.com/huggingface/grout) — Qwen 3 inference engine in Rust by Hugging Face
+- [Grout](https://github.com/huggingface/grout): Qwen 3 inference engine in Rust by Hugging Face, built with cuTile Rust.
+- [cuda-oxide](https://github.com/NVlabs/cuda-oxide): NVlabs experimental Rust-to-CUDA compiler for writing SIMT-style GPU kernels in Rust.
+- [Rust NVPTX backend](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html): rustc's target support for generating PTX for NVIDIA GPUs.
+
+cuTile Rust targets tile-based kernels that lower through CUDA Tile IR, with APIs built around tensor partitions and tensor-core-oriented operations.
 
 ## Setup
 

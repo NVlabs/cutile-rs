@@ -5,65 +5,63 @@
 ---
 
 ## Project Status
-We are excited to release this experimental, research-driven prototype to explore how GPU programming can be made available in the Rust ecosystem. The software is in a pre-alpha state and under active development. It is **not production-ready** and should be used for evaluation purposes only: you should expect instability, including bugs, incomplete functionality, and breaking API changes as we work to improve it.
 
-We encourage early experimentation and welcome feedback to help validate design decisions and guide future development. This project is intended to inform direction rather than represent a finalized or supported solution.
+We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
 
 ---
 
-## 🚀 Get Started in 5 Minutes
+## Get Started
 
 ```rust
 use cutile::prelude::*;
-use my_module::add;
 
 #[cutile::module]
-mod my_module {
+mod kernel {
     use cutile::core::*;
+
     #[cutile::entry()]
-    fn add<const S: [i32; 2]>(
-        z: &mut Tensor<f32, S>,
-        x: &Tensor<f32, { [-1, -1] }>,
-        y: &Tensor<f32, { [-1, -1] }>,
+    fn add<const B: i32>(
+        z: &mut Tensor<f32, { [B] }>,
+        x: &Tensor<f32, { [-1] }>,
+        y: &Tensor<f32, { [-1] }>,
     ) {
-        let tile_x = load_tile_like(x, z);
-        let tile_y = load_tile_like(y, z);
-        z.store(tile_x + tile_y);
+        let tx = load_tile_like(x, z);
+        let ty = load_tile_like(y, z);
+        z.store(tx + ty);
     }
 }
 
-fn main() -> Result<(), cuda_async::error::DeviceError> {
-    let x = api::ones::<f32>(&[1024, 1024]).sync()?;
-    let y = api::ones::<f32>(&[1024, 1024]).sync()?;
-    let mut z = api::zeros::<f32>(&[1024, 1024]).sync()?;
+fn main() -> Result<(), Error> {
+    let x = api::ones::<f32>(&[1024]);
+    let y = api::ones::<f32>(&[1024]);
+    let z = api::zeros::<f32>(&[1024]).partition([128]);
 
-    add((&mut z).partition([64, 64]), &x, &y).sync()?;
+    let (_z, _x, _y) = kernel::add(z, x, y).sync()?;
     Ok(())
 }
 ```
 
-This compiles to optimized GPU code that processes thousands of elements in parallel.
+The example separates host-side tensor setup from the device-side tile program. The host constructs tensors, partitions the mutable output into 128-element chunks, and launches the generated operation with `.sync()`.
+
+The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result.
 
 ---
 
-## Why cuTile Rust?
+## What it gives you
 
 ::::{grid} 1 2 2 3
 :gutter: 3
 
-:::{grid-item-card} 🦀 Rust Safety
-Write GPU kernels with Rust's memory and type safety.
-No more segfaults or race conditions.
+:::{grid-item-card} Ownership at the launch boundary
+Mutable tensors are partitioned into disjoint pieces before launch; immutable tensors are shared by `Arc`. The borrow checker covers GPU kernel arguments, not just host-side code.
 :::
 
-:::{grid-item-card} 🎯 Tile Abstraction
-Kernels are single-threaded, allowing you to think in terms of data tiles rather than individual threads.
-The compiler handles the complexity.
+:::{grid-item-card} Tile programs, not threads
+Tile kernels are written as single-threaded programs over tiles of data. The compiler maps tiles onto warps, blocks, and Tensor Cores; you don't manage shared memory or thread indices directly.
 :::
 
-:::{grid-item-card} ⚡ High Performance
-Compiles to optimized bytecode.
-Zero-cost abstractions achieve peak performance on popular tile-based kernels.
+:::{grid-item-card} Tile IR for performance
+Tile kernels lower to PTX through Tile IR. On B200, the safe API reaches 2.07 PFlop/s on persistent GEMM (96.4% of cuBLAS); the safe mapped kernel matches the raw-pointer Rust baseline within measurement noise.
 :::
 
 ::::

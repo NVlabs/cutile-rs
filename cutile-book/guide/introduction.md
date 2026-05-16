@@ -1,6 +1,8 @@
 # Introduction
 
-**cuTile Rust** is a safe tile-based parallel programming model for Rust. It automatically leverages advanced hardware capabilities — Tensor Cores, Tensor Memory Accelerators — while providing portability across NVIDIA GPU architectures, without requiring code changes. On the host side, it provides a safe API for allocating device tensors, partitioning mutable tensors for safe parallel access, wrapping shared immutable tensors in `Arc`, constructing kernel launchers, and JIT-compiling and asynchronously executing tile kernels on the GPU.
+**cuTile Rust** is a safe tile-based parallel programming model for Rust. Kernels map onto Tensor Cores, Tensor Memory Accelerators, and other architecture-specific units automatically, so the same source runs across NVIDIA GPU architectures.
+
+On the host side, the API handles device tensor allocation, partitioning mutable tensors for safe parallel access, and `Arc`-wrapped sharing for read-only tensors. Kernel launchers are constructed from `#[cutile::entry]` functions and JIT-compiled at first use; subsequent launches use the cached binary. Execution is asynchronous.
 
 ---
 
@@ -103,10 +105,10 @@ Kernels move data between **Tensors** and **Tiles** using operations like `load_
 
 **Tensors** are multi-dimensional arrays stored in **global memory (HBM)**. They are:
 
-- **Kernel arguments** — Passed as `&mut Tensor<E, S>` for writable outputs or `&Tensor<E, S>` for read-only inputs
-- **Physical storage** — Have strided memory layouts in GPU global memory
-- **Limited operations** — Within kernel code, they mainly support loading and storing data as tiles; direct arithmetic is not supported
-- **External data** — Candle tensors and other GPU buffers can be passed as tensors from host code to kernels via kernel arguments
+- **Kernel arguments**: passed as `&mut Tensor<E, S>` for writable outputs or `&Tensor<E, S>` for read-only inputs.
+- **Physical storage**: strided memory layouts in GPU global memory.
+- **Limited operations**: within kernel code, tensors mainly support loading and storing data as tiles. Direct arithmetic is not supported.
+- **External data**: Candle tensors and other GPU buffers can be passed as tensors from host code to kernels via kernel arguments.
 
 ```rust
 // Tensor parameters in kernel signature
@@ -120,10 +122,10 @@ fn kernel(
 
 **Tiles** are **immutable** multi-dimensional array fragments that live in GPU **registers** during kernel execution. They are:
 
-- **Immutable** — Operations create new tiles rather than modifying existing ones
-- **Compiler-managed storage** — Tile data lives in registers; the compiler handles shared memory staging and other memory hierarchy details automatically
-- **Compile-time static shapes** — Tile dimensions must be compile-time constants (often powers of two for optimal performance)
-- **Rich operations** — Support elementwise arithmetic, matrix multiplication, reduction, shape manipulation, and more
+- **Immutable**: operations create new tiles rather than modifying existing ones.
+- **Compiler-managed storage**: tile data lives in registers. The compiler handles shared memory staging and other memory hierarchy details automatically.
+- **Compile-time static shapes**: tile dimensions must be compile-time constants, often powers of two for optimal performance.
+- **Rich operations**: elementwise arithmetic, matrix multiplication, reduction, shape manipulation, and more.
 
 ```rust
 // Tiles are created and transformed, never mutated

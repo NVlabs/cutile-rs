@@ -156,7 +156,9 @@ fn alloc_with_custom_pool_via_device_op() {
         set_device_pool(0, pool).expect("set pool failed");
 
         let op = with_context(move |ctx| {
-            let p = ctx.get_pool().expect("pool must be present in ExecutionContext via sync()");
+            let p = ctx
+                .get_pool()
+                .expect("pool must be present in ExecutionContext via sync()");
             assert_eq!(
                 p.cu_pool() as usize,
                 pool_ptr,
@@ -186,7 +188,9 @@ fn alloc_with_custom_pool_via_into_future() {
         set_device_pool(0, pool).expect("set pool failed");
 
         let op = with_context(move |ctx| {
-            let p = ctx.get_pool().expect("pool must be present in ExecutionContext via into_future()");
+            let p = ctx
+                .get_pool()
+                .expect("pool must be present in ExecutionContext via into_future()");
             assert_eq!(
                 p.cu_pool() as usize,
                 pool_ptr,
