@@ -13,8 +13,8 @@
 
 use cuda_async::device_context::{
     clear_device_pool, clear_device_poison, get_device_pool, global_policy, init_device_contexts,
-    is_device_poisoned, reset_device, set_device_pool, with_device, with_global_device_context,
-    with_global_device_context_mut,
+    is_device_poisoned, pool_for_stream, reset_device, set_device_pool, with_device,
+    with_global_device_context, with_global_device_context_mut,
 };
 use cuda_async::device_operation::{value, DeviceOp};
 use cuda_async::prelude::*;
@@ -436,6 +436,66 @@ fn mut_callback_panic_returns_err_on_subsequent_access() {
             mut_err,
             cuda_async::error::DeviceError::Context { device_id: 0, .. }
         ));
+    });
+}
+
+// The no-nesting contract must also hold for transitive re-borrowers:
+// pool_for_stream → get_device_pool → with_global_device_context.
+#[test]
+fn nested_pool_lookup_panics_loudly() {
+    let result = std::thread::spawn(|| {
+        init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
+        let stream = global_policy(0)
+            .expect("setup: global_policy")
+            .next_stream()
+            .expect("setup: next_stream");
+        let _ = with_global_device_context(0, |_outer| {
+            let _ = pool_for_stream(&stream); // transitive re-entry
+        });
+    })
+    .join();
+
+    let payload = result.expect_err("expected nested pool_for_stream to panic");
+    let msg = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .expect("panic payload should be a string");
+    assert!(
+        !msg.contains("setup:"),
+        "test environment problem (not a contract failure): {msg}"
+    );
+    assert!(
+        msg.contains("re-entrant access"),
+        "re-entry contract broken — expected re-entrant panic, got: {msg}"
+    );
+}
+
+// A _mut callback panic must not leave the cell stuck in Borrowed: the
+// guard's Drop runs during unwinding and restores Available, so the thread
+// stays usable (poison Err, not a re-entry panic) and recovers fully after
+// clear_device_poison.
+#[test]
+fn panic_recovery_restores_context_state() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_global_device_context_mut(0, |_ctx| panic!("poison"));
+        }));
+        assert!(panicked.is_err(), "setup: expected inner panic");
+
+        // Stuck `Borrowed` would panic here instead of returning poison Err.
+        let err = with_global_device_context(0, |_| ())
+            .expect_err("poisoned device should return Err, not panic on Borrowed");
+        assert!(matches!(
+            err,
+            cuda_async::error::DeviceError::Context { device_id: 0, .. }
+        ));
+
+        clear_device_poison(0).expect("clear failed");
+        with_global_device_context(0, |_| ())
+            .expect("context must be usable after panic recovery + clear");
     });
 }
 

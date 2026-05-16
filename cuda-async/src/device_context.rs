@@ -349,6 +349,15 @@ pub fn reset_device(device_id: usize) -> Result<(), DeviceError> {
     })
 }
 
+/// Run `f` with shared access to `device_id`'s context.
+///
+/// Nested access is unsupported: re-borrowing the per-thread map from
+/// within `f` — directly or transitively (`pool_for_stream`,
+/// `contains_cuda_function`, `ExecutionContext::new`, the recovery fns) —
+/// panics on `Borrowed`. Intentional and guaranteed; see [`borrow_devices`].
+///
+/// Returns `Err(DeviceError::Context)` if `device_id` is poisoned; recover
+/// via [`clear_device_poison`] / [`reset_device`].
 pub fn with_global_device_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&AsyncDeviceContext) -> R,
@@ -369,6 +378,13 @@ where
     })
 }
 
+/// Run `f` with exclusive access to `device_id`'s context. Same no-nesting
+/// contract as [`with_global_device_context`].
+///
+/// If `f` panics, only `device_id` is poisoned (the guard restores the map
+/// to `Available`, so other devices stay usable); access returns
+/// `Err(DeviceError::Context)` until [`clear_device_poison`] /
+/// [`reset_device`].
 pub fn with_global_device_context_mut<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&mut AsyncDeviceContext) -> R,
