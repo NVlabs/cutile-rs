@@ -483,3 +483,141 @@ fn reset_used_high_collapses_watermark_to_current() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Reuse policy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reuse_policy_defaults_all_enabled() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+
+        let policy = pool.reuse_policy().expect("read policy failed");
+        assert!(policy.follow_event_deps, "follow_event_deps should default to true");
+        assert!(policy.allow_opportunistic, "allow_opportunistic should default to true");
+        assert!(policy.allow_internal_deps, "allow_internal_deps should default to true");
+    });
+}
+
+#[test]
+fn reuse_policy_roundtrip() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+
+        pool.set_reuse_policy(cuda_core::ReusePolicy::NONE)
+            .expect("set NONE failed");
+        let read_back = pool.reuse_policy().expect("read after NONE failed");
+        assert_eq!(read_back, cuda_core::ReusePolicy::NONE);
+
+        pool.set_reuse_policy(cuda_core::ReusePolicy::ALL)
+            .expect("set ALL failed");
+        let read_back = pool.reuse_policy().expect("read after ALL failed");
+        assert_eq!(read_back, cuda_core::ReusePolicy::ALL);
+    });
+}
+
+#[test]
+fn reuse_policy_partial_flags() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+
+        let partial = cuda_core::ReusePolicy {
+            follow_event_deps: true,
+            allow_opportunistic: false,
+            allow_internal_deps: true,
+        };
+        pool.set_reuse_policy(partial).expect("set partial policy failed");
+
+        let read_back = pool.reuse_policy().expect("read partial policy failed");
+        assert_eq!(read_back, partial);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// trim_to
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trim_to_zero_releases_idle_memory() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        pool.set_release_threshold(u64::MAX)
+            .expect("set threshold failed");
+
+        let stream = global_policy(0)
+            .expect("get policy failed")
+            .next_stream()
+            .expect("get stream failed");
+
+        const N: usize = 1 << 20;
+
+        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) };
+        unsafe { cuda_core::free_async(dptr, &stream) };
+        unsafe { stream.synchronize() }.expect("stream sync failed");
+
+        let before = pool.mem_stats().expect("read stats before trim failed");
+        assert!(
+            before.reserved_current >= N as u64,
+            "pool should hold reserved memory before trim"
+        );
+
+        pool.trim_to(0).expect("trim_to(0) failed");
+
+        let after = pool.mem_stats().expect("read stats after trim failed");
+        assert_eq!(after.reserved_current, 0, "trim_to(0) should release all idle memory");
+    });
+}
+
+#[test]
+fn trim_to_with_floor_keeps_minimum() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        pool.set_release_threshold(u64::MAX)
+            .expect("set threshold failed");
+
+        let stream = global_policy(0)
+            .expect("get policy failed")
+            .next_stream()
+            .expect("get stream failed");
+
+        const N: usize = 4 << 20;
+        const FLOOR: usize = 1 << 20;
+
+        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) };
+        unsafe { cuda_core::free_async(dptr, &stream) };
+        unsafe { stream.synchronize() }.expect("stream sync failed");
+
+        let before = pool.mem_stats().expect("read stats before trim failed");
+
+        pool.trim_to(FLOOR).expect("trim_to(FLOOR) failed");
+
+        let after = pool.mem_stats().expect("read stats after trim failed");
+        assert!(
+            after.reserved_current <= before.reserved_current,
+            "trim should not increase reservation: before={}, after={}",
+            before.reserved_current,
+            after.reserved_current,
+        );
+    });
+}
