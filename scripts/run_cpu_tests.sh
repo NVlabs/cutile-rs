@@ -82,6 +82,10 @@ run_step \
     "cutile compile-only specialization regressions" \
     cargo test -p cutile --test specialization_bits -- --skip raw_pointer_launch
 
+run_step \
+    "cutile warmup/cache-key CPU tests" \
+    cargo test -p cutile --test warmup
+
 print_summary_and_exit \
     "All CPU tests passed!" \
     "Some CPU checks failed. See output above for details."

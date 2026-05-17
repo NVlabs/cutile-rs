@@ -11,13 +11,42 @@ use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, Function};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, get_gpu_name};
+use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, get_gpu_name, get_cuda_toolkit_version, get_compiler_version};
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+// JIT diagnostic logging (set CUTILE_JIT_LOG=1 to enable)
+
+fn jit_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CUTILE_JIT_LOG").is_ok_and(|v| v == "1"))
+}
+
+macro_rules! jit_log {
+    ($($arg:tt)*) => {
+        if jit_log_enabled() {
+            eprintln!("[cutile::jit] {}", format!($($arg)*));
+        }
+    };
+}
+
+static JIT_COMPILE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Process-global JIT compile counter: +1 per cache miss, +0 on cache hits.
+/// Snapshot before a call and check the delta to get exact miss counts.
+pub fn jit_compile_count() -> u64 {
+    JIT_COMPILE_COUNT.load(Ordering::Relaxed)
+}
+
+#[inline]
+fn record_jit_compile() {
+    JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
 
 use crate::error::*;
 use crate::tensor::{IntoPartition, IntoPartitionArc, Partition, Tensor};
@@ -34,7 +63,8 @@ pub use cutile_compiler::compiler::utils::CompileOptions;
 /// Two kernel invocations that share the same `TileFunctionKey` can reuse the same compiled
 /// CUDA module and function, avoiding recompilation. The key captures everything that can
 /// change the generated GPU code: module name, function name, generic type/const parameters,
-/// tensor stride layouts, (optionally) the launch grid, and compile options.
+/// tensor stride layouts, (optionally) the launch grid, compile options, source hash, 
+/// GPU architecture, compiler version, and CUDA toolkit version.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TileFunctionKey {
     module_name: String,
@@ -45,6 +75,10 @@ pub struct TileFunctionKey {
     pub scalar_hints: Vec<(String, DivHint)>,
     pub grid: Option<(u32, u32, u32)>,
     pub compile_options: CompileOptions,
+    source_hash: String,
+    gpu_name: String,
+    compiler_version: String,
+    cuda_toolkit_version: String,
 }
 
 impl TileFunctionKey {
@@ -57,6 +91,10 @@ impl TileFunctionKey {
         scalar_hints: Vec<(String, DivHint)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
+        source_hash: String,
+        gpu_name: String,
+        compiler_version: String,
+        cuda_toolkit_version: String,
     ) -> Self {
         Self {
             module_name,
@@ -67,6 +105,121 @@ impl TileFunctionKey {
             scalar_hints,
             grid,
             compile_options,
+            source_hash,
+            gpu_name,
+            compiler_version,
+            cuda_toolkit_version,
+        }
+    }
+}
+
+/// Builder for [`TileFunctionKey`].
+///
+/// With 11 positional arguments it is easy to silently transpose two `String`
+/// fields and produce a wrong-but-valid key. The builder makes each field
+/// self-documenting and keeps future additions backward-compatible.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let key = TileFunctionKey::builder("linalg", "matmul")
+///     .generics(vec!["f32".into(), "128".into()])
+///     .source_hash(linalg::_SOURCE_HASH)
+///     .gpu_name(get_gpu_name(device_id))
+///     .compiler_version(get_compiler_version())
+///     .cuda_toolkit_version(get_cuda_toolkit_version())
+///     .build();
+/// ```
+pub struct TileFunctionKeyBuilder {
+    module_name: String,
+    function_name: String,
+    function_generics: Vec<String>,
+    stride_args: Vec<(String, Vec<i32>)>,
+    spec_args: Vec<(String, SpecializationBits)>,
+    scalar_hints: Vec<(String, DivHint)>,
+    grid: Option<(u32, u32, u32)>,
+    compile_options: CompileOptions,
+    source_hash: String,
+    gpu_name: String,
+    compiler_version: String,
+    cuda_toolkit_version: String,
+}
+
+impl TileFunctionKeyBuilder {
+    pub fn generics(mut self, generics: Vec<String>) -> Self {
+        self.function_generics = generics;
+        self
+    }
+    pub fn stride_args(mut self, stride_args: Vec<(String, Vec<i32>)>) -> Self {
+        self.stride_args = stride_args;
+        self
+    }
+    pub fn spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
+        self.spec_args = spec_args;
+        self
+    }
+    pub fn grid(mut self, grid: (u32, u32, u32)) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+    pub fn compile_options(mut self, options: CompileOptions) -> Self {
+        self.compile_options = options;
+        self
+    }
+    pub fn source_hash(mut self, hash: impl Into<String>) -> Self {
+        self.source_hash = hash.into();
+        self
+    }
+    pub fn gpu_name(mut self, name: impl Into<String>) -> Self {
+        self.gpu_name = name.into();
+        self
+    }
+    pub fn compiler_version(mut self, version: impl Into<String>) -> Self {
+        self.compiler_version = version.into();
+        self
+    }
+    pub fn cuda_toolkit_version(mut self, version: impl Into<String>) -> Self {
+        self.cuda_toolkit_version = version.into();
+        self
+    }
+    pub fn build(self) -> TileFunctionKey {
+        TileFunctionKey {
+            module_name: self.module_name,
+            function_name: self.function_name,
+            function_generics: self.function_generics,
+            stride_args: self.stride_args,
+            spec_args: self.spec_args,
+            scalar_hints: self.scalar_hints,
+            grid: self.grid,
+            compile_options: self.compile_options,
+            source_hash: self.source_hash,
+            gpu_name: self.gpu_name,
+            compiler_version: self.compiler_version,
+            cuda_toolkit_version: self.cuda_toolkit_version,
+        }
+    }
+}
+
+impl TileFunctionKey {
+    /// Start building a key with required `module_name` and `function_name`.
+    /// All other fields default to empty / `None` / `default()`.
+    pub fn builder(
+        module_name: impl Into<String>,
+        function_name: impl Into<String>,
+    ) -> TileFunctionKeyBuilder {
+        TileFunctionKeyBuilder {
+            module_name: module_name.into(),
+            function_name: function_name.into(),
+            function_generics: vec![],
+            stride_args: vec![],
+            spec_args: vec![],
+            scalar_hints: vec![],
+            grid: None,
+            compile_options: CompileOptions::default(),
+            source_hash: String::new(),
+            gpu_name: String::new(),
+            compiler_version: String::new(),
+            cuda_toolkit_version: String::new(),
         }
     }
 }
@@ -123,12 +276,18 @@ fn write_ir(
     println!("IR written to {path:?}");
 }
 
+// ── Single-flight compilation dedup is handled by once_cell::sync::OnceCell ──
+
 /// Compiles a tile function to CUDA and caches it for reuse.
 ///
-/// Handles the complete compilation pipeline from Rust to CUDA:
-/// 1. Checks the thread-local cache for a previously compiled function
-/// 2. If not cached, compiles the module AST to Tile IR bytecode, then to a cubin
-/// 3. Loads the compiled function and caches it for future use
+/// Handles the complete compilation pipeline from Rust/MLIR to CUDA:
+/// 1. Checks the global kernel cache (process-wide, cross-thread)
+/// 2. If not cached, compiles the module AST to MLIR, then to PTX/CUBIN
+/// 3. Stores the result in the global kernel cache
+///
+/// **Compilation dedup**: When multiple threads need the same kernel, `OnceCell::get_or_try_init`
+/// ensures only one thread performs compilation while others block. Once initialization completes,
+/// all threads see the same cached result.
 ///
 /// The caching key is based on the module name, function name, type generics, stride arguments,
 /// and compile-time grid dimensions, ensuring correct reuse across different specializations.
@@ -174,9 +333,12 @@ pub fn compile_from_context<F: Fn() -> Module>(
     scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
+    source_hash: &str,
 ) -> Result<(Arc<Function>, Arc<Validator>), Error> {
     let device_id: usize = ctx.get_device_id();
-    // Compilation constructs a lookup key.
+    let gpu_name = get_gpu_name(device_id);
+    let compiler_version = get_compiler_version();
+    let cuda_toolkit_version = get_cuda_toolkit_version();
     let key = TileFunctionKey::new(
         module_name.to_string(),
         function_name.to_string(),
@@ -186,18 +348,23 @@ pub fn compile_from_context<F: Fn() -> Module>(
         scalar_hints,
         const_grid,
         compile_options,
+        source_hash.to_string(),
+        gpu_name.clone(),
+        compiler_version,
+        cuda_toolkit_version,
     );
-    let cache_hash_str = key.get_hash_string();
-    if contains_cuda_function(device_id, &key) {
-        // A hit to the thread local kernel cache returns the compiled function.
-        let func = get_cuda_function(device_id, &key)?;
-        let validator = get_function_validator(device_id, &key)?;
-        Ok((func, validator))
-    } else {
-        let gpu_name = get_gpu_name(device_id);
-        // LINKING Phase B: build the module set by walking the kernel's
-        // `use` graph against the linker registry. The legacy chained
-        // `_module_asts()` is no longer consulted here.
+    let key_str = key.get_hash_string();
+    let slot = kernel_cache_slot(&key_str);
+
+    // Use OnceCell::get_or_try_init for single-flight compilation dedup.
+    // Only one thread executes the closure; others block and see the result.
+    let compiled = slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
+        // Cache miss: this closure runs exactly once per key, only on a real
+        // compile. Record it so tests can assert hit/miss deterministically.
+        record_jit_compile();
+        // Full JIT compilation.
+        jit_log!("{module_name}::{function_name} → JIT compiling...");
+        let t0 = std::time::Instant::now();
         let modules = CUDATileModules::from_kernel(kernel_ast())?;
         let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
             module_name,
@@ -276,7 +443,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
                 write_ir(
                     module_name,
                     function_name,
-                    cache_hash_str.as_str(),
+                    key_str.as_str(),
                     "mlir",
                     path.as_str(),
                     ir_text.as_str(),
@@ -305,11 +472,16 @@ pub fn compile_from_context<F: Fn() -> Module>(
         //     println!();
         // }
         let stage3_start = std::time::Instant::now();
+        let jit_elapsed = t0.elapsed();
         let module = load_module_from_file(&cubin_filename, device_id)?;
-        let function = Arc::new(
-            module
-                .load_function(function_entry)
-                .expect("Failed to compile function."),
+        let function = Arc::new(module.load_function(function_entry).map_err(|e| {
+            Error::KernelLaunch(KernelLaunchError(format!(
+                "failed to load '{function_entry}' from compiled cubin: {e}"
+            )))
+        })?);
+        jit_log!(
+            "{module_name}::{function_name} → JIT compiled in {:.1?}",
+            jit_elapsed
         );
         let stage3_ms = stage3_start.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("CUTILE_JIT_TIMING").is_some() {
@@ -317,17 +489,262 @@ pub fn compile_from_context<F: Fn() -> Module>(
                 "CUTILE_JIT_TIMING module={} function={} key={} stage1_ms={:.3} stage2_ms={:.3} stage3_ms={:.3} generics={}",
                 module_name,
                 function_name,
-                cache_hash_str,
+                key_str,
                 stage1_ms,
                 stage2_ms,
                 stage3_ms,
                 key.function_generics.join(","),
             );
         }
-        insert_cuda_function(device_id, &key, (module, function.clone()))?;
-        insert_function_validator(device_id, &key, validator.clone())?;
-        Ok((function, validator))
+        Ok(CompiledKernel {
+            module,
+            function,
+            validator,
+        })
+    })?;
+
+    Ok((
+        Arc::clone(&compiled.function),
+        Arc::clone(&compiled.validator),
+    ))
+}
+
+// ── Warmup types and functions ───────────────────────────────────────────────
+
+/// Metadata for a single kernel entry point, generated by the `#[cutile::module]` macro.
+#[derive(Debug, Clone)]
+pub struct EntryMeta {
+    pub module_name: &'static str,
+    pub function_name: &'static str,
+    pub function_entry: &'static str,
+}
+
+/// User-provided specialization for warmup compilation.
+///
+/// Each `WarmupSpec` describes one kernel specialization to pre-compile.
+#[derive(Debug, Clone)]
+pub struct WarmupSpec {
+    pub function_name: String,
+    pub function_generics: Vec<String>,
+    pub stride_args: Vec<(String, Vec<i32>)>,
+    pub spec_args: Vec<(String, SpecializationBits)>,
+    pub scalar_hints: Vec<(String, DivHint)>,
+    pub const_grid: Option<(u32, u32, u32)>,
+}
+
+impl WarmupSpec {
+    /// Create a warmup spec with just generics (no strides, no const grid).
+    pub fn new(function_name: &str, generics: Vec<String>) -> Self {
+        Self {
+            function_name: function_name.to_string(),
+            function_generics: generics,
+            stride_args: vec![],
+            spec_args: vec![],
+            scalar_hints: vec![],
+            const_grid: None,
+        }
     }
+
+    /// Set stride arguments for this spec.
+    pub fn with_strides(mut self, stride_args: Vec<(String, Vec<i32>)>) -> Self {
+        self.stride_args = stride_args;
+        self
+    }
+
+    /// Set specialization arguments for this spec.
+    pub fn with_spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
+        self.spec_args = spec_args;
+        self
+    }
+
+    /// Set scalar divisibility hints for this spec.
+    pub fn with_scalar_hints(mut self, scalar_hints: Vec<(String, DivHint)>) -> Self {
+        self.scalar_hints = scalar_hints;
+        self
+    }
+
+    /// Set a const grid for this spec.
+    pub fn with_const_grid(mut self, grid: (u32, u32, u32)) -> Self {
+        self.const_grid = Some(grid);
+        self
+    }
+}
+
+/// Pre-compile a set of kernel specializations without launching.
+///
+/// Builds the module ASTs once, then compiles each requested specialization.
+/// Results are placed in the global kernel cache.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// compile_warmup(
+///     || linalg::__module_ast_self(),
+///     &linalg::_entries(),
+///     "linalg",
+///     linalg::_SOURCE_HASH,
+///     &[
+///         WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()]),
+///         WarmupSpec::new("vector_add", vec!["f16".into(), "256".into()]),
+///         WarmupSpec::new("relu",       vec!["f32".into(), "128".into()]),
+///     ],
+/// )?;
+/// ```
+pub fn compile_warmup<F: Fn() -> Module>(
+    module_asts: F,
+    entries: &[EntryMeta],
+    module_name: &str,
+    source_hash: &str,
+    specs: &[WarmupSpec],
+) -> Result<(), Error> {
+    let device_id = get_default_device();
+    let gpu_name = get_gpu_name(device_id);
+    let compiler_version = get_compiler_version();
+    let cuda_toolkit_version = get_cuda_toolkit_version();
+
+    // Build module ASTs once, shared across all specs in this warmup call.
+    let modules = CUDATileModules::from_kernel(module_asts())?;
+
+    for spec in specs {
+        // Find matching entry metadata.
+        let entry = entries
+            .iter()
+            .find(|e| e.function_name == spec.function_name)
+            .ok_or_else(|| {
+                Error::KernelLaunch(KernelLaunchError(format!(
+                    "compile_warmup: unknown function '{}' in module '{}'",
+                    spec.function_name, module_name
+                )))
+            })?;
+
+        let key = TileFunctionKey::new(
+            module_name.to_string(),
+            spec.function_name.clone(),
+            spec.function_generics.clone(),
+            spec.stride_args.clone(),
+            spec.spec_args.clone(),
+            spec.scalar_hints.clone(),
+            spec.const_grid,
+            CompileOptions::default(),
+            source_hash.to_string(),
+            gpu_name.clone(),
+            compiler_version.clone(),
+            cuda_toolkit_version.clone(),
+        );
+
+        let slot = kernel_cache_slot(&key.get_hash_string());
+
+        // Use OnceCell::get_or_try_init for single-flight compilation dedup.
+        // Only one thread executes the closure; others block and see the result.
+        let _ = slot.get_or_try_init(|| -> Result<CompiledKernel, Error> {
+            // Cache miss: this closure runs exactly once per key, only on a
+            // real compile. Record it so tests can assert hit/miss
+            // deterministically.
+            record_jit_compile();
+            jit_log!(
+                "warmup: {module_name}::{} <{}> → compiling...",
+                spec.function_name,
+                spec.function_generics.join(", ")
+            );
+
+            // Full JIT compilation.
+            let t0 = std::time::Instant::now();
+            let compiler = CUDATileFunctionCompiler::new(
+                &modules,
+                module_name,
+                &spec.function_name,
+                &spec.function_generics,
+                &spec
+                    .stride_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), x.1.as_slice()))
+                    .collect::<Vec<_>>(),
+                &spec
+                    .spec_args
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
+                &spec
+                    .scalar_hints
+                    .iter()
+                    .map(|x| (x.0.as_str(), &x.1))
+                    .collect::<Vec<_>>(),
+                spec.const_grid,
+                gpu_name.clone(),
+                &key.compile_options,
+            )?;
+            let validator = Arc::new(compiler.get_validator());
+            let module_op = compiler.compile()?;
+            let cubin_filename = compile_tile_ir_module(&module_op, &gpu_name);
+            let jit_elapsed = t0.elapsed();
+
+            let module = load_module_from_file(&cubin_filename, device_id)?;
+            let function =
+                Arc::new(module.load_function(entry.function_entry).map_err(|e| {
+                    Error::KernelLaunch(KernelLaunchError(format!(
+                        "failed to load '{}' from compiled cubin: {e}",
+                        entry.function_entry
+                    )))
+                })?);
+            jit_log!(
+                "warmup: {module_name}::{} → JIT compiled in {:.1?}",
+                spec.function_name,
+                jit_elapsed
+            );
+            Ok(CompiledKernel {
+                module,
+                function,
+                validator,
+            })
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Execute a warmup routine with realistic kernel launches.
+///
+/// The provided closure should launch kernels with production-representative
+/// shapes and data. This warms up both the JIT compilation cache and the
+/// CUDA runtime (driver initialization, shared memory allocation, occupancy
+/// calculation, etc.).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[cutile::module]
+/// mod my_module {
+///     #[cutile::entry()]
+///     fn vector_add<T: ElementType, const N: i32>(
+///         z: &mut Tensor<T, { [N] }>,
+///         x: &Tensor<T, { [-1] }>,
+///         y: &Tensor<T, { [-1] }>,
+///     ) {
+///         z.store(load_tile_like(x, z) + load_tile_like(y, z));
+///     }
+/// }
+///
+/// execute_warmup(|| {
+///     let x = api::ones::<f32>(&[256]).sync()?;
+///     let y = api::ones::<f32>(&[256]).sync()?;
+///     let z = api::zeros::<f32>(&[256]).partition([128]).sync()?;
+///     my_module::vector_add(z, &x, &y)
+///         .generics(vec!["f32".into(), "128".into()])
+///         .sync()?;
+///     Ok(())
+/// })?;
+/// ```
+pub fn execute_warmup<F>(f: F) -> Result<(), Error>
+where
+    F: FnOnce() -> Result<(), Error>,
+{
+    // Ensure device context is initialized.
+    let device_id = get_default_device();
+    let _ = with_global_device_context(device_id, |_| {})?;
+
+    // Run user-provided warmup routine.
+    // Kernels inside will auto-JIT via existing compile_from_context path.
+    f()
 }
 
 /// Validates that all partition grids match the expected launch grid.
@@ -471,6 +888,7 @@ where
         scalar_hints: Vec<(String, DivHint)>,
         grid: Option<(u32, u32, u32)>,
         compile_options: CompileOptions,
+        source_hash: &str,
     ) -> Result<(Arc<Function>, Arc<Validator>), Error> {
         compile_from_context(
             ctx,
@@ -484,6 +902,7 @@ where
             scalar_hints,
             grid,
             compile_options,
+            source_hash,
         )
     }
     /// Sets the type and const generic arguments for this kernel.

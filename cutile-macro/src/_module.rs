@@ -58,6 +58,7 @@ use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
 use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::{env, fs};
 
@@ -241,10 +242,11 @@ fn process_items(
     items: &[syn::Item],
     parent_name: &Ident,
     tile_rust_crate_root: &Ident,
-) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
+) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>, Vec<(String, String)>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
     let type_aliases = cutile_compiler::type_aliases::collect_type_aliases(items);
+    let mut entry_metas: Vec<(String, String)> = vec![]; 
 
     for item in items {
         match item {
@@ -262,6 +264,10 @@ fn process_items(
                         function_item,
                         &type_aliases,
                     )?);
+                    let fn_name = function_item.sig.ident.to_string();
+                    let kernel_naming = KernelNaming::new(&fn_name);
+                    let fn_entry = kernel_naming.entry_name();
+                    entry_metas.push((fn_name, fn_entry));
                 };
                 concrete_items.push(function(
                     function_item.clone(),
@@ -302,7 +308,7 @@ fn process_items(
                          not supported because the macro needs the body at expansion time.",
                     );
                 };
-                let (sub_concrete, sub_entries) =
+                let (sub_concrete, sub_entries, _sub_metas) =
                     process_items(&sub_content.1, &submod.ident, tile_rust_crate_root)?;
                 let sub_name = &submod.ident;
                 let sub_attrs = &submod.attrs;
@@ -321,7 +327,7 @@ fn process_items(
             }
         }
     }
-    Ok((concrete_items, entry_functions))
+    Ok((concrete_items, entry_functions, entry_metas))
 }
 
 /// Fallible inner implementation of the `module` macro.
@@ -334,14 +340,69 @@ fn module_inner(
         return module_item.err("Non-empty module expected.");
     };
     let name = &module_item.ident;
-    let (concrete_items, entry_functions) = process_items(&content.1, name, tile_rust_crate_root)?;
+    let (concrete_items, entry_functions, entry_metas) = process_items(&content.1, name, tile_rust_crate_root)?;
     let ast_path = get_ast_path(tile_rust_crate_root);
     let ast_module_item: ItemMod = module_item.clone();
     let ast_module_tokens = emit_module_ast_self_and_registry_entry(
         ast_module_item,
         tile_rust_crate_root,
-        raw_item_source,
+        raw_item_source.clone(),
     );
+
+    // Compute SHA-256 source hash at macro expansion time.
+    let source_hash = format!("{:x}", Sha256::digest(raw_item_source.as_bytes()));
+    let module_name_str = name.to_string();
+
+    // Generate _entries() and _SOURCE_HASH for warmup support.
+    let entry_meta_items: Vec<TokenStream2> = entry_metas
+        .iter()
+        .map(|(fn_name, fn_entry)| {
+            quote! {
+                #tile_rust_crate_root::tile_kernel::EntryMeta {
+                    module_name: #module_name_str,
+                    function_name: #fn_name,
+                    function_entry: #fn_entry,
+                }
+            }
+        })
+        .collect();
+    let warmup_metadata = quote! {
+        /// SHA-256 hash of the module source, computed at compile time.
+        /// Changes whenever any kernel source in this module changes.
+        pub const _SOURCE_HASH: &str = #source_hash;
+
+        /// Returns metadata for all entry points in this module.
+        pub fn _entries() -> Vec<#tile_rust_crate_root::tile_kernel::EntryMeta> {
+            vec![#(#entry_meta_items),*]
+        }
+
+        /// Pre-compile kernel specializations for this module.
+        ///
+        /// This is a convenience wrapper around [`compile_warmup`] that automatically
+        /// supplies the module ASTs, entry metadata, module name, and source hash.
+        /// Callers only need to provide the [`WarmupSpec`]s describing which
+        /// generics/strides to pre-compile.
+        ///
+        /// # Example
+        ///
+        /// ```rust,ignore
+        /// my_module::_compile_warmup(&[
+        ///     WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()]),
+        /// ])?;
+        /// ```
+        pub fn _compile_warmup(
+            specs: &[#tile_rust_crate_root::tile_kernel::WarmupSpec],
+        ) -> Result<(), #tile_rust_crate_root::error::Error> {
+            #tile_rust_crate_root::tile_kernel::compile_warmup(
+                || __module_ast_self(),
+                &_entries(),
+                #module_name_str,
+                _SOURCE_HASH,
+                specs,
+            )
+        }
+    };
+
     let res = if entry_functions.is_empty() {
         quote! {
             pub mod #name {
@@ -352,6 +413,8 @@ fn module_inner(
                 use #ast_path;
                 #ast_module_tokens
                 #(#concrete_items)*
+                // Warmup metadata.
+                #warmup_metadata
             }
         }
     } else {
@@ -378,6 +441,8 @@ fn module_inner(
                 #(#concrete_items)*
                 // Entry point code.
                 #(#entry_functions)*
+                // Warmup metadata.
+                #warmup_metadata
             }
         }
     };
