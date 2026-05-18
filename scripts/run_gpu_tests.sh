@@ -15,7 +15,7 @@ run_step \
 
 run_step \
     "cutile-compiler GPU runtime tests" \
-    cargo test -p cutile-compiler --test gpu
+    cargo test -p cutile-compiler --test compiler2_e2e
 
 run_step \
     "cutile doc tests" \
@@ -51,7 +51,7 @@ do
     run_step \
         "cuda-async GPU integration test ${test_target}" \
         cargo test -p cuda-async --test "$test_target"
-done    
+done
 
 print_summary_and_exit \
     "All GPU tests passed!" \
