@@ -11,8 +11,8 @@ Tile kernels are functions which run as `N` copies concurrently and in parallel 
 Here is a kernel that prints "hello" from the GPU:
 
 ```rust
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
 use cutile;
 use cutile::error::Error;
 use cutile::tile_kernel::TileKernel;

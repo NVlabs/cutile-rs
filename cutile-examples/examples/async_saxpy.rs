@@ -2,8 +2,9 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::value;
-use cutile::api::{arange, DeviceOpReshape};
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
+use cutile::api::{arange, ones, zeros};
 use cutile::error::Error;
 use cutile::prelude::*;
 use cutile::tensor::ToHostVec;

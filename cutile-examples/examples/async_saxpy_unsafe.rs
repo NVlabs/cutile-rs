@@ -7,9 +7,9 @@
  * Manually use the async API to compile and launch the saxpy kernel using the cutile API.
  */
 
-use cuda_async::device_operation::{value, with_context, DeviceOp};
-use cuda_async::launch::AsyncKernelLaunch;
-use cuda_core::LaunchConfig;
+use cutile::cuda_async::device_operation::{value, with_context, DeviceOp};
+use cutile::cuda_async::launch::AsyncKernelLaunch;
+use cutile::cuda_core::LaunchConfig;
 use cutile::api::arange;
 use cutile::api::DeviceOpReshape;
 use cutile::error::Error;
