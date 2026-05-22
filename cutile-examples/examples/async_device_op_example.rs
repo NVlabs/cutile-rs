@@ -2,10 +2,10 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation;
-use cuda_async::device_operation::*;
-use cuda_async::error::DeviceError;
-use cuda_core::*;
+use cutile::cuda_async::device_operation;
+use cutile::cuda_async::device_operation::*;
+use cutile::cuda_async::error::DeviceError;
+use cutile::cuda_core::*;
 use cutile::tile_kernel::global_policy;
 
 #[tokio::main]

@@ -25,7 +25,7 @@
 //!      handles — the `source_*` handles still work afterward.
 
 use core::ffi::{c_int, c_void};
-use cuda_core::{Device, Stream};
+use cutile::cuda_core::{Device, Stream};
 use cutile::error::Error;
 use cutile::prelude::*;
 

@@ -15,13 +15,13 @@
 //!   - Wrapping a custom kernel in a `DeviceOp` struct for a safe call-site
 //!   - Chaining tile and custom kernels on the same stream with `and_then`
 
-use cuda_async::device_context::{load_module_from_ptx, with_default_device_policy};
-use cuda_async::device_future::DeviceFuture;
-use cuda_async::device_operation::DeviceOp;
-use cuda_async::device_operation::ExecutionContext;
-use cuda_async::error::DeviceError;
-use cuda_async::launch::AsyncKernelLaunch;
-use cuda_core::{Function, LaunchConfig};
+use cutile::cuda_async::device_context::{load_module_from_ptx, with_default_device_policy};
+use cutile::cuda_async::device_future::DeviceFuture;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_async::device_operation::ExecutionContext;
+use cutile::cuda_async::error::DeviceError;
+use cutile::cuda_async::launch::AsyncKernelLaunch;
+use cutile::cuda_core::{Function, LaunchConfig};
 use cutile::api::{arange, zeros};
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec};
 use std::future::IntoFuture;

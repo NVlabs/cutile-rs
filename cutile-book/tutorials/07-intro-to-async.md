@@ -63,7 +63,7 @@ In cutile, a `DeviceOp` can be executed with either sync or async APIs. Given a 
 use cutile::api::{ones, zeros};
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::{PartitionOp, TileKernel, ToHostVecOp};
-use cuda_async::device_operation::*;
+use cutile::cuda_async::{error::DeviceError, device_operation::*};
 use std::sync::Arc;
 
 #[cutile::module]

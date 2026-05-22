@@ -7,8 +7,8 @@ In cutile, tile threads run concurrently and each tile knows its coordinates via
 ---
 
 ```rust
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api::{ones, zeros};

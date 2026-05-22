@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_operation::*;
+use cutile::cuda_async::device_operation::*;
 use cutile::api;
 use cutile::half::f16;
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
@@ -69,7 +69,7 @@ fn gemm<T1: DType, T2: DType>(
 use cutile_examples::to_candle_tensor;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
-async fn main() -> Result<(), cuda_async::error::DeviceError> {
+async fn main() -> Result<(), cutile::cuda_async::error::DeviceError> {
     type In = f16;
     type Out = f32;
     let (m, n, k) = (64, 64, 16);

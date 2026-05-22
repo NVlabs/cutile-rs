@@ -2,11 +2,11 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cuda_async::device_context;
-use cuda_async::device_context::global_policy;
-use cuda_async::device_operation::*;
-use cuda_async::launch::AsyncKernelLaunch;
-use cuda_core::LaunchConfig;
+use cutile::cuda_async::device_context;
+use cutile::cuda_async::device_context::global_policy;
+use cutile::cuda_async::device_operation::*;
+use cutile::cuda_async::launch::AsyncKernelLaunch;
+use cutile::cuda_core::LaunchConfig;
 use cutile::tensor::{Tensor, ToHostVec};
 use cutile::tile_kernel::PartitionOp;
 use cutile::{api, error::Error};
