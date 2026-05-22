@@ -50,6 +50,11 @@ Each element of A is used BN times. Each element of B is used BM times. This **d
 ---
 
 ## The Code
+Note: Before running this code, ensure you have the candle-core crate added to your project dependencies. You can do this by running the command in terminal:
+
+```Bash
+cargo add candle-core
+```
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
