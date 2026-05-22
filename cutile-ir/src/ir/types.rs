@@ -266,11 +266,7 @@ fn strip_prefix_suffix<'a>(s: &'a str, prefix: &str, _suffix: &str) -> Option<&'
         }
     }
     // No matching close — try without nesting (just strip last char if it's '>').
-    if after_prefix.ends_with('>') {
-        Some(&after_prefix[..after_prefix.len() - 1])
-    } else {
-        None
-    }
+    after_prefix.strip_suffix('>')
 }
 
 fn parse_scalar(s: &str) -> Option<ScalarType> {
@@ -314,7 +310,7 @@ fn parse_tile(inner: &str) -> Option<Type> {
             before
                 .trim_end_matches('x')
                 .split('x')
-                .map(|d| parse_dim(d))
+                .map(parse_dim)
                 .collect()
         };
         let ptr_inner_start = ptr_start + "ptr<".len();
@@ -368,7 +364,7 @@ fn parse_tensor_view(inner: &str) -> Option<Type> {
 
     let strides = if let Some(sp) = strides_part {
         let sp = sp.trim_start_matches('[').trim_end_matches(']');
-        sp.split(',').map(|s| parse_dim(s)).collect()
+        sp.split(',').map(parse_dim).collect()
     } else {
         vec![DYNAMIC; shape.len()]
     };
