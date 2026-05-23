@@ -57,13 +57,14 @@ cargo add candle-core
 ```
 
 ```rust
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api;
-use cutile::candle_core::WithDType;
+use candle_core::WithDType;
 use cutile::error::Error;
+use cutile::prelude::PartitionOp;
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::TileKernel;
 
@@ -98,7 +99,7 @@ fn main() -> Result<(), Error> {
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
 
-    let (bm, bn, bk): (i32, i32, i32) = (16, 16, 8);
+    let (bm, bn, bk): (usize, usize, usize) = (16, 16, 8);
     let (m, n, k) = (64usize, 64usize, 64usize);
 
     let generics = vec![
