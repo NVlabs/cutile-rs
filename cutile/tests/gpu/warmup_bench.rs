@@ -19,7 +19,7 @@ use crate::common;
 use cutile::api;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    contains_cuda_function, execute_warmup, get_default_device, jit_compile_count,
+    contains_cuda_function, get_default_device, jit_compile_count,
     CompileOptions, TileFunctionKey, TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
@@ -244,24 +244,21 @@ fn full_warmup_workflow() {
             "compile_warmup must perform exactly one JIT compile"
         );
 
-        // Step 2: execute_warmup — same key → cache hit.
+        // Step 2: first real launch — same key → cache hit. 
         let t1 = Instant::now();
-        execute_warmup(|| {
-            let x = api::ones::<f32>(&[256]).sync()?;
-            let y = api::ones::<f32>(&[256]).sync()?;
-            let z = api::zeros::<f32>(&[256]).partition([128]).sync()?;
-            let _result = bench_module::vector_add(z, &x, &y)
-                .generics(vec!["f32".into(), "128".into()])
-                .sync()?;
-            Ok(())
-        })
-        .expect("execute_warmup failed");
-        let execute_time = t1.elapsed();
-        let c_after_execute = jit_compile_count();
+        let x = api::ones::<f32>(&[256]).sync().unwrap();
+        let y = api::ones::<f32>(&[256]).sync().unwrap();
+        let z = api::zeros::<f32>(&[256]).partition([128]).sync().unwrap();
+        let _ = bench_module::vector_add(z, &x, &y)
+            .generics(vec!["f32".into(), "128".into()])
+            .sync()
+            .unwrap();
+        let first_launch_time = t1.elapsed();
+        let c_after_first = jit_compile_count();
         assert_eq!(
-            c_after_execute, c_after_compile,
-            "execute_warmup after compile_warmup must NOT recompile (key must \
-             match): counter moved from {c_after_compile} to {c_after_execute}"
+            c_after_first, c_after_compile,
+            "first launch after compile_warmup must NOT recompile (key must \
+             match): counter moved from {c_after_compile} to {c_after_first}"
         );
 
         // Step 3: production call — cache hit.
@@ -281,8 +278,8 @@ fn full_warmup_workflow() {
             compile_time
         );
         println!(
-            "║  2. execute_warmup:   {:>10.1?}  (cache: +0 compile)  ║",
-            execute_time
+            "║  2. first real launch: {:>10.1?}  (cache: +0 compile)  ║",
+            first_launch_time
         );
         println!(
             "║  3. production call:  {:>10.1?}  (cache: +0 compile)  ║",

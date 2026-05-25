@@ -530,6 +530,7 @@ pub struct WarmupSpec {
     pub spec_args: Vec<(String, SpecializationBits)>,
     pub scalar_hints: Vec<(String, DivHint)>,
     pub const_grid: Option<(u32, u32, u32)>,
+    pub compile_options: CompileOptions,
 }
 
 impl WarmupSpec {
@@ -542,6 +543,7 @@ impl WarmupSpec {
             spec_args: vec![],
             scalar_hints: vec![],
             const_grid: None,
+            compile_options: CompileOptions::default(),
         }
     }
 
@@ -566,6 +568,12 @@ impl WarmupSpec {
     /// Set a const grid for this spec.
     pub fn with_const_grid(mut self, grid: (u32, u32, u32)) -> Self {
         self.const_grid = Some(grid);
+        self
+    }
+
+    /// Set [`CompileOptions`] for this spec. 
+    pub fn with_compile_options(mut self, compile_options: CompileOptions) -> Self {
+        self.compile_options = compile_options;
         self
     }
 }
@@ -625,7 +633,7 @@ pub fn compile_warmup<F: Fn() -> Module>(
             spec.spec_args.clone(),
             spec.scalar_hints.clone(),
             spec.const_grid,
-            CompileOptions::default(),
+            spec.compile_options.clone(),
             source_hash.to_string(),
             gpu_name.clone(),
             compiler_version.clone(),
@@ -700,51 +708,6 @@ pub fn compile_warmup<F: Fn() -> Module>(
     }
 
     Ok(())
-}
-
-/// Execute a warmup routine with realistic kernel launches.
-///
-/// The provided closure should launch kernels with production-representative
-/// shapes and data. This warms up both the JIT compilation cache and the
-/// CUDA runtime (driver initialization, shared memory allocation, occupancy
-/// calculation, etc.).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// #[cutile::module]
-/// mod my_module {
-///     #[cutile::entry()]
-///     fn vector_add<T: ElementType, const N: i32>(
-///         z: &mut Tensor<T, { [N] }>,
-///         x: &Tensor<T, { [-1] }>,
-///         y: &Tensor<T, { [-1] }>,
-///     ) {
-///         z.store(load_tile_like(x, z) + load_tile_like(y, z));
-///     }
-/// }
-///
-/// execute_warmup(|| {
-///     let x = api::ones::<f32>(&[256]).sync()?;
-///     let y = api::ones::<f32>(&[256]).sync()?;
-///     let z = api::zeros::<f32>(&[256]).partition([128]).sync()?;
-///     my_module::vector_add(z, &x, &y)
-///         .generics(vec!["f32".into(), "128".into()])
-///         .sync()?;
-///     Ok(())
-/// })?;
-/// ```
-pub fn execute_warmup<F>(f: F) -> Result<(), Error>
-where
-    F: FnOnce() -> Result<(), Error>,
-{
-    // Ensure device context is initialized.
-    let device_id = get_default_device();
-    let _ = with_global_device_context(device_id, |_| {})?;
-
-    // Run user-provided warmup routine.
-    // Kernels inside will auto-JIT via existing compile_from_context path.
-    f()
 }
 
 /// Validates that all partition grids match the expected launch grid.
