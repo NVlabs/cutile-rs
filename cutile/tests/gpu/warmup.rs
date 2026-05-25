@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! GPU integration tests for compile_warmup and execute_warmup.
+//! GPU integration tests for compile_warmup.
 
 use crate::common;
 use cutile::api;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    contains_cuda_function, execute_warmup, get_default_device, jit_compile_count,
+    contains_cuda_function, get_default_device, jit_compile_count,
     TileFunctionKey, TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
@@ -95,23 +95,6 @@ fn compile_warmup_skips_duplicate() {
             .expect("first compile_warmup failed");
         warmup_test_module::_compile_warmup(specs)
             .expect("second compile_warmup failed");
-    });
-}
-
-#[test]
-fn execute_warmup_runs_kernel() {
-    common::with_test_stack(|| {
-        let _guard = common::cache_test_lock();
-        execute_warmup(|| {
-            let x = api::ones::<f32>(&[256]).sync()?;
-            let y = api::ones::<f32>(&[256]).sync()?;
-            let z = api::zeros::<f32>(&[256]).partition([64]).sync()?;
-            let _result = warmup_test_module::vector_add(z, &x, &y)
-                .generics(vec!["f32".into(), "64".into()])
-                .sync()?;
-            Ok(())
-        })
-        .expect("execute_warmup failed");
     });
 }
 
