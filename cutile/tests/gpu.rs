@@ -16,3 +16,9 @@ mod tensor;
 
 #[path = "gpu/num_tiles.rs"]
 mod num_tiles;
+
+#[path = "gpu/warmup.rs"]
+mod warmup;
+
+#[path = "gpu/warmup_bench.rs"]
+mod warmup_bench;
