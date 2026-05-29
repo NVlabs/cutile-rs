@@ -2506,22 +2506,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let inner = val_str
                         .trim_start_matches("#cuda_tile.rounding<")
                         .trim_end_matches('>');
-                    let rm = match inner {
-                        "nearest_even" => 0,
-                        "positive_inf" => 1,
-                        "negative_inf" => 2,
-                        "nearest_int_to_zero" => 3,
-                        "zero" => 4,
-                        "approx" => 5,
-                        "full" => 6,
-                        other => {
-                            return self.jit_error_result(
-                                &call_expr.span(),
-                                &format!("unknown rounding mode '{other}'"),
-                            );
-                        }
-                    };
-                    Attribute::i32(rm)
+                    rounding_mode_attr(inner).1
                 } else if val_str.starts_with("#cuda_tile.overflow<") {
                     let inner = val_str
                         .trim_start_matches("#cuda_tile.overflow<")
@@ -3184,7 +3169,10 @@ fn op_name_to_opcode(op_name: &str) -> Result<Opcode, JITError> {
         "pow" => Ok(Opcode::Pow),
         "fma" => Ok(Opcode::Fma),
         "mmaf" => Ok(Opcode::MmaF),
+        "mmaf_scaled" => Ok(Opcode::MmaFScaled),
         "mmai" => Ok(Opcode::MmaI),
+        "pack" => Ok(Opcode::Pack),
+        "unpack" => Ok(Opcode::Unpack),
         "assert" => Ok(Opcode::Assert),
         "assume" => Ok(Opcode::Assume),
         "print" | "print_tko" => Ok(Opcode::Print),

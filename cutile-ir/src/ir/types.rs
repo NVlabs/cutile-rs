@@ -21,6 +21,7 @@ pub const DYNAMIC: i64 = i64::MIN;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScalarType {
     I1,
+    I4,
     I8,
     I16,
     I32,
@@ -32,13 +33,21 @@ pub enum ScalarType {
     F64,
     F8E4M3FN,
     F8E5M2,
+    F8E8M0FNU,
+    F4E2M1FN,
 }
 
 impl ScalarType {
     /// Byte width of this scalar type (I1 rounds up to 1 byte).
     pub fn byte_width(self) -> usize {
         match self {
-            Self::I1 | Self::I8 | Self::F8E4M3FN | Self::F8E5M2 => 1,
+            Self::I1
+            | Self::I4
+            | Self::I8
+            | Self::F8E4M3FN
+            | Self::F8E5M2
+            | Self::F8E8M0FNU
+            | Self::F4E2M1FN => 1,
             Self::I16 | Self::F16 | Self::BF16 => 2,
             Self::I32 | Self::F32 | Self::TF32 => 4,
             Self::I64 | Self::F64 => 8,
@@ -48,6 +57,7 @@ impl ScalarType {
     pub fn type_tag(self) -> TypeTag {
         match self {
             Self::I1 => TypeTag::I1,
+            Self::I4 => TypeTag::I4,
             Self::I8 => TypeTag::I8,
             Self::I16 => TypeTag::I16,
             Self::I32 => TypeTag::I32,
@@ -59,13 +69,15 @@ impl ScalarType {
             Self::F64 => TypeTag::F64,
             Self::F8E4M3FN => TypeTag::F8E4M3FN,
             Self::F8E5M2 => TypeTag::F8E5M2,
+            Self::F8E8M0FNU => TypeTag::F8E8M0FNU,
+            Self::F4E2M1FN => TypeTag::F4E2M1FN,
         }
     }
 
     pub fn is_integer(self) -> bool {
         matches!(
             self,
-            Self::I1 | Self::I8 | Self::I16 | Self::I32 | Self::I64
+            Self::I1 | Self::I4 | Self::I8 | Self::I16 | Self::I32 | Self::I64
         )
     }
 
@@ -116,6 +128,25 @@ pub struct PartitionViewType {
     pub padding_value: Option<PaddingValue>,
 }
 
+/// A view that uses a 1D tensor of sparse indices along one tensor dimension.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GatherScatterViewType {
+    pub tile_shape: Vec<i32>,
+    pub tensor_view: TensorViewType,
+    pub sparse_dim: i32,
+    pub padding_value: Option<PaddingValue>,
+}
+
+/// A view that traverses a tensor with configurable per-dimension strides.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StridedViewType {
+    pub tile_shape: Vec<i32>,
+    pub traversal_strides: Vec<i32>,
+    pub tensor_view: TensorViewType,
+    pub dim_map: Vec<i32>,
+    pub padding_value: Option<PaddingValue>,
+}
+
 /// Padding value for out-of-bounds accesses in a partition view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -142,6 +173,8 @@ pub enum Type {
     Tile(TileType),
     TensorView(TensorViewType),
     PartitionView(PartitionViewType),
+    GatherScatterView(GatherScatterViewType),
+    StridedView(StridedViewType),
     Func(FuncType),
     Token,
 }
@@ -173,6 +206,18 @@ impl From<TensorViewType> for Type {
 impl From<PartitionViewType> for Type {
     fn from(p: PartitionViewType) -> Self {
         Self::PartitionView(p)
+    }
+}
+
+impl From<GatherScatterViewType> for Type {
+    fn from(g: GatherScatterViewType) -> Self {
+        Self::GatherScatterView(g)
+    }
+}
+
+impl From<StridedViewType> for Type {
+    fn from(s: StridedViewType) -> Self {
+        Self::StridedView(s)
     }
 }
 
@@ -215,6 +260,12 @@ impl Type {
         if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.partition_view<", ">") {
             return parse_partition_view(inner);
         }
+        if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.gather_scatter_view<", ">") {
+            return parse_gather_scatter_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.strided_view<", ">") {
+            return parse_strided_view(inner);
+        }
         if let Some(inner) = strip_prefix_suffix(s, "!cuda_tile.ptr<", ">") {
             let pointee = parse_scalar(inner)?;
             return Some(Type::Pointer(PointerType { pointee }));
@@ -228,6 +279,12 @@ impl Type {
         }
         if let Some(inner) = strip_prefix_suffix(s, "partition_view<", ">") {
             return parse_partition_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "gather_scatter_view<", ">") {
+            return parse_gather_scatter_view(inner);
+        }
+        if let Some(inner) = strip_prefix_suffix(s, "strided_view<", ">") {
+            return parse_strided_view(inner);
         }
         if let Some(inner) = strip_prefix_suffix(s, "ptr<", ">") {
             let pointee = parse_scalar(inner)?;
@@ -276,6 +333,7 @@ fn strip_prefix_suffix<'a>(s: &'a str, prefix: &str, _suffix: &str) -> Option<&'
 fn parse_scalar(s: &str) -> Option<ScalarType> {
     match s.trim() {
         "i1" => Some(ScalarType::I1),
+        "i4" => Some(ScalarType::I4),
         "i8" => Some(ScalarType::I8),
         "i16" => Some(ScalarType::I16),
         "i32" => Some(ScalarType::I32),
@@ -287,6 +345,8 @@ fn parse_scalar(s: &str) -> Option<ScalarType> {
         "f64" => Some(ScalarType::F64),
         "f8E4M3FN" | "f8e4m3fn" => Some(ScalarType::F8E4M3FN),
         "f8E5M2" | "f8e5m2" => Some(ScalarType::F8E5M2),
+        "f8E8M0FNU" | "f8e8m0fnu" => Some(ScalarType::F8E8M0FNU),
+        "f4E2M1FN" | "f4e2m1fn" => Some(ScalarType::F4E2M1FN),
         // Rust-facing names used by the compiler.
         "bool" => Some(ScalarType::I1),
         _ => None,
@@ -482,6 +542,140 @@ fn parse_partition_view(inner: &str) -> Option<Type> {
     }))
 }
 
+fn parse_view_tile_shape(inner: &str) -> Option<(Vec<i32>, usize)> {
+    let tile_start = inner.find("tile=(")?;
+    let dims_start = tile_start + "tile=(".len();
+    let dims_end = inner[dims_start..].find(')')? + dims_start;
+    let dims_str = &inner[dims_start..dims_end];
+    let tile_shape: Vec<i32> = if dims_str.contains('x') {
+        dims_str
+            .split('x')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(1))
+            .collect()
+    } else {
+        dims_str
+            .split(',')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(1))
+            .collect()
+    };
+    Some((tile_shape, dims_end))
+}
+
+fn parse_padding_value(inner: &str) -> Option<PaddingValue> {
+    if inner.contains("padding_value") {
+        if inner.contains("zero") && !inner.contains("neg_zero") {
+            Some(PaddingValue::Zero)
+        } else if inner.contains("neg_zero") {
+            Some(PaddingValue::NegZero)
+        } else if inner.contains("nan") {
+            Some(PaddingValue::Nan)
+        } else if inner.contains("pos_inf") {
+            Some(PaddingValue::PosInf)
+        } else if inner.contains("neg_inf") {
+            Some(PaddingValue::NegInf)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn parse_nested_tensor_view(inner: &str, after_pos: usize) -> Option<TensorViewType> {
+    let tv_search = inner;
+    let tv_prefix_start = tv_search
+        .find("tensor_view=!cuda_tile.tensor_view<")
+        .map(|p| (p, "tensor_view=!cuda_tile.tensor_view<"))
+        .or_else(|| {
+            tv_search
+                .find("!cuda_tile.tensor_view<")
+                .map(|p| (p, "!cuda_tile.tensor_view<"))
+        })
+        .or_else(|| {
+            let remaining = &tv_search[after_pos..];
+            remaining
+                .find("tensor_view<")
+                .map(|p| (p + after_pos, "tensor_view<"))
+        })?;
+    let (tv_pos, tv_prefix) = tv_prefix_start;
+    let tv_inner_start = tv_pos + tv_prefix.len();
+
+    let mut depth = 1;
+    let mut tv_inner_end = tv_inner_start;
+    for (i, c) in inner[tv_inner_start..].char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    tv_inner_end = tv_inner_start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let tv_inner = &inner[tv_inner_start..tv_inner_end];
+    let tv_type = parse_tensor_view(tv_inner)?;
+    let Type::TensorView(tv) = tv_type else {
+        return None;
+    };
+    Some(tv)
+}
+
+fn parse_i32_list_after(inner: &str, prefix: &str) -> Option<Vec<i32>> {
+    let start = inner.find(prefix)? + prefix.len();
+    let end = inner[start..].find(']')? + start;
+    Some(
+        inner[start..end]
+            .split(',')
+            .map(|s| s.trim().parse::<i32>().unwrap_or(0))
+            .collect(),
+    )
+}
+
+fn parse_gather_scatter_view(inner: &str) -> Option<Type> {
+    let (tile_shape, dims_end) = parse_view_tile_shape(inner)?;
+    let padding_value = parse_padding_value(inner);
+    let tensor_view = parse_nested_tensor_view(inner, dims_end + 1)?;
+    let sparse_dim = if let Some(start) = inner.find("sparse_dim=") {
+        let value_start = start + "sparse_dim=".len();
+        let value = inner[value_start..]
+            .split([',', '>'])
+            .next()
+            .unwrap_or("0")
+            .trim();
+        value.parse::<i32>().unwrap_or(0)
+    } else {
+        0
+    };
+
+    Some(Type::GatherScatterView(GatherScatterViewType {
+        tile_shape,
+        tensor_view,
+        sparse_dim,
+        padding_value,
+    }))
+}
+
+fn parse_strided_view(inner: &str) -> Option<Type> {
+    let (tile_shape, dims_end) = parse_view_tile_shape(inner)?;
+    let padding_value = parse_padding_value(inner);
+    let traversal_strides = parse_i32_list_after(inner, "traversal_strides=[")
+        .unwrap_or_else(|| vec![1; tile_shape.len()]);
+    let tensor_view = parse_nested_tensor_view(inner, dims_end + 1)?;
+    let dim_map = parse_i32_list_after(inner, "dim_map=[")
+        .unwrap_or_else(|| (0..tile_shape.len() as i32).collect());
+
+    Some(Type::StridedView(StridedViewType {
+        tile_shape,
+        traversal_strides,
+        tensor_view,
+        dim_map,
+        padding_value,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +695,26 @@ mod tests {
     #[test]
     fn parse_scalar_bf16() {
         assert_eq!(Type::parse("bf16"), Some(Type::Scalar(ScalarType::BF16)));
+    }
+
+    #[test]
+    fn parse_cuda_13_3_scalars() {
+        assert_eq!(Type::parse("i4"), Some(Type::Scalar(ScalarType::I4)));
+        assert_eq!(
+            Type::parse("f8E8M0FNU"),
+            Some(Type::Scalar(ScalarType::F8E8M0FNU))
+        );
+        assert_eq!(
+            Type::parse("f4E2M1FN"),
+            Some(Type::Scalar(ScalarType::F4E2M1FN))
+        );
+        assert_eq!(
+            Type::parse("!cuda_tile.tile<64xf4E2M1FN>"),
+            Some(Type::Tile(TileType {
+                shape: vec![64],
+                element_type: TileElementType::Scalar(ScalarType::F4E2M1FN),
+            }))
+        );
     }
 
     #[test]

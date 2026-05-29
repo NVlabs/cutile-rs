@@ -46,7 +46,7 @@ fn current_version_roundtrip() {
     let bytecode = write_bytecode(&module).expect("write_bytecode failed");
     let decoded = decode_bytecode(&bytecode).expect("decode_bytecode failed");
 
-    // The current version is 13.2 (BytecodeVersion::CURRENT).
+    // The current version is BytecodeVersion::CURRENT.
     let expected = format!("TileIR bytecode v{}", BytecodeVersion::CURRENT);
     assert!(
         decoded.contains(&expected),
@@ -153,8 +153,8 @@ fn version_ordering() {
         tag: 0,
     };
     let v3 = BytecodeVersion {
-        major: 14,
-        minor: 0,
+        major: 13,
+        minor: 3,
         tag: 0,
     };
     assert!(v1 < v2);

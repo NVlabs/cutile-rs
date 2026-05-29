@@ -2990,6 +2990,10 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
     let scalar = super::_type::scalar_from_name(cuda_tile_ty).unwrap_or(ScalarType::I32);
     match scalar {
         ScalarType::I1 => vec![if lit_string != "0" { 0xFF } else { 0x00 }],
+        ScalarType::I4 => {
+            let v: i8 = lit_string.parse().unwrap_or(0);
+            vec![(v as u8) & 0x0F]
+        }
         ScalarType::I8 => {
             let v: i8 = lit_string.parse().unwrap_or(0);
             v.to_le_bytes().to_vec()
@@ -3022,9 +3026,13 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
             let v = parse_float_or_hex(lit_string);
             v.to_le_bytes().to_vec()
         }
-        _ => {
-            let v: i32 = lit_string.parse().unwrap_or(0);
-            v.to_le_bytes().to_vec()
+        ScalarType::F8E4M3FN | ScalarType::F8E5M2 | ScalarType::F8E8M0FNU => {
+            let v: u8 = lit_string.parse().unwrap_or(0);
+            vec![v]
+        }
+        ScalarType::F4E2M1FN => {
+            let v: u8 = lit_string.parse().unwrap_or(0);
+            vec![v & 0x0F]
         }
     }
 }

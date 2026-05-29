@@ -670,6 +670,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         });
         let data = match scalar {
             ScalarType::I1 => vec![if const_value != 0 { 0xFF } else { 0x00 }],
+            ScalarType::I4 => vec![(const_value as u8) & 0x0F],
             ScalarType::I8 => (const_value as i8).to_le_bytes().to_vec(),
             ScalarType::I16 => (const_value as i16).to_le_bytes().to_vec(),
             ScalarType::I32 => (const_value as i32).to_le_bytes().to_vec(),
@@ -682,6 +683,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .to_vec(),
             ScalarType::F32 => (const_value as f32).to_le_bytes().to_vec(),
             ScalarType::F64 => (const_value as f64).to_le_bytes().to_vec(),
+            ScalarType::F8E4M3FN | ScalarType::F8E5M2 | ScalarType::F8E8M0FNU => {
+                vec![const_value as u8]
+            }
+            ScalarType::F4E2M1FN => vec![(const_value as u8) & 0x0F],
             _ => (const_value as i32).to_le_bytes().to_vec(),
         };
         let (op_id, results) =

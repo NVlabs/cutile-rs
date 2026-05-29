@@ -27,6 +27,16 @@ pub struct Global {
     pub sym_name: String,
     pub value: DenseElements,
     pub alignment: u64,
+    pub constant: bool,
+    pub symbol_visibility: SymbolVisibility,
+}
+
+/// Visibility of a module global symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SymbolVisibility {
+    Public = 0,
+    Private = 1,
 }
 
 /// The root container for a Tile IR program.
