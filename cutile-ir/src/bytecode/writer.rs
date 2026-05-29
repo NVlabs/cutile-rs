@@ -51,6 +51,7 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
         types: TypeManager::new(),
         constants: ConstantManager::new(),
         debug: DebugInfoCollector::new(),
+        version,
     };
 
     // Pre-scan: register all types, strings, constants used by globals and functions.
@@ -84,7 +85,7 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
     write_debug_section(&mut out, &ctx)?;
 
     // 6. Type section
-    write_type_section(&mut out, &ctx.types)?;
+    write_type_section(&mut out, &ctx.types, version)?;
 
     // 7. String section
     write_string_section(&mut out, &ctx.strings)?;
@@ -277,6 +278,12 @@ impl TypeManager {
             Type::PartitionView(pv) => {
                 self.get_or_insert(&Type::TensorView(pv.tensor_view.clone()));
             }
+            Type::GatherScatterView(gsv) => {
+                self.get_or_insert(&Type::TensorView(gsv.tensor_view.clone()));
+            }
+            Type::StridedView(sv) => {
+                self.get_or_insert(&Type::TensorView(sv.tensor_view.clone()));
+            }
             Type::Func(f) => {
                 for inp in &f.inputs {
                     self.get_or_insert(inp);
@@ -290,7 +297,12 @@ impl TypeManager {
     }
 }
 
-fn serialize_type(ty: &Type, types: &mut TypeManager, w: &mut EncodingWriter) -> Result<()> {
+fn serialize_type(
+    ty: &Type,
+    types: &mut TypeManager,
+    w: &mut EncodingWriter,
+    version: BytecodeVersion,
+) -> Result<()> {
     match ty {
         Type::Scalar(s) => {
             w.write_varint(s.type_tag() as u64);
@@ -319,14 +331,51 @@ fn serialize_type(ty: &Type, types: &mut TypeManager, w: &mut EncodingWriter) ->
         }
         Type::PartitionView(pv) => {
             w.write_varint(TypeTag::PartitionView as u64);
+            if version >= BytecodeVersion::V13_3 {
+                let flags = if pv.padding_value.is_some() {
+                    1u64
+                } else {
+                    0u64
+                };
+                w.write_varint(flags);
+            }
             w.write_le_var_size_i32(&pv.tile_shape);
             let idx = types.get_or_insert(&Type::TensorView(pv.tensor_view.clone()));
             w.write_varint(idx);
             w.write_le_var_size_i32(&pv.dim_map);
-            let has_padding = pv.padding_value.is_some();
-            w.write_byte(has_padding as u8);
-            if let Some(pv_val) = pv.padding_value {
-                w.write_varint(pv_val as u64);
+            if version >= BytecodeVersion::V13_3 {
+                if let Some(pv_val) = pv.padding_value {
+                    w.write_byte(pv_val as u8);
+                }
+            } else {
+                let has_padding = pv.padding_value.is_some();
+                w.write_byte(has_padding as u8);
+                if let Some(pv_val) = pv.padding_value {
+                    w.write_varint(pv_val as u64);
+                }
+            }
+        }
+        Type::GatherScatterView(gsv) => {
+            w.write_varint(TypeTag::GatherScatterView as u64);
+            w.write_varint(if gsv.padding_value.is_some() { 1 } else { 0 });
+            w.write_le_var_size_i32(&gsv.tile_shape);
+            let idx = types.get_or_insert(&Type::TensorView(gsv.tensor_view.clone()));
+            w.write_varint(idx);
+            w.write_varint(gsv.sparse_dim as u64);
+            if let Some(padding_value) = gsv.padding_value {
+                w.write_byte(padding_value as u8);
+            }
+        }
+        Type::StridedView(sv) => {
+            w.write_varint(TypeTag::StridedView as u64);
+            w.write_varint(if sv.padding_value.is_some() { 1 } else { 0 });
+            w.write_le_var_size_i32(&sv.tile_shape);
+            w.write_le_var_size_i32(&sv.traversal_strides);
+            let idx = types.get_or_insert(&Type::TensorView(sv.tensor_view.clone()));
+            w.write_varint(idx);
+            w.write_le_var_size_i32(&sv.dim_map);
+            if let Some(padding_value) = sv.padding_value {
+                w.write_byte(padding_value as u8);
             }
         }
         Type::Func(f) => {
@@ -349,7 +398,11 @@ fn serialize_type(ty: &Type, types: &mut TypeManager, w: &mut EncodingWriter) ->
     Ok(())
 }
 
-fn write_type_section(out: &mut Vec<u8>, types: &TypeManager) -> Result<()> {
+fn write_type_section(
+    out: &mut Vec<u8>,
+    types: &TypeManager,
+    version: BytecodeVersion,
+) -> Result<()> {
     if types.list.is_empty() {
         return Ok(());
     }
@@ -376,7 +429,7 @@ fn write_type_section(out: &mut Vec<u8>, types: &TypeManager) -> Result<()> {
     for ty in &type_list {
         offsets.push(running);
         let before = w.tell();
-        serialize_type(ty, &mut types_mut, &mut w)?;
+        serialize_type(ty, &mut types_mut, &mut w, version)?;
         running += (w.tell() - before) as u32;
     }
 
@@ -477,6 +530,11 @@ fn write_global_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> {
 
         // 4. Alignment.
         w.write_varint(global.alignment);
+
+        if ctx.version >= BytecodeVersion::V13_3 {
+            w.write_byte(global.symbol_visibility as u8);
+            w.write_varint(global.constant as u64);
+        }
     }
 
     let buf = w.into_bytes();
@@ -813,6 +871,7 @@ fn write_function_body(ctx: &mut WriterCtx, func_op: OpId) -> Result<Vec<u8>> {
 /// `&mut` to per-op writers and recursive region/block writers.
 pub(super) struct WriterCtx<'a> {
     pub module: &'a Module,
+    pub version: BytecodeVersion,
     pub value_map: HashMap<Value, u64>,
     pub next_idx: u64,
     pub strings: StringManager,

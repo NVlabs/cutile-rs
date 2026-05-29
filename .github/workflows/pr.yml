@@ -21,20 +21,54 @@ jobs:
   build:
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
+      # TODO: Switch back to nvidia/cuda:13.3.x-devel-ubuntu24.04 once NVIDIA
+      # publishes a CUDA 13.3 image, then remove the redist install below.
+      image: ubuntu:24.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
-      CUDA_TOOLKIT_PATH: /usr/local/cuda-13
-      CUDA_TILE_USE_LLVM_INSTALL_DIR: /usr/lib/llvm-21
+      CUDA_TOOLKIT_PATH: /opt/cuda-13.3
     timeout-minutes: 30
     steps:
       - name: Install basic dependencies
         run: |
           apt update
-          apt install -y --no-install-recommends curl wget ca-certificates \
-            lsb-release git software-properties-common gnupg cmake zlib1g-dev \
-            libzstd-dev git
+          apt install -y --no-install-recommends build-essential curl \
+            ca-certificates git cmake pkg-config libclang-dev zlib1g-dev \
+            libzstd-dev xz-utils
+
+      - name: Install CUDA 13.3 redist
+        run: |
+          install_cuda_component() {
+            local name="$1"
+            local version="$2"
+            local sha256="$3"
+            local archive="/tmp/${name}-${version}.tar.xz"
+            local url="https://developer.download.nvidia.com/compute/cuda/redist/${name}/linux-x86_64/${name}-linux-x86_64-${version}-archive.tar.xz"
+
+            curl -fsSL "$url" -o "$archive"
+            echo "${sha256}  ${archive}" | sha256sum -c -
+            tar -xf "$archive" --strip-components=1 -C "${CUDA_TOOLKIT_PATH}"
+          }
+
+          rm -rf "${CUDA_TOOLKIT_PATH}"
+          mkdir -p "${CUDA_TOOLKIT_PATH}"
+
+          install_cuda_component cuda_crt 13.3.33 4755d36d24c6ef7697a2d3e1dbb23c4562c9c0d97d48390d4cbd8ab32dec5b5f
+          install_cuda_component cuda_nvcc 13.3.33 93b098bda4a562ebf3541523ce82adc43f106a81dcf28bcbf8f0d8e093d1c66f
+          install_cuda_component libnvvm 13.3.33 fc9c1fd5844e44c0e5eeb051378c1b13cf0e3bb3fe4966d5103c38885424f802
+          install_cuda_component cuda_cudart 13.3.29 1e59c4888267d27ba1a9bd0f3669a6439db1334a96e754cd9013c7c73e18dc9d
+          install_cuda_component libcurand 10.4.3.29 0218e62ab413e435dcd0274ec8e63b62214e6aba8519201061d1597e73caadbb
+          install_cuda_component cuda_tileiras 13.3.36 1b055db199f806c746d53331200ccd8480bfdddd14638ed2911f30ee0cc4447b
+
+          if [ -d "${CUDA_TOOLKIT_PATH}/lib" ] && [ ! -e "${CUDA_TOOLKIT_PATH}/lib64" ]; then
+            ln -s lib "${CUDA_TOOLKIT_PATH}/lib64"
+          fi
+
+          export PATH="${CUDA_TOOLKIT_PATH}/bin:${PATH}"
+          echo "${CUDA_TOOLKIT_PATH}/bin" >> "${GITHUB_PATH}"
+          nvcc --version
+          tileiras --help | grep -q "sm_120"
 
       - name: Clone repository
         uses: actions/checkout@v6
@@ -42,16 +76,17 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Install custom dependencies
+      - name: Install Rust
         run: |
-          # Install rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source "${HOME}/.cargo/env"
           rustup default nightly
-          wget https://apt.llvm.org/llvm.sh
-          bash ./llvm.sh 21
-          apt install -y --no-install-recommends libmlir-21-dev mlir-21-tools libpolly-21-dev
-          update-alternatives --install /usr/bin/llvm-config llvm-config /usr/lib/llvm-21/bin/llvm-config 1
+
+      - name: TileIR toolchain smoke test
+        run: |
+          source "${HOME}/.cargo/env"
+          command -v tileiras
+          cargo test -p cutile-ir --test bytecode_validate simple_arithmetic -- --exact --nocapture
 
       - name: Build
         run: |
@@ -76,7 +111,4 @@ jobs:
       - name: CPU only tests
         run: |
           source "${HOME}/.cargo/env"
-
-          # FIXME: Temporary hack for runtime linking
-          export LD_LIBRARY_PATH="${CUDA_TILE_USE_LLVM_INSTALL_DIR}/lib"
           ./scripts/run_cpu_tests.sh

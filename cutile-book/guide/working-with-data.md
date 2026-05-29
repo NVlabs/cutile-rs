@@ -106,7 +106,12 @@ fn kernel(
 | `Partition<E, S>` | Device | Element type + shape | Read-only view of a `&Tensor` divided into tiles inside a kernel |
 | `Tile<E, S>` | Device | Element type + shape (always static) | Immutable data fragment in GPU registers |
 
-For the full list of supported element types (`f16`, `bf16`, `f32`, `f64`, `tf32`, `f8e4m3fn`, `f8e5m2`, integer types, `bool`), see the [DSL API: ElementType](../reference/dsl-api.md#elementtype). For the `api::*` module and `TensorView`, see [Host API: Tensor Creation and Views](../reference/host-api.md#tensor-creation-and-views).
+For the full list of supported element types (`f16`, `bf16`, `f32`, `f64`,
+`tf32`, `f8e4m3fn`, `f8e5m2`, `f8e8m0fnu`, `f4e2m1fn`,
+`f4e2m1fnx2`, `i4`, integer types, `bool`), see the
+[DSL API: ElementType](../reference/dsl-api.md#elementtype). For the `api::*`
+module and `TensorView`, see
+[Host API: Tensor Creation and Views](../reference/host-api.md#tensor-creation-and-views).
 
 ---
 

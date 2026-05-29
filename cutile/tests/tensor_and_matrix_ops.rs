@@ -3,11 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile::cuda_core::{f4e2m1fnx2, f8e4m3fn};
+use cutile::prelude::{
+    api, Arc, Device, DeviceOp, DeviceOpReshape, IntoPartition, Tensor, ToHostVec,
+};
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
+
+fn supports_native_nvfp4(gpu_name: &str) -> bool {
+    gpu_name
+        .strip_prefix("sm_")
+        .and_then(|sm| sm.parse::<u32>().ok())
+        .is_some_and(|sm| sm >= 100)
+}
 
 #[cutile::module]
 mod tensor_and_matrix_ops_module {
@@ -100,6 +111,159 @@ mod tensor_and_matrix_ops_module {
 
         let result: Tile<f32, { [16, 16] }> = mmaf(lhs, rhs, acc);
 
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn transpose_tile_kernel(
+        output: &mut Tensor<f32, { [8, 16] }>,
+        input: &Tensor<f32, { [-1, -1] }>,
+    ) {
+        let source: Tile<f32, { [16, 8] }> = load_tile(input, const_shape![16, 8], [0, 0]);
+        let result: Tile<f32, { [8, 16] }> = source.transpose();
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn nvfp4_pack_unpack_kernel(
+        output: &mut Tensor<f4e2m1fnx2, { [32] }>,
+        input: &Tensor<f4e2m1fnx2, { [-1] }>,
+    ) {
+        let bytes: Tile<f4e2m1fnx2, { [32] }> = load_tile(input, const_shape![32], [0]);
+        let f4s: Tile<f4e2m1fn, { [64] }> = unpack(bytes);
+        let packed: Tile<f4e2m1fnx2, { [32] }> = pack(f4s);
+        output.store(packed);
+    }
+
+    #[cutile::entry()]
+    fn nvfp4_pack_unpack_2d_kernel(
+        output: &mut Tensor<f4e2m1fnx2, { [16, 32] }>,
+        input: &Tensor<f4e2m1fnx2, { [-1, -1] }>,
+    ) {
+        let bytes_2d: Tile<f4e2m1fnx2, { [16, 32] }> =
+            load_tile(input, const_shape![16, 32], [0, 0]);
+        let f4s: Tile<f4e2m1fn, { [16, 64] }> = bytes_2d.unpack(const_shape![16, 64]);
+        let packed: Tile<f4e2m1fnx2, { [16, 32] }> = f4s.pack(const_shape![16, 32]);
+        output.store(packed);
+    }
+
+    #[cutile::entry()]
+    fn nvfp4_u8_escape_unpack_kernel(
+        output: &mut Tensor<f4e2m1fnx2, { [32] }>,
+        input: &Tensor<u8, { [-1] }>,
+    ) {
+        let bytes: Tile<u8, { [32] }> = load_tile(input, const_shape![32], [0]);
+        let f4s: Tile<f4e2m1fn, { [64] }> = unpack(bytes);
+        let packed: Tile<f4e2m1fnx2, { [32] }> = pack(f4s);
+        output.store(packed);
+    }
+
+    #[cutile::entry()]
+    fn pack_unpack_2d_f16_kernel(
+        output: &mut Tensor<f16, { [8, 8] }>,
+        input: &Tensor<f16, { [-1, -1] }>,
+    ) {
+        let src: Tile<f16, { [8, 8] }> = load_tile(input, const_shape![8, 8], [0, 0]);
+        let flat: Tile<f16, { [64] }> = reshape(src, const_shape![64]);
+        let packed: Tile<u8, { [128] }> = pack(flat);
+        let unpacked: Tile<f16, { [64] }> = unpack(packed);
+        let result: Tile<f16, { [8, 8] }> = reshape(unpacked, const_shape![8, 8]);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn cross_type_pack_unpack_kernel(
+        output: &mut Tensor<i32, { [16] }>,
+        input: &Tensor<f32, { [-1] }>,
+    ) {
+        let src: Tile<f32, { [16] }> = load_tile(input, const_shape![16], [0]);
+        let packed: Tile<u8, { [64] }> = pack(src);
+        let result: Tile<i32, { [16] }> = unpack(packed);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn raw_mmaf_scaled_nvfp4_kernel(
+        output: &mut Tensor<f32, { [16, 16] }>,
+        lhs_bytes: &Tensor<f4e2m1fnx2, { [-1] }>,
+        rhs_bytes: &Tensor<f4e2m1fnx2, { [-1] }>,
+        lhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
+        rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
+    ) {
+        let lhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(lhs_bytes, const_shape![128], [0]);
+        let rhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(rhs_bytes, const_shape![128], [0]);
+        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_raw.unpack(const_shape![16, 16]);
+        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_raw.unpack(const_shape![16, 16]);
+        let lscale: Tile<f8e8m0fnu, { [16, 1] }> =
+            load_tile(lhs_scale, const_shape![16, 1], [0, 0]);
+        let rscale: Tile<f8e8m0fnu, { [1, 16] }> =
+            load_tile(rhs_scale, const_shape![1, 16], [0, 0]);
+        let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
+
+        let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs, rhs, acc, lscale, rscale);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn raw_mmaf_scaled_nvfp4_e4_scale_kernel(
+        output: &mut Tensor<f32, { [16, 16] }>,
+        lhs_bytes: &Tensor<f4e2m1fnx2, { [-1] }>,
+        rhs_bytes: &Tensor<f4e2m1fnx2, { [-1] }>,
+        lhs_scale: &Tensor<f8e4m3fn, { [-1, -1] }>,
+        rhs_scale: &Tensor<f8e4m3fn, { [-1, -1] }>,
+    ) {
+        let lhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(lhs_bytes, const_shape![128], [0]);
+        let rhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(rhs_bytes, const_shape![128], [0]);
+        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_raw.unpack(const_shape![16, 16]);
+        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_raw.unpack(const_shape![16, 16]);
+        let lscale: Tile<f8e4m3fn, { [16, 1] }> = load_tile(lhs_scale, const_shape![16, 1], [0, 0]);
+        let rscale: Tile<f8e4m3fn, { [1, 16] }> = load_tile(rhs_scale, const_shape![1, 16], [0, 0]);
+        let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
+
+        let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs, rhs, acc, lscale, rscale);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn raw_mmaf_scaled_fp8_kernel(
+        output: &mut Tensor<f32, { [16, 16] }>,
+        lhs: &Tensor<f8e4m3fn, { [-1, -1] }>,
+        rhs: &Tensor<f8e4m3fn, { [-1, -1] }>,
+        lhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
+        rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
+    ) {
+        let lhs_tile: Tile<f8e4m3fn, { [16, 64] }> = load_tile(lhs, const_shape![16, 64], [0, 0]);
+        let rhs_tile: Tile<f8e4m3fn, { [64, 16] }> = load_tile(rhs, const_shape![64, 16], [0, 0]);
+        let lscale: Tile<f8e8m0fnu, { [16, 2] }> =
+            load_tile(lhs_scale, const_shape![16, 2], [0, 0]);
+        let rscale: Tile<f8e8m0fnu, { [2, 16] }> =
+            load_tile(rhs_scale, const_shape![2, 16], [0, 0]);
+        let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
+
+        let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs_tile, rhs_tile, acc, lscale, rscale);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
+    fn batch_mmaf_scaled_fp8_kernel(
+        output: &mut Tensor<f32, { [2, 16, 16] }>,
+        lhs: &Tensor<f8e4m3fn, { [-1, -1, -1] }>,
+        rhs: &Tensor<f8e4m3fn, { [-1, -1, -1] }>,
+        lhs_scale: &Tensor<f8e8m0fnu, { [-1, -1, -1] }>,
+        rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1, -1] }>,
+    ) {
+        let lhs_tile: Tile<f8e4m3fn, { [2, 16, 64] }> =
+            load_tile(lhs, const_shape![2, 16, 64], [0, 0, 0]);
+        let rhs_tile: Tile<f8e4m3fn, { [2, 64, 16] }> =
+            load_tile(rhs, const_shape![2, 64, 16], [0, 0, 0]);
+        let lscale: Tile<f8e8m0fnu, { [2, 16, 2] }> =
+            load_tile(lhs_scale, const_shape![2, 16, 2], [0, 0, 0]);
+        let rscale: Tile<f8e8m0fnu, { [2, 2, 16] }> =
+            load_tile(rhs_scale, const_shape![2, 2, 16], [0, 0, 0]);
+        let acc: Tile<f32, { [2, 16, 16] }> = load_tile_mut(output);
+
+        let result: Tile<f32, { [2, 16, 16] }> =
+            mmaf_scaled(lhs_tile, rhs_tile, acc, lscale, rscale);
         output.store(result);
     }
 }
@@ -270,5 +434,395 @@ fn compile_raw_mmaf() -> () {
             module_op_str.contains("= mmaf"),
             "Expected raw mmaf operation in MLIR output"
         );
+    });
+}
+
+#[test]
+fn compile_transpose_tile() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "transpose_tile_kernel",
+            &[],
+            &[("output", &[8, 16]), ("input", &[16, 8])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= permute"));
+        assert!(module_op_str.contains("tile<16x8xf32>"));
+        assert!(module_op_str.contains("tile<8x16xf32>"));
+    });
+}
+
+#[test]
+fn compile_nvfp4_pack_unpack() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "nvfp4_pack_unpack_kernel",
+            &[],
+            &[("output", &[32]), ("input", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== NVFP4 PACK/UNPACK MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= unpack"),
+            "Expected raw unpack operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("= pack"),
+            "Expected raw pack operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("f4e2m1fn"),
+            "Expected f4e2m1fn tile type in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_nvfp4_pack_unpack_2d() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "nvfp4_pack_unpack_2d_kernel",
+            &[],
+            &[("output", &[32, 1]), ("input", &[32, 1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= unpack"));
+        assert!(module_op_str.contains("= pack"));
+        assert!(module_op_str.contains("tile<16x32xi8>"));
+        assert!(module_op_str.contains("tile<512xi8>"));
+        assert!(module_op_str.contains("tile<1024xf4e2m1fn>"));
+    });
+}
+
+#[test]
+fn compile_nvfp4_u8_escape_unpack() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "nvfp4_u8_escape_unpack_kernel",
+            &[],
+            &[("output", &[32]), ("input", &[1])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== NVFP4 U8 ESCAPE UNPACK MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= unpack"),
+            "Expected raw unpack operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("f4e2m1fn"),
+            "Expected f4e2m1fn tile type in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("xi8"),
+            "Expected u8 storage tile type in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_pack_unpack_2d_f16() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "pack_unpack_2d_f16_kernel",
+            &[],
+            &[("output", &[8, 8]), ("input", &[8, 8])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= pack"));
+        assert!(module_op_str.contains("= unpack"));
+        assert!(module_op_str.contains("tile<128xi8>"));
+        assert!(module_op_str.contains("tile<64xf16>"));
+    });
+}
+
+#[test]
+fn compile_cross_type_pack_unpack() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "cross_type_pack_unpack_kernel",
+            &[],
+            &[("output", &[16]), ("input", &[16])],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= pack"));
+        assert!(module_op_str.contains("= unpack"));
+        assert!(module_op_str.contains("tile<16xf32>"));
+        assert!(module_op_str.contains("tile<16xi32>"));
+    });
+}
+
+#[test]
+fn compile_raw_mmaf_scaled_nvfp4() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "raw_mmaf_scaled_nvfp4_kernel",
+            &[],
+            &[
+                ("output", &[16, 16]),
+                ("lhs_bytes", &[1]),
+                ("rhs_bytes", &[1]),
+                ("lhs_scale", &[1, 1]),
+                ("rhs_scale", &[16, 1]),
+            ],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        println!("\n=== RAW MMAF_SCALED NVFP4 MLIR ===\n{}", module_op_str);
+
+        assert!(
+            module_op_str.contains("= mmaf_scaled"),
+            "Expected raw mmaf_scaled operation in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("f4e2m1fn"),
+            "Expected f4e2m1fn operands in MLIR output"
+        );
+        assert!(
+            module_op_str.contains("f8e8m0fnu"),
+            "Expected f8e8m0fnu scales in MLIR output"
+        );
+    });
+}
+
+#[test]
+fn compile_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "raw_mmaf_scaled_nvfp4_e4_scale_kernel",
+            &[],
+            &[
+                ("output", &[16, 16]),
+                ("lhs_bytes", &[1]),
+                ("rhs_bytes", &[1]),
+                ("lhs_scale", &[1, 1]),
+                ("rhs_scale", &[16, 1]),
+            ],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= mmaf_scaled"));
+        assert!(module_op_str.contains("f4e2m1fn"));
+        assert!(module_op_str.contains("f8e4m3fn"));
+    });
+}
+
+#[test]
+fn execute_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
+    common::with_test_stack(|| {
+        let gpu_name = get_gpu_name(0);
+        if !supports_native_nvfp4(&gpu_name) {
+            eprintln!("Skipping NVFP4 runtime test on {gpu_name}: native NVFP4 requires sm_100+");
+            return;
+        }
+
+        let device = Device::new(0).expect("device");
+        let stream = device.new_stream().expect("stream");
+        let fp4_one = f4e2m1fnx2::from_nibbles(0x2, 0x2);
+        let scale_one = f8e4m3fn(0x38);
+
+        let output = api::zeros::<f32>(&[16, 16])
+            .sync_on(&stream)
+            .expect("output")
+            .partition([16, 16]);
+        let lhs: Arc<Tensor<f4e2m1fnx2>> =
+            api::copy_host_vec_to_device(&Arc::new(vec![fp4_one; 128]))
+                .sync_on(&stream)
+                .expect("lhs")
+                .into();
+        let rhs: Arc<Tensor<f4e2m1fnx2>> =
+            api::copy_host_vec_to_device(&Arc::new(vec![fp4_one; 128]))
+                .sync_on(&stream)
+                .expect("rhs")
+                .into();
+        let lhs_scale: Arc<Tensor<f8e4m3fn>> =
+            api::copy_host_vec_to_device(&Arc::new(vec![scale_one; 16]))
+                .reshape(&[16, 1])
+                .sync_on(&stream)
+                .expect("lhs_scale")
+                .into();
+        let rhs_scale: Arc<Tensor<f8e4m3fn>> =
+            api::copy_host_vec_to_device(&Arc::new(vec![scale_one; 16]))
+                .reshape(&[1, 16])
+                .sync_on(&stream)
+                .expect("rhs_scale")
+                .into();
+
+        let (output, _lhs, _rhs, _lhs_scale, _rhs_scale) =
+            tensor_and_matrix_ops_module::raw_mmaf_scaled_nvfp4_e4_scale_kernel(
+                output, lhs, rhs, lhs_scale, rhs_scale,
+            )
+            .sync_on(&stream)
+            .expect("kernel");
+
+        let host: Vec<f32> = output
+            .unpartition()
+            .to_host_vec()
+            .sync_on(&stream)
+            .expect("to_host");
+        for (idx, value) in host.iter().enumerate() {
+            assert!(
+                (*value - 16.0).abs() <= 1e-3,
+                "output[{idx}] = {value}, expected 16"
+            );
+        }
+    });
+}
+
+#[test]
+fn compile_raw_mmaf_scaled_fp8() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "raw_mmaf_scaled_fp8_kernel",
+            &[],
+            &[
+                ("output", &[16, 16]),
+                ("lhs", &[16, 64]),
+                ("rhs", &[64, 16]),
+                ("lhs_scale", &[16, 2]),
+                ("rhs_scale", &[2, 16]),
+            ],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= mmaf_scaled"));
+        assert!(module_op_str.contains("f8e4m3fn"));
+        assert!(module_op_str.contains("f8e8m0fnu"));
+    });
+}
+
+#[test]
+fn compile_batch_mmaf_scaled_fp8() -> () {
+    common::with_test_stack(|| {
+        let modules = CUDATileModules::from_kernel(__module_ast_self())
+            .expect("Failed to create CUDATileModules");
+        let gpu_name = get_gpu_name(0);
+        let compiler = CUDATileFunctionCompiler::new(
+            &modules,
+            "tensor_and_matrix_ops_module",
+            "batch_mmaf_scaled_fp8_kernel",
+            &[],
+            &[
+                ("output", &[2, 16, 16]),
+                ("lhs", &[2, 16, 64]),
+                ("rhs", &[2, 64, 16]),
+                ("lhs_scale", &[2, 16, 2]),
+                ("rhs_scale", &[2, 2, 16]),
+            ],
+            &[],
+            &[],
+            None,
+            gpu_name,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        let module_op_str = compiler.compile().expect("Failed.").to_string();
+
+        assert!(module_op_str.contains("= mmaf_scaled"));
+        assert!(module_op_str.contains("tile<2x16x64xf8e4m3fn>"));
+        assert!(module_op_str.contains("tile<2x16x16xf32>"));
     });
 }

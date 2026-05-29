@@ -37,6 +37,88 @@ pub struct f8e4m3fn(pub u8);
 #[allow(non_camel_case_types)]
 pub struct f8e5m2(pub u8);
 
+/// FP8 E8M0FNU format (8-bit exponent, unsigned, finite-only).
+///
+/// Used as a block scale type for scaled low-precision MMA, including NVFP4
+/// inputs.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct f8e8m0fnu(pub u8);
+
+/// FP4 E2M1FN format (2-bit exponent, 1-bit mantissa, finite-only).
+///
+/// This is a logical sub-byte Tile IR element type. It is the type consumed by
+/// FP4 MMA after packed tensor data has been unpacked inside a kernel. Host
+/// tensors should store model data in byte-addressable packed storage such as
+/// [`f4e2m1fnx2`].
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct f4e2m1fn(pub u8);
+
+/// Packed pair of FP4 E2M1FN values in one byte.
+///
+/// This is a byte-addressable storage type for tensors that contain packed
+/// `f4e2m1fn` values. A nibble is a 4-bit half-byte: the low nibble is the
+/// first logical value and the high nibble is the second logical value,
+/// matching the [`Self::from_nibbles`], [`Self::low`], and [`Self::high`]
+/// convention.
+///
+/// This is not a Tile IR arithmetic element type. Kernels should explicitly
+/// unpack it to logical `f4e2m1fn` tiles before using FP4 MMA operations.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct f4e2m1fnx2(u8);
+
+impl f4e2m1fnx2 {
+    /// Creates a packed pair from a raw byte.
+    ///
+    /// This preserves the byte exactly. Every `u8` bit pattern is valid packed
+    /// storage for two 4-bit values, so this constructor is safe. It does not
+    /// validate that the byte came from a correctly quantized model. Use
+    /// [`Self::from_nibbles`] when building a pair from two logical FP4 bit
+    /// patterns.
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Creates a packed pair from two raw FP4 nibble values.
+    ///
+    /// Each input is masked to 4 bits. `low` becomes the first logical FP4 value
+    /// and `high` becomes the second logical FP4 value. Higher input bits are
+    /// discarded.
+    pub const fn from_nibbles(low: u8, high: u8) -> Self {
+        Self((low & 0x0F) | ((high & 0x0F) << 4))
+    }
+
+    /// Returns the first logical FP4 value, stored in the low nibble.
+    pub const fn low(self) -> f4e2m1fn {
+        f4e2m1fn(self.0 & 0x0F)
+    }
+
+    /// Returns the second logical FP4 value, stored in the high nibble.
+    pub const fn high(self) -> f4e2m1fn {
+        f4e2m1fn((self.0 >> 4) & 0x0F)
+    }
+
+    /// Returns the packed byte.
+    pub const fn to_bits(self) -> u8 {
+        self.0
+    }
+}
+
+/// 4-bit signless integer Tile IR element marker.
+///
+/// This is a sub-byte Tile IR type for integer pack/unpack paths. It is not the
+/// NVFP4 data type, and it is not a byte-addressable host tensor element in
+/// this crate. Packed host storage should use bytes.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct i4(pub u8);
+
 /// Runtime identifier for a `DType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DTypeId {
@@ -56,6 +138,8 @@ pub enum DTypeId {
     F64,
     F8E4M3FN,
     F8E5M2,
+    F8E8M0FNU,
+    F4E2M1FNX2,
 }
 
 impl DTypeId {
@@ -78,6 +162,8 @@ impl DTypeId {
             DTypeId::F64 => "f64",
             DTypeId::F8E4M3FN => "f8e4m3fn",
             DTypeId::F8E5M2 => "f8e5m2",
+            DTypeId::F8E8M0FNU => "f8e8m0fnu",
+            DTypeId::F4E2M1FNX2 => "f4e2m1fnx2",
         }
     }
 
@@ -88,7 +174,7 @@ impl DTypeId {
             DTypeId::U16 | DTypeId::I16 | DTypeId::F16 | DTypeId::BF16 => 2,
             DTypeId::U32 | DTypeId::I32 | DTypeId::F32 | DTypeId::TF32 => 4,
             DTypeId::U64 | DTypeId::I64 | DTypeId::F64 => 8,
-            DTypeId::F8E4M3FN | DTypeId::F8E5M2 => 1,
+            DTypeId::F8E4M3FN | DTypeId::F8E5M2 | DTypeId::F8E8M0FNU | DTypeId::F4E2M1FNX2 => 1,
         }
     }
 }
@@ -138,6 +224,8 @@ impl_dtype!(
     f64 => F64, 0.0, 1.0,
     f8e4m3fn => F8E4M3FN, f8e4m3fn(0), f8e4m3fn(0x38),  // 1.0 in E4M3FN
     f8e5m2 => F8E5M2, f8e5m2(0), f8e5m2(0x3C),          // 1.0 in E5M2
+    f8e8m0fnu => F8E8M0FNU, f8e8m0fnu(0), f8e8m0fnu(0x7F),
+    f4e2m1fnx2 => F4E2M1FNX2, f4e2m1fnx2::from_bits(0), f4e2m1fnx2::from_nibbles(0x2, 0x2),
 );
 
 #[cfg(test)]
@@ -162,6 +250,8 @@ mod tests {
         assert_eq!(DTypeId::F64.as_str(), "f64");
         assert_eq!(DTypeId::F8E4M3FN.as_str(), "f8e4m3fn");
         assert_eq!(DTypeId::F8E5M2.as_str(), "f8e5m2");
+        assert_eq!(DTypeId::F8E8M0FNU.as_str(), "f8e8m0fnu");
+        assert_eq!(DTypeId::F4E2M1FNX2.as_str(), "f4e2m1fnx2");
     }
 
     #[test]
@@ -180,6 +270,8 @@ mod tests {
         assert_eq!(DTypeId::U64.size_in_bytes(), 8);
         assert_eq!(DTypeId::I64.size_in_bytes(), 8);
         assert_eq!(DTypeId::F64.size_in_bytes(), 8);
+        assert_eq!(DTypeId::F8E8M0FNU.size_in_bytes(), 1);
+        assert_eq!(DTypeId::F4E2M1FNX2.size_in_bytes(), 1);
     }
 
     #[test]
@@ -209,6 +301,8 @@ mod tests {
         assert_eq!(<bf16 as DType>::DTYPE, DTypeId::BF16);
         assert_eq!(<f32 as DType>::DTYPE, DTypeId::F32);
         assert_eq!(<f64 as DType>::DTYPE, DTypeId::F64);
+        assert_eq!(<f8e8m0fnu as DType>::DTYPE, DTypeId::F8E8M0FNU);
+        assert_eq!(<f4e2m1fnx2 as DType>::DTYPE, DTypeId::F4E2M1FNX2);
     }
 
     #[test]
@@ -274,6 +368,14 @@ mod tests {
             <f64 as DType>::DTYPE.size_in_bytes(),
             std::mem::size_of::<f64>()
         );
+        assert_eq!(
+            <f8e8m0fnu as DType>::DTYPE.size_in_bytes(),
+            std::mem::size_of::<f8e8m0fnu>()
+        );
+        assert_eq!(
+            <f4e2m1fnx2 as DType>::DTYPE.size_in_bytes(),
+            std::mem::size_of::<f4e2m1fnx2>()
+        );
     }
 
     #[test]
@@ -292,6 +394,26 @@ mod tests {
         assert_eq!(f16::one(), f16::ONE);
         assert_eq!(bf16::zero(), bf16::ZERO);
         assert_eq!(bf16::one(), bf16::ONE);
+        assert_eq!(f8e8m0fnu::zero(), f8e8m0fnu(0));
+        assert_eq!(f8e8m0fnu::one(), f8e8m0fnu(0x7F));
+        assert_eq!(f4e2m1fnx2::zero(), f4e2m1fnx2::from_bits(0));
+        assert_eq!(f4e2m1fnx2::one(), f4e2m1fnx2::from_nibbles(0x2, 0x2));
+    }
+
+    #[test]
+    fn packed_f4_pair_nibble_order_is_low_then_high() {
+        let pair = f4e2m1fnx2::from_nibbles(0x3, 0xC);
+        assert_eq!(pair.to_bits(), 0xC3);
+        assert_eq!(pair.low(), f4e2m1fn(0x3));
+        assert_eq!(pair.high(), f4e2m1fn(0xC));
+    }
+
+    #[test]
+    fn packed_f4_pair_from_bits_preserves_raw_byte() {
+        let pair = f4e2m1fnx2::from_bits(0xAB);
+        assert_eq!(pair.to_bits(), 0xAB);
+        assert_eq!(pair.low(), f4e2m1fn(0x0B));
+        assert_eq!(pair.high(), f4e2m1fn(0x0A));
     }
 
     // Compile-time verification that DType types satisfy the required bounds.
@@ -311,5 +433,7 @@ mod tests {
         _assert_dtype_bounds::<bf16>();
         _assert_dtype_bounds::<f32>();
         _assert_dtype_bounds::<f64>();
+        _assert_dtype_bounds::<f8e8m0fnu>();
+        _assert_dtype_bounds::<f4e2m1fnx2>();
     }
 }

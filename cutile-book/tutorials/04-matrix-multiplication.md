@@ -1,5 +1,10 @@
 # 4. Matrix Multiplication
 
+<!-- TODO: This tutorial has grown to cover basic GEMM, const generic inference,
+mapped persistent GEMM, unsafe optimization hints, and fully static GEMM. Split
+or streamline it when there is bandwidth: keep this page focused on the first
+GEMM path and move advanced performance variants to separate pages. -->
+
 Matrix multiplication (GEMM = General Matrix Multiply) is everywhere in modern computing:
 
 | Application | Where GEMM is Used |
@@ -474,3 +479,4 @@ Try using `f16` (half precision) for inputs and `f32` for the accumulator. This 
 - [Thinking in Tiles](../guide/thinking-in-tiles.md) — 2D partitioning and grid mapping
 - [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core alignment requirements and tile-size selection
 - [DSL API](../reference/dsl-api.md#matrix-multiply) — `mma` signature and element-type constraints
+- [Inference with NVFP4](11-nvfp4-inference.md) — packed FP4 storage and block-scaled MMA

@@ -94,6 +94,28 @@ let floats: Arc<Tensor<f32>> = raw.reinterpret::<f32>(&[4])?;
 assert_eq!(floats.shape(), &[4]);
 ```
 
+Packed FP4 model bytes can use the same zero-copy metadata path. If an
+interoperability layer gives you byte storage, reinterpret it as
+`f4e2m1fnx2` before launching kernels that expect typed packed FP4 tensors:
+
+```rust
+use cutile::api::{self, DeviceOpReshape};
+use cutile::cuda_core::f4e2m1fnx2;
+use cutile::tensor::Tensor;
+use std::sync::Arc;
+
+let packed_bytes: Arc<Vec<u8>> = Arc::new(model_bytes);
+let raw: Arc<Tensor<u8>> = api::copy_host_vec_to_device(&packed_bytes)
+    .reshape(&[m, k / 2])
+    .sync_on(&stream)?
+    .into();
+let fp4: Arc<Tensor<f4e2m1fnx2>> = raw.reinterpret::<f4e2m1fnx2>(&[m, k / 2])?;
+```
+
+`reinterpret` does not repack or validate the FP4 payload. It preserves the
+bytes and changes the tensor element type metadata, so the producer of
+`model_bytes` is responsible for the low-nibble, high-nibble packing order.
+
 ### `TensorView`: zero-copy views and slices
 
 `TensorView` provides zero-copy borrowed views of a tensor with a different shape or offset. Views borrow the underlying tensor — the tensor cannot be mutated while a view exists. The offset is applied host-side, so passing a view to a kernel hands the kernel a pointer to the correct starting address without any data movement.

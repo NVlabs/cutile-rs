@@ -54,7 +54,7 @@ pub fn decode_bytecode(data: &[u8]) -> Result<String> {
     }
 
     // Parse type table.
-    let types = parse_type_section(sections.get(Section::Type as u8))?;
+    let types = parse_type_section(sections.get(Section::Type as u8), version)?;
     if !types.is_empty() {
         writeln!(out, "=== Types ({}) ===", types.len()).unwrap();
         for (i, t) in types.iter().enumerate() {
@@ -75,7 +75,7 @@ pub fn decode_bytecode(data: &[u8]) -> Result<String> {
 
     // Global section.
     if let Some(payload) = sections.get(Section::Global as u8) {
-        let globals = parse_global_section(payload, &strings, &types)?;
+        let globals = parse_global_section(payload, &strings, &types, version)?;
         if !globals.is_empty() {
             writeln!(out, "=== Globals ({}) ===", globals.len()).unwrap();
             for g in &globals {
@@ -317,7 +317,7 @@ fn parse_string_section(payload: Option<&[u8]>) -> Result<Vec<String>> {
 // Type section parser
 // =========================================================================
 
-fn parse_type_section(payload: Option<&[u8]>) -> Result<Vec<String>> {
+fn parse_type_section(payload: Option<&[u8]>, version: BytecodeVersion) -> Result<Vec<String>> {
     let Some(data) = payload else {
         return Ok(Vec::new());
     };
@@ -342,13 +342,13 @@ fn parse_type_section(payload: Option<&[u8]>) -> Result<Vec<String>> {
         } else {
             type_data.len()
         };
-        let desc = decode_type_entry(&type_data[start..end], &types);
+        let desc = decode_type_entry(&type_data[start..end], &types, version);
         types.push(desc);
     }
     Ok(types)
 }
 
-fn decode_type_entry(data: &[u8], prev_types: &[String]) -> String {
+fn decode_type_entry(data: &[u8], prev_types: &[String], version: BytecodeVersion) -> String {
     let mut r = Reader::new(data);
     let Ok(tag_val) = r.read_varint() else {
         return "<read error>".into();
@@ -356,6 +356,7 @@ fn decode_type_entry(data: &[u8], prev_types: &[String]) -> String {
     let tag = tag_val as u8;
     match tag {
         t if t == TypeTag::I1 as u8 => "i1".into(),
+        t if t == TypeTag::I4 as u8 => "i4".into(),
         t if t == TypeTag::I8 as u8 => "i8".into(),
         t if t == TypeTag::I16 as u8 => "i16".into(),
         t if t == TypeTag::I32 as u8 => "i32".into(),
@@ -367,6 +368,8 @@ fn decode_type_entry(data: &[u8], prev_types: &[String]) -> String {
         t if t == TypeTag::F64 as u8 => "f64".into(),
         t if t == TypeTag::F8E4M3FN as u8 => "f8e4m3fn".into(),
         t if t == TypeTag::F8E5M2 as u8 => "f8e5m2".into(),
+        t if t == TypeTag::F8E8M0FNU as u8 => "f8e8m0fnu".into(),
+        t if t == TypeTag::F4E2M1FN as u8 => "f4e2m1fn".into(),
         t if t == TypeTag::Token as u8 => "token".into(),
         t if t == TypeTag::Pointer as u8 => {
             let elem = r.read_varint().unwrap_or(0) as usize;
@@ -430,6 +433,11 @@ fn decode_type_entry(data: &[u8], prev_types: &[String]) -> String {
             format!("tensor_view<{shape_str}x{elem_name}, strides=[{stride_str}]>")
         }
         t if t == TypeTag::PartitionView as u8 => {
+            let mut padding_flag_from_bitfield = None;
+            if version >= BytecodeVersion::V13_3 {
+                let flags = r.read_varint().unwrap_or(0);
+                padding_flag_from_bitfield = Some(flags & 1 != 0);
+            }
             let tile_rank = r.read_varint().unwrap_or(0) as usize;
             let mut tile_shape = Vec::with_capacity(tile_rank);
             for _ in 0..tile_rank {
@@ -442,9 +450,14 @@ fn decode_type_entry(data: &[u8], prev_types: &[String]) -> String {
             for _ in 0..dim_map_size {
                 dim_map.push(r.read_le_i32().unwrap_or(0));
             }
-            let has_padding = r.read_byte().unwrap_or(0) != 0;
+            let has_padding =
+                padding_flag_from_bitfield.unwrap_or_else(|| r.read_byte().unwrap_or(0) != 0);
             let padding = if has_padding {
-                let p = r.read_varint().unwrap_or(0);
+                let p = if version >= BytecodeVersion::V13_3 {
+                    r.read_byte().unwrap_or(0) as u64
+                } else {
+                    r.read_varint().unwrap_or(0)
+                };
                 format!(", padding={p}")
             } else {
                 String::new()
@@ -455,6 +468,75 @@ fn decode_type_entry(data: &[u8], prev_types: &[String]) -> String {
                 .collect::<Vec<_>>()
                 .join("x");
             format!("partition_view<tile=({ts}), tv={tv_name}{padding}>")
+        }
+        t if t == TypeTag::GatherScatterView as u8 => {
+            let flags = r.read_varint().unwrap_or(0);
+            let tile_rank = r.read_varint().unwrap_or(0) as usize;
+            let mut tile_shape = Vec::with_capacity(tile_rank);
+            for _ in 0..tile_rank {
+                tile_shape.push(r.read_le_i32().unwrap_or(0));
+            }
+            let tv_idx = r.read_varint().unwrap_or(0) as usize;
+            let tv_name = prev_types.get(tv_idx).cloned().unwrap_or("?".into());
+            let sparse_dim = r.read_varint().unwrap_or(0);
+            let padding = if flags & 1 != 0 {
+                let p = r.read_byte().unwrap_or(0);
+                format!(", padding={p}")
+            } else {
+                String::new()
+            };
+            let ts = tile_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("x");
+            format!(
+                "gather_scatter_view<tile=({ts}), tv={tv_name}, sparse_dim={sparse_dim}{padding}>"
+            )
+        }
+        t if t == TypeTag::StridedView as u8 => {
+            let flags = r.read_varint().unwrap_or(0);
+            let tile_rank = r.read_varint().unwrap_or(0) as usize;
+            let mut tile_shape = Vec::with_capacity(tile_rank);
+            for _ in 0..tile_rank {
+                tile_shape.push(r.read_le_i32().unwrap_or(0));
+            }
+            let stride_rank = r.read_varint().unwrap_or(0) as usize;
+            let mut traversal_strides = Vec::with_capacity(stride_rank);
+            for _ in 0..stride_rank {
+                traversal_strides.push(r.read_le_i32().unwrap_or(0));
+            }
+            let tv_idx = r.read_varint().unwrap_or(0) as usize;
+            let tv_name = prev_types.get(tv_idx).cloned().unwrap_or("?".into());
+            let dim_map_size = r.read_varint().unwrap_or(0) as usize;
+            let mut dim_map = Vec::with_capacity(dim_map_size);
+            for _ in 0..dim_map_size {
+                dim_map.push(r.read_le_i32().unwrap_or(0));
+            }
+            let padding = if flags & 1 != 0 {
+                let p = r.read_byte().unwrap_or(0);
+                format!(", padding={p}")
+            } else {
+                String::new()
+            };
+            let ts = tile_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("x");
+            let strides = traversal_strides
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let dim_map_str = dim_map
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "strided_view<tile=({ts}), traversal_strides=[{strides}], tv={tv_name}, dim_map=[{dim_map_str}]{padding}>"
+            )
         }
         t if t == TypeTag::Func as u8 => {
             let num_inputs = r.read_varint().unwrap_or(0) as usize;
@@ -516,7 +598,12 @@ fn parse_constant_section(payload: Option<&[u8]>) -> Result<Vec<Vec<u8>>> {
 // Global section parser
 // =========================================================================
 
-fn parse_global_section(data: &[u8], strings: &[String], types: &[String]) -> Result<Vec<String>> {
+fn parse_global_section(
+    data: &[u8],
+    strings: &[String],
+    types: &[String],
+    version: BytecodeVersion,
+) -> Result<Vec<String>> {
     let mut r = Reader::new(data);
     let count = r.read_varint()? as usize;
     let mut globals = Vec::with_capacity(count);
@@ -525,10 +612,24 @@ fn parse_global_section(data: &[u8], strings: &[String], types: &[String]) -> Re
         let type_idx = r.read_varint()? as usize;
         let const_idx = r.read_varint()? as usize;
         let alignment = r.read_varint()?;
+        let mut visibility = None;
+        let mut constant = None;
+        if version >= BytecodeVersion::V13_3 {
+            visibility = Some(match r.read_byte()? {
+                0 => "public",
+                1 => "private",
+                _ => "unknown",
+            });
+            constant = Some(r.read_varint()? != 0);
+        }
         let name = strings.get(name_idx).cloned().unwrap_or("?".into());
         let ty = types.get(type_idx).cloned().unwrap_or("?".into());
+        let suffix = match (visibility, constant) {
+            (Some(vis), Some(is_constant)) => format!(", {vis}, constant={is_constant}"),
+            _ => String::new(),
+        };
         globals.push(format!(
-            "@{name} : {ty} = const[{const_idx}], align {alignment}"
+            "@{name} : {ty} = const[{const_idx}], align {alignment}{suffix}"
         ));
     }
     Ok(globals)

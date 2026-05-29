@@ -25,7 +25,7 @@
 
         isDarwin = pkgs.stdenv.isDarwin;
 
-        # CUDA 13.2 fetched from nvidia (headers needed on all platforms for
+        # CUDA 13.3 fetched from nvidia (headers needed on all platforms for
         # bindgen type generation; runtime libraries only needed on Linux)
         cudaRedistBase = "https://developer.download.nvidia.com/compute/cuda/redist";
         fetchCudaRedist =
@@ -35,35 +35,40 @@
             inherit sha256;
           };
         cudaToolkit = pkgs.symlinkJoin {
-          name = "cuda-toolkit-13.2";
+          name = "cuda-toolkit-13.3";
           paths = map (src: pkgs.runCommand (builtins.baseNameOf (toString src)) { } ''
             mkdir -p $out
             tar xf ${src} --strip-components=1 -C $out
           '') [
             (fetchCudaRedist {
               name = "cuda_crt";
-              version = "13.2.51";
-              sha256 = "fbc31fed55b7255591f3a19f575ca078827f5e6757d317d009f7ec1e69fcde4b";
+              version = "13.3.33";
+              sha256 = "4755d36d24c6ef7697a2d3e1dbb23c4562c9c0d97d48390d4cbd8ab32dec5b5f";
             })
             (fetchCudaRedist {
               name = "cuda_nvcc";
-              version = "13.2.51";
-              sha256 = "706b996fefc59dc8d64d317fdf48d0aa84c4ae004eff43009dd918f40c5cc66a";
+              version = "13.3.33";
+              sha256 = "93b098bda4a562ebf3541523ce82adc43f106a81dcf28bcbf8f0d8e093d1c66f";
+            })
+            (fetchCudaRedist {
+              name = "libnvvm";
+              version = "13.3.33";
+              sha256 = "fc9c1fd5844e44c0e5eeb051378c1b13cf0e3bb3fe4966d5103c38885424f802";
             })
             (fetchCudaRedist {
               name = "cuda_cudart";
-              version = "13.2.51";
-              sha256 = "539edc1056e44d319f2112e9971c6415d78d4dde04b3f6ffbd20ec808e718526";
+              version = "13.3.29";
+              sha256 = "1e59c4888267d27ba1a9bd0f3669a6439db1334a96e754cd9013c7c73e18dc9d";
             })
             (fetchCudaRedist {
               name = "libcurand";
-              version = "10.4.2.51";
-              sha256 = "a089985ac24fff42b719ab42a015c7df39cd721a3d83bfa4af9249b9fca883dc";
+              version = "10.4.3.29";
+              sha256 = "0218e62ab413e435dcd0274ec8e63b62214e6aba8519201061d1597e73caadbb";
             })
             (fetchCudaRedist {
               name = "cuda_tileiras";
-              version = "13.2.51";
-              sha256 = "76cbbcc4458b6175878c3a1168521ca9ce36263e7e450ff8a1d1988e5b0bf792";
+              version = "13.3.36";
+              sha256 = "1b055db199f806c746d53331200ccd8480bfdddd14638ed2911f30ee0cc4447b";
             })
           ];
           postBuild = ''

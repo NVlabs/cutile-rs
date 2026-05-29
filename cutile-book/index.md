@@ -81,6 +81,7 @@ tutorials/07-intro-to-async
 tutorials/08-data-parallel-mlp
 tutorials/09-pointer-addition
 tutorials/10-cuda-graphs
+tutorials/11-nvfp4-inference
 ```
 
 ```{toctree}
