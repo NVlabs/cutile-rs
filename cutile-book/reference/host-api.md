@@ -1,6 +1,6 @@
 # Host API
 
-Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Device Operations](../guide/device-operations.md) and [Working with Data](../guide/working-with-data.md).
+Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Host vs. Device Code](../guide/host-vs-device.md), [Tensors and Tiles](../guide/tensors-and-tiles.md), and [Device Operations](../guide/device-operations.md).
 
 ---
 

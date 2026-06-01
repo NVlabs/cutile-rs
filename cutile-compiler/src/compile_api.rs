@@ -27,9 +27,9 @@
 use crate::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use crate::error::JITError;
 use crate::hints::CompileOptions;
-use crate::specialization::SpecializationBits;
+use crate::specialization::{DivHint, SpecializationBits};
 
-/// Compiled kernel artifacts: IR, bytecode, and optional cubin.
+/// Compiled kernel artifacts: IR and bytecode.
 ///
 /// Produced by [`KernelCompiler::compile`]. All methods are pure Rust and
 /// do not require a GPU or CUDA driver.
@@ -82,6 +82,7 @@ pub struct KernelCompiler<F: Fn() -> crate::ast::Module> {
     generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
     spec_args: Vec<(String, SpecializationBits)>,
+    scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
 }
@@ -101,6 +102,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             generics: Vec::new(),
             stride_args: Vec::new(),
             spec_args: Vec::new(),
+            scalar_hints: Vec::new(),
             const_grid: None,
             compile_options: CompileOptions::default(),
         }
@@ -137,6 +139,15 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         self
     }
 
+    /// Sets scalar specialization hints for integer scalar and raw pointer parameters.
+    pub fn scalar_hints(mut self, hints: &[(&str, DivHint)]) -> Self {
+        self.scalar_hints = hints
+            .iter()
+            .map(|(name, hint)| (name.to_string(), *hint))
+            .collect();
+        self
+    }
+
     /// Sets a constant grid size for the kernel launch configuration.
     pub fn grid(mut self, grid: (u32, u32, u32)) -> Self {
         self.const_grid = Some(grid);
@@ -168,6 +179,12 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             .map(|(name, s)| (name.as_str(), s))
             .collect();
 
+        let scalar_hint_refs: Vec<(&str, &DivHint)> = self
+            .scalar_hints
+            .iter()
+            .map(|(name, hint)| (name.as_str(), hint))
+            .collect();
+
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             &self.module_name,
@@ -175,7 +192,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             &self.generics,
             &stride_refs,
             &spec_refs,
-            &[],
+            &scalar_hint_refs,
             self.const_grid,
             self.gpu_name,
             &self.compile_options,

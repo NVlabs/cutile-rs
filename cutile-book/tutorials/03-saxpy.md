@@ -168,6 +168,5 @@ fn saxpy_extended<const S: [i32; 2]>(
 
 ## See also
 
-- [Writing Computations](../guide/writing-computations.md) — scalar arithmetic and `broadcast`
-- [Working with Data](../guide/working-with-data.md) — shape broadcasting rules
+- [Tensors and Tiles](../guide/tensors-and-tiles.md) — scalar arithmetic, `broadcast`, and shape rules
 - [DSL API](../reference/dsl-api.md) — `broadcast`, `broadcast_scalar`, and arithmetic operator signatures

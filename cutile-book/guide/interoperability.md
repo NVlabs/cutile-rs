@@ -1,6 +1,6 @@
 # Interoperability
 
-cuTile Rust is designed to coexist with existing CUDA infrastructure. This chapter covers three common interop concerns:
+cuTile Rust is designed to coexist with existing CUDA infrastructure. The main interop paths are:
 
 - **Integrating external PTX or CUBIN kernels** — for CUDA C++ kernels, cuda-oxide-generated PTX, or other CUDA module artifacts that you want to launch alongside cuTile kernels.
 - **Borrowing foreign CUDA handles** — wrap a `CUcontext` / `CUstream` from another Rust binding crate (cudarc, Candle, hand-rolled FFI) so cuTile kernels can run on handles you already own.
@@ -258,7 +258,7 @@ Borrowed wrappers skip destruction on drop: `Stream` does not call `cuStreamDest
 |-----------------|------------------------|
 | Assign producer warps to prefetch tiles from global → shared memory | Compiler generates shared memory staging for `load_tile` operations |
 | Assign consumer warps to compute on shared memory tiles | Compiler maps tile arithmetic to Tensor Cores and registers |
-| Software pipeline with `warp_specialize` in `tl.range` | Compiler uses TMA for hardware-assisted pipelining on supported architectures |
+| Software pipeline with `warp_specialize` in `tl.range` | Compiler uses Tensor Memory Accelerator (TMA) instructions for hardware-assisted pipelining on supported architectures |
 | Manual `tl.dot` placement across warps | `mma()` maps directly to Tensor Core instructions; thread/warp assignment is compiler-managed |
 | Tune `num_warps` and `num_stages` for occupancy | `occupancy` and `num_cta_in_cga` optimization hints guide the compiler |
 
@@ -283,4 +283,4 @@ Both front-ends use the same underlying Tile IR compilation pipeline and generat
 
 ---
 
-Continue to [Debugging and Profiling](debugging.md) for troubleshooting. This chapter builds on the `DeviceOp` model introduced in [Device Operations](device-operations.md).
+Continue to [Debugging and Profiling](debugging-and-profiling.md) for troubleshooting. Interop kernels use the `DeviceOp` model described in [Device Operations](device-operations.md).

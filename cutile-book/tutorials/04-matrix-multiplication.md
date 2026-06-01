@@ -178,7 +178,7 @@ let generics = vec!["f32".to_string(), "16".to_string(), "16".to_string(), "8".t
 gemm(z, x, y).generics(generics)
 ```
 
-Changing any const generic or type parameter triggers a **JIT recompilation**. The first time a new combination of generics is seen, cutile compiles the kernel through Tile IR bytecode → cubin. The resulting binary is cached, so subsequent launches with the same generics are instant. Launching with different generics — for example, switching from `K=64` to `K=128` — produces a new compilation.
+Changing a type parameter or const generic in the entry function signature creates a new compiled variant. The first time a variant is launched, cuTile compiles the kernel through Tile IR bytecode → cubin. The resulting binary is cached, so subsequent launches that resolve to the same variant reuse it. Launching with different generics — for example, switching from `K=64` to `K=128` — produces a new compilation. The full cache rules, including compile options and specialization hints, are covered in [Compilation](../guide/jit-compilation.md).
 
 This is the tradeoff between **static** and **dynamic** shape dimensions. In the GEMM signature above, `K` is a const generic while the M and N dimensions of `x` and `y` are dynamic (`-1`):
 
@@ -188,7 +188,7 @@ y: &Tensor<E, { [K, -1] }>,   // K is static, N is dynamic (-1)
 ```
 
 - **Static dimensions** (const generics) enable aggressive optimization but trigger recompilation when they change.
-- **Dynamic dimensions** (`-1`) carry no optimization benefit but can vary freely across launches without recompilation.
+- **Dynamic dimensions** (`-1`) carry no optimization benefit but can vary freely across launches without creating a new compiled variant.
 
 As a rule, make tile sizes (`BM`, `BN`, `BK`) static — they are fixed for a given kernel variant and the compiler needs them for register allocation and Tensor Core mapping. Make problem dimensions that change often (such as sequence length or batch size) dynamic.
 
@@ -351,7 +351,7 @@ The key differences from the tutorial kernel:
 
 - **`unchecked_accesses = true`** removes bounds-checking overhead on every `load` and `store` call.
 - **`sm_120 = (num_cta_in_cga = 2, max_divisibility = 16,)`** is an architecture-specific hint for Blackwell (SM 120) that groups two CTAs into a CGA for better inter-SM data sharing and caps auto-inferred alignment at 16.
-- **`k` is passed as a runtime `i32`** rather than a const generic, so changing the K dimension does not trigger JIT recompilation.
+- **`k` is passed as a runtime `i32`** rather than a const generic, so changing the K dimension does not create a new compiled variant.
 
 Note that even though this approach is `unsafe`, many of cuTile Rust's static guarantees still apply: tile shapes are still checked at compile time, `mma` dimensions are still validated, and the type system still prevents dtype mismatches. The `unsafe` annotation specifically opts out of runtime bounds checking, not the DSL's compile-time checks.
 
@@ -402,7 +402,7 @@ The key differences:
 
 - **`x: &Tensor<E, { [M, K] }>` and `y: &Tensor<E, { [K, N] }>`** — input dimensions are fully static instead of dynamic (`-1`). The compiler sees the exact shape of every tensor.
 - **No `unsafe`, no `unchecked_accesses`** — bounds checks are present in the source but the JIT compiler proves they are redundant and eliminates them during optimization.
-- **`M`, `N`, `K` are const generics** — they must be passed via `.generics()` at launch time, and every new combination triggers a JIT recompilation.
+- **`M`, `N`, `K` are const generics** — they must be passed via `.generics()` at launch time, and every new combination creates a new compiled variant.
 - **`.const_grid(grid)`** — because all dimensions are static, the launch grid must be provided using `.const_grid()` rather than `.grid()`. The grid is computed from the output partition as usual (`let grid = z.grid()?`), but `.const_grid()` passes it as a compile-time constant so the JIT compiler can fold it into the generated code:
 
 ```rust
@@ -420,7 +420,7 @@ See [`cutile-examples/examples/gemm_static.rs`](https://github.com/nvlabs/cutile
 | | Mapped Persistent | Unsafe + Hints | Fully Static |
 |---|---|---|---|
 | **Safety** | Safe bounded/disjoint output iteration | `unsafe` - programmer must ensure correct dimensions | Safe - compiler verifies direct static accesses |
-| **JIT recompilation** | Tile sizes and map shape trigger recompilation | Tile sizes trigger recompilation | Every full tensor shape triggers recompilation |
+| **Compilation behavior** | Tile sizes and map shape create new compiled variants | Tile sizes create new compiled variants | Every full tensor shape creates a new compiled variant |
 | **Flexibility** | Problem sizes can change at runtime | Problem sizes can change at runtime | Each new problem size is a new compilation |
 | **Compile-time checks** | Tile shapes, types, and mapped index proofs | Tile shapes and types still checked | All shapes and types checked |
 | **Best for** | Default high-performance safe GEMM | Escape hatch for manually proven kernels | Legacy fixed-size kernels |
@@ -439,9 +439,9 @@ for workloads with a small, fixed set of full tensor shapes.
 | **Tiling** | Process data in blocks to maximize data reuse |
 | **K-loop** | Iterate over tile pairs, accumulating partial results |
 | **mma()** | Matrix multiply-accumulate, maps to Tensor Cores |
-| **Const generics** | Tile sizes known at compile time for optimization; changing them triggers JIT recompilation |
+| **Const generics** | Tile sizes known at compile time for optimization; changing them creates a new compiled variant |
 | **Const generic inference** | Generics appearing in `&mut Tensor` / `&Tensor` parameter types are inferred from host-side `Partition` shapes and tensor shapes; generics used only inside the kernel body (like `BK`) must be passed explicitly |
-| **Dynamic dimensions (`-1`)** | Can vary across launches without recompilation |
+| **Dynamic dimensions (`-1`)** | Can vary across launches without creating a new compiled variant |
 | **Arithmetic intensity** | Ratio of compute to memory ops — higher is better |
 | **Mapped output iteration** | Recommended safe performance path for persistent GEMM |
 | **`unchecked_accesses`** | Disables runtime bounds checks for peak performance; requires `unsafe` |
@@ -475,8 +475,8 @@ Try using `f16` (half precision) for inputs and `f32` for the accumulator. This 
 
 ## See also
 
-- [Writing Computations](../guide/writing-computations.md#tiled-matrix-multiply) — `mma` usage and the accumulate pattern
-- [Thinking in Tiles](../guide/thinking-in-tiles.md) — 2D partitioning and grid mapping
-- [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core alignment requirements and tile-size selection
+- [Tensors and Tiles](../guide/tensors-and-tiles.md#tiled-matrix-multiply) — `mma` usage and the accumulate pattern
+- [Useful Mental Models](../guide/useful-mental-models.md) — 2D partitioning and grid mapping
+- [Performance](../guide/performance.md) — Tensor Core usage and tile-size selection
 - [DSL API](../reference/dsl-api.md#matrix-multiply) — `mma` signature and element-type constraints
 - [Inference with NVFP4/MXFP8](11-nvfp4-inference.md) — packed FP4, FP8 data, and block-scaled MMA

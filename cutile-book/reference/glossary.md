@@ -106,7 +106,7 @@ On-chip memory shared among all threads within a tile block. Shared memory is sl
 
 ## Const Generics
 
-Compile-time constant parameters on kernel functions, such as `const BM: i32`. Const generics enable the compiler to optimize register allocation, unroll loops, and generate architecture-specific code. Changing a const generic value triggers JIT recompilation. See also [Const Generic Arrays](#const-generic-arrays).
+Compile-time constant parameters on kernel functions, such as `const BM: i32`. Const generics enable the compiler to optimize register allocation, unroll loops, and generate architecture-specific code. Changing a const generic value creates a new compiled variant. See also [Const Generic Arrays](#const-generic-arrays).
 
 ## Const Generic Arrays
 
@@ -123,15 +123,15 @@ fn add<const S: [i32; 2]>(
 ) { ... }
 ```
 
-Here `S` is inferred from the host-side partition shape passed at launch time. Because `S` is a compile-time constant, the compiler can specialize the generated code for each distinct shape. A new value of `S` triggers JIT recompilation, just like scalar const generics.
+Here `S` is inferred from the host-side partition shape passed at launch time. Because `S` is a compile-time constant, the compiler can specialize the generated code for each distinct shape. A new value of `S` creates a new compiled variant, just like scalar const generics.
 
 ## Dynamic Dimensions
 
-Tensor shape dimensions specified as `-1` in the kernel signature (e.g., `Tensor<f32, {[-1, -1]}>`). Dynamic dimensions can vary across kernel launches without triggering recompilation. They carry no compile-time optimization benefit but provide flexibility for problem sizes that change often.
+Tensor shape dimensions specified as `-1` in the kernel signature (e.g., `Tensor<f32, {[-1, -1]}>`). Dynamic dimensions can vary across kernel launches without creating a new compiled variant. They carry no compile-time optimization benefit but provide flexibility for problem sizes that change often.
 
 ## JIT Compilation
 
-cuTile Rust compiles kernels at first invocation through a multi-stage pipeline: Rust AST → Tile IR bytecode → cubin. The compiled binary is cached in memory (in a thread-local `HashMap`) so subsequent launches with the same generics are instant. A new combination of const generics or type parameters produces a new compilation.
+cuTile Rust normally compiles a kernel entry function at first launch through a multi-stage pipeline: Rust AST → Tile IR bytecode → cubin. The generated launcher caches compiled kernels in memory using the active device and resolved kernel specialization. The specialization includes the entry function identity, type and const generics, compile options, optional constant grid, and tensor or scalar specialization hints. See [Compilation](../guide/jit-compilation.md) for the full cache behavior and the compile-only API.
 
 ## DeviceOp
 

@@ -1,8 +1,8 @@
 # Device Operations
 
-`DeviceOp` is how you describe and compose GPU work on the host. Every host-side API that returns a future — `api::zeros`, kernel launchers, and the `.then()` / `.shared()` / `zip!` / `unzip` combinators — produces one. Composition is decoupled from execution: you build the operation graph with combinators, then run it in one of three peer modes — `.sync()` (blocking), `.await` (async), or `.graph()` (capture once, launch many).
+`DeviceOp` is how you describe and compose GPU work on the host. Tensor constructors, kernel launchers, and the `.then()` / `.shared()` / `zip!` / `unzip` combinators produce `DeviceOp`s. Composition is decoupled from execution: you build the operation graph with combinators, then run it in one of three execution modes — `.sync()` (blocking), `.await` (async), or `.graph()` (capture once, launch many).
 
-This chapter covers the `DeviceOp` model, composition, stream scheduling, CUDA graph capture, and the runtime state worth knowing about.
+The `DeviceOp` model gives kernel launches, tensor constructors, memory copies, and CUDA graphs one composable execution interface.
 
 ---
 
@@ -123,7 +123,7 @@ GPU:                    [norm████][mv████][add████]
                          no gaps — work is pipelined
 ```
 
-cuTile offers three peer execution modes for running a constructed `DeviceOp`:
+cuTile offers three execution modes for running a constructed `DeviceOp`:
 
 **Synchronous** — `.sync()` and `.sync_on(&stream)` block the thread until the result is ready. Best for scripts, debugging, and learning.
 
@@ -373,4 +373,4 @@ Handles from other frameworks (cudarc, Candle, hand-rolled FFI) can be wrapped i
 
 ---
 
-Continue to [Tuning for Performance](performance-tuning.md) for optimization techniques. For the full `DeviceOp` API, see the [Host API](../reference/host-api.md).
+Continue to [Performance](performance.md) for optimization techniques. For the full `DeviceOp` API, see the [Host API](../reference/host-api.md).

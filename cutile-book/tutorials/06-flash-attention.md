@@ -306,7 +306,7 @@ For autoregressive models (like GPT), we only attend to *previous* positions. Mo
 
 ## See also
 
-- [Writing Computations](../guide/writing-computations.md) — `mma`, reductions, and broadcasting combined
-- [Where Data Lives](../guide/memory-hierarchy.md) — why tiled access matters for bandwidth-bound kernels
-- [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core utilization and tile-size selection
+- [Tensors and Tiles](../guide/tensors-and-tiles.md) — `mma`, reductions, and broadcasting combined
+- [Useful Mental Models](../guide/useful-mental-models.md) — why tiled access matters for bandwidth-bound kernels
+- [Performance](../guide/performance.md) — Tensor Core utilization and tile-size selection
 - [DSL API](../reference/dsl-api.md) — operator reference for the patterns used here

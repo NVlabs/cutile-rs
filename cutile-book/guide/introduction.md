@@ -1,8 +1,8 @@
 # Introduction
 
-**cuTile Rust** is a safe tile-based parallel programming model for Rust. Kernels map onto Tensor Cores, Tensor Memory Accelerators, and other architecture-specific units automatically, so the same source runs across NVIDIA GPU architectures.
+**cuTile Rust** is a safe tile-based parallel programming model for Rust. Kernels map onto Tensor Cores, Tensor Memory Accelerator (TMA) instructions, and other architecture-specific units automatically, so the same source runs across NVIDIA GPU architectures.
 
-On the host side, the API handles device tensor allocation, partitioning mutable tensors for safe parallel access, and `Arc`-wrapped sharing for read-only tensors. Kernel launchers are constructed from `#[cutile::entry]` functions and JIT-compiled at first use; subsequent launches use the cached binary. Execution is asynchronous.
+On the host side, the API handles device tensor allocation, partitioning mutable tensors for safe parallel access, and `Arc`-wrapped sharing for read-only tensors. Kernel launchers are generated from `#[cutile::entry]` functions and JIT-compiled at first use; subsequent launches reuse the cached binary. Execution is asynchronous and expressed through `DeviceOp`, a lazy host-side description of GPU work.
 
 ---
 
@@ -45,9 +45,7 @@ fn main() -> Result<(), cuda_async::error::DeviceError> {
 
 Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launches work. The `add` function is device Rust code because it is marked with `#[cutile::entry()]`; when `main` first calls `add(...)`, cuTile Rust JIT-compiles that function into optimized GPU code. The `#[cutile::module]` macro makes `my_module` expose the generated host-side APIs for launching `add`.
 
-![The cuTile Rust compilation pipeline from Rust to GPU execution](../_static/images/compilation-pipeline.svg)
-
-At first call, the pipeline transforms the entry function through Rust AST → Tile IR bytecode → cubin. Subsequent calls reuse the cached binary, so JIT overhead is paid once per unique specialization.
+At first call, the entry function is compiled through Rust AST -> Tile IR bytecode -> cubin. Subsequent calls with the same compiled variant reuse the cached binary.
 
 ---
 
@@ -99,53 +97,15 @@ let result = allocate()
 
 ## Tensors and Tiles
 
-Kernels move data between **Tensors** and **Tiles** using operations like `load_tile` and `store`. Both are tensor-like data structures: each has a specific **shape** (the number of elements along each axis) and a **dtype** (the data type of elements). The difference is where they live and what you can do with them.
-
-### Tensors (Global Memory)
-
-**Tensors** are multi-dimensional arrays stored in **global memory (HBM)**. They are:
-
-- **Kernel arguments**: passed as `&mut Tensor<E, S>` for writable outputs or `&Tensor<E, S>` for read-only inputs.
-- **Physical storage**: strided memory layouts in GPU global memory.
-- **Limited operations**: within kernel code, tensors mainly support loading and storing data as tiles. Direct arithmetic is not supported.
-- **External data**: Candle tensors and other GPU buffers can be passed as tensors from host code to kernels via kernel arguments.
-
-```rust
-// Tensor parameters in kernel signature
-fn kernel(
-    output: &mut Tensor<f32, S>,      // Mutable tensor (can store to)
-    input: &Tensor<f32, {[-1, -1]}>   // Immutable tensor (read-only)
-) { ... }
-```
-
-### Tiles
-
-**Tiles** are **immutable** multi-dimensional array fragments that live in GPU **registers** during kernel execution. They are:
-
-- **Immutable**: operations create new tiles rather than modifying existing ones.
-- **Compiler-managed storage**: tile data lives in registers. The compiler handles shared memory staging and other memory hierarchy details automatically.
-- **Compile-time static shapes**: tile dimensions must be compile-time constants, often powers of two for optimal performance.
-- **Rich operations**: elementwise arithmetic, matrix multiplication, reduction, shape manipulation, and more.
-
-```rust
-// Tiles are created and transformed, never mutated
-let tile_a = load_tile_like(a, output);    // Load creates a tile
-let tile_b = load_tile_like(b, output);    // Another tile
-let result_tile = tile_a + tile_b;            // New tile from operation
-output.store(result_tile);                     // Store tile to tensor
-```
-
-### The Load → Compute → Store Pattern
-
-Every cuTile Rust kernel follows the same fundamental pattern:
+Kernels move data between **tensors** and **tiles**. Tensors are multi-dimensional arrays in GPU global memory. Tiles are immutable multi-dimensional fragments in registers. A kernel usually follows the same pattern:
 
 ![Data flow: Load from Tensor to Tile, Compute in registers, Store back to Tensor](../_static/images/data-flow.svg)
 
-1. **Load**: Move data from global memory (Tensor) into tiles
-2. **Compute**: Perform operations on tiles
-3. **Store**: Write results from tiles back to global memory (Tensor)
+1. Load tensor data into tiles.
+2. Compute on tiles.
+3. Store tile results back to tensors.
 
-This is key to performance: global memory is slow compared to on-chip resources. By loading once, computing many operations, and storing once, we maximize the compute-to-memory ratio.
+Tile shapes are part of the type system, so many shape and dtype errors are caught before the kernel runs.
 
 ---
 
@@ -160,10 +120,10 @@ This is key to performance: global memory is slow compared to on-chip resources.
 **Don't use cuTile Rust when:**
 - Standard library operations (cuBLAS, cuDNN) suffice
 - You need maximum portability across GPU *vendors*
-- Your team is deeply invested in the CUDA C++ ecosystem
+- You need tile programming support in Python or C++; use [cuTile Python](https://docs.nvidia.com/cuda/cutile-python/) or [CUDA Tile C++](https://docs.nvidia.com/cuda/cuda-tile-cpp-api-reference/) instead
 
-> **Note**: For algorithms requiring warp-level primitives or custom CUDA C++ kernels, see [Interoperability](interoperability.md); custom kernels can participate in the same `DeviceOp` execution model as your tile kernels.
+> **Note**: For algorithms requiring warp-level primitives, explicit pipelining, manual memory management, or custom CUDA C++ kernels, see [Interoperability](interoperability.md); custom kernels can participate in the same `DeviceOp` execution model as your tile kernels.
 
 ---
 
-Continue to [Thinking in Tiles](thinking-in-tiles.md), or jump straight to the [Tutorials](../tutorials/01-hello-world.md).
+Continue to [Host vs. Device Code](host-vs-device.md), or jump straight to the [Tutorials](../tutorials/01-hello-world.md).

@@ -61,7 +61,7 @@ Tile kernels are written as single-threaded programs over tiles of data. The com
 :::
 
 :::{grid-item-card} Tile IR for performance
-Tile kernels lower through CUDA Tile IR to GPU cubins. On B200, the safe API reaches 2.07 PFlop/s on persistent GEMM (96.4% of cuBLAS); the safe mapped kernel matches the raw-pointer Rust baseline within measurement noise.
+Tile kernels lower through CUDA Tile IR, NVIDIA's tile-level compiler IR, to GPU cubins. On B200, the safe API reaches 2.07 PFlop/s on persistent GEMM (96.4% of cuBLAS); the safe mapped kernel matches the raw-pointer Rust baseline within measurement noise.
 :::
 
 ::::
@@ -90,15 +90,14 @@ tutorials/11-nvfp4-inference
 :caption: User Guide
 
 guide/introduction
-guide/thinking-in-tiles
-guide/memory-hierarchy
-guide/working-with-data
-guide/writing-computations
-guide/execution-model
+guide/host-vs-device
+guide/tensors-and-tiles
+guide/jit-compilation
 guide/device-operations
-guide/performance-tuning
+guide/performance
 guide/interoperability
-guide/debugging
+guide/debugging-and-profiling
+guide/useful-mental-models
 ```
 
 ```{toctree}
