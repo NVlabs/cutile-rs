@@ -48,7 +48,7 @@ assert!(!z_host.iter().any(|x| x.is_infinite()), "Output contains Inf!");
 println!("First 10 values: {:?}", &z_host[..10]);
 ```
 
-**Inspect the generated MLIR** to see how your code is compiled, verify that optimizations are applied, or diagnose unexpected behavior. `print_ir = true` writes the IR to stdout during JIT compilation; `dump_mlir_dir` saves it to files for offline analysis; `use_debug_mlir` loads hand-modified MLIR instead of the compiler's output:
+**Inspect the generated Tile IR text** to see how your code is compiled, verify that optimizations are applied, or diagnose unexpected behavior. `print_ir = true` writes the IR to stdout during JIT compilation; `dump_mlir_dir` saves it to files for offline analysis; `use_debug_mlir` loads hand-modified Tile IR text instead of the compiler's output:
 
 ```rust
 #[cutile::entry(
@@ -58,7 +58,7 @@ println!("First 10 values: {:?}", &z_host[..10]);
 fn debug_ir_kernel<const S: [i32; 2]>(...) { ... }
 
 #[cutile::entry(use_debug_mlir = "/path/to/custom.mlir")]
-fn kernel_with_custom_mlir<const S: [i32; 2]>(...) { ... }
+fn kernel_with_custom_ir<const S: [i32; 2]>(...) { ... }
 ```
 
 ---
@@ -108,7 +108,7 @@ Get a backtrace first:
 RUST_BACKTRACE=1 cargo run
 RUST_BACKTRACE=full cargo run   # with all frames, including inlined
 
-# If the crash is inside a native library (CUDA driver, MLIR compiler):
+# If the crash is inside a native library (CUDA driver or Tile IR toolchain):
 gdb --args ./target/debug/my_program
 (gdb) run
 (gdb) bt
@@ -119,9 +119,9 @@ Common causes:
 - **CUDA toolkit mismatch.** The JIT pipeline calls into CUDA libraries via FFI. An incompatible toolkit/driver pair, or a broken `CUDA_TOOLKIT_PATH`, can segfault in those FFI calls. Verify with `nvidia-smi`, `nvcc --version`, and `echo $CUDA_TOOLKIT_PATH`.
 - **Use-after-free with raw pointers.** If you pass a `DevicePointer<T>` from `device_pointer()` into an unsafe raw-pointer kernel and drop the owning tensor before the kernel completes, the kernel operates on freed memory. Ensure all tensors outlive any kernel that uses their pointers.
 - **Async lifetime issues.** With `tokio::spawn`, the kernel runs concurrently; if tensors are dropped before the spawned task completes, the kernel accesses freed memory. Await the spawn handle before tensors go out of scope.
-- **OOM during JIT compilation.** The MLIR compiler allocates host memory during compilation. On RAM-constrained systems this can fail as a segfault rather than a clean error. Monitor host memory during the first kernel launch.
+- **OOM during JIT compilation.** Tile IR compilation allocates host memory. On RAM-constrained systems this can fail as a segfault rather than a clean error. Monitor host memory during the first kernel launch.
 
-Diagnostic checklist for segfaults: Is `nvidia-smi` reporting a healthy driver? Does `CUDA_TOOLKIT_PATH` point to a valid toolkit? Are all tensors alive for the duration of any kernel that uses their pointers? If using `tokio::spawn`, are all handles awaited before tensors are dropped? Does the backtrace point into CUDA/MLIR libraries (toolkit issue) or your own code (lifetime issue)?
+Diagnostic checklist for segfaults: Is `nvidia-smi` reporting a healthy driver? Does `CUDA_TOOLKIT_PATH` point to a valid toolkit? Are all tensors alive for the duration of any kernel that uses their pointers? If using `tokio::spawn`, are all handles awaited before tensors are dropped? Does the backtrace point into CUDA or Tile IR toolchain libraries (toolkit issue) or your own code (lifetime issue)?
 
 ---
 

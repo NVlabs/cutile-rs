@@ -6,7 +6,7 @@
 //! End-to-end test for compiler2: build IR → bytecode → tileiras → cubin.
 
 use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
-use cutile_ir::bytecode::Opcode;
+use cutile_ir::bytecode::{BytecodeVersion, Opcode};
 use cutile_ir::ir::{
     Attribute, FuncType, Location, Module, PartitionViewType, ScalarType, TensorViewType,
     TileElementType, TileType, Type, DYNAMIC,
@@ -76,7 +76,7 @@ fn test_empty_kernel_bytecode_roundtrip() {
     match cutile_ir::decode_bytecode(&bytecode) {
         Ok(decoded) => {
             println!("=== decoded ===\n{decoded}");
-            assert!(decoded.contains("TileIR bytecode v13.2"));
+            assert!(decoded.contains(&format!("TileIR bytecode v{}", BytecodeVersion::CURRENT)));
             assert!(decoded.contains("empty_kernel"));
         }
         Err(e) => {

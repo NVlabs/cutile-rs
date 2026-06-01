@@ -1,7 +1,7 @@
 # Architecture: cuda_tile Macro System
 
 Developer reference for the `#[cuda_tile::*]` attributes in `cutile/src/_core.rs`.
-These macros bridge the Rust DSL surface with the JIT compiler and MLIR backend.
+These macros bridge the Rust DSL surface with the JIT compiler and Tile IR backend.
 
 ## Overview
 
@@ -12,11 +12,11 @@ The macro system has two concerns:
    stamp out rank-specific versions at compile time.
 
 2. **JIT metadata** (`ty`, `op`, `compiler_op`): Annotations that the JIT
-   compiler reads at runtime to emit MLIR operations and construct MLIR types.
+   compiler reads at runtime to emit Tile IR operations and construct Tile IR types.
 
 Functions annotated with `#[cuda_tile::op]` or `#[cuda_tile::compiler_op]` have
 bodies of `unreachable!()` -- they are never executed as Rust. Instead, the JIT
-reads their signature and attributes, then emits the corresponding MLIR.
+reads their signature and attributes, then emits the corresponding Tile IR.
 Functions *without* these annotations have real bodies and are inlined by the JIT
 into the caller.
 
@@ -24,21 +24,21 @@ into the caller.
 
 ## `#[cuda_tile::ty(...)]`
 
-Declares how a Rust type maps to an MLIR type. Applied to structs and trait impls.
+Declares how a Rust type maps to a Tile IR type. Applied to structs and trait impls.
 
 ### Attributes
 
 | Attribute              | Purpose |
 |------------------------|---------|
-| `name`                 | MLIR type name (e.g., `"!cuda_tile.tile"`, `"!cuda_tile.partition_view"`) |
-| `type_params`          | Required MLIR type parameters, in order |
-| `type_params_optional` | Optional MLIR type parameters, in order (appended after required) |
-| `type_meta`            | Runtime metadata fields carried on the value (not part of the MLIR type string) |
-| `pointer_type`         | For pointer types: the MLIR pointer wrapper type |
+| `name`                 | Tile IR type name (e.g., `"!cuda_tile.tile"`, `"!cuda_tile.partition_view"`) |
+| `type_params`          | Required Tile IR type parameters, in order |
+| `type_params_optional` | Optional Tile IR type parameters, in order (appended after required) |
+| `type_meta`            | Runtime metadata fields carried on the value (not part of the Tile IR type string) |
+| `pointer_type`         | For pointer types: the Tile IR pointer wrapper type |
 
 ### How type params work
 
-The compiler constructs the MLIR type string by concatenating:
+The compiler constructs the Tile IR type string by concatenating:
 1. Required `type_params`, in order
 2. Optional `type_params_optional`, in order -- included only when a matching
    entry exists in the compiler's `type_params` HashMap
@@ -48,7 +48,7 @@ If a required param cannot be resolved (not in the HashMap, not derivable from
 the Rust type), `compile_type` returns `None` and the compiler falls back to
 type inference via `derive_type`.
 
-**Ordering matters.** The MLIR dialect parser expects type parameters in a fixed
+**Ordering matters.** The Tile IR parser expects type parameters in a fixed
 order. `type_params_optional` entries must appear in the order the dialect expects
 them, after the required params.
 
@@ -77,7 +77,7 @@ populate the HashMap before retrying.
 #[cuda_tile::ty(name = "f32")]
 impl ElementType for f32 {}
 ```
-Maps `f32` to MLIR `f32`. No type params.
+Maps `f32` to Tile IR `f32`. No type params.
 
 **Tile (shape x element type):**
 ```rust
@@ -98,7 +98,7 @@ from the annotation path, so the JIT derives the type from the constructor
 (`make_tensor_view`) that populates `strides` via its `output_type_params`.
 
 `type_meta` declares runtime metadata that travels with the value but isn't
-part of the printed MLIR type. Here, a `Tensor` carries its base pointer, shape,
+part of the printed Tile IR type. Here, a `Tensor` carries its base pointer, shape,
 strides, and a memory-ordering token.
 
 **Partition view (required + optional params):**
@@ -119,7 +119,7 @@ params appear only when set by the constructor op:
 - `make_partition_view(..., padding::None, dim_map, ...)` sets
   `tensor_view` + `dim_map`
 
-Resulting MLIR types:
+Resulting Tile IR types:
 ```
 partition_view<tile=(64x64), tensor_view<?x?xf32, strides=[?,1]>>
 partition_view<tile=(64x64), padding_value = zero, tensor_view<?x?xf32, strides=[?,1]>>
@@ -129,30 +129,30 @@ partition_view<tile=(64x64), padding_value = zero, tensor_view<?x?xf32, strides=
 
 ## `#[cuda_tile::op(...)]`
 
-Declares a function as a primitive MLIR operation. The function body is
-`unreachable!()` -- the JIT emits MLIR instead.
+Declares a function as a primitive Tile IR operation. The function body is
+`unreachable!()` -- the JIT emits Tile IR instead.
 
 ### Attributes
 
 | Attribute              | Purpose |
 |------------------------|---------|
-| `name`                 | MLIR operation name (e.g., `"cuda_tile.make_partition_view"`) |
-| `params`               | Function parameters that become MLIR operands, by name |
-| `output_type_params`   | Parameter names whose types are forwarded to the output MLIR type |
+| `name`                 | Tile IR operation name (e.g., `"cuda_tile.make_partition_view"`) |
+| `params`               | Function parameters that become Tile IR operands, by name |
+| `output_type_params`   | Parameter names whose types are forwarded to the output Tile IR type |
 | `output_type_meta`     | Expressions that become runtime metadata on the output value |
-| `attribute_params`     | Parameters encoded as MLIR attributes (not operands). Format: `"name:kind"` |
-| `hint_params`          | Parameters that guide compilation but don't appear in MLIR (e.g., latency hints) |
-| `named_attributes`     | Static MLIR attributes. Format: `"attr_name=attr_value"` |
-| `static_params`        | ZST type parameters resolved to MLIR attributes at compile time |
+| `attribute_params`     | Parameters encoded as Tile IR attributes (not operands). Format: `"name:kind"` |
+| `hint_params`          | Parameters that guide compilation but don't appear in Tile IR (e.g., latency hints) |
+| `named_attributes`     | Static Tile IR attributes. Format: `"attr_name=attr_value"` |
+| `static_params`        | ZST type parameters resolved to Tile IR attributes at compile time |
 | `has_variadic_params`  | `true` if operand count varies (adds `operandSegmentSizes` attribute) |
 
 ### How constructor ops connect to struct types
 
 This is the central mechanism for how ops produce typed values.
 
-**The problem:** Some MLIR type parameters can't be derived from Rust type
+**The problem:** Some Tile IR type parameters can't be derived from Rust type
 annotations alone. For example, `Partition<E, D>` only carries the tile shape `D`
-in its Rust type, but the MLIR `partition_view` type also needs `tensor_view`
+in its Rust type, but the Tile IR `partition_view` type also needs `tensor_view`
 and optionally `padding_value`.
 
 **The solution:** Constructor ops declare `output_type_params` -- parameter names
@@ -192,7 +192,7 @@ When the JIT compiles a call to this function:
 
 4. Calls `compile_type` on the return type with this HashMap. The struct's
    `type_params_optional` picks up `padding_value` and `tensor_view` from
-   the HashMap and includes them in the MLIR type.
+   the HashMap and includes them in the Tile IR type.
 
 ### `output_type_meta`
 
@@ -210,9 +210,9 @@ output_type_meta=["token", "tensor_view.shape()"]
 
 This metadata is accessed later via `compiler_op(name = "return_type_meta_field")`.
 
-### How `params` maps to MLIR operands
+### How `params` maps to Tile IR operands
 
-`params` lists parameter names that become SSA operands in the MLIR operation.
+`params` lists parameter names that become SSA operands in the Tile IR operation.
 Parameters NOT in `params` are still compiled (for type inference, string values,
 etc.) but don't appear as operands.
 
@@ -224,8 +224,8 @@ Here `shape.dims` extracts the `dims` field from the compiled `Shape` struct val
 
 ### `static_params`
 
-Maps Rust ZST (zero-sized type) generic parameters to MLIR attributes. The
-format is a map from ZST variant names to MLIR attribute strings:
+Maps Rust ZST (zero-sized type) generic parameters to Tile IR attributes. The
+format is a map from ZST variant names to Tile IR attribute strings:
 
 ```rust
 #[cuda_tile::op(name="cuda_tile.sqrt", params=["x"],
@@ -240,7 +240,7 @@ fn sqrt<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
 
 At the call site `sqrt::<_, _, rounding::NearestEven, ftz::Enabled>(tile)`, the
 compiler resolves `R = NearestEven` and `F = Enabled`, then emits the
-corresponding MLIR attributes.
+corresponding Tile IR attributes.
 
 ### Examples
 
@@ -258,7 +258,7 @@ Emits `%result = cuda_tile.cos %x : !cuda_tile.tile<128xf32>`.
 #[cuda_tile::op(name="load_view_tko", params=["view", "index"])]
 fn load_view_tko(view: &Partition<E, D>, index: [i32; N], latency: Option<i32>, tma: T, ..) { .. }
 ```
-`latency` guides TMA vs non-TMA lowering but doesn't appear as an MLIR operand.
+`latency` guides TMA vs non-TMA lowering but doesn't appear as a Tile IR operand.
 
 **Constructor op with type forwarding (detailed walkthrough):**
 
@@ -313,10 +313,10 @@ Compilation flow:
 
 5. Result: `!cuda_tile.partition_view<tile=(64x64), padding_value = zero, tensor_view<?x?xf32, strides=[?,1]>>`
 
-### One Rust op surface for optional MLIR type params
+### One Rust op surface for optional Tile IR type params
 
 The partition-view constructor has a single read-only Rust function and one
-mutable Rust function. Marker arguments determine which optional MLIR type
+mutable Rust function. Marker arguments determine which optional Tile IR type
 parameters appear:
 
 ```rust
@@ -336,7 +336,7 @@ unsafe fn make_partition_view_mut(
 ) -> PartitionMut { .. }
 ```
 
-Both emit the same `cuda_tile.make_partition_view` MLIR op. The output type
+Both emit the same `cuda_tile.make_partition_view` Tile IR op. The output type
 includes `padding_value` only for real padding markers such as `padding::Zero`,
 and includes `dim_map` only for non-identity mappings.
 
@@ -346,7 +346,7 @@ and includes `dim_map` only for non-identity mappings.
 
 Declares a function as a compiler intrinsic. Unlike `cuda_tile::op`, these are
 handled by dedicated Rust code in the compiler (`compile_intrinsic.rs`) rather
-than the general MLIR op emission path.
+than the general Tile IR op emission path.
 
 ### Attributes
 
@@ -393,7 +393,7 @@ fn get_tensor_shape(tensor: &Tensor<E, S>) -> Shape<S> { unreachable!() }
 ```
 
 These compile to direct reads/writes of the SSA metadata attached to the value --
-no MLIR operation is emitted.
+no Tile IR operation is emitted.
 
 ---
 
@@ -483,7 +483,7 @@ pub fn store_tile<E: ElementType, const S: [i32; N]>(y: &mut Tensor<E, S>, resul
 ```
 
 This composes primitive ops (`get_tensor_token`, `make_partition_view_mut`,
-`store_view_tko_mut`, etc.) without emitting a single MLIR op of its own.
+`store_view_tko_mut`, etc.) without emitting a single Tile IR op of its own.
 
 When the JIT encounters a call to `store_tile(...)`:
 1. `get_cuda_tile_op_attrs` returns `None` (no `cuda_tile::op`)
@@ -500,7 +500,7 @@ When the JIT encounters a function call `f(...)`:
 
 ```
 get_cuda_tile_op_attrs(f) found?
-  YES: compile_cuda_tile_op_call (emit MLIR op)
+  YES: compile_cuda_tile_op_call (emit Tile IR op)
   NO:  get_function_by_name(f) found?
          YES: has cuda_tile::compiler_op?
                 YES: compile_compiler_op_call (custom intrinsic)

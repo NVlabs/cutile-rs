@@ -63,7 +63,11 @@ pub enum TypeTag {
     PartitionView = 15,
     Func = 16,
     Token = 17,
-    Unknown = 18,
+    F8E8M0FNU = 18,
+    F4E2M1FN = 19,
+    GatherScatterView = 20,
+    StridedView = 21,
+    I4 = 22,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,11 +151,13 @@ pub struct BytecodeVersion {
 }
 
 impl BytecodeVersion {
-    pub const CURRENT: Self = Self {
+    pub const V13_3: Self = Self {
         major: 13,
-        minor: 2,
+        minor: 3,
         tag: 0,
     };
+
+    pub const CURRENT: Self = Self::V13_3;
 
     pub const MIN_SUPPORTED: Self = Self {
         major: 13,

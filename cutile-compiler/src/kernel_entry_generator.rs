@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Generates CUDA Tile MLIR entry-point functions from Rust kernel signatures.
+//! Generates CUDA Tile IR entry-point functions from Rust kernel signatures.
 //! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
 
 use crate::ast::SourceLocation;
@@ -451,7 +451,7 @@ fn generic_arg_to_const_array_string(arg: &GenericArgument) -> Result<String, JI
     }
 }
 
-/// Generates an MLIR entry-point wrapper for a kernel function, including tensor argument unpacking.
+/// Generates a Tile IR entry-point wrapper for a kernel function, including tensor argument unpacking.
 pub fn generate_entry_point(
     modules: &CUDATileModules,
     fn_item: &ItemFn,

@@ -10,7 +10,7 @@
 
 </div>
 
-cuTile Rust (`cutile-rs`) lets you write tile-based GPU kernels in Rust. Rust's ownership discipline is preserved across the GPU launch boundary: mutable tensors are partitioned into disjoint pieces before launch, immutable tensors are shared, and the generated launcher returns ownership when GPU work completes. Tile kernels lower to PTX through Tile IR.
+cuTile Rust (`cutile-rs`) lets you write tile-based GPU kernels in Rust. Rust's ownership discipline is preserved across the GPU launch boundary: mutable tensors are partitioned into disjoint pieces before launch, immutable tensors are shared, and the generated launcher returns ownership when GPU work completes. Tile kernels lower through CUDA Tile IR to GPU cubins.
 
 ## Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
@@ -70,8 +70,8 @@ cuTile Rust targets tile-based kernels that lower through CUDA Tile IR, with API
 - **NVIDIA GPU** with compute capability `sm_80` or higher (minimum supported architecture: `sm_80`).
   - `sm_100+` is supported by CUDA 13.1+.
   - `sm_8x` support was added in CUDA 13.2.
-  - `sm_90` is not yet supported; it is expected in CUDA 13.3 (release date TBD).
-- **CUDA** 13.2 recommended (`sm_8x` support and `sm_100+` performance improvements over 13.1).
+  - CUDA 13.3 adds `sm_90` support, so CUDA 13.3 users now have `sm_80+` coverage.
+- **CUDA** 13.3 recommended (`sm_80+` support and CUDA Tile IR 13.3 features such as FP4 packing and block-scaled MMA).
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
 
@@ -87,17 +87,17 @@ rustup default stable
 
 #### CUDA
 
-Install CUDA 13.2 for your OS by following the official instructions:
+Install CUDA 13.3 for your OS by following the official instructions:
 https://developer.nvidia.com/cuda-downloads
 
 ### Configure Environment
 
-Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
+Set `CUDA_TOOLKIT_PATH` to your CUDA 13.3 install directory.
 
 Example `.cargo/config.toml`:
 ```toml
 [env]
-CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false }
+CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13", relative = false }
 ```
 
 ### Verifying Installation
@@ -126,7 +126,7 @@ Or open an interactive shell:
 ```bash
 nix develop
 # cutile-rs dev shell
-#  ✓ CUDA  /nix/store/...-cuda-toolkit-13.2
+#  ✓ CUDA  /nix/store/...-cuda-toolkit-13.3
 #  ✓ Rust  1.90.0-nightly
 ```
 

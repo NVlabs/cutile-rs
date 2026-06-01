@@ -25,7 +25,7 @@
 
         isDarwin = pkgs.stdenv.isDarwin;
 
-        # CUDA 13.2 fetched from nvidia (headers needed on all platforms for
+        # CUDA 13.3 fetched from nvidia (headers needed on all platforms for
         # bindgen type generation; runtime libraries only needed on Linux)
         cudaRedistBase = "https://developer.download.nvidia.com/compute/cuda/redist";
         fetchCudaRedist =
@@ -35,35 +35,40 @@
             inherit sha256;
           };
         cudaToolkit = pkgs.symlinkJoin {
-          name = "cuda-toolkit-13.2";
+          name = "cuda-toolkit-13.3";
           paths = map (src: pkgs.runCommand (builtins.baseNameOf (toString src)) { } ''
             mkdir -p $out
             tar xf ${src} --strip-components=1 -C $out
           '') [
             (fetchCudaRedist {
               name = "cuda_crt";
-              version = "13.2.51";
-              sha256 = "fbc31fed55b7255591f3a19f575ca078827f5e6757d317d009f7ec1e69fcde4b";
+              version = "13.3.33";
+              sha256 = "4755d36d24c6ef7697a2d3e1dbb23c4562c9c0d97d48390d4cbd8ab32dec5b5f";
             })
             (fetchCudaRedist {
               name = "cuda_nvcc";
-              version = "13.2.51";
-              sha256 = "706b996fefc59dc8d64d317fdf48d0aa84c4ae004eff43009dd918f40c5cc66a";
+              version = "13.3.33";
+              sha256 = "93b098bda4a562ebf3541523ce82adc43f106a81dcf28bcbf8f0d8e093d1c66f";
+            })
+            (fetchCudaRedist {
+              name = "libnvvm";
+              version = "13.3.33";
+              sha256 = "fc9c1fd5844e44c0e5eeb051378c1b13cf0e3bb3fe4966d5103c38885424f802";
             })
             (fetchCudaRedist {
               name = "cuda_cudart";
-              version = "13.2.51";
-              sha256 = "539edc1056e44d319f2112e9971c6415d78d4dde04b3f6ffbd20ec808e718526";
+              version = "13.3.29";
+              sha256 = "1e59c4888267d27ba1a9bd0f3669a6439db1334a96e754cd9013c7c73e18dc9d";
             })
             (fetchCudaRedist {
               name = "libcurand";
-              version = "10.4.2.51";
-              sha256 = "a089985ac24fff42b719ab42a015c7df39cd721a3d83bfa4af9249b9fca883dc";
+              version = "10.4.3.29";
+              sha256 = "0218e62ab413e435dcd0274ec8e63b62214e6aba8519201061d1597e73caadbb";
             })
             (fetchCudaRedist {
               name = "cuda_tileiras";
-              version = "13.2.51";
-              sha256 = "76cbbcc4458b6175878c3a1168521ca9ce36263e7e450ff8a1d1988e5b0bf792";
+              version = "13.3.36";
+              sha256 = "1b055db199f806c746d53331200ccd8480bfdddd14638ed2911f30ee0cc4447b";
             })
           ];
           postBuild = ''
@@ -74,73 +79,8 @@
           '';
         };
 
-        # LLVM / MLIR 
-        llvmPkgs = pkgs.llvmPackages_21;
-        llvmIncludeRoot = pkgs.symlinkJoin {
-          name = "llvm-mlir-21-headers";
-          paths = [
-            llvmPkgs.llvm.dev
-            llvmPkgs.mlir.dev
-          ];
-        };
-        llvmLibRoot = pkgs.symlinkJoin {
-          name = "llvm-mlir-21-libs";
-          paths = [
-            llvmPkgs.llvm.lib
-            llvmPkgs.mlir
-          ];
-        };
-        llvmConfigWrapper = pkgs.writeShellScriptBin "llvm-config" ''
-          real_llvm_config="${llvmPkgs.llvm.dev}/bin/llvm-config"
-          merged_include="${llvmIncludeRoot}/include"
-          merged_lib="${llvmLibRoot}/lib"
-          real_include="$("$real_llvm_config" --includedir)"
-
-          for arg in "$@"; do
-            case "$arg" in
-              --includedir)
-                printf '%s\n' "$merged_include"
-                exit 0
-                ;;
-              --libdir)
-                printf '%s\n' "$merged_lib"
-                exit 0
-                ;;
-            esac
-          done
-
-          if printf '%s\n' "$@" | grep -qx -- '--cxxflags'; then
-            "$real_llvm_config" "$@" | sed "s|$real_include|$merged_include|g"
-            exit 0
-          fi
-
-          exec "$real_llvm_config" "$@"
-        '';
-        llvmInstall = pkgs.symlinkJoin {
-          name = "llvm-mlir-21";
-          paths = [
-            llvmConfigWrapper
-            llvmPkgs.tblgen
-            llvmPkgs.llvm
-            llvmPkgs.llvm.dev
-            llvmPkgs.llvm.lib
-            llvmPkgs.mlir
-            llvmPkgs.mlir.dev
-          ];
-          # patch paths for MLIR's mlir-tblgen dependency in the installed CMake config
-          postBuild = ''
-            # The installed MLIRConfig.cmake sets MLIR_TABLEGEN_EXE to the bare
-            # name "mlir-tblgen".  Ninja treats that as a file dependency relative
-            # to each build sub-directory, which fails when using a pre-built LLVM.
-            # Replace it with the absolute path so both command execution and
-            # dependency tracking work.
-            target="$out/lib/cmake/mlir/MLIRConfig.cmake"
-            original=$(readlink -f "$target")
-            rm "$target"
-            sed 's|set(MLIR_TABLEGEN_EXE "mlir-tblgen")|set(MLIR_TABLEGEN_EXE "'"$out"'/bin/mlir-tblgen")|' \
-              "$original" > "$target"
-          '';
-        };
+        # bindgen uses libclang to parse CUDA headers.
+        libclang = pkgs.llvmPackages.libclang;
 
         # Nightly Rust 
         rustToolchain =
@@ -160,12 +100,7 @@
 
           packages = [
             rustToolchain
-            llvmPkgs.clang
-            llvmPkgs.libclang
-            llvmPkgs.tblgen
-            llvmPkgs.llvm
-            llvmPkgs.mlir
-            llvmPkgs.llvm.dev
+            libclang
             pkgs.cmake
             pkgs.git
             pkgs.libffi
@@ -178,28 +113,15 @@
 
           CMAKE_GENERATOR = "Ninja";
           CUDA_TOOLKIT_PATH = "${cudaToolkit}";
-          CUDA_TILE_USE_LLVM_INSTALL_DIR = "${llvmInstall}";
-          LLVM_CONFIG_PATH = "${llvmInstall}/bin/llvm-config";
-          LLVM_DIR = "${llvmInstall}/lib/cmake/llvm";
-          MLIR_DIR = "${llvmInstall}/lib/cmake/mlir";
-          LLVM_INCLUDE_DIRS = "${llvmIncludeRoot}/include";
-          LLVM_LIBRARY_DIR = "${llvmPkgs.llvm.lib}/lib";
-          LIBCLANG_PATH = "${llvmPkgs.libclang.lib}/lib";
-          MLIR_SYS_210_PREFIX = "${llvmInstall}";
-          TABLEGEN_210_PREFIX = "${llvmInstall}";
+          LIBCLANG_PATH = "${libclang.lib}/lib";
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
             pkgs.libffi
             pkgs.libxml2
-            llvmPkgs.libclang.lib
-            llvmPkgs.llvm.lib
-            llvmPkgs.mlir
+            libclang.lib
           ] ++ pkgs.lib.optionals (!isDarwin) [ cudaToolkit ]);
 
-          shellHook = ''
-            export PATH="${llvmInstall}/bin:$PATH"
-            export CMAKE_PREFIX_PATH="${llvmInstall}:$CMAKE_PREFIX_PATH"
-          '' + pkgs.lib.optionalString (!isDarwin) ''
+          shellHook = pkgs.lib.optionalString (!isDarwin) ''
             export PATH="${cudaToolkit}/bin:$PATH"
             # GPU driver libs: NixOS provides /run/opengl-driver/lib; on other
             # distros, symlink just the NVIDIA libs into a temp dir so we don't
@@ -223,16 +145,9 @@
               fi
             fi
           '' + ''
-
-            if [ ! -d cuda-tile-rs/cuda-tile/.git ] && [ ! -f cuda-tile-rs/cuda-tile/CMakeLists.txt ]; then
-              echo "Initializing cuda-tile submodule..."
-              git submodule update --init --recursive
-            fi
-
             echo ""
             echo "cutile-rs dev shell"
             echo " ${if isDarwin then "~" else "✓"} CUDA  ${if isDarwin then "(headers only — no GPU required)" else "$CUDA_TOOLKIT_PATH"}"
-            echo " ✓ LLVM  $(llvm-config --version 2>/dev/null)"
             echo " ✓ Rust  $(rustc --version 2>/dev/null | awk '{print $2}')"
           '' + pkgs.lib.optionalString isDarwin ''
             echo ""

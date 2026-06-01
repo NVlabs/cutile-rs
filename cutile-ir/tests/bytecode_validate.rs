@@ -129,7 +129,7 @@ fn run_tileiras(bc: &[u8], name: &str) {
             }
         }
         Err(_) => {
-            // tileiras not available — skip byte-level check
+            // tileiras not available -- skip byte-level check
             std::fs::remove_file(&tmp).ok();
         }
     }

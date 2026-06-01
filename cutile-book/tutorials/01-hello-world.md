@@ -115,7 +115,7 @@ Each tile runs the same code but with different coordinates. This is how tiles d
 ## Under the hood
 
 1. **At compile time:** `#[cutile::module]` captures your Rust code as an AST.
-2. **At first kernel launch:** The AST is compiled to MLIR → cubin (GPU binary).
+2. **At first kernel launch:** The AST is compiled to Tile IR bytecode → cubin (GPU binary).
 3. **Cached:** The cubin is cached, so subsequent runs are instant.
 4. **Launch:** 4 tile threads are dispatched to the GPU.
 5. **Execution:** All 4 tile threads run concurrently, each printing its coordinates.

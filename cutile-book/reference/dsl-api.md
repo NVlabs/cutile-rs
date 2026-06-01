@@ -2,7 +2,7 @@
 
 > **Status**: This API is under active development. Expect changes.
 
-The cuTile Rust DSL lets you write GPU kernel code in Rust syntax that compiles to [CUDA Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/). Inside a `#[cutile::module]` block, you write Rust-like code using the types and operations documented here. The compiler translates this code into MLIR, which is then compiled to PTX/SASS for execution on NVIDIA GPUs.
+The cuTile Rust DSL lets you write GPU kernel code in Rust syntax that compiles to [CUDA Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/). Inside a `#[cutile::module]` block, you write Rust-like code using the types and operations documented here. The compiler translates this code into Tile IR bytecode, then invokes `tileiras` to produce GPU code for NVIDIA GPUs.
 
 All DSL types and functions are available via `use cutile::core::*;` inside a module block.
 
@@ -48,10 +48,10 @@ mod my_kernels {
 
 | Attribute | Type | Description |
 |---|---|---|
-| `print_ir = true` | bool | Print three stages at JIT compile time: (1) the generated entry point wrapper (Rust), (2) the original kernel function, (3) the compiled Tile IR MLIR |
+| `print_ir = true` | bool | Print three stages at JIT compile time: (1) the generated entry point wrapper (Rust), (2) the original kernel function, (3) the compiled Tile IR text |
 | `unchecked_accesses` | bool | Disable partition bounds checks. Requires `unsafe fn`. Removes runtime assertions on partition index ranges |
 | `optimization_hints = expr` | expr | Pass an `OptimizationHints` expression to the compiler for target-specific optimization |
-| `dump_mlir_dir = "path"` | string | Write the compiled MLIR to a file in the specified directory |
+| `dump_mlir_dir = "path"` | string | Write the compiled Tile IR text to a file in the specified directory |
 
 ```rust
 #[cutile::entry(print_ir = true)]
@@ -60,7 +60,7 @@ fn debug_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
 #[cutile::entry(unchecked_accesses)]
 unsafe fn fast_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
 
-#[cutile::entry(dump_mlir_dir = "/tmp/mlir")]
+#[cutile::entry(dump_mlir_dir = "/tmp/cutile-ir")]
 fn traced_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
 ```
 
@@ -193,6 +193,7 @@ let s: Tile<f32, { [] }>;
 - `tile.shape()` — Returns the tile's `Shape<S>`
 - `tile.broadcast(shape)` — Broadcast to a larger shape
 - `tile.reshape(shape)` — Reshape (must preserve element count)
+- `tile.transpose()` — Transpose a rank-2 tile
 
 **Arithmetic operators:** `+`, `-`, `*`, `/` are overloaded for element-wise operations between tiles of the same shape and type.
 
@@ -331,7 +332,16 @@ Trait implemented by all scalar types usable in tiles:
 | `bool` | Boolean |
 | `tf32` | TensorFloat-32 (NVIDIA) |
 | `f8e4m3fn`, `f8e5m2` | FP8 (storage only; convert to `f16`/`f32` for compute) |
+| `f8e8m0fnu` | FP8 scale format for block-scaled low-precision MMA |
+| `f4e2m1fn` | Logical FP4 E2M1 tile element; unpack from packed storage before MMA |
+| `f4e2m1fnx2` | Byte-addressable packed storage for two `f4e2m1fn` values; unpack before MMA |
+| `i4` | Tile IR 4-bit signless integer type for quantization and pack/unpack paths |
 
+`f4e2m1fn` and `i4` are sub-byte Tile IR element types. Use
+`f4e2m1fnx2` or `u8` for byte-addressable packed FP4 tensor storage at host and
+kernel boundaries, then unpack to logical `f4e2m1fn` tiles before block-scaled
+MMA. `i4` is not the NVFP4 type and is not a supported high-level integer MMA
+operand in cuTile Rust today.
 
 ---
 
@@ -350,10 +360,12 @@ Examples:
 
 | Rust DSL surface | Tile IR operation family |
 |---|---|
-| `constant`, `iota`, `broadcast`, `reshape`, `permute`, `cat`, `extract`, `select` | Core tile ops such as `cuda_tile.constant`, `cuda_tile.iota`, `cuda_tile.broadcast`, `cuda_tile.reshape`, `cuda_tile.permute`, `cuda_tile.cat`, `cuda_tile.extract`, `cuda_tile.select` |
+| `constant`, `iota`, `broadcast`, `reshape`, `transpose`, `permute`, `cat`, `extract`, `select` | Core tile ops such as `cuda_tile.constant`, `cuda_tile.iota`, `cuda_tile.broadcast`, `cuda_tile.reshape`, `cuda_tile.permute`, `cuda_tile.cat`, `cuda_tile.extract`, `cuda_tile.select` |
 | `addf`, `mulf`, `fma`, `exp`, `sqrt`, `maxf`, `cmpf` and operator overloads | Floating-point ops such as `cuda_tile.addf`, `cuda_tile.mulf`, `cuda_tile.fma`, `cuda_tile.exp`, `cuda_tile.sqrt`, `cuda_tile.maxf`, `cuda_tile.cmpf` |
 | `addi`, `muli`, `shli`, `shri`, `andi`, `ori`, `xori`, `cmpi` and operator overloads | Integer and bitwise ops such as `cuda_tile.addi`, `cuda_tile.muli`, `cuda_tile.shli`, `cuda_tile.andi`, `cuda_tile.cmpi` |
 | `convert_tile`, `bitcast`, `exti`, `trunci`, `int_to_ptr`, `ptr_to_int`, `ptr_to_ptr` | Conversion ops such as `cuda_tile.bitcast`, `cuda_tile.exti`, `cuda_tile.trunci`, `cuda_tile.int_to_ptr`, `cuda_tile.ptr_to_int`, `cuda_tile.ptr_to_ptr` |
+| `pack`, `unpack` | Rank-1 byte packing and unpacking ops such as `cuda_tile.pack` and `cuda_tile.unpack` |
+| `Tile<f4e2m1fn, ...>::pack`, `Tile<f4e2m1fnx2, ...>::unpack` | Rust helpers that flatten shaped FP4 tiles, call rank-1 `cuda_tile.pack`/`cuda_tile.unpack`, and reshape the result |
 | `load_ptr_tko`, `store_ptr_tko`, `atomic_rmw_tko`, `atomic_cas_tko`, `new_token_unordered`, `join_tokens` | Memory, atomic, and token ops such as `cuda_tile.load_ptr_tko`, `cuda_tile.store_ptr_tko`, `cuda_tile.atomic_rmw_tko`, `cuda_tile.atomic_cas_tko`, `cuda_tile.make_token`, `cuda_tile.join_tokens` |
 | `load_tile_like`, `tensor.load_tile`, `tensor.store`, partition and tensor view helpers | View ops such as `cuda_tile.load_view_tko`, `cuda_tile.store_view_tko`, `cuda_tile.make_tensor_view`, `cuda_tile.make_partition_view`, plus compiler-generated shape/stride plumbing |
 | `assume_div_by`, `assume_bounds_*`, `cuda_tile_print!`, `cuda_tile_assert!` | Compiler and debugging ops such as `cuda_tile.assume`, `cuda_tile.print_tko`, and `cuda_tile.assert` |
@@ -535,6 +547,7 @@ let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, const_shape![16, 1
 |---|---|---|
 | `tile.reshape(shape)` | `Tile<E, S> -> Tile<E, R>` | Reshape (preserves element count) |
 | `tile.broadcast(shape)` | `Tile<E, S> -> Tile<E, R>` | Broadcast to a larger shape |
+| `tile.transpose()` | `Tile<E, [M, N]> -> Tile<E, [N, M]>` | Rank-2 transpose |
 | `reshape(tile, shape)` | `(Tile<E, S>, Shape<R>) -> Tile<E, R>` | Free function reshape |
 | `broadcast(tile, shape)` | `(Tile<E, S>, Shape<R>) -> Tile<E, R>` | Free function broadcast |
 | `permute(tile, indices, shape)` | `(Tile<E, A>, Array<I>, Shape<R>) -> Tile<E, R>` | Transpose / permute dimensions |
@@ -574,6 +587,7 @@ let prefix: Tile<f32, { [128] }> = scan_sum(row, 0i32, reverse::Forward, 0.0f32)
 | Function | Signature | Description |
 |---|---|---|
 | `mma(a, b, c)` | `(Tile<E, {[M,K]}>, Tile<E, {[K,N]}>, Tile<E, {[M,N]}>) -> Tile<E, {[M,N]}>` | Matrix multiply-accumulate |
+| `mmaf_scaled(a, b, c, a_scale, b_scale)` | `(Tile<E, A>, Tile<E, B>, Tile<f32, C>, Tile<S, AS>, Tile<S, BS>) -> Tile<f32, C>` | Block-scaled floating-point matrix multiply-accumulate |
 
 Maps to hardware tensor cores when available.
 
@@ -585,6 +599,15 @@ for k in 0i32..(K/BK) {
     acc = mma(a_tile, b_tile, acc);
 }
 ```
+
+`mmaf_scaled` is used for FP4/FP8 block-scaled matrix multiply. Packed FP4
+tensors should be represented as `Tensor<f4e2m1fnx2, ...>`, unpacked with
+`tile.unpack(const_shape![...])` to logical `Tile<f4e2m1fn, ...>` operands, and
+then passed to `mmaf_scaled` with FP8 scale tiles. The raw `pack` and `unpack`
+ops operate on rank-1 tiles; the FP4 tile methods emit the required
+flatten/pack-or-unpack/reshape sequence. See
+[Inference with NVFP4/MXFP8](../tutorials/11-nvfp4-inference.md)
+for the full pattern.
 
 ### Low-Level Memory Ops
 

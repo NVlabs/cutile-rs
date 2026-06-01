@@ -1,5 +1,10 @@
 # 4. Matrix Multiplication
 
+<!-- TODO: This tutorial has grown to cover basic GEMM, const generic inference,
+mapped persistent GEMM, unsafe optimization hints, and fully static GEMM. Split
+or streamline it when there is bandwidth: keep this page focused on the first
+GEMM path and move advanced performance variants to separate pages. -->
+
 Matrix multiplication (GEMM = General Matrix Multiply) is everywhere in modern computing:
 
 | Application | Where GEMM is Used |
@@ -173,7 +178,7 @@ let generics = vec!["f32".to_string(), "16".to_string(), "16".to_string(), "8".t
 gemm(z, x, y).generics(generics)
 ```
 
-Changing any const generic or type parameter triggers a **JIT recompilation**. The first time a new combination of generics is seen, cutile compiles the kernel through MLIR → cubin. The resulting binary is cached, so subsequent launches with the same generics are instant. Launching with different generics — for example, switching from `K=64` to `K=128` — produces a new compilation.
+Changing any const generic or type parameter triggers a **JIT recompilation**. The first time a new combination of generics is seen, cutile compiles the kernel through Tile IR bytecode → cubin. The resulting binary is cached, so subsequent launches with the same generics are instant. Launching with different generics — for example, switching from `K=64` to `K=128` — produces a new compilation.
 
 This is the tradeoff between **static** and **dynamic** shape dimensions. In the GEMM signature above, `K` is a const generic while the M and N dimensions of `x` and `y` are dynamic (`-1`):
 
@@ -474,3 +479,4 @@ Try using `f16` (half precision) for inputs and `f32` for the accumulator. This 
 - [Thinking in Tiles](../guide/thinking-in-tiles.md) — 2D partitioning and grid mapping
 - [Tuning for Performance](../guide/performance-tuning.md) — Tensor Core alignment requirements and tile-size selection
 - [DSL API](../reference/dsl-api.md#matrix-multiply) — `mma` signature and element-type constraints
+- [Inference with NVFP4/MXFP8](11-nvfp4-inference.md) — packed FP4, FP8 data, and block-scaled MMA

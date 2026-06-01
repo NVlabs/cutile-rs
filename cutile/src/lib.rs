@@ -14,7 +14,7 @@
 //!
 //! - **Core types**: GPU tensors, tiles, and partitions for structured data access
 //! - **Async execution**: Modern async/await syntax for GPU operations with automatic scheduling
-//! - **Kernel compilation**: Rust → MLIR → PTX/CUBIN compilation pipeline with caching
+//! - **Kernel compilation**: Rust → Tile IR bytecode → cubin compilation pipeline with caching
 //! - **High-level API**: Familiar NumPy-like operations for tensor creation and manipulation
 //! - **Built-in kernels**: Optimized implementations of common operations (GEMM, matrix-vector, etc.)
 //!
@@ -148,7 +148,7 @@
 //! ## Performance
 //!
 //! cuTile Rust kernels can achieve performance competitive with hand-written CUDA:
-//! - Zero-cost abstractions: Rust compiles to MLIR then optimized PTX
+//! - Zero-cost abstractions: Rust compiles to Tile IR, then optimized GPU code
 //! - Compile-time specialization: Tile shapes and types are compile-time constants
 //! - Kernel caching: Compiled kernels are cached per-device for reuse
 //!

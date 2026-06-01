@@ -91,9 +91,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         generic_vars: &GenericVars,
         span: &proc_macro2::Span,
     ) -> Result<Vec<i32>, JITError> {
-        if let TypeInstance::StructuredType(instance) = &value.ty.type_instance {
+        self.static_shape_from_type(&value.ty, generic_vars, span)
+    }
+
+    fn static_shape_from_type(
+        &self,
+        ty: &TileRustType,
+        generic_vars: &GenericVars,
+        span: &proc_macro2::Span,
+    ) -> Result<Vec<i32>, JITError> {
+        if let TypeInstance::StructuredType(instance) = &ty.type_instance {
             Ok(instance.shape.clone())
-        } else if let Some(shape) = get_cga_from_type(&value.ty.rust_ty, generic_vars) {
+        } else if let Some(shape) = get_cga_from_type(&ty.rust_ty, generic_vars) {
             Ok(shape)
         } else {
             self.jit_error_result(span, "expected a statically shaped value")
@@ -203,6 +212,238 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let array_ty = self.array_i32_type(rank, generic_vars, span)?;
         Ok(Some(TileRustValue::new_compound(offsets, array_ty)))
+    }
+
+    fn tile_type_for_element_shape(
+        &self,
+        element_name: &str,
+        shape: &[i32],
+        generic_vars: &GenericVars,
+        span: &proc_macro2::Span,
+    ) -> Result<TileRustType, JITError> {
+        if let Some(tile_ty) = TileRustType::from_tile(element_name, shape) {
+            return Ok(tile_ty);
+        }
+
+        let ty =
+            syn::parse_str::<syn::Type>(&format!("Tile<{element_name}, {{ {shape:?} }}>")).unwrap();
+        self.compile_type(&ty, generic_vars, &HashMap::new())?
+            .ok_or_else(|| {
+                self.jit_error(
+                    span,
+                    &format!("failed to synthesize Tile<{element_name}, {{ {shape:?} }}>"),
+                )
+            })
+    }
+
+    fn static_element_count(shape: &[i32]) -> Option<i64> {
+        let mut count = 1i64;
+        for dim in shape {
+            if *dim <= 0 {
+                return None;
+            }
+            count = count.checked_mul(*dim as i64)?;
+        }
+        Some(count)
+    }
+
+    fn compile_fp4_pack_unpack(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        path_expr: &ExprPath,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 2 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "`{}` expects 2 arguments, got {}",
+                    path_expr.to_token_stream(),
+                    call_expr.args.len()
+                ),
+            );
+        }
+
+        let ident = get_ident_from_path_expr(path_expr).to_string();
+        let is_pack = match ident.as_str() {
+            "__pack_f4e2m1fnx2_tile" => true,
+            "__unpack_f4e2m1fnx2_tile" => false,
+            other => {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    &format!("unsupported FP4 pack/unpack helper `{other}`"),
+                )
+            }
+        };
+
+        let source = self
+            .compile_expression(
+                module,
+                block_id,
+                &call_expr.args[0],
+                generic_vars,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[0].span(),
+                    "failed to compile FP4 pack/unpack source tile",
+                )
+            })?;
+        let Some(source_value) = source.value else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "FP4 pack/unpack source must be a tile value",
+            );
+        };
+
+        let shape_value = self
+            .compile_expression(
+                module,
+                block_id,
+                &call_expr.args[1],
+                generic_vars,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[1].span(),
+                    "failed to compile FP4 pack/unpack result shape",
+                )
+            })?;
+
+        let source_shape =
+            self.static_shape_from_value(&source, generic_vars, &call_expr.args[0].span())?;
+        let result_shape =
+            self.static_shape_from_value(&shape_value, generic_vars, &call_expr.args[1].span())?;
+
+        let source_count = Self::static_element_count(&source_shape);
+        let result_count = Self::static_element_count(&result_shape);
+
+        if is_pack {
+            if let Some(count) = source_count {
+                if count % 2 != 0 {
+                    return self.jit_error_result(
+                        &call_expr.args[0].span(),
+                        &format!("FP4 pack requires an even number of logical values, got {count}"),
+                    );
+                }
+            }
+            if let (Some(src), Some(dst)) = (source_count, result_count) {
+                if src != dst * 2 {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "FP4 pack shape mismatch: source has {src} logical values, result shape stores {}",
+                            dst * 2
+                        ),
+                    );
+                }
+            }
+        } else if let (Some(src), Some(dst)) = (source_count, result_count) {
+            if dst != src * 2 {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    &format!(
+                        "FP4 unpack shape mismatch: source stores {} logical values, result shape has {dst}",
+                        src * 2
+                    ),
+                );
+            }
+        }
+
+        let result_element = if is_pack { "f4e2m1fnx2" } else { "f4e2m1fn" };
+        let source_element = if is_pack { "f4e2m1fn" } else { "f4e2m1fnx2" };
+
+        let return_type = match return_type {
+            Some(return_type) => {
+                let return_shape =
+                    self.static_shape_from_type(&return_type, generic_vars, &call_expr.span())?;
+                if return_shape != result_shape {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!(
+                            "FP4 pack/unpack return shape {:?} does not match requested shape {:?}",
+                            return_shape, result_shape
+                        ),
+                    );
+                }
+                return_type
+            }
+            None => self.tile_type_for_element_shape(
+                result_element,
+                &result_shape,
+                generic_vars,
+                &call_expr.span(),
+            )?,
+        };
+
+        let source_flat_len = source_count.unwrap_or(-1);
+        let result_flat_len = result_count.unwrap_or_else(|| {
+            source_count
+                .map(|count| if is_pack { count / 2 } else { count * 2 })
+                .unwrap_or(-1)
+        });
+
+        let source_flat_ty =
+            types::make_tile_type(source_element, &[source_flat_len]).ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.span(),
+                    &format!("failed to build flat source tile type for `{source_element}`"),
+                )
+            })?;
+        let result_flat_ty =
+            types::make_tile_type(result_element, &[result_flat_len]).ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.span(),
+                    &format!("failed to build flat result tile type for `{result_element}`"),
+                )
+            })?;
+        let final_ty =
+            tile_ir_type_from_trt(&return_type, &self.modules.primitives()).ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.span(),
+                    "failed to convert FP4 pack/unpack return type to Tile IR",
+                )
+            })?;
+
+        let (flatten_op_id, flatten_results) =
+            OpBuilder::new(Opcode::Reshape, self.ir_location(&call_expr.span()))
+                .operand(source_value)
+                .result(source_flat_ty)
+                .build(module);
+        append_op(module, block_id, flatten_op_id);
+
+        let opcode = if is_pack {
+            Opcode::Pack
+        } else {
+            Opcode::Unpack
+        };
+        let (pack_op_id, pack_results) =
+            OpBuilder::new(opcode, self.ir_location(&call_expr.span()))
+                .operand(flatten_results[0])
+                .result(result_flat_ty)
+                .build(module);
+        append_op(module, block_id, pack_op_id);
+
+        let (reshape_op_id, reshape_results) =
+            OpBuilder::new(Opcode::Reshape, self.ir_location(&call_expr.span()))
+                .operand(pack_results[0])
+                .result(final_ty)
+                .build(module);
+        append_op(module, block_id, reshape_op_id);
+
+        Ok(Some(TileRustValue::new_structured_type(
+            reshape_results[0],
+            return_type,
+            None,
+        )))
     }
 
     /// Compiles a `compiler_op` (intrinsic) function call.
@@ -359,6 +600,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 )?;
                 Ok(Some(res))
             }
+            "fp4_pack_unpack" => self.compile_fp4_pack_unpack(
+                module,
+                block_id,
+                call_expr,
+                path_expr,
+                generic_vars,
+                ctx,
+                return_type,
+            ),
             "shape" => {
                 let compiler_op_function = ident.to_string();
                 match compiler_op_function.as_str() {

@@ -4,7 +4,7 @@
  */
 
 //! Type parameter definitions and element-type resolution helpers.
-//! Maps Rust generic type parameters to their CUDA Tile MLIR representations.
+//! Maps Rust generic type parameters to their CUDA Tile IR representations.
 
 // Helper module for type parameters.
 use crate::ast::SourceLocation;
@@ -56,7 +56,7 @@ impl TypeParam {
             TypeParam::Padding(tp) => tp.name.clone(),
         }
     }
-    /// Resolves this type parameter to a concrete MLIR type string.
+    /// Resolves this type parameter to a concrete Tile IR type string.
     pub fn instantiate(
         &mut self,
         generic_args: &GenericVars,
@@ -396,7 +396,7 @@ impl From<syn::Type> for TypeParamTile {
     }
 }
 
-/// Shape and element type information formatted for MLIR type string construction.
+/// Shape and element type information formatted for Tile IR type string construction.
 #[derive(Debug)]
 pub struct MLIRVariadicArg {
     pub primitive_type_str: Option<String>,
@@ -448,7 +448,7 @@ impl MLIRVariadicArg {
             shape,
         }
     }
-    /// Formats as an MLIR type fragment (e.g. `128x64xf32`) with the given delimiter.
+    /// Formats as a Tile IR type fragment (e.g. `128x64xf32`) with the given delimiter.
     pub fn mlir_str(&self, delim: &str, include_element_type: bool) -> String {
         let mlir_shape = self
             .shape

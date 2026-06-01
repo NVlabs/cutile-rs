@@ -80,9 +80,6 @@ mod my_module {
 
         let k_part = k.partition(const_shape![1, 1, BN, D]); // permuted after loading.
         let v_part = v.partition(const_shape![1, 1, BN, D]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
 
         // j corresponds to tile index along key / value seq len dim.
         for j in 0i32..num_tiles {
@@ -92,7 +89,7 @@ mod my_module {
             let k_tile: Tile<f32, { [BN, D] }> = k_part
                 .load([batch_idx, kv_head_idx, j, 0i32])
                 .reshape(const_shape![BN, D]);
-            let k_tile_trans: Tile<f32, { [D, BN] }> = permute(k_tile, transpose);
+            let k_tile_trans: Tile<f32, { [D, BN] }> = k_tile.transpose();
             let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
             let qk: Tile<f32, { [BM, BN] }> = mma(tq, k_tile_trans, qk);
 

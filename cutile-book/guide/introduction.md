@@ -47,7 +47,7 @@ Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launc
 
 ![The cuTile Rust compilation pipeline from Rust to GPU execution](../_static/images/compilation-pipeline.svg)
 
-At first call, the pipeline transforms the entry function through Rust AST → MLIR → cubin. Subsequent calls reuse the cached binary, so JIT overhead is paid once per unique specialization.
+At first call, the pipeline transforms the entry function through Rust AST → Tile IR bytecode → cubin. Subsequent calls reuse the cached binary, so JIT overhead is paid once per unique specialization.
 
 ---
 

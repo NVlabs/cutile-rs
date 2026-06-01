@@ -72,9 +72,6 @@ mod kernels {
 
         let k_part = k.partition(const_shape![1, 1, BN, D]);
         let v_part = v.partition(const_shape![1, 1, BN, D]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
 
         let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
         let offs_n_tile: Tile<i32, { [BM, BN] }> = offs_n_tile
@@ -94,7 +91,7 @@ mod kernels {
             let k_tile: Tile<f16, { [BN, D] }> = k_part
                 .load([batch_idx, kv_head_idx, j, 0i32])
                 .reshape(const_shape![BN, D]);
-            let k_tile_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+            let k_tile_trans: Tile<f16, { [D, BN] }> = k_tile.transpose();
             let mut qk: Tile<f16, { [BM, BN] }> = constant(f16::ZERO, const_shape![BM, BN]);
             qk = mma(tq, k_tile_trans, qk);
 

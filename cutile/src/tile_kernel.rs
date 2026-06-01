@@ -73,7 +73,7 @@ impl TileFunctionKey {
 
 impl FunctionKey for TileFunctionKey {}
 
-/// Reads IR (MLIR or PTX) from a file.
+/// Reads Tile IR text from a file.
 ///
 /// This helper function reads intermediate representation files from disk, typically
 /// for debugging purposes when using `use_debug_mlir` or similar options.
@@ -91,10 +91,10 @@ fn read_ir(path: String) -> Result<String, std::io::Error> {
     Ok(s)
 }
 
-/// Writes IR (MLIR or PTX) to a file for debugging.
+/// Writes Tile IR text to a file for debugging.
 ///
 /// This helper function writes intermediate representation to disk when kernel functions
-/// are marked with `dump_mlir_dir` or `dump_ptx_dir` entry attributes. The filename
+/// are marked with `dump_mlir_dir` entry attributes. The filename
 /// includes the module name, function name, and cache hash for uniqueness.
 ///
 /// ## Parameters
@@ -102,7 +102,7 @@ fn read_ir(path: String) -> Result<String, std::io::Error> {
 /// - `module_name`: Name of the module containing the kernel
 /// - `function_name`: Name of the kernel function
 /// - `cache_hash_str`: Unique hash identifying this compilation
-/// - `extension`: File extension (e.g., "mlir", "ptx")
+/// - `extension`: File extension (usually "mlir" for the MLIR-like Tile IR text)
 /// - `dir`: Directory to write the file to
 /// - `contents`: IR contents to write
 ///
@@ -125,9 +125,9 @@ fn write_ir(
 
 /// Compiles a tile function to CUDA and caches it for reuse.
 ///
-/// Handles the complete compilation pipeline from Rust/MLIR to CUDA:
+/// Handles the complete compilation pipeline from Rust to CUDA:
 /// 1. Checks the thread-local cache for a previously compiled function
-/// 2. If not cached, compiles the module AST to MLIR, then to PTX/CUBIN
+/// 2. If not cached, compiles the module AST to Tile IR bytecode, then to a cubin
 /// 3. Loads the compiled function and caches it for future use
 ///
 /// The caching key is based on the module name, function name, type generics, stride arguments,
@@ -205,10 +205,10 @@ pub fn compile_from_context<F: Fn() -> Module>(
             "use_debug_mlir",
         )?;
         // TODO (hme): Re-enable some debug support for internal.
-        // let mlir = if let Some(debug_mlir_path) = &debug_mlir_path {
-        //     println!("USING DEBUG MLIR: {debug_mlir_path}");
-        //     let mlir = read_ir(debug_mlir_path.to_string()).expect("Failed to read debug MLIR.");
-        //     mlir
+        // let ir_text = if let Some(debug_mlir_path) = &debug_mlir_path {
+        //     println!("USING DEBUG TILE IR: {debug_mlir_path}");
+        //     let ir_text = read_ir(debug_mlir_path.to_string()).expect("Failed to read debug Tile IR.");
+        //     ir_text
         // } else {
         //     let module_op: ModuleOperation = compiler.compile(
         //         module_name,
@@ -221,8 +221,8 @@ pub fn compile_from_context<F: Fn() -> Module>(
         //         const_grid,
         //         gpu_name.clone(),
         //     );
-        //     let mlir = module_op.as_operation().to_string();
-        //     mlir
+        //     let ir_text = module_op.as_operation().to_string();
+        //     ir_text
         // };
         let stride_args_refs: Vec<(&str, &[i32])> = key
             .stride_args
@@ -260,13 +260,13 @@ pub fn compile_from_context<F: Fn() -> Module>(
 
         let stage2_start = std::time::Instant::now();
         let cubin_filename = {
-            let mlir = tile_module.to_mlir_text();
+            let ir_text = tile_module.to_mlir_text();
             if modules.get_entry_arg_bool_by_function_name(
                 module_name,
                 function_name,
                 "print_ir",
             )? {
-                println!("COMPILED IR: {module_name}::{function_name}\n{}", mlir);
+                println!("COMPILED IR: {module_name}::{function_name}\n{}", ir_text);
             }
             if let Some(path) = modules.get_entry_arg_string_by_function_name(
                 module_name,
@@ -279,7 +279,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
                     cache_hash_str.as_str(),
                     "mlir",
                     path.as_str(),
-                    mlir.as_str(),
+                    ir_text.as_str(),
                 );
             }
             compile_tile_ir_module(&tile_module, &gpu_name)
@@ -383,7 +383,7 @@ pub fn infer_launch_grid(
 ///
 /// `TileKernel` extends [`DeviceOp`] with kernel-specific functionality. Kernels are
 /// automatically generated from Rust functions marked with `#[cutile::entry]` and compiled
-/// to MLIR, then to CUDA PTX at runtime.
+/// to Tile IR bytecode, then to a CUDA cubin at runtime.
 ///
 /// The trait provides methods for configuring kernel launch parameters such as grid dimensions,
 /// type generics, and shared memory. Grid dimensions can be set explicitly or inferred from

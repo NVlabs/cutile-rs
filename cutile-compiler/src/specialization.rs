@@ -74,7 +74,7 @@ impl DivHint {
 ///
 /// Computed once at tensor construction and recomputed on reshape/view.
 /// Used by the JIT compiler to emit targeted `assume_div_by` operations
-/// and to determine static vs dynamic strides in generated MLIR.
+/// and to determine static vs dynamic strides in generated Tile IR.
 ///
 /// # Units
 ///

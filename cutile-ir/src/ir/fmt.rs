@@ -428,9 +428,11 @@ impl<'a> ModulePrinter<'a> {
             Opcode::Bitcast
             | Opcode::Broadcast
             | Opcode::IntToPtr
+            | Opcode::Pack
             | Opcode::PtrToInt
             | Opcode::PtrToPtr
-            | Opcode::Reshape => {
+            | Opcode::Reshape
+            | Opcode::Unpack => {
                 let op = self.module.op(op_id);
                 if !op.operands.is_empty() {
                     write!(out, " %{}", op.operands[0].index()).unwrap();
@@ -929,6 +931,33 @@ impl<'a> ModulePrinter<'a> {
                 writeln!(out).unwrap();
             }
 
+            // ---- MmaFScaled: `$lhs, $rhs, $acc, $lhs_scale, $rhs_scale attr-dict : type(...)` ----
+            Opcode::MmaFScaled => {
+                let op = self.module.op(op_id);
+                if op.operands.len() >= 5 {
+                    write!(
+                        out,
+                        " %{}, %{}, %{}, %{}, %{}",
+                        op.operands[0].index(),
+                        op.operands[1].index(),
+                        op.operands[2].index(),
+                        op.operands[3].index(),
+                        op.operands[4].index()
+                    )
+                    .unwrap();
+                }
+                self.print_attr_dict(op_id, &[], out);
+                write!(out, " :").unwrap();
+                for (i, &v) in op.operands.iter().enumerate() {
+                    if i > 0 {
+                        write!(out, ",").unwrap();
+                    }
+                    let ty = self.module.value_type(v);
+                    write!(out, " {}", format_type(ty)).unwrap();
+                }
+                writeln!(out).unwrap();
+            }
+
             // ---- MmaI: `$lhs, $rhs, $acc signedness_lhs signedness_rhs attr-dict : type(lhs), type(rhs), type(acc)` ----
             Opcode::MmaI => {
                 let op = self.module.op(op_id);
@@ -982,7 +1011,13 @@ impl<'a> ModulePrinter<'a> {
             }
 
             // ---- Global / Module / Entry handled elsewhere ----
-            Opcode::Global | Opcode::Module | Opcode::Entry => {
+            Opcode::Alloca
+            | Opcode::AtomicRedViewTko
+            | Opcode::Global
+            | Opcode::MakeGatherScatterView
+            | Opcode::MakeStridedView
+            | Opcode::Module
+            | Opcode::Entry => {
                 writeln!(out, " <structural-op>").unwrap();
             }
         }
@@ -1921,8 +1956,10 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         AndI => "andi",
         Assert => "assert",
         Assume => "assume",
+        Alloca => "alloca",
         Atan2 => "atan2",
         AtomicCAS => "atomic_cas_tko",
+        AtomicRedViewTko => "atomic_red_view_tko",
         AtomicRMW => "atomic_rmw_tko",
         Bitcast => "bitcast",
         Break => "break",
@@ -1963,7 +2000,9 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Log => "log",
         Log2 => "log2",
         Loop => "cuda_tile.loop",
+        MakeGatherScatterView => "make_gather_scatter_view",
         MakePartitionView => "make_partition_view",
+        MakeStridedView => "make_strided_view",
         MakeTensorView => "make_tensor_view",
         MakeToken => "make_token",
         MaxF => "maxf",
@@ -1971,6 +2010,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         MinF => "minf",
         MinI => "mini",
         MmaF => "mmaf",
+        MmaFScaled => "mmaf_scaled",
         MmaI => "mmai",
         Module => "module",
         MulF => "mulf",
@@ -1980,6 +2020,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         NegI => "negi",
         Offset => "offset",
         OrI => "ori",
+        Pack => "pack",
         Permute => "permute",
         Pow => "pow",
         Print => "print_tko",
@@ -2005,6 +2046,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Tan => "tan",
         TanH => "tanh",
         TruncI => "trunci",
+        Unpack => "unpack",
         XOrI => "xori",
         Yield => "yield",
     }
@@ -2093,6 +2135,65 @@ pub fn format_type(ty: &Type) -> String {
             };
             format!("partition_view<tile=({tile_shape}){padding}, {tv}{dim_map_str}>")
         }
+        Type::GatherScatterView(gsv) => {
+            let tv = format_type(&Type::TensorView(gsv.tensor_view.clone()));
+            let tile_shape = gsv
+                .tile_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("x");
+            let padding = match &gsv.padding_value {
+                Some(PaddingValue::Zero) => ", padding_value = zero",
+                Some(PaddingValue::NegZero) => ", padding_value = neg_zero",
+                Some(PaddingValue::Nan) => ", padding_value = nan",
+                Some(PaddingValue::PosInf) => ", padding_value = pos_inf",
+                Some(PaddingValue::NegInf) => ", padding_value = neg_inf",
+                None => "",
+            };
+            format!(
+                "gather_scatter_view<tile=({tile_shape}){padding}, {tv}, sparse_dim={}>",
+                gsv.sparse_dim
+            )
+        }
+        Type::StridedView(sv) => {
+            let tv = format_type(&Type::TensorView(sv.tensor_view.clone()));
+            let tile_shape = sv
+                .tile_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("x");
+            let traversal_strides = sv
+                .traversal_strides
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let padding = match &sv.padding_value {
+                Some(PaddingValue::Zero) => ", padding_value = zero",
+                Some(PaddingValue::NegZero) => ", padding_value = neg_zero",
+                Some(PaddingValue::Nan) => ", padding_value = nan",
+                Some(PaddingValue::PosInf) => ", padding_value = pos_inf",
+                Some(PaddingValue::NegInf) => ", padding_value = neg_inf",
+                None => "",
+            };
+            let is_identity = sv.dim_map.iter().enumerate().all(|(i, &d)| d == i as i32);
+            let dim_map_str = if is_identity {
+                String::new()
+            } else {
+                let vals = sv
+                    .dim_map
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(", dim_map=[{vals}]")
+            };
+            format!(
+                "strided_view<tile=({tile_shape}){padding}, traversal_strides=[{traversal_strides}], {tv}{dim_map_str}>"
+            )
+        }
         Type::Func(f) => {
             let inputs = f
                 .inputs
@@ -2115,6 +2216,7 @@ pub fn format_type(ty: &Type) -> String {
 fn format_scalar(s: ScalarType) -> String {
     match s {
         ScalarType::I1 => "i1",
+        ScalarType::I4 => "i4",
         ScalarType::I8 => "i8",
         ScalarType::I16 => "i16",
         ScalarType::I32 => "i32",
@@ -2126,6 +2228,8 @@ fn format_scalar(s: ScalarType) -> String {
         ScalarType::F64 => "f64",
         ScalarType::F8E4M3FN => "f8e4m3fn",
         ScalarType::F8E5M2 => "f8e5m2",
+        ScalarType::F8E8M0FNU => "f8e8m0fnu",
+        ScalarType::F4E2M1FN => "f4e2m1fn",
     }
     .into()
 }
@@ -2487,7 +2591,11 @@ fn decode_scalar(sc: ScalarType, data: &[u8], byte_offset: usize) -> String {
                 "0.0".into()
             }
         }
-        ScalarType::F8E4M3FN | ScalarType::F8E5M2 => {
+        ScalarType::I4
+        | ScalarType::F4E2M1FN
+        | ScalarType::F8E4M3FN
+        | ScalarType::F8E5M2
+        | ScalarType::F8E8M0FNU => {
             if byte_offset < data.len() {
                 format!("{}", data[byte_offset])
             } else {
