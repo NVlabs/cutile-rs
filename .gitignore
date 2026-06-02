@@ -3,6 +3,7 @@
 .vscode
 .cargo
 target
+_site
 
 **/*.bc
 **/*.cubin
