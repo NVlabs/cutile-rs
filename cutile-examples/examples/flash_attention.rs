@@ -4,8 +4,8 @@
  */
 extern crate core;
 
-use cuda_async::device_operation::{DeviceOp, Unzippable6};
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::{DeviceOp, Unzippable6};
+use cutile::cuda_core::Device;
 use cutile;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;

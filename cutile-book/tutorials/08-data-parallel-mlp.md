@@ -73,14 +73,14 @@ mod data_parallel_module {
 use data_parallel_module::{gemm, relu, matvec};
 
 #[tokio::main]
-async fn main() -> Result<(), DeviceError> {
+async fn main() -> Result<(), cutile::cuda_async::error::DeviceError> {
 
-    use cuda_async::device_operation::*;
+    use cutile::cuda_async::device_operation::*;
     use data_parallel_module::{gemm, relu, matvec};
     use cutile::api;
     use cutile::tensor::{Unpartition, Partition, Tensor, ToHostVec};
     use cutile::tile_kernel::{PartitionOp, TileKernel};
-    use cuda_async::device_context::global_policy;
+    use cutile::cuda_async::device_context::global_policy;
     use cutile::api::dup;
     use tokio::task::JoinHandle;
 
@@ -123,7 +123,7 @@ async fn main() -> Result<(), DeviceError> {
     }
 
     // Asynchronously compute forward pass for each batch of data on each device.
-    let mut futures: Vec<JoinHandle<Result<Partition<Tensor<f32>>, cuda_async::error::DeviceError>>> = vec![];
+    let mut futures: Vec<JoinHandle<Result<Partition<Tensor<f32>>, cutile::cuda_async::error::DeviceError>>> = vec![];
     for i in 0..num_devices {
         let w = &model_weights[i];
         let (w0, w1) = (w.0.clone(), w.1.clone());

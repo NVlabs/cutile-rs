@@ -9,8 +9,8 @@
 //! This example verifies that all tutorial code from the book compiles and runs correctly.
 //! Run with: cargo run --example book_examples
 
-use cuda_async::device_operation::*;
-use cuda_core::{Device, Stream};
+use cutile::cuda_async::device_operation::*;
+use cutile::cuda_core::{Device, Stream};
 use cutile;
 use cutile::api::{arange, ones, randn, zeros};
 use cutile::error::Error;

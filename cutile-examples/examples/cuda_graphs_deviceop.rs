@@ -9,7 +9,7 @@
  *   cargo run -p cutile-examples --example cuda_graphs
  */
 
-use cuda_core::{Device, Stream};
+use cutile::cuda_core::{Device, Stream};
 use cutile::error::Error;
 use cutile::prelude::*;
 use std::time::Instant;
@@ -217,7 +217,7 @@ impl GraphModel {
         buffers: Vec<LayerBuffers>,
     ) -> (impl DeviceOp<Output = ()>, SharedDeviceOp<Tensor<f32>>) {
         let mut hidden: SharedDeviceOp<Tensor<f32>> =
-            cuda_async::device_operation::shared(input.clone());
+            cutile::cuda_async::device_operation::shared(input.clone());
 
         let mut ops: Vec<BoxedDeviceOp<()>> = Vec::with_capacity(buffers.len());
 

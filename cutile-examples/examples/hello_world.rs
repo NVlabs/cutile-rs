@@ -4,8 +4,8 @@
  */
 #![allow(unused_variables)]
 
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
 use cutile::error::Error;
 use cutile::tile_kernel::TileKernel;
 

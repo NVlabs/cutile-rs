@@ -43,8 +43,8 @@ exp(x_i - max) / Σ exp(x_j - max)
 ## The Code
 
 ```rust
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
 use cutile;
 use cutile::api::arange;
 use cutile::error::Error;

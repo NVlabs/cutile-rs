@@ -12,7 +12,7 @@
  *   cargo run -p cutile-examples --example cuda_graphs
  */
 
-use cuda_core::{Device, Stream};
+use cutile::cuda_core::{Device, Stream};
 use cutile::error::Error;
 use cutile::prelude::*;
 use std::time::Instant;

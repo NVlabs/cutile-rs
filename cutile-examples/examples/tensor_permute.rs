@@ -4,8 +4,8 @@
  */
 extern crate core;
 
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::Device;
 use cutile::api::DeviceOpReshape;
 use cutile::api::{arange, zeros};
 use cutile::error::Error;
