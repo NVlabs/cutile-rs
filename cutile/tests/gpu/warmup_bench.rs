@@ -19,8 +19,8 @@ use crate::common;
 use cutile::api;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    contains_cuda_function, get_default_device, jit_compile_count,
-    CompileOptions, TileFunctionKey, TileKernel, WarmupSpec,
+    contains_cuda_function, get_default_device, jit_compile_count, TileFunctionKey, TileKernel,
+    WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
     get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
@@ -70,20 +70,15 @@ fn bench_key(
     spec_args: Vec<(String, SpecializationBits)>,
 ) -> TileFunctionKey {
     let device_id = get_default_device();
-    TileFunctionKey::new(
-        "bench_module".into(),
-        "vector_add".into(),
-        generics,
-        stride_args(),
-        spec_args,
-        vec![],
-        None,
-        CompileOptions::default(),
-        bench_module::_SOURCE_HASH.into(),
-        get_gpu_name(device_id),
-        get_compiler_version(),
-        get_cuda_toolkit_version(),
-    )
+    TileFunctionKey::builder("bench_module", "vector_add")
+        .generics(generics)
+        .stride_args(stride_args())
+        .spec_args(spec_args)
+        .source_hash(bench_module::_SOURCE_HASH)
+        .gpu_name(get_gpu_name(device_id))
+        .compiler_version(get_compiler_version())
+        .cuda_toolkit_version(get_cuda_toolkit_version())
+        .build()
 }
 
 fn timed_kernel_call(tile_size: &str) -> std::time::Duration {

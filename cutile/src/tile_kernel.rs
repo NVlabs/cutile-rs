@@ -81,38 +81,6 @@ pub struct TileFunctionKey {
     cuda_toolkit_version: String,
 }
 
-impl TileFunctionKey {
-    pub fn new(
-        module_name: String,
-        function_name: String,
-        function_generics: Vec<String>,
-        stride_args: Vec<(String, Vec<i32>)>,
-        spec_args: Vec<(String, SpecializationBits)>,
-        scalar_hints: Vec<(String, DivHint)>,
-        grid: Option<(u32, u32, u32)>,
-        compile_options: CompileOptions,
-        source_hash: String,
-        gpu_name: String,
-        compiler_version: String,
-        cuda_toolkit_version: String,
-    ) -> Self {
-        Self {
-            module_name,
-            function_name,
-            function_generics,
-            stride_args,
-            spec_args,
-            scalar_hints,
-            grid,
-            compile_options,
-            source_hash,
-            gpu_name,
-            compiler_version,
-            cuda_toolkit_version,
-        }
-    }
-}
-
 /// Builder for [`TileFunctionKey`].
 ///
 /// With 11 positional arguments it is easy to silently transpose two `String`
@@ -156,6 +124,10 @@ impl TileFunctionKeyBuilder {
     }
     pub fn spec_args(mut self, spec_args: Vec<(String, SpecializationBits)>) -> Self {
         self.spec_args = spec_args;
+        self
+    }
+    pub fn scalar_hints(mut self, scalar_hints: Vec<(String, DivHint)>) -> Self {
+        self.scalar_hints = scalar_hints;
         self
     }
     pub fn grid(mut self, grid: (u32, u32, u32)) -> Self {
@@ -339,20 +311,20 @@ pub fn compile_from_context<F: Fn() -> Module>(
     let gpu_name = get_gpu_name(device_id);
     let compiler_version = get_compiler_version();
     let cuda_toolkit_version = get_cuda_toolkit_version();
-    let key = TileFunctionKey::new(
-        module_name.to_string(),
-        function_name.to_string(),
-        function_generics,
-        stride_args,
-        spec_args,
-        scalar_hints,
-        const_grid,
-        compile_options,
-        source_hash.to_string(),
-        gpu_name.clone(),
-        compiler_version,
-        cuda_toolkit_version,
-    );
+    let mut key_builder = TileFunctionKey::builder(module_name, function_name)
+        .generics(function_generics)
+        .stride_args(stride_args)
+        .spec_args(spec_args)
+        .scalar_hints(scalar_hints)
+        .compile_options(compile_options)
+        .source_hash(source_hash)
+        .gpu_name(gpu_name.clone())
+        .compiler_version(compiler_version)
+        .cuda_toolkit_version(cuda_toolkit_version);
+    if let Some(grid) = const_grid {
+        key_builder = key_builder.grid(grid);
+    }
+    let key = key_builder.build();
     let key_str = key.get_hash_string();
     let slot = kernel_cache_slot(&key_str);
 
@@ -625,20 +597,20 @@ pub fn compile_warmup<F: Fn() -> Module>(
                 )))
             })?;
 
-        let key = TileFunctionKey::new(
-            module_name.to_string(),
-            spec.function_name.clone(),
-            spec.function_generics.clone(),
-            spec.stride_args.clone(),
-            spec.spec_args.clone(),
-            spec.scalar_hints.clone(),
-            spec.const_grid,
-            spec.compile_options.clone(),
-            source_hash.to_string(),
-            gpu_name.clone(),
-            compiler_version.clone(),
-            cuda_toolkit_version.clone(),
-        );
+        let mut key_builder = TileFunctionKey::builder(module_name, spec.function_name.as_str())
+            .generics(spec.function_generics.clone())
+            .stride_args(spec.stride_args.clone())
+            .spec_args(spec.spec_args.clone())
+            .scalar_hints(spec.scalar_hints.clone())
+            .compile_options(spec.compile_options.clone())
+            .source_hash(source_hash)
+            .gpu_name(gpu_name.clone())
+            .compiler_version(compiler_version.clone())
+            .cuda_toolkit_version(cuda_toolkit_version.clone());
+        if let Some(grid) = spec.const_grid {
+            key_builder = key_builder.grid(grid);
+        }
+        let key = key_builder.build();
 
         let slot = kernel_cache_slot(&key.get_hash_string());
 
