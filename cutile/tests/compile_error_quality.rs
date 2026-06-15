@@ -3,18 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! GPU-dependent error-quality tests.
+//! Compile-only error-quality tests.
 
 use cutile;
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use cutile_compiler::error::JITError;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use crate::common;
+mod common;
 
 const FORBIDDEN_INTERNALS: &[&str] = &[
     "TileRustValue",
@@ -107,7 +105,7 @@ mod error_quality_linked_helper {
 
 #[cutile::module]
 mod error_quality_linked_caller {
-    use crate::error_quality::error_quality_linked_helper::linked_bad_helper;
+    use crate::error_quality_linked_helper::linked_bad_helper;
     use cutile::core::*;
 
     #[cutile::entry()]
@@ -119,10 +117,8 @@ mod error_quality_linked_caller {
 }
 
 fn compile_and_get_error(kernel: Module, module_name: &str, function_name: &str) -> JITError {
-    let modules = CUDATileModules::from_kernel(kernel).expect("Failed to create CUDATileModules");
-    let gpu_name = get_gpu_name(0);
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    common::compile_to_ir(
+        move || kernel.clone(),
         module_name,
         function_name,
         &[128.to_string()],
@@ -130,28 +126,21 @@ fn compile_and_get_error(kernel: Module, module_name: &str, function_name: &str)
         &[],
         &[],
         None,
-        gpu_name,
         &CompileOptions::default(),
     )
-    .expect("Compiler construction should succeed");
-
-    let result = compiler.compile();
-    let err = match result {
-        Err(e) => Some(e),
-        Ok(_) => None,
-    };
-    err.unwrap_or_else(|| {
+    .err()
+    .unwrap_or_else(|| {
         panic!("Expected compilation of {module_name}::{function_name} to fail, but it succeeded.")
     })
 }
 
 fn line_containing(needle: &str) -> usize {
-    include_str!("error_quality.rs")
+    include_str!("compile_error_quality.rs")
         .lines()
         .enumerate()
         .find(|(_, line)| line.contains(needle))
         .map(|(idx, _)| idx + 1)
-        .unwrap_or_else(|| panic!("could not find `{needle}` in error_quality.rs"))
+        .unwrap_or_else(|| panic!("could not find `{needle}` in compile_error_quality.rs"))
 }
 
 fn assert_located_line(err: &JITError, expected_line: usize, context: &str) {
@@ -162,8 +151,8 @@ fn assert_located_line(err: &JITError, expected_line: usize, context: &str) {
                 "{context}: expected a known source location"
             );
             assert!(
-                loc.file.ends_with("gpu/error_quality.rs"),
-                "{context}: expected gpu/error_quality.rs, got {}",
+                loc.file.ends_with("compile_error_quality.rs"),
+                "{context}: expected compile_error_quality.rs, got {}",
                 loc.file
             );
             assert_eq!(loc.line, expected_line, "{context}: {err}");
@@ -228,7 +217,7 @@ fn untyped_literal_error_message_quality() {
         match &err {
             JITError::Located(msg, loc) => {
                 assert!(loc.is_known());
-                assert!(loc.file.ends_with("gpu/error_quality.rs"));
+                assert!(loc.file.ends_with("compile_error_quality.rs"));
                 assert!(display.contains("-->"));
                 assert_no_internal_leaks(msg, "untyped literal (Located msg)");
             }
@@ -302,12 +291,12 @@ fn untyped_literal_error_location_points_to_this_file() {
             JITError::Located(_msg, loc) => {
                 assert!(loc.is_known(), "Error should have a known source location");
                 assert!(
-                    loc.file.ends_with("gpu/error_quality.rs"),
-                    "Error location file should end with 'gpu/error_quality.rs', got: '{}'",
+                    loc.file.ends_with("compile_error_quality.rs"),
+                    "Error location file should end with 'compile_error_quality.rs', got: '{}'",
                     loc.file
                 );
 
-                let source = include_str!("error_quality.rs");
+                let source = include_str!("compile_error_quality.rs");
                 let target_line = source
                     .lines()
                     .enumerate()

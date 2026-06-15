@@ -11,7 +11,6 @@
 
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 
 mod common;
 
@@ -90,10 +89,8 @@ mod load_tile_like_examples_module {
 use load_tile_like_examples_module::__module_ast_self;
 
 fn compile(kernel: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    let mlir = common::compile_to_ir(
+        __module_ast_self,
         "load_tile_like_examples_module",
         kernel,
         generics,
@@ -101,11 +98,9 @@ fn compile(kernel: &str, generics: &[String], strides: &[(&str, &[i32])]) -> Str
         &[],
         &[],
         None,
-        "sm_120".to_string(),
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler");
-    let mlir = compiler.compile().expect("Failed to compile").to_string();
+    .expect("Failed to compile");
     println!("=== MLIR for {kernel} ===\n{mlir}");
     mlir
 }

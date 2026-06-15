@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -154,11 +152,8 @@ mod opt_hints_module {
 use opt_hints_module::__module_ast_self;
 
 fn compile_kernel(name: &str, strides: &[(&str, &[i32])], options: &CompileOptions) -> String {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
-    let gpu_name = get_gpu_name(0);
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    common::compile_to_ir(
+        __module_ast_self,
         "opt_hints_module",
         name,
         &[128.to_string()],
@@ -166,15 +161,9 @@ fn compile_kernel(name: &str, strides: &[(&str, &[i32])], options: &CompileOptio
         &[],
         &[],
         None,
-        gpu_name,
         options,
     )
-    .expect("Failed to create compiler");
-    let module_op = compiler.compile().expect("Failed to compile");
-    let result = module_op.to_string();
-    drop(module_op);
-    drop(compiler);
-    result
+    .expect("Failed to compile")
 }
 
 #[test]
@@ -330,11 +319,8 @@ fn different_compile_options_produce_different_mlir() {
 fn load_view_const_latency_in_mlir() {
     // Latency as a const generic: L=5 should appear as `latency = 5` in MLIR.
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
+        let mlir = common::compile_to_ir(
+            __module_ast_self,
             "opt_hints_module",
             "load_view_const_latency_kernel",
             &[128.to_string(), 5.to_string()], // S=128, L=5
@@ -342,14 +328,9 @@ fn load_view_const_latency_in_mlir() {
             &[],
             &[],
             None,
-            gpu_name,
             &CompileOptions::default(),
         )
-        .expect("Failed to create compiler");
-        let module_op = compiler.compile().expect("Failed to compile");
-        let mlir = module_op.to_string();
-        drop(module_op);
-        drop(compiler);
+        .expect("Failed to compile");
         println!("{mlir}");
         assert!(
             mlir.contains("latency = 5"),

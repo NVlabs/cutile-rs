@@ -52,7 +52,7 @@ The `#[cutile::module]` macro transforms `add` into a GPU kernel and generates a
 
 The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result. The launch grid `(8, 1, 1)` is inferred from the partition: 1024÷128 = 8 tiles.
 
-- Run a similar example via `cargo run -p cutile-examples --example add_basic`.
+- Run a similar example via `cargo run -p cutile-examples --example saxpy`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
 ## Related Projects
@@ -119,7 +119,7 @@ experimental-features = nix-command flakes
 
 Run a command directly:
 ```bash
-nix develop -c cargo run -p cutile-examples --example add_basic
+nix develop -c cargo run -p cutile-examples --example saxpy
 ```
 
 Or open an interactive shell:
