@@ -4,7 +4,7 @@
 
 <img src="assets/logo.svg" alt="cuTile Rust" width="380">
 
-[![Crates.io](https://img.shields.io/crates/v/cutile.svg)](https://crates.io/crates/cutile)
+[![Crates.io](https://badgen.net/crates/v/cutile)](https://crates.io/crates/cutile)
 [![Build](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pr.yml?event=push&label=build)](https://github.com/NVlabs/cutile-rs/actions/workflows/pr.yml)
 [![Docs](https://img.shields.io/badge/docs-book-blue.svg)](https://nvlabs.github.io/cutile-rs/)
 
