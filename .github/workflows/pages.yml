@@ -4,7 +4,6 @@ name: pages
 on:
   push:
     branches: [main]
-    tags: ["v*"]
 
 permissions:
   contents: read
