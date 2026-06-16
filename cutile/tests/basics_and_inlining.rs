@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -412,25 +410,25 @@ mod basics_and_inlining_module {
 
 use basics_and_inlining_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "basics_and_inlining_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_inline_tensor_from_ptr_helper() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "inline_tensor_from_ptr_kernel",
-            &["f32".to_string()],
-            &[],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("inline_tensor_from_ptr_kernel", &["f32".to_string()], &[]);
         assert!(
             module_op_str.contains("make_tensor_view"),
             "Expected inlined pointer helper to emit make_tensor_view.\n{module_op_str}"
@@ -442,22 +440,7 @@ fn compile_inline_tensor_from_ptr_helper() -> () {
 #[test]
 fn compile_ptr_partition_load_helper() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "ptr_partition_load_kernel",
-            &["f32".to_string()],
-            &[],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("ptr_partition_load_kernel", &["f32".to_string()], &[]);
         assert!(
             module_op_str.contains("make_partition_view"),
             "Expected partition helper to emit make_partition_view.\n{module_op_str}"
@@ -472,22 +455,7 @@ fn compile_ptr_partition_load_helper() -> () {
 #[test]
 fn compile_ptr_partition_mut_store_helper() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "ptr_partition_mut_store_kernel",
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("ptr_partition_mut_store_kernel", &[], &[]);
         assert!(
             module_op_str.contains("make_partition_view"),
             "Expected mutable partition helper to emit make_partition_view.\n{module_op_str}"
@@ -502,22 +470,11 @@ fn compile_ptr_partition_mut_store_helper() -> () {
 #[test]
 fn compile_partition_mut_store_rank3_loop() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "partition_mut_store_rank3_loop_kernel",
             &[1.to_string(), 4.to_string(), 8.to_string()],
             &[("out", &[1, 4, 8])],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         assert!(
             module_op_str.contains("store_view_tko"),
             "Expected partition store helper to emit store_view_tko.\n{module_op_str}"
@@ -528,22 +485,11 @@ fn compile_partition_mut_store_rank3_loop() -> () {
 #[test]
 fn compile_partition_mut_store_loaded_rank3_loop() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "partition_mut_store_loaded_rank3_loop_kernel",
             &[8.to_string(), 4.to_string()],
             &[("source", &[16, 16, 8]), ("out", &[1, 4, 8])],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         assert!(
             module_op_str.contains("store_view_tko"),
             "Expected partition store helper to emit store_view_tko.\n{module_op_str}"
@@ -554,11 +500,7 @@ fn compile_partition_mut_store_loaded_rank3_loop() -> () {
 #[test]
 fn compile_inlining() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "inlining_kernel",
             &[
                 "f32".to_string(),
@@ -569,14 +511,7 @@ fn compile_inlining() -> () {
                 2.to_string(),
             ],
             &[("y", &[1024, 1, 1])],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("{module_op_str}");
     });
 }
@@ -584,23 +519,11 @@ fn compile_inlining() -> () {
 #[test]
 fn compile_scalar_bool_condition() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "scalar_bool_condition_kernel",
             &[1.to_string(), 0.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("{module_op_str}");
     });
 }
@@ -608,23 +531,11 @@ fn compile_scalar_bool_condition() -> () {
 #[test]
 fn compile_basics() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "basics_kernel",
             &[128.to_string(), 256.to_string(), 512.to_string()],
             &[("y", &[1024, 1]), ("w", &[1, 2, 3])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("{module_op_str}");
     });
 }
@@ -632,26 +543,11 @@ fn compile_basics() -> () {
 #[test]
 fn compile_negative_constant() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "negative_constant_kernel",
             &[128.to_string()],
             &[("output", &[1024])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed to compile negative constant kernel.")
-            .to_string();
+        );
         assert!(module_op_str.contains("-1.0"));
         println!("{module_op_str}");
     });
@@ -660,23 +556,7 @@ fn compile_negative_constant() -> () {
 #[test]
 fn compile_ptr_tile_reshape() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "ptr_tile_reshape_kernel",
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("ptr_tile_reshape_kernel", &[], &[]);
         println!("{module_op_str}");
         assert!(
             module_op_str.contains("reshape") && module_op_str.contains("tile<ptr<f32>>"),

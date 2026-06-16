@@ -606,14 +606,12 @@ fn compile_kernel_result_with_generic_args(
     generic_args: &[&str],
     shape_constraints: &[(&str, &[i32])],
 ) -> Result<String, cutile_compiler::error::JITError> {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
     let generic_args = generic_args
         .iter()
         .map(|arg| arg.to_string())
         .collect::<Vec<_>>();
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    common::compile_to_ir(
+        __module_ast_self,
         "type_inference_sanity_module",
         name,
         &generic_args,
@@ -621,11 +619,8 @@ fn compile_kernel_result_with_generic_args(
         &[],
         &[],
         None,
-        "sm_120".to_string(),
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler.");
-    compiler.compile().map(|module| module.to_string())
 }
 
 fn typeck_dump(name: &str, shape_constraints: &[(&str, &[i32])]) -> String {

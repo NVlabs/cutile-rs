@@ -3,8 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+//! Smoke test: basic add kernel using `Tensor` arguments.
+
 use cutile::prelude::*;
 use my_module::add;
+
+use crate::common;
 
 #[cutile::module]
 mod my_module {
@@ -22,16 +26,20 @@ mod my_module {
     }
 }
 
-fn main() {
-    let c_host_vec = add(
-        api::zeros(&[32]).partition([4]),
-        api::ones(&[32]),
-        api::ones(&[32]),
-    )
-    .grid((8, 1, 1))
-    .first()
-    .unpartition()
-    .to_host_vec()
-    .sync();
-    println!("{:#?}", c_host_vec);
+#[test]
+fn smoke_add_basic() {
+    common::with_test_stack(|| {
+        let c_host_vec = add(
+            api::zeros(&[32]).partition([4]),
+            api::ones(&[32]),
+            api::ones(&[32]),
+        )
+        .grid((8, 1, 1))
+        .first()
+        .unpartition()
+        .to_host_vec()
+        .sync()
+        .expect("kernel should run");
+        assert!(c_host_vec.iter().all(|&v| (v - 2.0f32).abs() < 1e-6));
+    });
 }

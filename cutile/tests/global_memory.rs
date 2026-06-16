@@ -4,7 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 
 mod common;
 
@@ -55,10 +54,8 @@ use bad_static_module::__module_ast_self as bad_static_module_ast;
 use global_memory_module::__module_ast_self as global_memory_module_ast;
 
 fn compile_global_kernel(name: &str) -> String {
-    let modules = CUDATileModules::from_kernel(global_memory_module_ast())
-        .expect("Failed to create CUDATileModules");
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    common::compile_to_ir(
+        global_memory_module_ast,
         "global_memory_module",
         name,
         &[],
@@ -66,11 +63,9 @@ fn compile_global_kernel(name: &str) -> String {
         &[],
         &[],
         None,
-        "sm_120".to_string(),
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler.");
-    compiler.compile().expect("Failed to compile.").to_string()
+    .expect("Failed to compile.")
 }
 
 #[test]
@@ -112,10 +107,8 @@ fn global_atomic_add_lowers_to_atomic_rmw() {
 #[test]
 fn non_global_static_is_rejected() {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(bad_static_module_ast())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
+        let err = common::compile_to_ir(
+            bad_static_module_ast,
             "bad_static_module",
             "kernel",
             &[],
@@ -123,11 +116,9 @@ fn non_global_static_is_rejected() {
             &[],
             &[],
             None,
-            "sm_120".to_string(),
             &CompileOptions::default(),
         )
-        .expect("Failed to create compiler.");
-        let err = compiler.compile().expect_err("expected static rejection");
+        .expect_err("expected static rejection");
         let msg = err.to_string();
         assert!(msg.contains("only `static NAME: Global<E, { [] }>` items are supported"));
     });

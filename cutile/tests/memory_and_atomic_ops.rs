@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -493,26 +491,29 @@ mod memory_and_atomic_ops_module {
 
 use memory_and_atomic_ops_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "memory_and_atomic_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_join_tokens() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "join_tokens_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== JOIN_TOKENS MLIR ===\n{}", module_op_str);
 
         // Verify join_tokens operation appears
@@ -542,23 +543,7 @@ fn compile_join_tokens() -> () {
 #[test]
 fn compile_print_tko() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
-            "print_tko_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("print_tko_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== PRINT_TKO MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -575,23 +560,11 @@ fn compile_print_tko() -> () {
 #[test]
 fn compile_ptr_load_store() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "ptr_load_store_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== LOAD_PTR_TKO / STORE_PTR_TKO MLIR ===\n{}",
             module_op_str
@@ -644,23 +617,11 @@ fn compile_ptr_load_store() -> () {
 #[test]
 fn compile_load_ptr_weak() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "load_ptr_weak_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== LOAD_PTR_WEAK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -679,23 +640,11 @@ fn compile_load_ptr_weak() -> () {
 #[test]
 fn compile_load_ptr_acquire() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "load_ptr_acquire_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== LOAD_PTR_ACQUIRE MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -714,23 +663,11 @@ fn compile_load_ptr_acquire() -> () {
 #[test]
 fn compile_load_ptr_with_token() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "load_ptr_with_token_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== LOAD_PTR_WITH_TOKEN MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -754,23 +691,11 @@ fn compile_load_ptr_with_token() -> () {
 #[test]
 fn compile_load_ptr_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "load_ptr_with_mask_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== LOAD_PTR_WITH_MASK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -794,23 +719,11 @@ fn compile_load_ptr_with_mask() -> () {
 #[test]
 fn compile_store_ptr_release() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "store_ptr_release_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== STORE_PTR_RELEASE MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -829,23 +742,11 @@ fn compile_store_ptr_release() -> () {
 #[test]
 fn compile_store_ptr_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "store_ptr_with_mask_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== STORE_PTR_WITH_MASK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -868,23 +769,11 @@ fn compile_store_ptr_with_mask() -> () {
 #[test]
 fn compile_atomic_rmw() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_rmw_kernel",
             &[128.to_string()],
             &[("output", &[1]), ("counters", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_RMW MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -915,23 +804,11 @@ fn compile_atomic_rmw() -> () {
 #[test]
 fn compile_atomic_cas() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_cas_kernel",
             &[128.to_string()],
             &[("output", &[1]), ("expected", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_CAS MLIR ===\n{}", module_op_str);
 
         // Verify atomic_cas_tko operation appears
@@ -963,23 +840,11 @@ fn compile_atomic_cas() -> () {
 #[test]
 fn compile_atomic_cas_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_cas_with_mask_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_CAS WITH MASK MLIR ===\n{}", module_op_str);
 
         // Verify atomic_cas_tko operation appears
@@ -1003,23 +868,11 @@ fn compile_atomic_cas_with_mask() -> () {
 #[test]
 fn compile_atomic_cas_acq_rel_sys() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_cas_acq_rel_sys_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_CAS ACQ_REL SYS MLIR ===\n{}", module_op_str);
 
         // Verify atomic_cas_tko operation appears
@@ -1043,23 +896,8 @@ fn compile_atomic_cas_acq_rel_sys() -> () {
 #[test]
 fn compile_atomic_and() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
-            "atomic_and_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str =
+            compile_ir("atomic_and_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== ATOMIC_AND MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -1082,23 +920,8 @@ fn compile_atomic_and() -> () {
 #[test]
 fn compile_atomic_add() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
-            "atomic_add_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str =
+            compile_ir("atomic_add_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== ATOMIC_ADD MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -1121,23 +944,8 @@ fn compile_atomic_add() -> () {
 #[test]
 fn compile_atomic_max() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
-            "atomic_max_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str =
+            compile_ir("atomic_max_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== ATOMIC_MAX MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -1160,23 +968,11 @@ fn compile_atomic_max() -> () {
 #[test]
 fn compile_atomic_rmw_with_mask() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_rmw_with_mask_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_RMW_WITH_MASK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -1199,23 +995,11 @@ fn compile_atomic_rmw_with_mask() -> () {
 #[test]
 fn compile_atomic_rmw_with_token() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_rmw_with_token_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_RMW_WITH_TOKEN MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -1238,23 +1022,11 @@ fn compile_atomic_rmw_with_token() -> () {
 #[test]
 fn compile_atomic_xchg() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "atomic_xchg_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ATOMIC_XCHG MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -1277,23 +1049,11 @@ fn compile_atomic_xchg() -> () {
 #[test]
 fn compile_padded_partition_view() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "memory_and_atomic_ops_module",
+        let module_op_str = compile_ir(
             "padded_partition_view_kernel",
             &[128.to_string()],
             &[("input", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== PADDED_PARTITION_VIEW MLIR ===\n{}", module_op_str);
 
         assert!(

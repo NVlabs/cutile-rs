@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -104,26 +102,25 @@ mod binary_math_ops_module {
 
 use binary_math_ops_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "binary_math_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_minmax() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
-            "minmax_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("minmax_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MIN/MAX MLIR ===\n{}", module_op_str);
 
         let expected_ops = ["remf", "maxf", "minf"];
@@ -145,23 +142,7 @@ fn compile_minmax() -> () {
 #[test]
 fn compile_select() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
-            "select_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("select_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== SELECT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -180,23 +161,11 @@ fn compile_select() -> () {
 #[test]
 fn compile_bf16_binary_arith() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
+        let module_op_str = compile_ir(
             "bf16_binary_arith_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== BF16 BINARY ARITH MLIR ===\n{}", module_op_str);
 
         for op in ["addf", "mulf", "divf"] {
@@ -216,23 +185,11 @@ fn compile_bf16_binary_arith() -> () {
 #[test]
 fn compile_addf_shadow_dispatch() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
+        let module_op_str = compile_ir(
             "addf_shadow_dispatch_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ADDF TRAIT DISPATCH MLIR ===\n{}", module_op_str);
         assert!(
             module_op_str.contains("= addf"),
@@ -244,23 +201,11 @@ fn compile_addf_shadow_dispatch() -> () {
 #[test]
 fn compile_reshape_shadow_dispatch() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
+        let module_op_str = compile_ir(
             "reshape_shadow_dispatch_kernel",
             &[8.to_string(), 16.to_string()],
             &[("output", &[8, 16])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== RESHAPE TRAIT DISPATCH MLIR ===\n{}", module_op_str);
         assert!(
             module_op_str.contains("reshape"),
@@ -272,23 +217,11 @@ fn compile_reshape_shadow_dispatch() -> () {
 #[test]
 fn compile_reduce_sum_shadow_dispatch() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
+        let module_op_str = compile_ir(
             "reduce_sum_shadow_dispatch_kernel",
             &[8.to_string(), 16.to_string()],
             &[("input", &[8, 16]), ("output", &[1, 1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== REDUCE_SUM TRAIT DISPATCH MLIR ===\n{}",
             module_op_str
@@ -303,23 +236,11 @@ fn compile_reduce_sum_shadow_dispatch() -> () {
 #[test]
 fn compile_addf_shadow_dispatch_nested() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "binary_math_ops_module",
+        let module_op_str = compile_ir(
             "addf_shadow_dispatch_nested_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== ADDF TRAIT DISPATCH NESTED MLIR ===\n{}",
             module_op_str

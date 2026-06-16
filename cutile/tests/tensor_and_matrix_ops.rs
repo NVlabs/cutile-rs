@@ -8,7 +8,6 @@ use cutile::prelude::{
     api, Arc, Device, DeviceOp, DeviceOpReshape, IntoPartition, Tensor, ToHostVec,
 };
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
@@ -309,26 +308,25 @@ mod tensor_and_matrix_ops_module {
 
 use tensor_and_matrix_ops_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "tensor_and_matrix_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_cat() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
-            "cat_kernel",
-            &[],
-            &[("output", &[8])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("cat_kernel", &[], &[("output", &[8])]);
         println!("\n=== CAT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -347,23 +345,7 @@ fn compile_cat() -> () {
 #[test]
 fn compile_extract() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
-            "extract_kernel",
-            &[],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("extract_kernel", &[], &[("output", &[1])]);
         println!("\n=== EXTRACT MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -378,23 +360,7 @@ fn compile_extract() -> () {
 #[test]
 fn compile_mmai() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
-            "mmai_kernel",
-            &[],
-            &[("output", &[16, 16])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("mmai_kernel", &[], &[("output", &[16, 16])]);
         println!("\n=== MMAI MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -417,23 +383,7 @@ fn compile_mmai() -> () {
 #[test]
 fn compile_raw_mmai() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
-            "raw_mmai_kernel",
-            &[],
-            &[("output", &[16, 16])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("raw_mmai_kernel", &[], &[("output", &[16, 16])]);
         println!("\n=== RAW MMAI MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -450,23 +400,7 @@ fn compile_raw_mmai() -> () {
 #[test]
 fn compile_raw_mmaf() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
-            "raw_mmaf_kernel",
-            &[],
-            &[("output", &[16, 16])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("raw_mmaf_kernel", &[], &[("output", &[16, 16])]);
         println!("\n=== RAW MMAF MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -479,23 +413,11 @@ fn compile_raw_mmaf() -> () {
 #[test]
 fn compile_transpose_tile() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "transpose_tile_kernel",
             &[],
             &[("output", &[8, 16]), ("input", &[16, 8])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= permute"));
         assert!(module_op_str.contains("tile<16x8xf32>"));
@@ -506,23 +428,11 @@ fn compile_transpose_tile() -> () {
 #[test]
 fn compile_nvfp4_pack_unpack() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "nvfp4_pack_unpack_kernel",
             &[],
             &[("output", &[32]), ("input", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== NVFP4 PACK/UNPACK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -543,23 +453,11 @@ fn compile_nvfp4_pack_unpack() -> () {
 #[test]
 fn compile_nvfp4_pack_unpack_2d() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "nvfp4_pack_unpack_2d_kernel",
             &[],
             &[("output", &[32, 1]), ("input", &[32, 1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= unpack"));
         assert!(module_op_str.contains("= pack"));
@@ -572,23 +470,11 @@ fn compile_nvfp4_pack_unpack_2d() -> () {
 #[test]
 fn compile_nvfp4_u8_escape_unpack() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "nvfp4_u8_escape_unpack_kernel",
             &[],
             &[("output", &[32]), ("input", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== NVFP4 U8 ESCAPE UNPACK MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -609,23 +495,11 @@ fn compile_nvfp4_u8_escape_unpack() -> () {
 #[test]
 fn compile_pack_unpack_2d_f16() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "pack_unpack_2d_f16_kernel",
             &[],
             &[("output", &[8, 8]), ("input", &[8, 8])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= pack"));
         assert!(module_op_str.contains("= unpack"));
@@ -637,23 +511,11 @@ fn compile_pack_unpack_2d_f16() -> () {
 #[test]
 fn compile_cross_type_pack_unpack() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "cross_type_pack_unpack_kernel",
             &[],
             &[("output", &[16]), ("input", &[16])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= pack"));
         assert!(module_op_str.contains("= unpack"));
@@ -665,23 +527,11 @@ fn compile_cross_type_pack_unpack() -> () {
 #[test]
 fn compile_i32_packed_nibbles_to_i4_roundtrip() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "i32_packed_nibbles_to_i4_roundtrip_kernel",
             &[],
             &[("output", &[16]), ("input", &[16])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= pack"));
         assert!(module_op_str.contains("= unpack"));
@@ -694,12 +544,7 @@ fn compile_i32_packed_nibbles_to_i4_roundtrip() -> () {
 #[test]
 fn compile_raw_mmaf_scaled_nvfp4_from_i32_words() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "raw_mmaf_scaled_nvfp4_from_i32_words_kernel",
             &[],
             &[
@@ -709,14 +554,7 @@ fn compile_raw_mmaf_scaled_nvfp4_from_i32_words() -> () {
                 ("lhs_scale", &[16, 1]),
                 ("rhs_scale", &[1, 16]),
             ],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= pack"));
         assert!(module_op_str.contains("= unpack"));
@@ -732,12 +570,7 @@ fn compile_raw_mmaf_scaled_nvfp4_from_i32_words() -> () {
 #[test]
 fn compile_raw_mmaf_scaled_nvfp4() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "raw_mmaf_scaled_nvfp4_kernel",
             &[],
             &[
@@ -747,14 +580,7 @@ fn compile_raw_mmaf_scaled_nvfp4() -> () {
                 ("lhs_scale", &[1, 1]),
                 ("rhs_scale", &[16, 1]),
             ],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== RAW MMAF_SCALED NVFP4 MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -775,12 +601,7 @@ fn compile_raw_mmaf_scaled_nvfp4() -> () {
 #[test]
 fn compile_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "raw_mmaf_scaled_nvfp4_e4_scale_kernel",
             &[],
             &[
@@ -790,14 +611,7 @@ fn compile_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
                 ("lhs_scale", &[1, 1]),
                 ("rhs_scale", &[16, 1]),
             ],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= mmaf_scaled"));
         assert!(module_op_str.contains("f4e2m1fn"));
@@ -870,12 +684,7 @@ fn execute_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
 #[test]
 fn compile_raw_mmaf_scaled_fp8() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "raw_mmaf_scaled_fp8_kernel",
             &[],
             &[
@@ -885,14 +694,7 @@ fn compile_raw_mmaf_scaled_fp8() -> () {
                 ("lhs_scale", &[16, 2]),
                 ("rhs_scale", &[2, 16]),
             ],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= mmaf_scaled"));
         assert!(module_op_str.contains("f8e4m3fn"));
@@ -903,12 +705,7 @@ fn compile_raw_mmaf_scaled_fp8() -> () {
 #[test]
 fn compile_batch_mmaf_scaled_fp8() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "tensor_and_matrix_ops_module",
+        let module_op_str = compile_ir(
             "batch_mmaf_scaled_fp8_kernel",
             &[],
             &[
@@ -918,14 +715,7 @@ fn compile_batch_mmaf_scaled_fp8() -> () {
                 ("lhs_scale", &[2, 16, 2]),
                 ("rhs_scale", &[2, 2, 16]),
             ],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
 
         assert!(module_op_str.contains("= mmaf_scaled"));
         assert!(module_op_str.contains("tile<2x16x64xf8e4m3fn>"));
