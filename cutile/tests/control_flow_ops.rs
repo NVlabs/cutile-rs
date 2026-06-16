@@ -339,7 +339,7 @@ fn compile_control_flow_test() -> () {
 }
 
 #[test]
-fn compile_if_result_test() -> () {
+fn execute_if_result_test() -> () {
     common::with_test_stack(|| {
         let arg: Tensor<i64> = ones(&[16]).sync().expect("Failed.");
         // If true, double and add 2.
