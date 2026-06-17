@@ -64,7 +64,6 @@ struct FunctionParamTypes {
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         modules: &'m CUDATileModules,
         module_name: &str,

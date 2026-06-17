@@ -286,7 +286,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn offset_nested_mutable_indices(
         &self,
         module: &mut Module,
@@ -450,7 +449,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn try_compile_cuda_tile_special_op(
         &self,
         module: &mut Module,
@@ -1496,7 +1494,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Ok(hint_params)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_load_view_tko(
         &self,
         module: &mut Module,
@@ -1642,7 +1639,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_store_view_tko(
         &self,
         module: &mut Module,
@@ -1856,7 +1852,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_shape_query_op(
         &self,
         module: &mut Module,
@@ -2258,7 +2253,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     /// General-purpose op compilation for CUDA Tile dialect operations.
-    #[allow(clippy::too_many_arguments)]
     fn compile_general_op(
         &self,
         module: &mut Module,

@@ -205,7 +205,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_global_store(
         &self,
         module: &mut Module,
@@ -291,7 +290,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_global_atomic_add(
         &self,
         module: &mut Module,

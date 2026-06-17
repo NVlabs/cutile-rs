@@ -91,7 +91,6 @@ fn set_lit_span(lit: &mut syn::Lit, span: Span) {
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
-    #[allow(clippy::too_many_arguments)]
     pub fn inline_function_call(
         &self,
         module: &mut Module,

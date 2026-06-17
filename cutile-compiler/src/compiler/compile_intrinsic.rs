@@ -129,7 +129,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_nested_mutable_access_offset_metadata(
         &self,
         module: &mut Module,
@@ -248,7 +247,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Some(count)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compile_fp4_pack_unpack(
         &self,
         module: &mut Module,
@@ -456,7 +454,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// with `#[cuda_tile::compiler_op(...)]`. These are internal operations
     /// like mma, tile ops, shape ops, reduce, arithmetic, cast, convert,
     /// return_type_meta_field, set_type_meta_field, check, and assume.
-    #[allow(clippy::too_many_arguments)]
     pub fn compile_compiler_op_call(
         &self,
         module: &mut Module,

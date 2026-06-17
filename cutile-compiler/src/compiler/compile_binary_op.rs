@@ -138,7 +138,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         )?))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn compile_binary_op_from_values(
         &self,
         module: &mut Module,

@@ -448,7 +448,6 @@ fn generic_arg_to_const_array_string(arg: &GenericArgument) -> Result<String, JI
 }
 
 /// Generates a Tile IR entry-point wrapper for a kernel function, including tensor argument unpacking.
-#[allow(clippy::too_many_arguments)]
 pub fn generate_entry_point(
     modules: &CUDATileModules,
     fn_item: &ItemFn,
