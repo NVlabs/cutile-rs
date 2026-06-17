@@ -27,6 +27,9 @@ members = [
     "cutile-examples",
     "cutile-benchmarks",
 
+    # Reusable cuTile Rust kernels.
+    "cutile-kernels",
+
     # Thin wrapper around the cuda-tile C++ library; excluded from
     # default-members because its build downloads and compiles LLVM.
     "cuda-tile-rs",
@@ -40,12 +43,13 @@ default-members = [
     "cutile-macro",
     "cutile-ir",
     "cutile",
+    "cutile-kernels",
     "cutile-examples",
     "cutile-benchmarks",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -78,12 +82,13 @@ convert_case = "0.8"
 linkme = "0.3"
 
 # ── Intra-workspace ──────────────────────────────────────────────────────────
-cuda-bindings = { path = "cuda-bindings", version = "0.1.1" }
-cuda-core = { path = "cuda-core", version = "0.1.1" }
-cuda-async = { path = "cuda-async", version = "0.1.1" }
-cutile-compiler = { path = "cutile-compiler", version = "0.1.1" }
-cutile-macro = { path = "cutile-macro", version = "0.1.1" }
-cutile = { path = "cutile", version = "0.1.1" }
-cutile-examples = { path = "cutile-examples", version = "0.1.1" }
-cutile-ir = { path = "cutile-ir", version = "0.1.1" }
-cutile-benchmarks = { path = "cutile-benchmarks", version = "0.1.1" }
+cuda-bindings = { path = "cuda-bindings", version = "0.2.0" }
+cuda-core = { path = "cuda-core", version = "0.2.0" }
+cuda-async = { path = "cuda-async", version = "0.2.0" }
+cutile-compiler = { path = "cutile-compiler", version = "0.2.0" }
+cutile-macro = { path = "cutile-macro", version = "0.2.0" }
+cutile = { path = "cutile", version = "0.2.0" }
+cutile-kernels = { path = "cutile-kernels", version = "0.2.0" }
+cutile-examples = { path = "cutile-examples", version = "0.2.0" }
+cutile-ir = { path = "cutile-ir", version = "0.2.0" }
+cutile-benchmarks = { path = "cutile-benchmarks", version = "0.2.0" }

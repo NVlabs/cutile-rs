@@ -278,8 +278,8 @@ impl CUDATileModules {
         let mut use_catalog: UseCatalog = HashMap::new();
 
         // Each queue entry pairs a (name, use-path) import with the
-        // absolute path of the module it appeared in, so `crate::*` paths
-        // can be resolved against the right crate root.
+        // absolute path of the module it appeared in, so relative paths can
+        // be resolved against the right module before registry lookup.
         struct Pending {
             name: Option<String>,
             path: String,
@@ -295,8 +295,7 @@ impl CUDATileModules {
             .collect();
 
         while let Some(pending) = queue.pop() {
-            let resolved =
-                resolve_crate_prefix(&pending.path, crate_root_of(&pending.owning_module));
+            let resolved = resolve_relative_use_path(&pending.path, &pending.owning_module);
             // `appears_in_kernel_module` is true when the use statement
             // we're processing was written in the kernel module itself —
             // i.e. `pending.owning_module` is the same module that was
@@ -352,26 +351,42 @@ impl CUDATileModules {
     }
 }
 
-/// Extract the crate-root segment from an absolute module path. For
-/// `"cutile::core"` returns `"cutile"`; for `""` returns `""`.
-fn crate_root_of(absolute_path: &str) -> &str {
-    absolute_path.split("::").next().unwrap_or("")
+/// Resolve leading `crate`, `self`, and `super` segments in a `use` path
+/// against the absolute path of the module containing that use.
+fn resolve_relative_use_path(use_path: &str, owning_module: &str) -> String {
+    let mut path_segments = use_path.split("::");
+    let Some(first) = path_segments.next() else {
+        return use_path.to_string();
+    };
+
+    match first {
+        "crate" => {
+            let Some(crate_root) = owning_module.split("::").next() else {
+                return use_path.to_string();
+            };
+            join_segments([crate_root].into_iter().chain(path_segments))
+        }
+        "self" => join_segments(owning_module.split("::").chain(path_segments)),
+        "super" => {
+            let mut base = owning_module.split("::").collect::<Vec<_>>();
+            base.pop();
+            while let Some("super") = path_segments.clone().next() {
+                path_segments.next();
+                if base.pop().is_none() {
+                    return use_path.to_string();
+                }
+            }
+            join_segments(base.into_iter().chain(path_segments))
+        }
+        _ => use_path.to_string(),
+    }
 }
 
-/// Replace a leading `crate::` segment in `use_path` with `crate_root`.
-/// Pass-through if the path doesn't start with `crate::`.
-fn resolve_crate_prefix(use_path: &str, crate_root: &str) -> String {
-    if let Some(rest) = use_path.strip_prefix("crate::") {
-        if crate_root.is_empty() {
-            use_path.to_string()
-        } else {
-            format!("{crate_root}::{rest}")
-        }
-    } else if use_path == "crate" {
-        crate_root.to_string()
-    } else {
-        use_path.to_string()
-    }
+fn join_segments<'a>(segments: impl Iterator<Item = &'a str>) -> String {
+    segments
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +930,26 @@ mod tests {
                 .get_span_base("my_crate::my_module")
                 .map(|base| base.file.as_str()),
             Some("source.rs")
+        );
+    }
+
+    #[test]
+    fn relative_use_paths_resolve_against_owning_module() {
+        assert_eq!(
+            resolve_relative_use_path("super::activations::relu", "gpu::inter_module::my_kernels"),
+            "gpu::inter_module::activations::relu"
+        );
+        assert_eq!(
+            resolve_relative_use_path("self::helpers::relu", "gpu::inter_module::my_kernels"),
+            "gpu::inter_module::my_kernels::helpers::relu"
+        );
+        assert_eq!(
+            resolve_relative_use_path("crate::core::Tile", "cutile::core"),
+            "cutile::core::Tile"
+        );
+        assert_eq!(
+            resolve_relative_use_path("cutile::core::Tile", "gpu::inter_module::my_kernels"),
+            "cutile::core::Tile"
         );
     }
 

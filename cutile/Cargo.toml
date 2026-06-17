@@ -26,3 +26,6 @@ cutile-compiler = { workspace = true }
 cutile-macro = { workspace = true }
 cutile-ir = { workspace = true }
 linkme = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

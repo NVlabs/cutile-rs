@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-async"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cuda-core",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-bindings"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bindgen 0.69.5",
  "libloading",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-tile-rs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bindgen 0.71.1",
  "cmake",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "cutile"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -440,11 +440,12 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "tokio",
 ]
 
 [[package]]
 name = "cutile-benchmarks"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "cuda-async",
@@ -456,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-compiler"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -475,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-examples"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -490,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-ir"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "half",
  "indexmap",
@@ -498,8 +499,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutile-kernels"
+version = "0.2.0"
+dependencies = [
+ "cutile",
+ "cutile-compiler",
+]
+
+[[package]]
 name = "cutile-macro"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "convert_case",
  "cutile-compiler",

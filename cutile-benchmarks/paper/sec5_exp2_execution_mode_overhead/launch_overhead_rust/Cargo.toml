@@ -1,0 +1,28 @@
+[package]
+name = "launch-overhead-rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[[bin]]
+name = "launch_overhead"
+path = "src/main.rs"
+
+[[bin]]
+name = "async_throughput"
+path = "src/bin/async_throughput.rs"
+
+[dependencies]
+cuda-core = "0.1.1"
+cuda-async = "0.1.1"
+cutile = "0.1.1"
+cutile-macro = "0.1.1"
+cutile-compiler = "0.1.1"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[workspace]

@@ -12,9 +12,9 @@ use cutile_ir::ir::{
     TileElementType, TileType, Type, DYNAMIC,
 };
 
-use cutile_compiler::cuda_tile_runtime_utils::{
-    compile_tile_ir_module, get_gpu_name, tileiras_binary,
-};
+use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, tileiras_binary};
+
+const DEFAULT_GPU_NAME: &str = "sm_120";
 
 /// Build the simplest possible kernel: an entry that just returns.
 fn build_empty_kernel() -> Module {
@@ -106,7 +106,7 @@ fn test_empty_kernel_bytecode_roundtrip() {
 
 #[test]
 fn test_empty_kernel_tileiras() {
-    // Skip if no GPU or tileiras available.
+    // Skip if tileiras is not available. Lowering to a cubin does not need a CUDA device.
     if std::process::Command::new(tileiras_binary())
         .arg("--version")
         .output()
@@ -115,16 +115,10 @@ fn test_empty_kernel_tileiras() {
         eprintln!("skipping: tileiras not available");
         return;
     }
-    let gpu_name = match std::panic::catch_unwind(|| get_gpu_name(0)) {
-        Ok(name) => name,
-        Err(_) => {
-            eprintln!("skipping: no CUDA GPU available");
-            return;
-        }
-    };
+    let gpu_name = DEFAULT_GPU_NAME;
 
     let module = build_empty_kernel();
-    println!("GPU: {gpu_name}");
+    println!("Target: {gpu_name}");
 
     // Print MLIR text for debugging.
     println!("=== MLIR text ===\n{}", module.to_mlir_text());
@@ -152,7 +146,7 @@ fn test_empty_kernel_tileiras() {
 // Helper to skip tests when no GPU is available
 // =========================================================================
 
-fn try_get_gpu_name() -> Option<String> {
+fn tileiras_target() -> Option<&'static str> {
     if std::process::Command::new(tileiras_binary())
         .arg("--version")
         .output()
@@ -160,12 +154,12 @@ fn try_get_gpu_name() -> Option<String> {
     {
         return None;
     }
-    std::panic::catch_unwind(|| get_gpu_name(0)).ok()
+    Some(DEFAULT_GPU_NAME)
 }
 
 fn assert_tileiras_accepts(module: &Module) {
-    let Some(gpu_name) = try_get_gpu_name() else {
-        eprintln!("skipping tileiras: no GPU available");
+    let Some(gpu_name) = tileiras_target() else {
+        eprintln!("skipping tileiras: tileiras not available");
         return;
     };
 

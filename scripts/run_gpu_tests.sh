@@ -9,28 +9,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_runner_common.sh"
 
 print_header "Running GPU tests"
 
-run_step \
-    "cutile error-quality tests" \
-    cargo test -p cutile --test error_quality
-
-run_step \
-    "cutile doc tests" \
-    cargo test -p cutile --doc
-
 for test_target in \
-    basics_and_inlining \
-    binary_math_ops \
-    bitwise_and_bitcast_ops \
-    control_flow_ops \
-    integer_ops \
-    memory_and_atomic_ops \
-    reduce_scan_ops \
-    span_source_location \
-    tensor_and_matrix_ops \
+    arange \
+    dtype_float_ops \
+    gpu_execution_ops \
+    nested_partition_mut \
+    slice_non_divisible \
     tensor_reinterpret \
-    tensor_views \
-    type_conversion_ops \
-    unary_math_ops
+    tensor_views
 do
     run_step \
         "cutile GPU integration test ${test_target}" \
@@ -38,16 +24,35 @@ do
 done
 
 run_step \
-    "cutile GPU error-quality tests" \
+    "cutile GPU integration test control_flow_ops runtime cases" \
+    cargo test -p cutile --test control_flow_ops -- --skip compile_
+
+run_step \
+    "cutile GPU integration test tensor_and_matrix_ops runtime cases" \
+    cargo test -p cutile --test tensor_and_matrix_ops execute_
+
+run_step \
+    "cutile GPU integration test type_conversion_ops runtime cases" \
+    cargo test -p cutile --test type_conversion_ops execute_
+
+run_step \
+    "cutile GPU integration test specialization_bits runtime cases" \
+    cargo test -p cutile --test specialization_bits raw_pointer_launch
+
+run_step \
+    "cutile GPU aggregate tests" \
     cargo test -p cutile --test gpu
 
 for test_target in \
+    concurrent_capture \
+    cuda_graph \
+    execute_once \
     pool_allocation
 do
     run_step \
         "cuda-async GPU integration test ${test_target}" \
         cargo test -p cuda-async --test "$test_target"
-done    
+done
 
 print_summary_and_exit \
     "All GPU tests passed!" \

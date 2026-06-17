@@ -6,7 +6,7 @@
  * into a CUDA graph for efficient replay.
  *
  * Usage:
- *   cargo run -p cutile-examples --example cuda_graphs
+ *   cargo run -p cutile-examples --example cuda_graphs_deviceop
  */
 
 use cuda_core::{Device, Stream};

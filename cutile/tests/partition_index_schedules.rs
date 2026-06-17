@@ -5,7 +5,6 @@
 
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 
 mod common;
 
@@ -186,8 +185,6 @@ async fn mapped_partition_launcher_accepts_host_map() {
 use partition_index_schedules_module::__module_ast_self;
 
 fn compile_static_persistent_gemm_kernel(function_name: &str) -> Result<String, String> {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
     let (generics, stride_args): (Vec<String>, Vec<(&str, &[i32])>) = match function_name {
         "static_persistent_gemm_scheduled" => (
             vec![
@@ -261,8 +258,8 @@ fn compile_static_persistent_gemm_kernel(function_name: &str) -> Result<String, 
         ),
         other => panic!("unexpected test kernel `{other}`"),
     };
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    common::compile_to_ir(
+        __module_ast_self,
         "partition_index_schedules_module",
         function_name,
         &generics,
@@ -270,14 +267,9 @@ fn compile_static_persistent_gemm_kernel(function_name: &str) -> Result<String, 
         &[],
         &[],
         Some((4, 1, 1)),
-        "sm_120".to_string(),
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler");
-    compiler
-        .compile()
-        .map(|module| module.to_string())
-        .map_err(|err| err.to_string())
+    .map_err(|err| err.to_string())
 }
 
 #[test]
@@ -309,8 +301,6 @@ fn mapped_partition_indices_lower_to_persistent_loop() {
 }
 
 fn compile_dynamic_persistent_gemm_bounded_with_map(map_shape: [i32; 2]) -> Result<String, String> {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
     let generics = vec![
         "f32".to_string(),
         "64".to_string(),
@@ -324,8 +314,8 @@ fn compile_dynamic_persistent_gemm_bounded_with_map(map_shape: [i32; 2]) -> Resu
         ("x", &[128, 1][..]),
         ("y", &[256, 1][..]),
     ];
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    common::compile_to_ir(
+        __module_ast_self,
         "partition_index_schedules_module",
         "dynamic_persistent_gemm_bounded",
         &generics,
@@ -333,14 +323,9 @@ fn compile_dynamic_persistent_gemm_bounded_with_map(map_shape: [i32; 2]) -> Resu
         &[],
         &[],
         Some((4, 1, 1)),
-        "sm_120".to_string(),
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler");
-    compiler
-        .compile()
-        .map(|module| module.to_string())
-        .map_err(|err| err.to_string())
+    .map_err(|err| err.to_string())
 }
 
 #[test]
