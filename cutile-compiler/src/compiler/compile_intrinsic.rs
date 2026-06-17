@@ -248,6 +248,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         Some(count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_fp4_pack_unpack(
         &self,
         module: &mut Module,
@@ -407,7 +408,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 )
             })?;
         let final_ty =
-            tile_ir_type_from_trt(&return_type, &self.modules.primitives()).ok_or_else(|| {
+            tile_ir_type_from_trt(&return_type, self.modules.primitives()).ok_or_else(|| {
                 self.jit_error(
                     &call_expr.span(),
                     "failed to convert FP4 pack/unpack return type to Tile IR",
