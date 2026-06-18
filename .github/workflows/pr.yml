@@ -42,7 +42,7 @@ jobs:
           tileiras --help | grep -q "sm_120"
 
       - name: Clone repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
