@@ -190,7 +190,6 @@ impl NameResolver {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn index_items(
         items_block: &[Item],
         module_name: &str,
