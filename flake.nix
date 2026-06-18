@@ -81,6 +81,8 @@
 
         # bindgen uses libclang to parse CUDA headers.
         libclang = pkgs.llvmPackages.libclang;
+        libcDev = pkgs.lib.getDev pkgs.stdenv.cc.libc;
+        bindgenClangArgs = pkgs.lib.optionalString (!isDarwin) "-isystem ${libcDev}/include";
 
         # Nightly Rust 
         rustToolchain =
@@ -114,6 +116,7 @@
           CMAKE_GENERATOR = "Ninja";
           CUDA_TOOLKIT_PATH = "${cudaToolkit}";
           LIBCLANG_PATH = "${libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = bindgenClangArgs;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
             pkgs.libffi

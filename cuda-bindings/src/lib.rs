@@ -43,10 +43,8 @@ mod generated_curand {
 mod dyn_load;
 pub use dyn_load::*;
 
-use std::env;
-
 pub fn cuda_toolkit_dir() -> String {
-    env::var("CUDA_TOOLKIT_PATH").expect("CUDA_TOOLKIT_PATH is required but not set")
+    env!("CUTILE_RESOLVED_CUDA_TOOLKIT_PATH").to_string()
 }
 
 #[cfg(test)]
