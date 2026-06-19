@@ -392,7 +392,20 @@ impl<T: DType> DeviceOp for CopyHostVecToDevice<T> {
         let shape = vec![num_elements as i32];
         let strides = vec![1];
         let dptr = ctx.alloc_async(element_size * num_elements);
-        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
+        let stream = ctx.get_cuda_stream();
+        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, stream);
+        let keep_alive = vec.clone();
+        if let Err(callback_error) = stream.launch_host_function(move || drop(keep_alive)) {
+            match stream.synchronize() {
+                Ok(()) => return Err(callback_error.into()),
+                Err(sync_error) => {
+                    // Avoid letting an in-flight DMA read freed host memory if
+                    // neither callback registration nor synchronization worked.
+                    std::mem::forget(vec);
+                    return Err(sync_error.into());
+                }
+            }
+        }
         Ok(Tensor::from_raw_parts(
             dptr,
             element_size * num_elements,
