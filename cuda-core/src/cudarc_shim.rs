@@ -538,6 +538,46 @@ pub(crate) mod pool {
         cuda_bindings::cuMemPoolSetAttribute(pool, attr, &zero as *const _ as *mut _).result()
     }
 
+    /// Reads a `c_int`-valued pool attribute (the three reuse-policy booleans).
+    ///
+    /// # Safety
+    /// `pool` must be a valid handle. `attr` must be one of the three
+    /// `REUSE_*` attributes whose value type is `int`.
+    pub unsafe fn get_attribute_int(
+        pool: cuda_bindings::CUmemoryPool,
+        attr: cuda_bindings::CUmemPool_attribute,
+    ) -> Result<std::ffi::c_int, DriverError> {
+        let mut value: std::ffi::c_int = 0;
+        cuda_bindings::cuMemPoolGetAttribute(pool, attr, &mut value as *mut _ as *mut _)
+            .result()?;
+        Ok(value)
+    }
+
+    /// Sets a `c_int`-valued pool attribute (the three reuse-policy booleans).
+    ///
+    /// # Safety
+    /// `pool` must be a valid handle. `attr` must be one of the three
+    /// `REUSE_*` attributes whose value type is `int`.
+    pub unsafe fn set_attribute_int(
+        pool: cuda_bindings::CUmemoryPool,
+        attr: cuda_bindings::CUmemPool_attribute,
+        value: std::ffi::c_int,
+    ) -> Result<(), DriverError> {
+        cuda_bindings::cuMemPoolSetAttribute(pool, attr, &value as *const _ as *mut _).result()
+    }
+
+    /// Releases reserved-but-idle pool memory back to the OS down to
+    /// `min_bytes_to_hold`. A value of 0 releases all idle memory.
+    ///
+    /// # Safety
+    /// `pool` must be a valid pool handle with no in-flight async frees.
+    pub unsafe fn trim_to(
+        pool: cuda_bindings::CUmemoryPool,
+        min_bytes_to_hold: usize,
+    ) -> Result<(), DriverError> {
+        cuda_bindings::cuMemPoolTrimTo(pool, min_bytes_to_hold).result()
+    }
+
     /// Allocates device memory from a specific pool asynchronously.
     ///
     /// # Safety

@@ -334,6 +334,99 @@ impl MemPool {
             )
         }
     }
+
+    /// Returns the current reuse policy for this pool.
+    pub fn reuse_policy(&self) -> Result<ReusePolicy, DriverError> {
+        self.device.bind_to_thread()?;
+        unsafe {
+            Ok(ReusePolicy {
+                follow_event_deps: pool::get_attribute_int(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_REUSE_FOLLOW_EVENT_DEPENDENCIES,
+                )? != 0,
+                allow_opportunistic: pool::get_attribute_int(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_REUSE_ALLOW_OPPORTUNISTIC,
+                )? != 0,
+                allow_internal_deps: pool::get_attribute_int(
+                    self.cu_pool,
+                    cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_REUSE_ALLOW_INTERNAL_DEPENDENCIES,
+                )? != 0,
+            })
+        }
+    }
+
+    /// Sets the reuse policy for this pool.
+    ///
+    /// All three fields are written in a single `bind_to_thread` block so the
+    /// policy is applied atomically from the caller's perspective.
+    pub fn set_reuse_policy(&self, policy: ReusePolicy) -> Result<(), DriverError> {
+        self.device.bind_to_thread()?;
+        unsafe {
+            pool::set_attribute_int(
+                self.cu_pool,
+                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_REUSE_FOLLOW_EVENT_DEPENDENCIES,
+                policy.follow_event_deps as c_int,
+            )?;
+            pool::set_attribute_int(
+                self.cu_pool,
+                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_REUSE_ALLOW_OPPORTUNISTIC,
+                policy.allow_opportunistic as c_int,
+            )?;
+            pool::set_attribute_int(
+                self.cu_pool,
+                cuda_bindings::CUmemPool_attribute_enum_CU_MEMPOOL_ATTR_REUSE_ALLOW_INTERNAL_DEPENDENCIES,
+                policy.allow_internal_deps as c_int,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Releases reserved-but-idle memory back to the OS, keeping at least
+    /// `min_bytes_to_hold` reserved. Pass `0` to release all idle memory.
+    ///
+    /// Only affects memory the pool has cached from the OS — live allocations
+    /// are never freed. Safe to call at any time; no active streams need to be
+    /// idle first.
+    pub fn trim_to(&self, min_bytes_to_hold: usize) -> Result<(), DriverError> {
+        self.device.bind_to_thread()?;
+        unsafe { pool::trim_to(self.cu_pool, min_bytes_to_hold) }
+    }
+}
+
+/// Reuse policy for a CUDA memory pool.
+///
+/// Controls when the driver is allowed to recycle freed async allocations.
+/// All three flags default to `true` at pool creation. Disabling them trades
+/// allocation throughput for more predictable memory lifetime — useful when
+/// benchmarking or debugging memory reuse interactions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReusePolicy {
+    /// Allow freed allocations to be reused when a stream event dependency
+    /// guarantees the free has completed.
+    pub follow_event_deps: bool,
+    /// Allow freed allocations to be reused opportunistically, even without
+    /// explicit event dependencies, when the driver infers it is safe.
+    pub allow_opportunistic: bool,
+    /// Allow the driver to insert internal stream dependencies to expand the
+    /// set of allocations eligible for reuse.
+    pub allow_internal_deps: bool,
+}
+
+impl ReusePolicy {
+    /// All reuse allowed — the driver default.
+    pub const ALL: Self = Self {
+        follow_event_deps: true,
+        allow_opportunistic: true,
+        allow_internal_deps: true,
+    };
+
+    /// All reuse disabled — maximum isolation, lowest recycling throughput.
+    pub const NONE: Self = Self {
+        follow_event_deps: false,
+        allow_opportunistic: false,
+        allow_internal_deps: false,
+    };
 }
 
 /// Snapshot of a pool's memory accounting counters at a point in time.
