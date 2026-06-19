@@ -86,7 +86,7 @@ fn main() -> Result<(), Error> {
     let stream = device.new_stream()?;
 
     let (m, n) = (4usize, 8usize);
-    let (bm, bn) = (2i32, n as i32);
+    let (bm, bn) = (2usize, n as usize);
 
     let input: Arc<Tensor<f32>> = arange(m * n).sync_on(&stream)?.into();
     let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape(&[m, n])?.into();
