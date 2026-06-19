@@ -43,7 +43,7 @@ were run on an RTX 5090. Section 5.3 uses the Grout artifact and model weights
 from the companion Grout repository.
 
 The embedded Rust benchmark crates depend on the published cuTile Rust crates
-at version `0.1.1`; they do not require a sibling `cutile-rs` checkout.
+at version `0.2.0`; they do not require a sibling `cutile-rs` checkout.
 
 Checked-in CSV and JSONL files are the paper data. For smoke tests or local
 reruns, write results and generated figures outside this tree. Shell runners

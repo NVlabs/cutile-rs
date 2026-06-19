@@ -14,11 +14,11 @@ name = "async_throughput"
 path = "src/bin/async_throughput.rs"
 
 [dependencies]
-cuda-core = "0.1.1"
-cuda-async = "0.1.1"
-cutile = "0.1.1"
-cutile-macro = "0.1.1"
-cutile-compiler = "0.1.1"
+cuda-core = "0.2.0"
+cuda-async = "0.2.0"
+cutile = "0.2.0"
+cutile-macro = "0.2.0"
+cutile-compiler = "0.2.0"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [profile.release]

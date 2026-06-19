@@ -515,7 +515,7 @@ pub mod core {
 
     #[cuda_tile::variadic_impl(N = 6)]
     impl<E: ElementType, const D: [i32; N]> Tile<E, D> {
-        pub fn shape(&self) -> Shape<D> {
+        pub fn shape(&self) -> Shape<'_, D> {
             unreachable!()
         }
         pub fn broadcast<const R: [i32; N]>(self, shape: Shape<R>) -> Tile<E, R> {
