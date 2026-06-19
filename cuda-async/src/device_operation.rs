@@ -68,13 +68,19 @@ impl ExecutionContext {
     pub fn new(cuda_stream: Arc<Stream>) -> Self {
         let device = cuda_stream.device().clone();
         let ordinal = device.ordinal();
-        let pool = pool_for_stream(&cuda_stream);
         Self {
             cuda_stream,
             device,
             ordinal,
-            pool,
+            pool: None,
         }
+    }
+
+    /// Attach a memory pool. Pass `None` to leave it unset.
+    #[must_use]
+    pub fn with_pool(mut self, pool: Option<Arc<MemPool>>) -> Self {
+        self.pool = pool;
+        self
     }
     pub fn get_cuda_stream(&self) -> &Arc<Stream> {
         &self.cuda_stream
@@ -202,9 +208,10 @@ pub trait DeviceOp:
         policy: &Arc<dyn SchedulingPolicy>,
     ) -> Result<DeviceFuture<<Self as DeviceOp>::Output, Self>, DeviceError> {
         let stream = policy.next_stream()?;
+        let pool = pool_for_stream(&stream)?;
         let mut future = DeviceFuture::new();
         future.device_operation = Some(self);
-        future.execution_context = Some(ExecutionContext::new(stream));
+        future.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         Ok(future)
     }
     /// Chain a follow-up operation that runs **on the same stream** as `self`.
@@ -365,7 +372,8 @@ pub trait DeviceOp:
         self,
         stream: &Arc<Stream>,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        let ctx = ExecutionContext::new(stream.clone());
+        let pool = pool_for_stream(stream)?;
+        let ctx = ExecutionContext::new(stream.clone()).with_pool(pool);
         unsafe { self.execute(&ctx) }
     }
     /// Execute on an **explicit stream** and block until the GPU finishes.
@@ -374,8 +382,11 @@ pub trait DeviceOp:
     /// stream are guaranteed to execute in call order. Use this when you need deterministic
     /// ordering or are debugging concurrency issues.
     fn sync_on(self, stream: &Arc<Stream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+        // Resolve the pool before taking the execution lock so a context
+        // error here can't leak the lock.
+        let pool = pool_for_stream(stream)?;
+        let ctx = ExecutionContext::new(stream.clone()).with_pool(pool);
         acquire_execution_lock()?;
-        let ctx = ExecutionContext::new(stream.clone());
         let res = unsafe { self.execute(&ctx) };
         let sync_res = unsafe { stream.synchronize() };
         release_execution_lock();
@@ -435,9 +446,13 @@ impl<T: Send> IntoFuture for BoxedDeviceOp<T> {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -500,9 +515,13 @@ impl<T: Send + Sync> IntoFuture for SharedDeviceOp<T> {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -661,9 +680,13 @@ where
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -700,9 +723,13 @@ impl<T: Send> IntoFuture for Value<T> {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -758,9 +785,13 @@ impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> IntoFuture for Empty<
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -814,9 +845,13 @@ impl<T1: Send, T2: Send, A: DeviceOp<Output = T1>, B: DeviceOp<Output = T2>> Int
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -1027,9 +1062,13 @@ where
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -1071,9 +1110,13 @@ where
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -1338,9 +1381,13 @@ impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce(&ExecutionContext) -> DO + Sen
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -1396,9 +1443,13 @@ where
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
@@ -1462,9 +1513,13 @@ impl<T: Send> IntoFuture for DeviceOpVec<T> {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
         };
+        let pool = match pool_for_stream(&stream) {
+            Ok(pool) => pool,
+            Err(e) => return DeviceFuture::failed(e),
+        };
         let mut f = DeviceFuture::new();
         f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream));
+        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
         f
     }
 }
