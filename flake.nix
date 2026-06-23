@@ -133,7 +133,7 @@
               export LD_LIBRARY_PATH="/run/opengl-driver/lib:$LD_LIBRARY_PATH"
             else
               _nv_drv_dir=$(mktemp -d /tmp/nix-nvidia-driver.XXXXXX)
-              for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib /usr/lib64; do
+              for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu /usr/lib /usr/lib64; do
                 if [ -e "$d/libcuda.so.1" ]; then
                   for lib in "$d"/libcuda.so* "$d"/libnvidia-ptxjitcompiler.so* "$d"/libnvidia-gpucomp.so*; do
                     [ -e "$lib" ] && ln -sf "$lib" "$_nv_drv_dir/"
