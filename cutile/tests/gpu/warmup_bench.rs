@@ -19,8 +19,8 @@ use crate::common;
 use cutile::api;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    contains_cuda_function, get_default_device, jit_compile_count, TileFunctionKey, TileKernel,
-    WarmupSpec,
+    contains_cuda_function, get_default_device, jit_compile_count, FunctionKey, TileFunctionKey,
+    TileKernel, WarmupSpec,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
     get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
@@ -289,5 +289,99 @@ fn full_warmup_workflow() {
             contains_cuda_function(device_id, &key),
             "tile=128 kernel should be in memory cache after warmup workflow"
         );
+    });
+}
+
+// Summary statistics over a slice of per-iteration durations.
+fn report(label: &str, samples: &[std::time::Duration]) {
+    assert!(!samples.is_empty(), "no samples for {label}");
+    let mut ns: Vec<u128> = samples.iter().map(|d| d.as_nanos()).collect();
+    ns.sort_unstable();
+    let n = ns.len();
+    let pct = |p: f64| ns[((p * (n as f64 - 1.0)).round() as usize).min(n - 1)];
+    let mean = ns.iter().sum::<u128>() / n as u128;
+    println!(
+        "  {label:<48} n={n:>5}  min={:>8.3?}  median={:>8.3?}  mean={:>8.3?}  p99={:>8.3?}  max={:>8.3?}",
+        std::time::Duration::from_nanos(ns[0] as u64),
+        std::time::Duration::from_nanos(pct(0.50) as u64),
+        std::time::Duration::from_nanos(mean as u64),
+        std::time::Duration::from_nanos(pct(0.99) as u64),
+        std::time::Duration::from_nanos(ns[n - 1] as u64),
+    );
+}
+
+/// Measures the per-launch cost of building the hardened key on the cache-hit
+/// path, three ways:
+///
+///   (A) End-to-end warmed launch — real per-call latency. `jit_compile_count`
+///       is asserted flat across the loop, so every iteration is a cache hit.
+///   (B) Build hardened key + `get_hash_string()`, no launch — the extra CPU
+///       work the hit path does before the lookup.
+///   (C) `get_gpu_name()` alone — the mutex + `String` clone.
+///
+/// Run with:
+///   cargo test --test gpu warmup_bench::cache_hit_path_cost -- --nocapture
+#[test]
+fn cache_hit_path_cost() {
+    common::with_test_stack(|| {
+        let _guard = common::cache_test_lock();
+
+        const LAUNCH_ITERS: usize = 500;
+        const CPU_ITERS: usize = 5000;
+        let tile = "128";
+        let generics = vec!["f32".to_string(), tile.to_string()];
+
+        // Prime: first call to this tile JIT-compiles (miss); everything after
+        // is a cache hit. Fill kernel primed so only vector_add moves the counter.
+        let spec_args = vector_add_spec_args(256, 128);
+        let c0 = jit_compile_count();
+        let _ = timed_kernel_call(tile);
+        let c_after_prime = jit_compile_count();
+        assert_eq!(
+            c_after_prime,
+            c0 + 1,
+            "prime call must JIT-compile exactly once (only bench_module::vector_add)"
+        );
+
+        // (A) End-to-end warmed launches. Counter must stay flat => all hits.
+        let mut launch_samples = Vec::with_capacity(LAUNCH_ITERS);
+        for _ in 0..LAUNCH_ITERS {
+            launch_samples.push(timed_kernel_call(tile));
+        }
+        let c_after_launch = jit_compile_count();
+        assert_eq!(
+            c_after_launch, c_after_prime,
+            "every launch in the loop must be a cache hit (no recompile): \
+             jit_compile_count moved from {c_after_prime} to {c_after_launch}"
+        );
+
+        // (B) Isolated added cost: build the hardened key + hash it, no launch.
+        // Clones are hoisted out of the timed region so we measure the build +
+        // hash (which includes get_gpu_name + version lookups), not the clones.
+        let device_id = get_default_device();
+        let mut key_samples = Vec::with_capacity(CPU_ITERS);
+        for _ in 0..CPU_ITERS {
+            let g = generics.clone();
+            let s = spec_args.clone();
+            let t0 = Instant::now();
+            let key = bench_key(g, s);
+            let h = std::hint::black_box(key.get_hash_string());
+            key_samples.push(t0.elapsed());
+            drop(h);
+        }
+
+        // (C) get_gpu_name() in isolation — the mutex + String clone per launch.
+        let mut gpu_name_samples = Vec::with_capacity(CPU_ITERS);
+        for _ in 0..CPU_ITERS {
+            let t0 = Instant::now();
+            let name = std::hint::black_box(get_gpu_name(device_id));
+            gpu_name_samples.push(t0.elapsed());
+            drop(name);
+        }
+
+        println!("\n=== cache-hit-path cost (tile={tile}, f32) ===");
+        report("(A) end-to-end warmed launch (real per-call)", &launch_samples);
+        report("(B) build hardened key + hash (added per-launch CPU)", &key_samples);
+        report("(C) get_gpu_name() only (mutex + String clone)", &gpu_name_samples);
     });
 }
