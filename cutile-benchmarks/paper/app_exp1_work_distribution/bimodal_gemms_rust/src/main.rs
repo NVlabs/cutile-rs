@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // §5.2 Part B2 — GPU work-distribution benchmark (bimodal GEMMs).
 //
 // Three modes demonstrating what the async primitive buys for

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Collect B200 locked-clock results for persistent GEMM and elementwise.
 # This intentionally writes under paper/results/b200 instead of clobbering the
 # 5090-oriented paper CSVs in paper/results/rtx5090.

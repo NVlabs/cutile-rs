@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Run §5.1 element-wise benchmarks at locked 2.4 GHz clocks.
 # Rust uses the isolated / CUDA-event / fixed-ITERS methodology. Each Rust
 # variant is run as its own single-variant process so optimized/safe match

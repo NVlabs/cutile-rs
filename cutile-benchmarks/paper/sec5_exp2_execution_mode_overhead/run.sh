@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Drives the §5.2 execution-mode scaling sweep: measured schedules × a sweep
 # of pipeline lengths N, one cargo run per (schedule, N) cell, appending
 # to results_part_a.csv. Then renders the line chart at

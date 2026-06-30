@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Plot the merged 6b+6c experiment (Option A): bimodal-GEMM queue
 with per-task host work W, fixed S, three modes (serial / threaded /

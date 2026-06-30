@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Sweeps the bimodal-GEMMs GPU work-distribution experiment:
 # three modes × a range of stream counts, appending to
 # results_bimodal.csv. Renders the figure afterward.

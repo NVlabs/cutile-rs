@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Run §5.1 GEMM benchmarks at locked 2.4 GHz clocks, regenerate the
 # GEMM plot. Matches run_elemwise.sh methodology so the two workloads
 # are measured under identical conditions.

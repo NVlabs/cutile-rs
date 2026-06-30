@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Dump Tile IR MLIR for clean vs ambiguous-alias kernels.
 Look for scope annotations on token-ordered operations.
