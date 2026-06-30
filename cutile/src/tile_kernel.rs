@@ -250,6 +250,116 @@ fn write_ir(
 
 // ── Single-flight compilation dedup is handled by once_cell::sync::OnceCell ──
 
+/// Compiles one tile-function specialization to a CUBIN and loads it into a
+/// [`CompiledKernel`].
+///
+/// This is the single compile-and-load core shared by the launch path
+/// ([`compile_from_context`]) and the warmup path ([`compile_warmup`]). It runs
+/// the compiler, honors the `print_ir` / `dump_mlir_dir` entry attributes,
+/// lowers to a CUBIN, loads the module, and resolves `function_entry`, emitting
+/// per-stage `CUTILE_JIT_TIMING` along the way.
+///
+/// Callers own the cache concerns: they build the [`TileFunctionKey`], dedup via
+/// the cache slot, and call [`record_jit_compile`]. This function assumes it
+/// runs exactly once per cache miss and does no caching itself.
+#[allow(clippy::too_many_arguments)]
+fn compile_and_load_kernel(
+    modules: &CUDATileModules,
+    module_name: &str,
+    function_name: &str,
+    function_entry: &str,
+    generics: &[String],
+    stride_args: &[(String, Vec<i32>)],
+    spec_args: &[(String, SpecializationBits)],
+    scalar_hints: &[(String, DivHint)],
+    const_grid: Option<(u32, u32, u32)>,
+    gpu_name: &str,
+    compile_options: &CompileOptions,
+    device_id: usize,
+    key_str: &str,
+) -> Result<CompiledKernel, Error> {
+    let t0 = std::time::Instant::now();
+
+    let stride_args_refs: Vec<(&str, &[i32])> = stride_args
+        .iter()
+        .map(|x| (x.0.as_str(), x.1.as_slice()))
+        .collect();
+    let spec_args_refs: Vec<(&str, &SpecializationBits)> =
+        spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
+    let scalar_hints_refs: Vec<(&str, &DivHint)> =
+        scalar_hints.iter().map(|x| (x.0.as_str(), &x.1)).collect();
+
+    let stage1_start = std::time::Instant::now();
+    let (tile_module, validator) = {
+        let compiler = CUDATileFunctionCompiler::new(
+            modules,
+            module_name,
+            function_name,
+            generics,
+            &stride_args_refs,
+            &spec_args_refs,
+            &scalar_hints_refs,
+            const_grid,
+            gpu_name.to_string(),
+            compile_options,
+        )?;
+        let validator = Arc::new(compiler.get_validator());
+        let tile_module = compiler.compile()?;
+        (tile_module, validator)
+    };
+    let stage1_ms = stage1_start.elapsed().as_secs_f64() * 1000.0;
+
+    let stage2_start = std::time::Instant::now();
+    let cubin_filename = {
+        let ir_text = tile_module.to_mlir_text();
+        if modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")? {
+            println!("COMPILED IR: {module_name}::{function_name}\n{ir_text}");
+        }
+        if let Some(path) = modules.get_entry_arg_string_by_function_name(
+            module_name,
+            function_name,
+            "dump_mlir_dir",
+        )? {
+            write_ir(
+                module_name,
+                function_name,
+                key_str,
+                "mlir",
+                path.as_str(),
+                ir_text.as_str(),
+            );
+        }
+        compile_tile_ir_module(&tile_module, gpu_name)
+    };
+    let stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
+
+    let stage3_start = std::time::Instant::now();
+    let module = load_module_from_file(&cubin_filename, device_id)?;
+    let function = Arc::new(module.load_function(function_entry).map_err(|e| {
+        Error::KernelLaunch(KernelLaunchError(format!(
+            "failed to load '{function_entry}' from compiled cubin: {e}"
+        )))
+    })?);
+    let stage3_ms = stage3_start.elapsed().as_secs_f64() * 1000.0;
+
+    jit_log!(
+        "{module_name}::{function_name} → JIT compiled in {:.1?}",
+        t0.elapsed()
+    );
+    if std::env::var_os("CUTILE_JIT_TIMING").is_some() {
+        eprintln!(
+            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage3_ms={stage3_ms:.3} generics={}",
+            generics.join(","),
+        );
+    }
+
+    Ok(CompiledKernel {
+        module,
+        function,
+        validator,
+    })
+}
+
 /// Compiles a tile function to CUDA and caches it for reuse.
 ///
 /// Handles the complete compilation pipeline from Rust/MLIR to CUDA:
@@ -334,145 +444,24 @@ pub fn compile_from_context<F: Fn() -> Module>(
         // Cache miss: this closure runs exactly once per key, only on a real
         // compile. Record it so tests can assert hit/miss deterministically.
         record_jit_compile();
-        // Full JIT compilation.
         jit_log!("{module_name}::{function_name} → JIT compiling...");
-        let t0 = std::time::Instant::now();
+        // Build the module ASTs lazily — only on a real cache miss.
         let modules = CUDATileModules::from_kernel(kernel_ast())?;
-        let _debug_mlir_path = modules.get_entry_arg_string_by_function_name(
+        compile_and_load_kernel(
+            &modules,
             module_name,
             function_name,
-            "use_debug_mlir",
-        )?;
-        // TODO (hme): Re-enable some debug support for internal.
-        // let ir_text = if let Some(debug_mlir_path) = &debug_mlir_path {
-        //     println!("USING DEBUG TILE IR: {debug_mlir_path}");
-        //     let ir_text = read_ir(debug_mlir_path.to_string()).expect("Failed to read debug Tile IR.");
-        //     ir_text
-        // } else {
-        //     let module_op: ModuleOperation = compiler.compile(
-        //         module_name,
-        //         function_name,
-        //         &key.function_generics,
-        //         &key.stride_args
-        //             .iter()
-        //             .map(|x| (x.0.as_str(), x.1.as_slice()))
-        //             .collect::<Vec<_>>(),
-        //         const_grid,
-        //         gpu_name.clone(),
-        //     );
-        //     let ir_text = module_op.as_operation().to_string();
-        //     ir_text
-        // };
-        let stride_args_refs: Vec<(&str, &[i32])> = key
-            .stride_args
-            .iter()
-            .map(|x| (x.0.as_str(), x.1.as_slice()))
-            .collect();
-        let spec_args_refs: Vec<(&str, &SpecializationBits)> =
-            key.spec_args.iter().map(|x| (x.0.as_str(), &x.1)).collect();
-        #[allow(unused_variables)]
-        let scalar_hints_refs: Vec<(&str, &DivHint)> = key
-            .scalar_hints
-            .iter()
-            .map(|x| (x.0.as_str(), &x.1))
-            .collect();
-        let stage1_start = std::time::Instant::now();
-        let (tile_module, validator) = {
-            let compiler = CUDATileFunctionCompiler::new(
-                &modules,
-                module_name,
-                function_name,
-                &key.function_generics,
-                &stride_args_refs,
-                &spec_args_refs,
-                &scalar_hints_refs,
-                const_grid,
-                gpu_name.clone(),
-                &key.compile_options,
-            )?;
-            let validator: Validator = compiler.get_validator();
-            let validator = Arc::new(validator);
-            let tile_module = compiler.compile()?;
-            (tile_module, validator)
-        };
-        let stage1_ms = stage1_start.elapsed().as_secs_f64() * 1000.0;
-
-        let stage2_start = std::time::Instant::now();
-        let cubin_filename = {
-            let ir_text = tile_module.to_mlir_text();
-            if modules.get_entry_arg_bool_by_function_name(
-                module_name,
-                function_name,
-                "print_ir",
-            )? {
-                println!("COMPILED IR: {module_name}::{function_name}\n{}", ir_text);
-            }
-            if let Some(path) = modules.get_entry_arg_string_by_function_name(
-                module_name,
-                function_name,
-                "dump_mlir_dir",
-            )? {
-                write_ir(
-                    module_name,
-                    function_name,
-                    key_str.as_str(),
-                    "mlir",
-                    path.as_str(),
-                    ir_text.as_str(),
-                );
-            }
-            compile_tile_ir_module(&tile_module, &gpu_name)
-        };
-        let stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
-        // if let Some(path) = compiler.get_entry_arg_string_by_function_name(
-        //     module_name,
-        //     function_name,
-        //     "dump_ptx_dir",
-        // ) {
-        //     write_ir(
-        //         module_name,
-        //         function_name,
-        //         cache_hash_str.as_str(),
-        //         "ptx",
-        //         path.as_str(),
-        //         ptx.as_str(),
-        //     );
-        // }
-        // if compiler.get_entry_arg_bool_by_function_name(module_name, function_name,"print_ir") {
-        //     println!("COMPILED PTX: {module_name}::{function_name}");
-        //     println!("{ptx}");
-        //     println!();
-        // }
-        let stage3_start = std::time::Instant::now();
-        let jit_elapsed = t0.elapsed();
-        let module = load_module_from_file(&cubin_filename, device_id)?;
-        let function = Arc::new(module.load_function(function_entry).map_err(|e| {
-            Error::KernelLaunch(KernelLaunchError(format!(
-                "failed to load '{function_entry}' from compiled cubin: {e}"
-            )))
-        })?);
-        jit_log!(
-            "{module_name}::{function_name} → JIT compiled in {:.1?}",
-            jit_elapsed
-        );
-        let stage3_ms = stage3_start.elapsed().as_secs_f64() * 1000.0;
-        if std::env::var_os("CUTILE_JIT_TIMING").is_some() {
-            eprintln!(
-                "CUTILE_JIT_TIMING module={} function={} key={} stage1_ms={:.3} stage2_ms={:.3} stage3_ms={:.3} generics={}",
-                module_name,
-                function_name,
-                key_str,
-                stage1_ms,
-                stage2_ms,
-                stage3_ms,
-                key.function_generics.join(","),
-            );
-        }
-        Ok(CompiledKernel {
-            module,
-            function,
-            validator,
-        })
+            function_entry,
+            &key.function_generics,
+            &key.stride_args,
+            &key.spec_args,
+            &key.scalar_hints,
+            const_grid,
+            &gpu_name,
+            &key.compile_options,
+            device_id,
+            &key_str,
+        )
     })?;
 
     Ok((
@@ -612,7 +601,8 @@ pub fn compile_warmup<F: Fn() -> Module>(
         }
         let key = key_builder.build();
 
-        let slot = kernel_cache_slot(&key.get_hash_string());
+        let key_str = key.get_hash_string();
+        let slot = kernel_cache_slot(&key_str);
 
         // Use OnceCell::get_or_try_init for single-flight compilation dedup.
         // Only one thread executes the closure; others block and see the result.
@@ -626,56 +616,21 @@ pub fn compile_warmup<F: Fn() -> Module>(
                 spec.function_name,
                 spec.function_generics.join(", ")
             );
-
-            // Full JIT compilation.
-            let t0 = std::time::Instant::now();
-            let compiler = CUDATileFunctionCompiler::new(
+            compile_and_load_kernel(
                 &modules,
                 module_name,
                 &spec.function_name,
+                entry.function_entry,
                 &spec.function_generics,
-                &spec
-                    .stride_args
-                    .iter()
-                    .map(|x| (x.0.as_str(), x.1.as_slice()))
-                    .collect::<Vec<_>>(),
-                &spec
-                    .spec_args
-                    .iter()
-                    .map(|x| (x.0.as_str(), &x.1))
-                    .collect::<Vec<_>>(),
-                &spec
-                    .scalar_hints
-                    .iter()
-                    .map(|x| (x.0.as_str(), &x.1))
-                    .collect::<Vec<_>>(),
+                &spec.stride_args,
+                &spec.spec_args,
+                &spec.scalar_hints,
                 spec.const_grid,
-                gpu_name.clone(),
+                &gpu_name,
                 &key.compile_options,
-            )?;
-            let validator = Arc::new(compiler.get_validator());
-            let module_op = compiler.compile()?;
-            let cubin_filename = compile_tile_ir_module(&module_op, &gpu_name);
-            let jit_elapsed = t0.elapsed();
-
-            let module = load_module_from_file(&cubin_filename, device_id)?;
-            let function =
-                Arc::new(module.load_function(entry.function_entry).map_err(|e| {
-                    Error::KernelLaunch(KernelLaunchError(format!(
-                        "failed to load '{}' from compiled cubin: {e}",
-                        entry.function_entry
-                    )))
-                })?);
-            jit_log!(
-                "warmup: {module_name}::{} → JIT compiled in {:.1?}",
-                spec.function_name,
-                jit_elapsed
-            );
-            Ok(CompiledKernel {
-                module,
-                function,
-                validator,
-            })
+                device_id,
+                &key_str,
+            )
         })?;
     }
 
