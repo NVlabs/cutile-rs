@@ -7,10 +7,13 @@
 //! Provides GPU detection and bytecode compilation helpers.
 
 use cuda_core::{get_device_sm_name, Device};
+use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion};
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 /// Environment variable used to override the `tileiras` executable.
@@ -22,6 +25,10 @@ pub const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
 
 const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
 const MIN_CUDA_VERSION: u32 = 13020;
+
+/// Environment variable to force the emitted Tile IR bytecode version
+/// (e.g. `13.2`). Overrides toolkit detection and probing.
+pub const BYTECODE_VERSION_ENV: &str = "CUTILE_BYTECODE_VERSION";
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 pub fn get_gpu_name(device_id: usize) -> String {
@@ -74,40 +81,67 @@ fn cuda_toolkit_tileiras(cuda_toolkit_path: Option<OsString>) -> Option<PathBuf>
 fn resolve_tileiras_binary(
     tileiras_override: Option<OsString>,
     cuda_toolkit_path: Option<OsString>,
-) -> PathBuf {
-    resolve_tileiras_binary_with_candidates(
+) -> (PathBuf, Option<PathBuf>) {
+    resolve_tileiras_with_toolkit_candidates(
         tileiras_override,
         cuda_toolkit_path,
         default_cuda_toolkit_candidates(),
     )
 }
 
-fn resolve_tileiras_binary_with_candidates(
+/// Resolves the `tileiras` binary and, when it was found via a CUDA toolkit
+/// (not a `CUTILE_TILEIRAS_PATH` override or bare `PATH`), the toolkit root used
+/// to locate `cuda.h` for bytecode-version selection.
+fn resolve_tileiras_with_toolkit_candidates(
     tileiras_override: Option<OsString>,
     cuda_toolkit_path: Option<OsString>,
     default_cuda_toolkit_candidates: &[PathBuf],
-) -> PathBuf {
+) -> (PathBuf, Option<PathBuf>) {
     if let Some(path) = tileiras_override.filter(|value| !value.as_os_str().is_empty()) {
         let path = PathBuf::from(path);
         emit_setup_diagnostic(format_args!("using {TILEIRAS_PATH_ENV}={}", path.display()));
-        return path;
+        // An overridden binary may be newer than the installed CTK, so its
+        // version is decided by probing rather than the toolkit's cuda.h.
+        return (path, None);
     }
 
     if let Some(path) = cuda_toolkit_tileiras(cuda_toolkit_path) {
         if path.is_file() {
-            return path;
+            let toolkit = toolkit_root_of(&path);
+            return (path, toolkit);
         }
     }
 
     if let Some(path) = default_cuda_toolkit_tileiras(default_cuda_toolkit_candidates) {
-        return path;
+        let toolkit = toolkit_root_of(&path);
+        return (path, toolkit);
     }
 
     emit_setup_diagnostic(format_args!(
         "falling back to {} through PATH lookup",
         tileiras_executable_name()
     ));
-    PathBuf::from(tileiras_executable_name())
+    (PathBuf::from(tileiras_executable_name()), None)
+}
+
+/// CUDA toolkit root for a `<root>/bin/tileiras` path (strips `bin/tileiras`).
+fn toolkit_root_of(tileiras: &Path) -> Option<PathBuf> {
+    tileiras.parent()?.parent().map(PathBuf::from)
+}
+
+/// Test-only helper that returns just the resolved `tileiras` path.
+#[cfg(test)]
+fn resolve_tileiras_binary_with_candidates(
+    tileiras_override: Option<OsString>,
+    cuda_toolkit_path: Option<OsString>,
+    default_cuda_toolkit_candidates: &[PathBuf],
+) -> PathBuf {
+    resolve_tileiras_with_toolkit_candidates(
+        tileiras_override,
+        cuda_toolkit_path,
+        default_cuda_toolkit_candidates,
+    )
+    .0
 }
 
 /// Returns the `tileiras` executable path used by the JIT.
@@ -121,10 +155,157 @@ fn resolve_tileiras_binary_with_candidates(
 ///    `bin/tileiras`.
 /// 4. `tileiras` through normal `PATH` lookup.
 pub fn tileiras_binary() -> PathBuf {
+    tileiras_and_toolkit().0
+}
+
+/// Resolves `tileiras` together with the CUDA toolkit root (when applicable),
+/// using the active `CUTILE_TILEIRAS_PATH` / `CUDA_TOOLKIT_PATH` environment.
+fn tileiras_and_toolkit() -> (PathBuf, Option<PathBuf>) {
     resolve_tileiras_binary(
         env::var_os(TILEIRAS_PATH_ENV),
         env::var_os(CUDA_TOOLKIT_PATH_ENV),
     )
+}
+
+// =========================================================================
+// Bytecode version selection
+//
+// The writer and decoder are already version-aware; this decides which
+// version to emit so a newer toolchain default (13.3) is not handed to an
+// older `tileiras`.
+// =========================================================================
+
+/// Selects the Tile IR bytecode version to emit for the active toolchain,
+/// caching the result per resolved (tileiras, toolkit) pair. Resolution order:
+///
+/// 1. `CUTILE_BYTECODE_VERSION` — explicit override (e.g. `13.2`).
+/// 2. The toolkit's `cuda.h` `CUDA_VERSION` — the coherent-install case.
+/// 3. Probing the resolved `tileiras` — the override / bare `PATH` case, where
+///    no trusted toolkit `cuda.h` is available.
+///
+/// The result is clamped to `[MIN_SUPPORTED, CURRENT]`. Feature
+/// incompatibilities (e.g. an FP4 kernel against a 13.2 toolchain) are left for
+/// `tileiras` to diagnose rather than pre-checked here.
+fn selected_bytecode_version() -> BytecodeVersion {
+    let (tileiras, toolkit) = tileiras_and_toolkit();
+    cached_bytecode_version(&tileiras, toolkit.as_deref())
+}
+
+fn cached_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> BytecodeVersion {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, Option<PathBuf>), BytecodeVersion>>> =
+        OnceLock::new();
+    let key = (tileiras.to_path_buf(), toolkit_dir.map(PathBuf::from));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&version) = cache.lock().unwrap().get(&key) {
+        return version;
+    }
+    let version = compute_bytecode_version(tileiras, toolkit_dir);
+    cache.lock().unwrap().insert(key, version);
+    version
+}
+
+fn compute_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> BytecodeVersion {
+    if let Some(value) = env::var_os(BYTECODE_VERSION_ENV).filter(|v| !v.is_empty()) {
+        let text = value.to_string_lossy();
+        match parse_bytecode_version(&text) {
+            Some(version) => {
+                emit_setup_diagnostic(format_args!("{BYTECODE_VERSION_ENV}={version} (override)"));
+                return version;
+            }
+            None => emit_setup_diagnostic(format_args!(
+                "ignoring invalid {BYTECODE_VERSION_ENV}={text}"
+            )),
+        }
+    }
+
+    if let Some(dir) = toolkit_dir {
+        let cuda_h = dir.join("include").join("cuda.h");
+        if let Ok(cuda_version) = cuda_version_from_header(&cuda_h) {
+            let version = bytecode_version_from_cuda_version(cuda_version);
+            emit_setup_diagnostic(format_args!(
+                "bytecode version {version} from {}",
+                cuda_h.display()
+            ));
+            return version;
+        }
+    }
+
+    let version = probe_max_supported_bytecode_version(tileiras);
+    emit_setup_diagnostic(format_args!(
+        "bytecode version {version} from probing {}",
+        tileiras.display()
+    ));
+    version
+}
+
+/// Maps a CUDA `CUDA_VERSION` integer (e.g. `13030`) to a clamped bytecode version.
+fn bytecode_version_from_cuda_version(cuda_version: u32) -> BytecodeVersion {
+    let candidate = BytecodeVersion {
+        major: (cuda_version / 1000) as u8,
+        minor: ((cuda_version % 1000) / 10) as u8,
+        tag: 0,
+    };
+    clamp_bytecode_version(candidate)
+}
+
+/// Parses a `major.minor[.tag]` string (e.g. `13.2`) to a clamped bytecode version.
+fn parse_bytecode_version(text: &str) -> Option<BytecodeVersion> {
+    let mut parts = text.trim().split('.');
+    let major: u8 = parts.next()?.trim().parse().ok()?;
+    let minor: u8 = parts.next()?.trim().parse().ok()?;
+    let tag: u16 = match parts.next() {
+        Some(part) => part.trim().parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(clamp_bytecode_version(BytecodeVersion {
+        major,
+        minor,
+        tag,
+    }))
+}
+
+/// Clamps a version to the range this writer can emit.
+fn clamp_bytecode_version(version: BytecodeVersion) -> BytecodeVersion {
+    version
+        .max(BytecodeVersion::MIN_SUPPORTED)
+        .min(BytecodeVersion::CURRENT)
+}
+
+/// Probes `tileiras` for the newest bytecode version it accepts by compiling a
+/// tiny empty module at each candidate version, newest first.
+fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
+    let tmp_dir = env::temp_dir();
+    for &version in BytecodeVersion::SUPPORTED.iter().rev() {
+        let module = cutile_ir::Module::new("__cutile_probe");
+        let Ok(bytes) = write_bytecode_version(&module, version) else {
+            continue;
+        };
+        let base = tmp_dir.join(Uuid::new_v4().to_string());
+        let bc_filename = format!("{}.bc", base.display());
+        let cubin_filename = format!("{}.cubin", base.display());
+        if std::fs::write(&bc_filename, &bytes).is_err() {
+            continue;
+        }
+        let accepted = Command::new(tileiras)
+            .args(["--gpu-name", "sm_120", "-o", &cubin_filename, &bc_filename])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&bc_filename);
+        let _ = std::fs::remove_file(&cubin_filename);
+        if accepted {
+            return version;
+        }
+    }
+    emit_setup_diagnostic(format_args!(
+        "could not probe a supported bytecode version from {}; using {}",
+        tileiras.display(),
+        BytecodeVersion::MIN_SUPPORTED
+    ));
+    BytecodeVersion::MIN_SUPPORTED
 }
 
 /// Compiles a `cutile_ir::Module` to a `.cubin` file via bytecode serialization and `tileiras`.
@@ -149,7 +330,8 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         &module.to_mlir_text(),
     );
 
-    let bytes = cutile_ir::write_bytecode(module)
+    let bytecode_version = selected_bytecode_version();
+    let bytes = write_bytecode_version(module, bytecode_version)
         .unwrap_or_else(|e| panic!("Failed to serialize bytecode for {bc_filename}: {e}"));
 
     if crate::dump::should_dump(crate::dump::DumpStage::Bytecode) {
@@ -455,6 +637,66 @@ mod tests {
 
         let _ = fs::remove_dir_all(old_dir);
         let _ = fs::remove_dir_all(new_dir);
+    }
+
+    #[test]
+    fn maps_cuda_version_to_bytecode_version() {
+        assert_eq!(
+            bytecode_version_from_cuda_version(13030),
+            BytecodeVersion::V13_3
+        );
+        assert_eq!(
+            bytecode_version_from_cuda_version(13020),
+            BytecodeVersion::V13_2
+        );
+        assert_eq!(
+            bytecode_version_from_cuda_version(13010),
+            BytecodeVersion::V13_1
+        );
+        // Out-of-range values clamp into [MIN_SUPPORTED, CURRENT].
+        assert_eq!(
+            bytecode_version_from_cuda_version(13000),
+            BytecodeVersion::MIN_SUPPORTED
+        );
+        assert_eq!(
+            bytecode_version_from_cuda_version(13040),
+            BytecodeVersion::CURRENT
+        );
+    }
+
+    #[test]
+    fn parses_bytecode_version_override() {
+        assert_eq!(parse_bytecode_version("13.2"), Some(BytecodeVersion::V13_2));
+        assert_eq!(
+            parse_bytecode_version(" 13.3 "),
+            Some(BytecodeVersion::V13_3)
+        );
+        assert_eq!(
+            parse_bytecode_version("13.3.0"),
+            Some(BytecodeVersion::V13_3)
+        );
+        // Out-of-range clamps to CURRENT; malformed input is rejected.
+        assert_eq!(
+            parse_bytecode_version("13.9"),
+            Some(BytecodeVersion::CURRENT)
+        );
+        assert_eq!(parse_bytecode_version("13"), None);
+        assert_eq!(parse_bytecode_version("nonsense"), None);
+        assert_eq!(parse_bytecode_version("13.2.3.4"), None);
+    }
+
+    #[test]
+    fn selects_bytecode_version_from_toolkit_cuda_h() {
+        let temp_dir = env::temp_dir().join(format!("cutile_bc_ver_{}", Uuid::new_v4()));
+        let tileiras = create_fake_cuda_toolkit(&temp_dir, 13020, true);
+        let toolkit = toolkit_root_of(&tileiras);
+        assert_eq!(toolkit.as_deref(), Some(temp_dir.as_path()));
+        // cuda.h reports CUDA 13.2, so we emit bytecode 13.2 without probing.
+        assert_eq!(
+            compute_bytecode_version(&tileiras, toolkit.as_deref()),
+            BytecodeVersion::V13_2
+        );
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
