@@ -21,6 +21,8 @@ pub use error::{Error, Result};
 
 // Re-export the most commonly used entry points at crate root.
 pub use builder::OpBuilder;
-pub use bytecode::decoder::{decode_bytecode, decode_bytecode_file};
+pub use bytecode::decoder::{
+    bytecode_version, decode_bytecode, decode_bytecode_file, decode_module,
+};
 pub use bytecode::{write_bytecode, write_bytecode_to_file};
 pub use ir::Module;

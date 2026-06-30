@@ -11,7 +11,7 @@
 use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
 use cutile_ir::bytecode::{BytecodeVersion, Opcode};
 use cutile_ir::ir::*;
-use cutile_ir::{decode_bytecode, write_bytecode};
+use cutile_ir::{bytecode_version, decode_bytecode, decode_module, write_bytecode};
 
 // =========================================================================
 // Helpers
@@ -138,6 +138,46 @@ fn version_display_without_tag() {
         tag: 0,
     };
     assert_eq!(format!("{v}"), "13.2");
+}
+
+#[test]
+fn bytecode_version_reads_header() {
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    let module = build_kernel("ver_read");
+    let bytecode =
+        write_bytecode_version(&module, BytecodeVersion::MIN_SUPPORTED).expect("write failed");
+    assert_eq!(
+        bytecode_version(&bytecode).expect("read version"),
+        BytecodeVersion::MIN_SUPPORTED
+    );
+}
+
+/// `bytecode_version` + `write_bytecode_version` reproduces an older buffer
+/// byte-for-byte, where a plain `write_bytecode` would upgrade its version.
+#[test]
+fn version_faithful_roundtrip_is_byte_identical() {
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    assert_ne!(BytecodeVersion::MIN_SUPPORTED, BytecodeVersion::CURRENT);
+
+    let module = build_kernel("ver_faithful");
+    let original =
+        write_bytecode_version(&module, BytecodeVersion::MIN_SUPPORTED).expect("write failed");
+
+    let decoded = decode_module(&original).expect("decode_module failed");
+    let version = bytecode_version(&original).expect("read version");
+    let faithful = write_bytecode_version(&decoded, version).expect("re-encode failed");
+    assert_eq!(
+        faithful, original,
+        "faithful re-encode must be byte-identical"
+    );
+
+    let upgraded = write_bytecode(&decoded).expect("re-encode failed");
+    assert_ne!(
+        upgraded, original,
+        "re-encoding at CURRENT should upgrade (not reproduce) an older buffer"
+    );
 }
 
 #[test]
