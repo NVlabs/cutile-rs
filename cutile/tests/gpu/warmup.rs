@@ -104,6 +104,7 @@ fn different_keys_parallel_compile() {
                 ("y".to_string(), y_probe_8.spec().clone()),
             ])
             .source_hash(warmup_test_module::_SOURCE_HASH)
+            .device_id(device_id)
             .gpu_name(gpu_name.clone())
             .compiler_version(cv.clone())
             .cuda_toolkit_version(tv.clone())
@@ -117,12 +118,13 @@ fn different_keys_parallel_compile() {
                 ("y".to_string(), y_probe_32.spec().clone()),
             ])
             .source_hash(warmup_test_module::_SOURCE_HASH)
+            .device_id(device_id)
             .gpu_name(gpu_name)
             .compiler_version(cv)
             .cuda_toolkit_version(tv)
             .build();
-        assert!(contains_cuda_function(device_id, &key_8));
-        assert!(contains_cuda_function(device_id, &key_32));
+        assert!(contains_cuda_function(&key_8));
+        assert!(contains_cuda_function(&key_32));
     });
 }
 
@@ -186,6 +188,36 @@ fn multi_thread_dedup_timing_evidence() {
             compiles_during_race, 1,
             "single-flight dedup: 4 concurrent threads on the same fresh kernel \
              must trigger exactly ONE JIT compile, got {compiles_during_race}"
+        );
+    });
+}
+
+// view/slice on a meta tensor must neither panic nor diverge from the real spec,
+// so kernels that reshape/slice their inputs can still be warmed.
+#[test]
+fn meta_view_and_slice_match_real_without_panicking() {
+    common::with_test_stack(|| {
+        let _guard = common::cache_test_lock();
+
+        let real = api::zeros::<f32>(&[256]).sync().unwrap();
+        let meta = api::meta::<f32>(&[256]).sync().unwrap();
+
+        // view (reshape): would panic on meta before spec_ptr.
+        let real_v = real.view(&[16, 16]).unwrap();
+        let meta_v = meta.view(&[16, 16]).unwrap();
+        assert_eq!(
+            meta_v.spec(),
+            real_v.spec(),
+            "viewed meta spec must match the real tensor's"
+        );
+
+        // slice with a non-trivial byte offset (element 64 → 256 bytes).
+        let real_s = real.slice(&[64..192]).unwrap();
+        let meta_s = meta.slice(&[64..192]).unwrap();
+        assert_eq!(
+            meta_s.spec(),
+            real_s.spec(),
+            "sliced meta spec must match the real tensor's"
         );
     });
 }

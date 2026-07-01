@@ -75,6 +75,7 @@ fn bench_key(
         .stride_args(stride_args())
         .spec_args(spec_args)
         .source_hash(bench_module::_SOURCE_HASH)
+        .device_id(device_id)
         .gpu_name(get_gpu_name(device_id))
         .compiler_version(get_compiler_version())
         .cuda_toolkit_version(get_cuda_toolkit_version())
@@ -160,10 +161,9 @@ fn warmup_eliminates_first_call_jit() {
         );
         println!("╚══════════════════════════════════════════════════════════╝\n");
 
-        let device_id = get_default_device();
         let key = bench_key(vec!["f32".into(), "64".into()], spec_args_64);
         assert!(
-            contains_cuda_function(device_id, &key),
+            contains_cuda_function(&key),
             "kernel should be in memory cache after warmup"
         );
     });
@@ -208,10 +208,9 @@ fn second_call_hits_memory_cache() {
         );
         println!("╚══════════════════════════════════════════════════════════╝\n");
 
-        let device_id = get_default_device();
         let key = bench_key(vec!["f32".into(), "16".into()], spec_args_16);
         assert!(
-            contains_cuda_function(device_id, &key),
+            contains_cuda_function(&key),
             "tile=16 kernel should be in memory cache after first call"
         );
     });

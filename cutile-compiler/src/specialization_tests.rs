@@ -254,4 +254,24 @@ mod tests {
             "meta and real specs must be byte-identical for the same layout",
         );
     }
+
+    /// Slicing offsets the sentinel (16) instead of a real base. `base_ptr_div`
+    /// depends only on the low 4 bits, and both 16 and a >=256-aligned real base
+    /// have those bits zero — so `+offset` matches for every offset, letting
+    /// `.compile()` warm slicing kernels.
+    #[test]
+    fn sliced_meta_spec_matches_real_across_offsets() {
+        let shape = [8];
+        let strides = [1];
+        let sentinel: u64 = 16;
+        let real_base: u64 = 0x7f00_1234_0000; // 256-aligned, like cudaMalloc
+        for offset in [0u64, 2, 4, 8, 12, 16, 24, 32, 48, 64, 128, 4096] {
+            let meta = compute_spec(sentinel + offset, &shape, &strides, 4);
+            let real = compute_spec(real_base + offset, &shape, &strides, 4);
+            assert_eq!(
+                meta, real,
+                "offset {offset}: sliced meta spec must equal the real spec",
+            );
+        }
+    }
 }

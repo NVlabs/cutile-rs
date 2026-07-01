@@ -490,7 +490,7 @@ pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Modul
 }
 
 /// Check whether a kernel with the given key has already been compiled and cached.
-pub fn contains_cuda_function(_device_id: usize, func_key: &impl FunctionKey) -> bool {
+pub fn contains_cuda_function(func_key: &impl FunctionKey) -> bool {
     let key = func_key.get_hash_string();
     let cache = get_kernel_cache();
     if let Some(slot) = cache.get(&key) {

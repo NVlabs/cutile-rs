@@ -63,7 +63,7 @@ pub use cutile_compiler::compiler::utils::CompileOptions;
 /// Two kernel invocations that share the same `TileFunctionKey` can reuse the same compiled
 /// CUDA module and function, avoiding recompilation. The key captures everything that can
 /// change the generated GPU code: module name, function name, generic type/const parameters,
-/// tensor stride layouts, (optionally) the launch grid, compile options, source hash, 
+/// tensor stride layouts, (optionally) the launch grid, compile options, source hash,
 /// GPU architecture, compiler version, and CUDA toolkit version.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TileFunctionKey {
@@ -76,6 +76,7 @@ pub struct TileFunctionKey {
     pub grid: Option<(u32, u32, u32)>,
     pub compile_options: CompileOptions,
     source_hash: String,
+    device_id: usize,
     gpu_name: String,
     compiler_version: String,
     cuda_toolkit_version: String,
@@ -93,6 +94,7 @@ pub struct TileFunctionKey {
 /// let key = TileFunctionKey::builder("linalg", "matmul")
 ///     .generics(vec!["f32".into(), "128".into()])
 ///     .source_hash(linalg::_SOURCE_HASH)
+///     .device_id(device_id)
 ///     .gpu_name(get_gpu_name(device_id))
 ///     .compiler_version(get_compiler_version())
 ///     .cuda_toolkit_version(get_cuda_toolkit_version())
@@ -108,6 +110,7 @@ pub struct TileFunctionKeyBuilder {
     grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
     source_hash: String,
+    device_id: usize,
     gpu_name: String,
     compiler_version: String,
     cuda_toolkit_version: String,
@@ -142,6 +145,10 @@ impl TileFunctionKeyBuilder {
         self.source_hash = hash.into();
         self
     }
+    pub fn device_id(mut self, device_id: usize) -> Self {
+        self.device_id = device_id;
+        self
+    }
     pub fn gpu_name(mut self, name: impl Into<String>) -> Self {
         self.gpu_name = name.into();
         self
@@ -165,6 +172,7 @@ impl TileFunctionKeyBuilder {
             grid: self.grid,
             compile_options: self.compile_options,
             source_hash: self.source_hash,
+            device_id: self.device_id,
             gpu_name: self.gpu_name,
             compiler_version: self.compiler_version,
             cuda_toolkit_version: self.cuda_toolkit_version,
@@ -189,6 +197,7 @@ impl TileFunctionKey {
             grid: None,
             compile_options: CompileOptions::default(),
             source_hash: String::new(),
+            device_id: 0,
             gpu_name: String::new(),
             compiler_version: String::new(),
             cuda_toolkit_version: String::new(),
@@ -429,6 +438,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
         .scalar_hints(scalar_hints)
         .compile_options(compile_options)
         .source_hash(source_hash)
+        .device_id(device_id)
         .gpu_name(gpu_name.clone())
         .compiler_version(compiler_version)
         .cuda_toolkit_version(cuda_toolkit_version);

@@ -49,6 +49,17 @@ fn cache_key_different_gpu_name() {
 }
 
 #[test]
+fn cache_key_different_device_id() {
+    let key_a = default_key().device_id(0).build();
+    let key_b = default_key().device_id(1).build();
+    assert_ne!(
+        key_a.get_hash_string(),
+        key_b.get_hash_string(),
+        "same kernel on different devices must not share a cache entry"
+    );
+}
+
+#[test]
 fn cache_key_different_compiler_version() {
     let key_a = default_key().compiler_version("0.0.1").build();
     let key_b = default_key().compiler_version("0.0.2").build();

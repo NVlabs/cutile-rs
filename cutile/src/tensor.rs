@@ -509,7 +509,8 @@ pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
 /// Reading the device pointer of a `Meta` tensor panics. `cu_deviceptr` is only
 /// reached on real execution paths (kernel launch arg push, host copies), so a
 /// meta tensor is accepted by `.compile()` (metadata only) yet rejected the
-/// moment anything tries to actually run it.
+/// moment anything tries to actually run it. Reshape/view/slice recompute spec
+/// through `spec_ptr` instead, which never dereferences.
 #[derive(Debug)]
 pub(crate) enum Storage {
     /// A real, owned GPU allocation.
@@ -551,6 +552,17 @@ impl Storage {
                  or copied. Use a real tensor (api::zeros/ones/...) on `.sync()` \
                  / `.await` paths."
             ),
+        }
+    }
+
+    /// Pointer for recomputing [`compute_spec`] on reshape/view/slice — never
+    /// dereferenced, so unlike [`cu_deviceptr`](Self::cu_deviceptr) it doesn't
+    /// panic on `Meta`. Meta returns the sentinel, keeping warmup of reshaping
+    /// kernels on the meta path with a `base_ptr_div` that matches a real tensor's.
+    fn spec_ptr(&self) -> CUdeviceptr {
+        match self {
+            Storage::Device(b) => b.cu_deviceptr(),
+            Storage::Meta { .. } => Storage::META_SPEC_PTR,
         }
     }
 }
@@ -736,8 +748,10 @@ impl<T: DType> Tensor<T> {
         if target_num_bytes != self.typed_num_bytes() {
             return tensor_error_result("Reinterpret shape must preserve total byte size.");
         }
+        // spec_ptr, not cu_deviceptr: the sentinel satisfies every DType's
+        // alignment (like a real >=256-aligned allocation) without panicking on meta.
         let alignment = align_of::<U>() as u64;
-        if alignment > 1 && self.cu_deviceptr() % alignment != 0 {
+        if alignment > 1 && self.storage.spec_ptr() % alignment != 0 {
             return tensor_error_result(
                 "Tensor storage alignment is incompatible with reinterpret target type.",
             );
@@ -867,7 +881,7 @@ impl<T: DType> Tensor<T> {
         let shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         self.strides = contiguous_strides(&shape);
         self.spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &shape,
             &self.strides,
             size_of::<T>() as i32,
@@ -883,7 +897,7 @@ impl<T: DType> Tensor<T> {
         let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -909,7 +923,7 @@ impl<T: DType> Tensor<T> {
         let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<U>() as i32,
@@ -1042,7 +1056,7 @@ impl<'a, T: DType> TensorView<'a, T> {
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.base.storage.cu_deviceptr(),
+            self.base.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -1076,7 +1090,7 @@ impl<'a, T: DType> TensorView<'a, T> {
         }
         let new_strides = self.strides.clone();
         let spec = compute_spec(
-            self.base.storage.cu_deviceptr()
+            self.base.storage.spec_ptr()
                 + (self.offset_bytes + offset_elems * size_of::<T>()) as u64,
             &new_shape,
             &new_strides,
@@ -1106,7 +1120,7 @@ impl<T: DType> Tensor<T> {
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -1140,7 +1154,7 @@ impl<T: DType> Tensor<T> {
         }
         let new_strides = self.strides.clone();
         let spec = compute_spec(
-            self.storage.cu_deviceptr() + (offset_elems * size_of::<T>()) as u64,
+            self.storage.spec_ptr() + (offset_elems * size_of::<T>()) as u64,
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
