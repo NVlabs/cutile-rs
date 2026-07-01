@@ -202,5 +202,4 @@ If you use cuTile Rust in research, please cite the paper:
 ```
 
 ## License
-The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
-All other crates are licensed under the Apache License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0
+All crates are licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
