@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Collect Rust JIT timing artifacts separately from the paper throughput
 # runs, then regenerate the combined JIT breakdown plot.
 set -euo pipefail

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Lock / unlock GPU clocks for reproducible paper-final benchmark numbers.
 #
 # 2400 MHz is the paper's reference clock (MACHINE.md): well within the

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Drives §5.2 Part B — async vs sync throughput under host work W.
 # For each (mode, W), one cargo run appending to results_part_b.csv.
 # Then renders figures/generated/exp2_async_throughput.pdf.

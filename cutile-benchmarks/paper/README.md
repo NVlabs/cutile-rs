@@ -18,7 +18,7 @@ available locally.
 | Component | Version / commit | Used for |
 | --- | --- | --- |
 | cuTile Rust | `0.2.0` | Rust kernel implementation, host API, and paper-result provenance. |
-| Grout | `4631fb01629fc3bc36ec4302b0bf3636f23e1453` | Qwen3 inference engine and benchmark harness for Section 5.3. |
+| Grout | [v0.1.0](https://github.com/huggingface/grout/releases/tag/v0.1.0) (`23ae5a3e78dc39e242918824839ba8a35e4adce9`) | Qwen3 inference engine and benchmark harness for Section 5.3. |
 | cuTile Python | `4f9e5c99ac1c0f2a794d36a99fc1921da84f7de7` | Python frontend baseline for Section 5.1 safety-overhead comparisons. |
 | vLLM | package `0.18.0`; local source checkout `69c9f19951026a7d6f2ddb425e7b1b5e6926f453` | Section 5.3 inference baseline, run with CUDA graphs and prefix cache disabled. |
 | SGLang | package `0.5.9`; local source checkout `8686f42ac2c7abccfa4239ab6a5d6eaa715a4ef1` | Section 5.3 inference baseline, run with RadixAttention/prefix cache disabled. |

@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * Data race prevention: kernel-internal index bug on head permutation.
  *
  * The cuTile Python version (permute_race.py) has a kernel-internal bug:

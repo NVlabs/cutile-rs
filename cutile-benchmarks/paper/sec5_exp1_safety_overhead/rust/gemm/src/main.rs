@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // GEMM benchmark for cuTile Rust — paper Exp 1.
 //
 // Mirrors `gemm_python.py` measurement methodology exactly so both produce

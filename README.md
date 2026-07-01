@@ -55,42 +55,6 @@ The kernel signature carries the access discipline into device code: `z` is the 
 - Run a similar example via `cargo run -p cutile-examples --example saxpy`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
 
-## Paper
-
-The cuTile Rust paper, *Fearless Concurrency on the GPU*, is available [here](https://arxiv.org/abs/2606.15991). On NVIDIA B200, cuTile Rust reaches 7 TB/s for element-wise operations and 2 PFlop/s for GEMM, about 91% of peak memory bandwidth and 92% of dense `f16` peak, respectively. The GEMM result is competitive with cuBLAS, and the B200 safety-overhead microbenchmarks show that cuTile Rust adds safety without measurable runtime overhead: safe Rust persistent GEMM reaches 2.07 PFlop/s at `M=N=K=8192` (92% of the B200 dense `f16` peak), within 0.3% of the corresponding low-level Tile IR variant.
-
-The paper also evaluates Grout, a Qwen3 inference engine built with cuTile Rust in collaboration with Hugging Face. In batch-1 Qwen3 decode, Grout reaches 171 tokens/s for Qwen3-4B on NVIDIA GeForce RTX 5090 and 82 tokens/s for Qwen3-32B on B200, showing competitive state-of-the-art performance on memory-bound inference tasks as measured by our HBM roofline analysis.
-
-Reproducibility artifacts for the paper evaluation are available [here](cutile-benchmarks/paper/). The paper-facing measurements were run against cuTile Rust 0.2.0, and the version of Grout used for the paper is available [here](https://github.com/huggingface/grout).
-
-## Citing
-
-If you use cuTile Rust in research, please cite the paper:
-
-```bibtex
-@misc{elibol2026fearlessconcurrencygpu,
-  title = {Fearless Concurrency on the GPU},
-  author = {Elibol, Melih and Roesch, Jared and Gelado, Isaac and Buehler, Eric and Garland, Michael},
-  year = {2026},
-  eprint = {2606.15991},
-  archivePrefix = {arXiv},
-  primaryClass = {cs.PL},
-  url = {https://arxiv.org/abs/2606.15991}
-}
-```
-
-## Related Projects and References
-
-- [Grout](https://github.com/huggingface/grout): Qwen 3 inference engine in Rust by Hugging Face, built with cuTile Rust and useful as a reference for production kernel call sites.
-- [cuTile Python](https://github.com/nvidia/cutile-python): Python kernel programming with CUDA Tile.
-- [TileGym](https://github.com/NVIDIA/TileGym): CUDA Tile kernel examples and tuning patterns.
-- [cuda-oxide](https://github.com/NVlabs/cuda-oxide): NVlabs experimental Rust-to-CUDA compiler for writing SIMT-style GPU kernels in Rust.
-- [CUDA Tile IR documentation](https://docs.nvidia.com/cuda/tile-ir/latest/index.html): CUDA Tile IR reference documentation.
-- [CUDA documentation](https://docs.nvidia.com/cuda/): CUDA toolkit documentation.
-- [Rust NVPTX backend](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html): rustc's target support for generating PTX for NVIDIA GPUs.
-
-cuTile Rust targets tile-based kernels that lower through CUDA Tile IR, with APIs built around tensor partitions and tensor-core-oriented operations.
-
 ## Setup
 
 ### Requirements
@@ -99,6 +63,7 @@ cuTile Rust targets tile-based kernels that lower through CUDA Tile IR, with API
   - `sm_100+` is supported by CUDA 13.1+.
   - `sm_8x` support was added in CUDA 13.2.
   - CUDA 13.3 adds `sm_90` support, so CUDA 13.3 users now have `sm_80+` coverage.
+  - Architectures below `sm_80` (for example `sm_70` and `sm_75`) are out of scope, and we do not plan to support them.
 - **CUDA** 13.3 recommended (`sm_80+` support and CUDA Tile IR 13.3 features such as FP4 packing and block-scaled MMA).
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
@@ -171,7 +136,7 @@ The flake automatically locates host NVIDIA driver libraries on both NixOS and n
 - Benchmarks: `cargo bench`
 - Everything: `./scripts/run_all.sh` (or pipe to a log file: `./scripts/run_all.sh 2>&1 | tee test_run.log`)
 
-### Workspace Crates
+## Workspace Crates
 
 ```
 cutile                 User-facing crate for authoring and executing tile kernels
@@ -202,6 +167,39 @@ cuda-core              Idiomatic safe CUDA API
 cuda-bindings          NVIDIA CUDA bindings
 ```
 
+## Related Projects and References
+
+- [Grout](https://github.com/huggingface/grout): Qwen 3 inference engine in Rust by Hugging Face, built with cuTile Rust and useful as a reference for production kernel call sites.
+- [cuTile Python](https://github.com/nvidia/cutile-python): Python kernel programming with CUDA Tile.
+- [TileGym](https://github.com/NVIDIA/TileGym): CUDA Tile kernel examples and tuning patterns.
+- [cuda-oxide](https://github.com/NVlabs/cuda-oxide): NVlabs experimental Rust-to-CUDA compiler for writing SIMT-style GPU kernels in Rust.
+- [CUDA Tile IR documentation](https://docs.nvidia.com/cuda/tile-ir/latest/index.html): CUDA Tile IR reference documentation.
+- [CUDA documentation](https://docs.nvidia.com/cuda/): CUDA toolkit documentation.
+- [Rust NVPTX backend](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html): rustc's target support for generating PTX for NVIDIA GPUs.
+
+## Paper
+
+The cuTile Rust paper, *Fearless Concurrency on the GPU*, is available [here](https://arxiv.org/abs/2606.15991). On NVIDIA B200, cuTile Rust reaches 7 TB/s for element-wise operations and 2 PFlop/s for GEMM, about 91% of peak memory bandwidth and 92% of dense `f16` peak, respectively. The GEMM result is competitive with cuBLAS, and the B200 safety-overhead microbenchmarks show that cuTile Rust adds safety without measurable runtime overhead: safe Rust persistent GEMM reaches 2.07 PFlop/s at `M=N=K=8192` (92% of the B200 dense `f16` peak), within 0.3% of the corresponding low-level Tile IR variant.
+
+The paper also evaluates Grout, a Qwen3 inference engine built with cuTile Rust in collaboration with Hugging Face. In batch-1 Qwen3 decode, Grout reaches 171 tokens/s for Qwen3-4B on NVIDIA GeForce RTX 5090 and 82 tokens/s for Qwen3-32B on B200, showing competitive state-of-the-art performance on memory-bound inference tasks as measured by our HBM roofline analysis.
+
+Reproducibility artifacts for the paper evaluation are available [here](cutile-benchmarks/paper/). The paper-facing measurements were run against cuTile Rust 0.2.0, and the version of Grout used for the paper is available [here](https://github.com/huggingface/grout).
+
+## Citing
+
+If you use cuTile Rust in research, please cite the paper:
+
+```bibtex
+@misc{elibol2026fearlessconcurrencygpu,
+  title = {Fearless Concurrency on the GPU},
+  author = {Elibol, Melih and Roesch, Jared and Gelado, Isaac and Buehler, Eric and Garland, Michael},
+  year = {2026},
+  eprint = {2606.15991},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.PL},
+  url = {https://arxiv.org/abs/2606.15991}
+}
+```
+
 ## License
-The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
-All other crates are licensed under the Apache License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0
+All crates are licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0
