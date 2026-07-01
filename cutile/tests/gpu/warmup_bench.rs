@@ -292,6 +292,52 @@ fn full_warmup_workflow() {
     });
 }
 
+// Acceptance test for the new `.compile()` terminal + `api::meta` warmup path.
+//
+// Warms the cache with zero-allocation meta tensors and no launch, then proves a
+// real `.sync()` launch of the same shape/generics hits that entry (+0 compiles).
+// tile=8 is unique to this test so its key never collides with the others.
+#[test]
+fn meta_compile_terminal_warms_cache() {
+    common::with_test_stack(|| {
+        let _guard = common::cache_test_lock();
+
+        let generics = vec!["f32".to_string(), "8".to_string()];
+        let c0 = jit_compile_count();
+
+        // Warmup: same call you would launch, but meta inputs + `.compile()`.
+        // No GPU allocation, no launch — just JIT-compile and cache.
+        let z = api::meta::<f32>(&[256]).partition([8]);
+        let x = api::meta::<f32>(&[256]);
+        let y = api::meta::<f32>(&[256]);
+        bench_module::vector_add(z, x, y)
+            .generics(generics.clone())
+            .compile()
+            .expect("meta .compile() warmup failed");
+        let c_after_compile = jit_compile_count();
+        assert_eq!(
+            c_after_compile,
+            c0 + 1,
+            "meta .compile() must JIT-compile exactly once"
+        );
+
+        // Real launch of the same specialization must hit the warmed entry.
+        let real_x = api::ones::<f32>(&[256]).sync().unwrap();
+        let real_y = api::ones::<f32>(&[256]).sync().unwrap();
+        let real_z = api::zeros::<f32>(&[256]).partition([8]).sync().unwrap();
+        let _ = bench_module::vector_add(real_z, &real_x, &real_y)
+            .generics(generics)
+            .sync()
+            .unwrap();
+        let c_after_launch = jit_compile_count();
+        assert_eq!(
+            c_after_launch, c_after_compile,
+            "real launch after meta .compile() must NOT recompile (key must \
+             match): counter moved from {c_after_compile} to {c_after_launch}"
+        );
+    });
+}
+
 // Summary statistics over a slice of per-iteration durations.
 fn report(label: &str, samples: &[std::time::Duration]) {
     assert!(!samples.is_empty(), "no samples for {label}");

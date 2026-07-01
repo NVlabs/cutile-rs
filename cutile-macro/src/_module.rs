@@ -870,6 +870,8 @@ pub fn kernel_launcher(
             function_generics: Option<Vec<String>>,
             _phantom: std::marker::PhantomData<( #(#ki_phantom_types,)* )>,
             _compile_options: CompileOptions,
+            // When true, `execute` skips its launch block (set by `.compile()`).
+            _compile_only: bool,
         }
 
         impl #tile_kernel_impl_type_params #launcher_ident #struct_args {
@@ -881,7 +883,23 @@ pub fn kernel_launcher(
                     function_generics: None,
                     _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
+                    _compile_only: false,
                 }
+            }
+
+            /// JIT-compiles and caches this specialization without launching.
+            ///
+            /// Runs the same `execute` path as a launch but stops before it, so
+            /// it derives the identical cache key a later `.sync()` / `.await`
+            /// launch will look up. Pair with `api::meta` inputs for
+            /// zero-allocation warmup; those are accepted here (no pointer is
+            /// read) but rejected on a real launch.
+            pub fn compile(mut self) -> Result<(), DeviceError> {
+                self._compile_only = true;
+                let stream = with_default_device_policy(|policy| policy.next_stream())??;
+                let ctx = ExecutionContext::new(stream);
+                unsafe { self.execute(&ctx)?; }
+                Ok(())
             }
         }
 

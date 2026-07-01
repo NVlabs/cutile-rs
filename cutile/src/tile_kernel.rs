@@ -760,12 +760,18 @@ where
     /// Compiles the kernel from its module AST, returning the CUDA function
     /// and validator.
     ///
+    /// This is the internal compile-and-cache entry point used by the generated
+    /// launcher (both the `.sync()`/`.await` launch path and the `.compile()`
+    /// warmup terminal). The user-facing `.compile()` terminal is a separate,
+    /// no-argument method generated per kernel; this one keeps the descriptive
+    /// name `jit_compile` so it does not collide with it.
+    ///
     /// `kernel_ast` is invoked once on cache miss to obtain the kernel's own
     /// [`Module`] (typically the macro-generated `__module_ast_self` fn).
     /// Dep modules are discovered by walking the kernel's `use` statements
     /// against the linker registry.
     #[allow(clippy::too_many_arguments)]
-    fn compile<F: Fn() -> Module>(
+    fn jit_compile<F: Fn() -> Module>(
         &mut self,
         ctx: &ExecutionContext,
         kernel_ast: F,

@@ -212,4 +212,55 @@ mod tests {
         assert!(set.contains(&b));
         assert!(!set.contains(&c));
     }
+
+    /// Meta-tensor cache-key parity (the invariant `api::meta` relies on).
+    ///
+    /// A meta tensor has no allocation, so `Tensor::from_meta` computes its spec
+    /// against a fixed 16-aligned sentinel pointer (`Storage::META_SPEC_PTR == 16`).
+    /// This only produces the same `TileFunctionKey` as a real tensor if the one
+    /// pointer-dependent spec field, `base_ptr_div`, is identical — which holds
+    /// because `from_ptr` clamps alignment to 16 and every real device allocation
+    /// is >=16-byte aligned. If this ever regresses, warmup via `.compile()` would
+    /// silently stop hitting the real `.sync()` launch's cache entry.
+    #[test]
+    fn meta_sentinel_matches_real_aligned_ptr() {
+        let meta = DivHint::from_ptr(16);
+        assert_eq!(meta, DivHint { divisor: 16, max: 16 });
+
+        // Representative real device addresses, all >=256-aligned (cudaMalloc's
+        // minimum), including 64-bit values that truncate and/or go negative
+        // under `as i32`, and the fully-aligned case whose low 32 bits are zero.
+        for &addr in &[
+            256u64,
+            4096,
+            0x10_0000,
+            0x7f00_1234_0000,
+            0x7fff_ffff_ff00,
+            u64::from(u32::MAX) + 1,
+        ] {
+            assert_eq!(
+                DivHint::from_ptr(addr),
+                meta,
+                "real >=16-aligned ptr {addr:#x} must yield the same base_ptr_div \
+                 as the meta sentinel (16); cache-key parity broken",
+            );
+        }
+    }
+
+    /// The full spec — not just `base_ptr_div` — must match between a meta tensor
+    /// and a real one of identical layout; that byte-for-byte equality is what
+    /// keeps the two `TileFunctionKey`s equal. Every field other than
+    /// `base_ptr_div` is pure shape/stride metadata, so this reduces to the
+    /// alignment parity above.
+    #[test]
+    fn meta_spec_equals_real_spec_for_same_layout() {
+        let shape = [256, 4];
+        let strides = [4, 1];
+        let meta_spec = compute_spec(16, &shape, &strides, 4);
+        let real_spec = compute_spec(0x7f00_1234_0000, &shape, &strides, 4);
+        assert_eq!(
+            meta_spec, real_spec,
+            "meta and real specs must be byte-identical for the same layout",
+        );
+    }
 }

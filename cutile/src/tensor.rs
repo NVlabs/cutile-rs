@@ -499,9 +499,65 @@ pub trait IntoPartitionArc {
 /// ```
 pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
 
+/// Backing storage for a [`Tensor`].
+///
+/// A tensor is normally backed by a real GPU allocation (`Device`). The `Meta`
+/// variant carries only the byte length and device id — no device memory — and
+/// is produced by [`crate::api::meta`] for kernel warmup: it lets `.compile()`
+/// build the cache key from shape/stride/spec metadata without allocating.
+///
+/// Reading the device pointer of a `Meta` tensor panics. `cu_deviceptr` is only
+/// reached on real execution paths (kernel launch arg push, host copies), so a
+/// meta tensor is accepted by `.compile()` (metadata only) yet rejected the
+/// moment anything tries to actually run it.
+#[derive(Debug)]
+pub(crate) enum Storage {
+    /// A real, owned GPU allocation.
+    Device(DeviceBuffer),
+    /// Metadata-only placeholder: valid shape/stride/spec, no device memory.
+    Meta { len_bytes: usize, device_id: usize },
+}
+
+impl Storage {
+    /// 16-aligned sentinel address fed to [`compute_spec`] for meta tensors.
+    ///
+    /// `DivHint::from_ptr` clamps pointer alignment to 16, and every real device
+    /// allocation is >=16-byte aligned, so this yields the exact same
+    /// `base_ptr_div` a real tensor would — keeping the warmup cache key
+    /// byte-identical to the launch key.
+    const META_SPEC_PTR: u64 = 16;
+
+    fn len_bytes(&self) -> usize {
+        match self {
+            Storage::Device(b) => b.len_bytes(),
+            Storage::Meta { len_bytes, .. } => *len_bytes,
+        }
+    }
+
+    fn device_id(&self) -> usize {
+        match self {
+            Storage::Device(b) => b.device_id(),
+            Storage::Meta { device_id, .. } => *device_id,
+        }
+    }
+
+    fn cu_deviceptr(&self) -> CUdeviceptr {
+        match self {
+            Storage::Device(b) => b.cu_deviceptr(),
+            Storage::Meta { .. } => panic!(
+                "cutile: read of a meta tensor's device pointer. Meta tensors \
+                 (api::meta) carry only shape/stride metadata for warmup via \
+                 `.compile()`; they have no device memory and cannot be launched \
+                 or copied. Use a real tensor (api::zeros/ones/...) on `.sync()` \
+                 / `.await` paths."
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
-    pub(crate) storage: Arc<DeviceBuffer>,
+    pub(crate) storage: Arc<Storage>,
     pub(crate) shape: Vec<i32>,
     pub(crate) strides: Vec<i32>,
     pub(crate) spec: SpecializationBits,
@@ -578,7 +634,7 @@ impl<T: DType> Tensor<T> {
         strides: Vec<i32>,
     ) -> Self {
         Self::assert_valid_metadata(&shape, &strides, device_buffer.len_bytes());
-        let storage = Arc::new(device_buffer);
+        let storage = Arc::new(Storage::Device(device_buffer));
         let spec = compute_spec(
             storage.cu_deviceptr(),
             &shape,
@@ -609,6 +665,35 @@ impl<T: DType> Tensor<T> {
             shape,
             strides,
         )
+    }
+
+    /// Builds a metadata-only tensor (no GPU allocation) with contiguous strides.
+    ///
+    /// Backed by [`Storage::Meta`]. The spec is computed against a fixed
+    /// 16-aligned sentinel pointer so the resulting cache key matches a real
+    /// allocation's. Only usable for warmup via `.compile()`; any launch or copy
+    /// panics when it reads the (absent) device pointer.
+    pub(crate) fn from_meta(shape: Vec<i32>, device_id: usize) -> Self {
+        let strides = contiguous_strides(&shape);
+        let len_bytes = checked_num_bytes_i32::<T>(&shape)
+            .expect("Tensor shape contains invalid dimensions or overflows.");
+        Self::assert_valid_metadata(&shape, &strides, len_bytes);
+        let spec = compute_spec(
+            Storage::META_SPEC_PTR,
+            &shape,
+            &strides,
+            size_of::<T>() as i32,
+        );
+        Self {
+            storage: Arc::new(Storage::Meta {
+                len_bytes,
+                device_id,
+            }),
+            shape,
+            strides,
+            spec,
+            _dtype: PhantomData,
+        }
     }
 
     // Returns the physical byte length of the shared backing allocation.
