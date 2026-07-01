@@ -40,7 +40,6 @@ pub(crate) mod primary_ctx {
 }
 
 /// Low-level device query operations.
-
 #[allow(dead_code)]
 pub(crate) mod device {
 
@@ -191,7 +190,6 @@ pub(crate) mod ctx {
 }
 
 /// Low-level CUDA stream operations.
-
 #[allow(dead_code)]
 pub(crate) mod stream {
     use super::{DriverError, IntoResult};
