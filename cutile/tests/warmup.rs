@@ -3,14 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Tests for in-memory cache key correctness and warmup APIs.
+//! Tests for in-memory cache key correctness.
 //!
-//! - `cache_key_*` tests are CPU-only (no GPU required) and assert that the
-//!   in-memory cache key (`get_hash_string`) distinguishes every input that can
-//!   change the generated GPU code, so kernels are never falsely reused.
-//! - `warmup_*` tests require GPU (compile + launch).
+//! The `cache_key_*` tests are CPU-only (no GPU required) and assert that the
+//! in-memory cache key (`get_hash_string`) distinguishes every input that can
+//! change the generated GPU code, so kernels are never falsely reused.
 
-use cutile::tile_kernel::{CompileOptions, FunctionKey, TileFunctionKey, WarmupSpec};
+use cutile::tile_kernel::{CompileOptions, FunctionKey, TileFunctionKey};
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 
 fn default_key() -> cutile::tile_kernel::TileFunctionKeyBuilder {
@@ -130,16 +129,5 @@ fn cache_key_different_compile_options() {
         .compile_options(CompileOptions::default().occupancy(4))
         .build();
     assert_ne!(key_c.get_hash_string(), key_d.get_hash_string());
-}
-
-#[test]
-fn warmup_spec_builder() {
-    let spec = WarmupSpec::new("my_kernel", vec!["f32".into(), "128".into()])
-        .with_strides(vec![("x".into(), vec![1, 128])])
-        .with_const_grid((4, 1, 1));
-    assert_eq!(spec.function_name, "my_kernel");
-    assert_eq!(spec.function_generics, vec!["f32", "128"]);
-    assert_eq!(spec.stride_args.len(), 1);
-    assert_eq!(spec.const_grid, Some((4, 1, 1)));
 }
 

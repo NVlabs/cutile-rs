@@ -213,15 +213,9 @@ mod tests {
         assert!(!set.contains(&c));
     }
 
-    /// Meta-tensor cache-key parity (the invariant `api::meta` relies on).
-    ///
-    /// A meta tensor has no allocation, so `Tensor::from_meta` computes its spec
-    /// against a fixed 16-aligned sentinel pointer (`Storage::META_SPEC_PTR == 16`).
-    /// This only produces the same `TileFunctionKey` as a real tensor if the one
-    /// pointer-dependent spec field, `base_ptr_div`, is identical — which holds
-    /// because `from_ptr` clamps alignment to 16 and every real device allocation
-    /// is >=16-byte aligned. If this ever regresses, warmup via `.compile()` would
-    /// silently stop hitting the real `.sync()` launch's cache entry.
+    /// Meta-tensor key parity: `from_ptr` clamps alignment to 16 and every real
+    /// allocation is >=16-aligned, so `api::meta`'s sentinel-16 `base_ptr_div`
+    /// matches theirs — otherwise `.compile()` warmup would miss the real launch.
     #[test]
     fn meta_sentinel_matches_real_aligned_ptr() {
         let meta = DivHint::from_ptr(16);
@@ -247,11 +241,8 @@ mod tests {
         }
     }
 
-    /// The full spec — not just `base_ptr_div` — must match between a meta tensor
-    /// and a real one of identical layout; that byte-for-byte equality is what
-    /// keeps the two `TileFunctionKey`s equal. Every field other than
-    /// `base_ptr_div` is pure shape/stride metadata, so this reduces to the
-    /// alignment parity above.
+    /// The full spec (not just `base_ptr_div`) is byte-identical for meta vs real
+    /// of the same layout — every other field is pure shape/stride metadata.
     #[test]
     fn meta_spec_equals_real_spec_for_same_layout() {
         let shape = [256, 4];

@@ -20,7 +20,7 @@ use cutile::api;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
     contains_cuda_function, get_default_device, jit_compile_count, FunctionKey, TileFunctionKey,
-    TileKernel, WarmupSpec,
+    TileKernel,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
     get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
@@ -116,16 +116,19 @@ fn warmup_eliminates_first_call_jit() {
         );
 
         let warmup_t0 = Instant::now();
-        bench_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "64".into()])
-            .with_strides(stride_args())
-            .with_spec_args(spec_args_64.clone())])
-        .expect("compile_warmup failed");
+        let z = api::meta::<f32>(&[256]).partition([64]);
+        let x = api::meta::<f32>(&[256]);
+        let y = api::meta::<f32>(&[256]);
+        bench_module::vector_add(z, x, y)
+            .generics(vec!["f32".into(), "64".into()])
+            .compile()
+            .expect("meta .compile() warmup failed");
         let warmup_duration = warmup_t0.elapsed();
         let c_after_warmup = jit_compile_count();
         assert_eq!(
             c_after_warmup,
             c_after_cold + 1,
-            "compile_warmup for tile=64 must perform exactly one JIT compile"
+            ".compile() warmup for tile=64 must perform exactly one JIT compile"
         );
 
         let warm_duration = timed_kernel_call("64");
@@ -214,84 +217,6 @@ fn second_call_hits_memory_cache() {
     });
 }
 
-// Steps 2 and 3 being cache hits proves compile_warmup's key matches the
-// launch-derived key — the property that makes warmup useful.
-#[test]
-fn full_warmup_workflow() {
-    common::with_test_stack(|| {
-        let _guard = common::cache_test_lock();
-
-        // Prime fill kernel so only vector_add moves the counter below.
-        let spec_args_128 = vector_add_spec_args(256, 128);
-        let c0 = jit_compile_count();
-
-        // Step 1: compile_warmup (one miss).
-        let t0 = Instant::now();
-        bench_module::_compile_warmup(&[WarmupSpec::new("vector_add", vec!["f32".into(), "128".into()])
-            .with_strides(stride_args())
-            .with_spec_args(spec_args_128.clone())])
-        .expect("compile_warmup failed");
-        let compile_time = t0.elapsed();
-        let c_after_compile = jit_compile_count();
-        assert_eq!(
-            c_after_compile,
-            c0 + 1,
-            "compile_warmup must perform exactly one JIT compile"
-        );
-
-        // Step 2: first real launch — same key → cache hit. 
-        let t1 = Instant::now();
-        let x = api::ones::<f32>(&[256]).sync().unwrap();
-        let y = api::ones::<f32>(&[256]).sync().unwrap();
-        let z = api::zeros::<f32>(&[256]).partition([128]).sync().unwrap();
-        let _ = bench_module::vector_add(z, &x, &y)
-            .generics(vec!["f32".into(), "128".into()])
-            .sync()
-            .unwrap();
-        let first_launch_time = t1.elapsed();
-        let c_after_first = jit_compile_count();
-        assert_eq!(
-            c_after_first, c_after_compile,
-            "first launch after compile_warmup must NOT recompile (key must \
-             match): counter moved from {c_after_compile} to {c_after_first}"
-        );
-
-        // Step 3: production call — cache hit.
-        let production_time = timed_kernel_call("128");
-        let c_after_prod = jit_compile_count();
-        assert_eq!(
-            c_after_prod, c_after_compile,
-            "production call after warmup must NOT recompile (cache hit): \
-             counter moved from {c_after_compile} to {c_after_prod}"
-        );
-
-        println!("\n╔══════════════════════════════════════════════════════════╗");
-        println!("║           Full Warmup Workflow Verification              ║");
-        println!("╠══════════════════════════════════════════════════════════╣");
-        println!(
-            "║  1. compile_warmup:   {:>10.1?}  (JIT: +1 compile)    ║",
-            compile_time
-        );
-        println!(
-            "║  2. first real launch: {:>10.1?}  (cache: +0 compile)  ║",
-            first_launch_time
-        );
-        println!(
-            "║  3. production call:  {:>10.1?}  (cache: +0 compile)  ║",
-            production_time
-        );
-        println!("║  Total JIT compiles for the whole workflow: 1           ║");
-        println!("╚══════════════════════════════════════════════════════════╝\n");
-
-        let device_id = get_default_device();
-        let key = bench_key(vec!["f32".into(), "128".into()], spec_args_128);
-        assert!(
-            contains_cuda_function(device_id, &key),
-            "tile=128 kernel should be in memory cache after warmup workflow"
-        );
-    });
-}
-
 // Acceptance test for the new `.compile()` terminal + `api::meta` warmup path.
 //
 // Warms the cache with zero-allocation meta tensors and no launch, then proves a
@@ -301,6 +226,8 @@ fn full_warmup_workflow() {
 fn meta_compile_terminal_warms_cache() {
     common::with_test_stack(|| {
         let _guard = common::cache_test_lock();
+
+        let _prime = api::ones::<f32>(&[256]).sync().unwrap();
 
         let generics = vec!["f32".to_string(), "8".to_string()];
         let c0 = jit_compile_count();
