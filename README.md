@@ -63,6 +63,7 @@ The kernel signature carries the access discipline into device code: `z` is the 
   - `sm_100+` is supported by CUDA 13.1+.
   - `sm_8x` support was added in CUDA 13.2.
   - CUDA 13.3 adds `sm_90` support, so CUDA 13.3 users now have `sm_80+` coverage.
+  - Architectures below `sm_80` (for example `sm_70` and `sm_75`) are out of scope, and we do not plan to support them.
 - **CUDA** 13.3 recommended (`sm_80+` support and CUDA Tile IR 13.3 features such as FP4 packing and block-scaled MMA).
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
@@ -175,8 +176,6 @@ cuda-bindings          NVIDIA CUDA bindings
 - [CUDA Tile IR documentation](https://docs.nvidia.com/cuda/tile-ir/latest/index.html): CUDA Tile IR reference documentation.
 - [CUDA documentation](https://docs.nvidia.com/cuda/): CUDA toolkit documentation.
 - [Rust NVPTX backend](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html): rustc's target support for generating PTX for NVIDIA GPUs.
-
-cuTile Rust targets tile-based kernels that lower through CUDA Tile IR, with APIs built around tensor partitions and tensor-core-oriented operations.
 
 ## Paper
 
