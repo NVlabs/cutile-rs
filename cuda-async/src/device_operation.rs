@@ -671,7 +671,6 @@ where
 // Value
 
 pub struct Value<T>(T);
-unsafe impl<T> Send for Value<T> {}
 
 impl<T> Value<T> {
     pub fn new(value: T) -> Self {
@@ -719,25 +718,20 @@ impl From<f32> for Value<f32> {
 
 // Empty (closure)
 
-pub struct Empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> {
+pub struct Empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send> {
     closure: F,
 }
 
-pub fn empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO>(closure: F) -> Empty<O, DO, F> {
+pub fn empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send>(
+    closure: F,
+) -> Empty<O, DO, F> {
     Empty { closure }
-}
-
-unsafe impl<O: Send, DO, F> Send for Empty<O, DO, F>
-where
-    DO: DeviceOp<Output = O>,
-    F: FnOnce() -> DO,
-{
 }
 
 impl<O: Send, DO, F> DeviceOp for Empty<O, DO, F>
 where
     DO: DeviceOp<Output = O>,
-    F: FnOnce() -> DO,
+    F: FnOnce() -> DO + Send,
 {
     type Output = O;
 
@@ -750,7 +744,7 @@ where
     }
 }
 
-impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> IntoFuture for Empty<O, DO, F> {
+impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send> IntoFuture for Empty<O, DO, F> {
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, Empty<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
