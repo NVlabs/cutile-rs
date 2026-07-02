@@ -426,14 +426,16 @@ pub fn copy_host_vec_to_device<T: DType>(vec: &Arc<Vec<T>>) -> impl DeviceOp<Out
 /// Creates a metadata-only tensor: valid shape/stride/spec, **no GPU allocation**.
 ///
 /// Meta tensors exist for kernel warmup. Build the same call you would launch,
-/// but with `api::meta` inputs and a `.compile()` terminal instead of `.sync()`:
-/// this JIT-compiles and caches the specialization without allocating memory or
-/// launching. Because it reuses the normal builder and derives the same cache
-/// key from the argument metadata, the compiled kernel is later hit by the real
-/// `.sync()` call.
+/// but with `api::meta` inputs and a `.compile()` / `.compile_on(stream)` terminal
+/// instead of `.sync()`: this JIT-compiles and caches the specialization without
+/// allocating memory or launching. Because it reuses the normal builder and
+/// derives the same cache key from the argument metadata, the compiled kernel is
+/// later hit by the real `.sync()` call.
 ///
-/// A meta tensor has no device memory, so any real execution path (`.sync()`,
-/// `.await`) panics the moment it reads the device pointer.
+/// `.sync()` / `.await` on the meta op itself succeeds — it just materializes the
+/// metadata-only tensor handle. A meta tensor has no device memory, so the panic
+/// comes only when something reads the device pointer: a kernel launch, or a
+/// host/device copy.
 ///
 /// ## Examples
 ///

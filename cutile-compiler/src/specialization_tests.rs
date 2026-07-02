@@ -224,7 +224,13 @@ mod tests {
     #[test]
     fn meta_sentinel_matches_real_aligned_ptr() {
         let meta = DivHint::from_ptr(16);
-        assert_eq!(meta, DivHint { divisor: 16, max: 16 });
+        assert_eq!(
+            meta,
+            DivHint {
+                divisor: 16,
+                max: 16
+            }
+        );
 
         // Representative real device addresses, all >=256-aligned (cudaMalloc's
         // minimum), including 64-bit values that truncate and/or go negative

@@ -57,8 +57,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
-use std::collections::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::{env, fs};
 
@@ -845,6 +845,13 @@ pub fn kernel_launcher(
                 self._compile_only = true;
                 let stream = with_default_device_policy(|policy| policy.next_stream())??;
                 let ctx = ExecutionContext::new(stream);
+                unsafe { self.execute(&ctx)?; }
+                Ok(())
+            }
+
+            pub fn compile_on(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
+                self._compile_only = true;
+                let ctx = ExecutionContext::new(stream.clone());
                 unsafe { self.execute(&ctx)?; }
                 Ok(())
             }

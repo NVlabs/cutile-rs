@@ -11,7 +11,9 @@ use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, Function};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, get_gpu_name, get_cuda_toolkit_version, get_compiler_version};
+use cutile_compiler::cuda_tile_runtime_utils::{
+    compile_tile_ir_module, get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+};
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use std::alloc::{alloc, Layout};
 use std::fs;

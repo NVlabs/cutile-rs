@@ -141,4 +141,3 @@ fn cache_key_different_compile_options() {
         .build();
     assert_ne!(key_c.get_hash_string(), key_d.get_hash_string());
 }
-

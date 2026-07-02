@@ -500,4 +500,3 @@ pub fn contains_cuda_function(func_key: &impl FunctionKey) -> bool {
         false
     }
 }
-

@@ -156,9 +156,7 @@ fn warmup_eliminates_first_call_jit() {
             warm_duration
         );
         println!("╠══════════════════════════════════════════════════════════╣");
-        println!(
-            "║  JIT compiles: cold +1, warmup +1, warmed call +0       ║"
-        );
+        println!("║  JIT compiles: cold +1, warmup +1, warmed call +0       ║");
         println!("╚══════════════════════════════════════════════════════════╝\n");
 
         let key = bench_key(vec!["f32".into(), "64".into()], spec_args_64);
@@ -352,9 +350,18 @@ fn cache_hit_path_cost() {
         }
 
         println!("\n=== cache-hit-path cost (tile={tile}, f32) ===");
-        report("(A) end-to-end warmed launch (real per-call)", &launch_samples);
-        report("(B) build hardened key + hash (added per-launch CPU)", &key_samples);
-        report("(C) get_gpu_name() only (mutex + String clone)", &gpu_name_samples);
+        report(
+            "(A) end-to-end warmed launch (real per-call)",
+            &launch_samples,
+        );
+        report(
+            "(B) build hardened key + hash (added per-launch CPU)",
+            &key_samples,
+        );
+        report(
+            "(C) get_gpu_name() only (mutex + String clone)",
+            &gpu_name_samples,
+        );
     });
 }
 
