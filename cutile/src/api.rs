@@ -133,11 +133,12 @@
 
 use crate::kernels::conversion::convert_apply;
 use crate::kernels::creation::{arange_apply, eye_apply, full_apply, linspace as linspace_kernel};
-use crate::tensor::{IntoPartition, Reshape, Tensor, Unpartition};
-use cuda_async::device_buffer::DeviceBuffer;
+use crate::tensor::{IntoPartition, Reshape, Storage, Tensor, Unpartition};
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
-use cuda_async::device_operation::{value, DeviceOp, ExecutionContext, Unzippable1, Unzippable2};
+use cuda_async::device_operation::{
+    value, with_context, DeviceOp, ExecutionContext, Unzippable1, Unzippable2,
+};
 use cuda_async::error::DeviceError;
 use cuda_core::curand::{RandNormal, RandUniform, RNG};
 use cuda_core::sys::CUdeviceptr;
@@ -153,7 +154,7 @@ use std::sync::Arc;
 /// This internal type implements the async copy operation that allocates new
 /// GPU memory and copies tensor data device-to-device.
 pub struct CopyDeviceToDevice<T: DType> {
-    _storage: Arc<DeviceBuffer>, // keeps source GPU memory alive
+    _storage: Arc<Storage>, // keeps source GPU memory alive
     src_ptr: CUdeviceptr,
     shape: Vec<i32>,
     strides: Vec<i32>,
@@ -420,6 +421,35 @@ impl<T: DType> IntoFuture for CopyHostVecToDevice<T> {
 
 pub fn copy_host_vec_to_device<T: DType>(vec: &Arc<Vec<T>>) -> impl DeviceOp<Output = Tensor<T>> {
     CopyHostVecToDevice { vec: vec.clone() }
+}
+
+/// Creates a metadata-only tensor: valid shape/stride/spec, **no GPU allocation**.
+///
+/// Meta tensors exist for kernel warmup. Build the same call you would launch,
+/// but with `api::meta` inputs and a `.compile()` / `.compile_on(stream)` terminal
+/// instead of `.sync()`: this JIT-compiles and caches the specialization without
+/// allocating memory or launching. Because it reuses the normal builder and
+/// derives the same cache key from the argument metadata, the compiled kernel is
+/// later hit by the real `.sync()` call.
+///
+/// `.sync()` / `.await` on the meta op itself succeeds — it just materializes the
+/// metadata-only tensor handle. A meta tensor has no device memory, so the panic
+/// comes only when something reads the device pointer: a kernel launch, or a
+/// host/device copy.
+///
+/// ## Examples
+///
+/// ```rust,ignore
+/// use cutile::api;
+///
+/// let z = api::meta::<f32>(&[1024]).partition([128]);
+/// let x = api::meta::<f32>(&[1024]);
+/// let y = api::meta::<f32>(&[1024]);
+/// kernels::vector_add(z, x, y).generics(["f32", "128"]).compile()?;
+/// ```
+pub fn meta<T: DType>(shape: &[usize]) -> impl DeviceOp<Output = Tensor<T>> {
+    let shape_i32: Vec<i32> = shape.iter().map(|&d| d as i32).collect();
+    with_context(move |ctx| value(Tensor::<T>::from_meta(shape_i32, ctx.get_device_id())))
 }
 
 /// Creates a tensor filled with zeros.

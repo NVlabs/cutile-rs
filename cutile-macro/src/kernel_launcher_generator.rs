@@ -862,12 +862,13 @@ pub fn generate_kernel_launcher(
         let compile_options = std::mem::take(&mut self._compile_options);
         // LINKING Phase B: pass the kernel's per-module AST builder; the JIT
         // walks `use` statements against the linker registry for deps.
-        let (function, validator) = self.compile(
+        let (function, validator) = self.jit_compile(
             ctx, __module_ast_self,
             module_name, function_name, function_entry,
             function_generics, stride_args, spec_args.clone(), scalar_hints,
             const_grid,
-            compile_options
+            compile_options,
+            _SOURCE_HASH,
         )?;
     }})
     .unwrap()
@@ -876,29 +877,35 @@ pub fn generate_kernel_launcher(
     launcher_method.block.stmts.extend(compile_stmts);
     launcher_method.block.stmts.extend(validator_statements);
 
-    launcher_method.block.stmts.push(parse_stmt(
+    let mut launch_only_stmts: Vec<Stmt> = vec![parse_stmt(
         "let mut kernel_launch = AsyncKernelLaunch::new(function.clone());".to_string(),
-    ));
-    launcher_method.block.stmts.extend(builder_statements);
-
-    launcher_method.block.stmts.push(parse_stmt(format!(
+    )];
+    launch_only_stmts.extend(builder_statements);
+    launch_only_stmts.push(parse_stmt(format!(
         "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
         launch_grid_expr_strs.join(",")
     )));
-
-    let launch_stmts = syn::parse2::<ExprBlock>(quote! {{
-        kernel_launch
-            .set_launch_config(LaunchConfig {
-                grid_dim: launch_grid,
-                block_dim: (1, 1, 1),
-                shared_mem_bytes: 0
-            });
-        kernel_launch.execute(ctx)?;
-    }})
-    .unwrap()
-    .block
-    .stmts;
-    launcher_method.block.stmts.extend(launch_stmts);
+    launch_only_stmts.extend(
+        syn::parse2::<ExprBlock>(quote! {{
+            kernel_launch
+                .set_launch_config(LaunchConfig {
+                    grid_dim: launch_grid,
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0
+                });
+            kernel_launch.execute(ctx)?;
+        }})
+        .unwrap()
+        .block
+        .stmts,
+    );
+    let gated_launch = syn::parse2::<Stmt>(quote! {
+        if !self._compile_only {
+            #(#launch_only_stmts)*
+        }
+    })
+    .unwrap();
+    launcher_method.block.stmts.push(gated_launch);
     // Return with KernelInput::recover applied to each &Tensor param.
     launcher_method
         .block

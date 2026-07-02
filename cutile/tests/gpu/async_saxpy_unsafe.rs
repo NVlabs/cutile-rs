@@ -69,6 +69,7 @@ fn smoke_async_saxpy_unsafe() {
                         vec![],
                         None,
                         CompileOptions::default(),
+                        my_module::_SOURCE_HASH,
                     );
                     value(func)
                 })
