@@ -55,6 +55,16 @@ impl StreamCallbackState {
 }
 
 /// A future that executes a [`DeviceOp`] on a CUDA stream and resolves upon completion.
+///
+/// # Cancellation
+///
+/// Dropping a `DeviceFuture` that has started executing (polled at least
+/// once, not yet complete) blocks the current thread until the underlying
+/// stream work finishes. The pending result may reference memory the device
+/// is still writing — host buffers filled by async copies, device buffers
+/// whose drop frees them — so the future cannot discard it while that work
+/// is in flight. Futures that were never polled, or that already resolved,
+/// drop without blocking.
 #[derive(Debug)]
 pub struct DeviceFuture<T: Send, DO: DeviceOp<Output = T>> {
     pub(crate) device_operation: Option<DO>,
@@ -73,10 +83,15 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
 
     /// Creates a device future scheduled on the given stream.
     pub fn scheduled(op: DO, ctx: ExecutionContext) -> Self {
+        // Functional update (`..Default::default()`) is not allowed on types
+        // that implement `Drop`; construct all fields explicitly.
         Self {
             device_operation: Some(op),
             execution_context: Some(ctx),
-            ..Default::default()
+            result: None,
+            error: None,
+            state: DeviceFutureState::Idle,
+            callback_state: None,
         }
     }
 
@@ -144,6 +159,39 @@ impl<T: Send, DO: DeviceOp<Output = T>> Default for DeviceFuture<T, DO> {
             error: None,
             state: DeviceFutureState::Idle,
             callback_state: None,
+        }
+    }
+}
+
+impl<T: Send, DO: DeviceOp<Output = T>> Drop for DeviceFuture<T, DO> {
+    fn drop(&mut self) {
+        if self.state != DeviceFutureState::Executing {
+            // Idle/Failed: nothing was submitted. Complete: the result was
+            // already taken by `poll`. Either way there is no in-flight work
+            // referencing `self.result`.
+            return;
+        }
+        // The operation was submitted and the completion callback has not
+        // been observed: `self.result` may still be referenced by in-flight
+        // stream work (host buffers written by async D2H copies, device
+        // buffers whose drop frees memory a kernel is still writing). Block
+        // until the stream drains before the result drops.
+        if let Some(state) = self.callback_state.as_ref() {
+            if state.complete.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        if let Some(ctx) = self.execution_context.as_ref() {
+            // SAFETY: the context holds the stream alive; an error means the
+            // context is unusable and the driver has aborted pending work,
+            // so dropping the result no longer races with it.
+            let _ = unsafe { ctx.get_cuda_stream().synchronize() };
+        } else if let Some(state) = self.callback_state.as_ref() {
+            // Unreachable by construction (Executing requires a context),
+            // but never drop a possibly-referenced result without waiting.
+            while !state.complete.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
         }
     }
 }
@@ -233,5 +281,19 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                 unreachable!();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device_operation::Value;
+
+    /// Dropping a future that was never polled must be a no-op: nothing has
+    /// been submitted, so `Drop` must not touch CUDA or block.
+    #[test]
+    fn drop_idle_future_is_noop() {
+        let fut: DeviceFuture<i32, Value<i32>> = DeviceFuture::new();
+        drop(fut);
     }
 }

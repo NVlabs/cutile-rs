@@ -49,3 +49,6 @@ mod book_snippets;
 
 #[path = "gpu/tensor_permute.rs"]
 mod tensor_permute;
+
+#[path = "gpu/future_drop.rs"]
+mod future_drop;

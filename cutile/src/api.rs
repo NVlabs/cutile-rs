@@ -334,6 +334,9 @@ impl<T: DType> DeviceOp for CopyDeviceToHostVec<T> {
         let size = self.tensor.size();
         let layout = Layout::array::<T>(size).expect("overflow cannot happen");
         let async_ptr = unsafe { alloc(layout).cast::<T>() };
+        if async_ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
         memcpy_dtoh_async(async_ptr, cu_deviceptr, size, ctx.get_cuda_stream());
         Ok(unsafe { Vec::from_raw_parts(async_ptr, size, size) })
     }
