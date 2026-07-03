@@ -12,7 +12,8 @@ use cuda_core::{memcpy_dtoh_async, Function};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
-    compile_tile_ir_module, get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+    compile_tile_ir_module, env_flag_enabled, get_compiler_version, get_cuda_toolkit_version,
+    get_gpu_name,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use std::alloc::{alloc, Layout};
@@ -22,11 +23,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-// JIT diagnostic logging (set CUTILE_JIT_LOG=1 to enable)
+// JIT diagnostic logging (set CUTILE_JIT_LOG=1, true, yes, or on to enable)
 
 fn jit_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("CUTILE_JIT_LOG").is_ok_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| env_flag_enabled("CUTILE_JIT_LOG"))
 }
 
 macro_rules! jit_log {
@@ -523,11 +524,11 @@ pub fn validate_grids(
 ///
 /// If a grid is explicitly specified (non-zero), it is used directly. Otherwise, the grid
 /// is inferred from partitioned tensor inputs. All inferred grids must match, or the
-/// function will panic.
+/// function will return an error.
 ///
-/// ## Panics
+/// ## Errors
 ///
-/// Panics if no grid is specified and no inferred grids are available, or if inferred
+/// Returns an error if no grid is specified and no inferred grids are available, or if inferred
 /// grids from different inputs don't match.
 pub fn infer_launch_grid(
     grid: (u32, u32, u32),

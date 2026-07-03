@@ -448,7 +448,16 @@ pub fn copy_host_vec_to_device<T: DType>(vec: &Arc<Vec<T>>) -> impl DeviceOp<Out
 /// kernels::vector_add(z, x, y).generics(["f32", "128"]).compile()?;
 /// ```
 pub fn meta<T: DType>(shape: &[usize]) -> impl DeviceOp<Output = Tensor<T>> {
-    let shape_i32: Vec<i32> = shape.iter().map(|&d| d as i32).collect();
+    // Checked: an unchecked `d as i32` would silently truncate a dimension above
+    // `i32::MAX` (e.g. a multiple of 2^32 → 0), warming up a wrong cache key.
+    let shape_i32: Vec<i32> = shape
+        .iter()
+        .map(|&d| {
+            i32::try_from(d).unwrap_or_else(|_| {
+                panic!("meta tensor dimension {d} exceeds i32::MAX ({})", i32::MAX)
+            })
+        })
+        .collect();
     with_context(move |ctx| value(Tensor::<T>::from_meta(shape_i32, ctx.get_device_id())))
 }
 

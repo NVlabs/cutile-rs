@@ -287,7 +287,7 @@ fn report(label: &str, samples: &[std::time::Duration]) {
 ///       is asserted flat across the loop, so every iteration is a cache hit.
 ///   (B) Build hardened key + `get_hash_string()`, no launch — the extra CPU
 ///       work the hit path does before the lookup.
-///   (C) `get_gpu_name()` alone — the mutex + `String` clone.
+///   (C) `get_gpu_name()` alone — cached `OnceLock` lookup + `String` clone.
 ///
 /// Run with:
 ///   cargo test --test gpu warmup_bench::cache_hit_path_cost -- --nocapture
@@ -340,7 +340,7 @@ fn cache_hit_path_cost() {
             drop(h);
         }
 
-        // (C) get_gpu_name() in isolation — the mutex + String clone per launch.
+        // (C) get_gpu_name() in isolation — cached OnceLock lookup + String clone per launch.
         let mut gpu_name_samples = Vec::with_capacity(CPU_ITERS);
         for _ in 0..CPU_ITERS {
             let t0 = Instant::now();
@@ -359,18 +359,19 @@ fn cache_hit_path_cost() {
             &key_samples,
         );
         report(
-            "(C) get_gpu_name() only (mutex + String clone)",
+            "(C) get_gpu_name() only (OnceLock lookup + String clone)",
             &gpu_name_samples,
         );
     });
 }
 
-/// (B) under concurrency: runs the full hit-path build (key + hash, which takes
-/// the `get_gpu_name()` mutex) across thread counts. The lock sits at its real
-/// ~5% duty cycle inside the path, so contention is representative.
+/// (B) under concurrency: runs the full hit-path build (key + hash, including
+/// `get_gpu_name()`) across thread counts. `get_gpu_name()` is now lock-free on
+/// the hot path, so any slowdown with thread count comes from the key build/hash
+/// itself, not from a lock.
 ///
 ///   threads=1 per-call ties back to (B) (~5.5µs).
-///   Flat per-call as threads grow => the mutex isn't serializing the path.
+///   Flat per-call as threads grow => the path is not serialized by a lock.
 ///
 /// Run with:
 ///   cargo test --test gpu warmup_bench::hit_path_contention -- --nocapture
@@ -379,7 +380,7 @@ fn hit_path_contention() {
     common::with_test_stack(|| {
         let _guard = common::cache_test_lock();
 
-        // Prime get_gpu_name's cache so workers take the locked read path,
+        // Prime get_gpu_name's cache so workers hit the lock-free cached path,
         // not the driver.
         let _ = get_gpu_name(get_default_device());
 
@@ -424,7 +425,7 @@ fn hit_path_contention() {
         }
         println!(
             "Read as: threads=1 ties back to (B); flat per-call as threads grow \
-             => the get_gpu_name lock inside the path isn't serializing.\n"
+             => no lock inside the path is serializing it.\n"
         );
     });
 }

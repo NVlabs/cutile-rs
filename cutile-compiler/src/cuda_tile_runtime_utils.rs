@@ -73,30 +73,34 @@ pub fn get_cuda_toolkit_version() -> String {
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 ///
-/// Result is cached per device_id; the driver is only queried once per device.
+/// Cached per device: the driver is queried once per device and cache hits are
+/// lock-free (`OnceLock::get` is an atomic load). CUDA device ordinals are small
+/// and contiguous, so a fixed array of `OnceLock` suffices; an ordinal beyond it
+/// (never in practice) skips the cache and queries the driver each time.
 pub fn get_gpu_name(device_id: usize) -> String {
-    static CACHE: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let guard = cache.lock().unwrap();
-        if let Some(name) = guard.get(&device_id) {
-            return name.clone();
-        }
+    const MAX_CACHED_DEVICES: usize = 64;
+    static NAMES: [OnceLock<String>; MAX_CACHED_DEVICES] =
+        [const { OnceLock::new() }; MAX_CACHED_DEVICES];
+
+    let query = || -> String {
+        let dev = Device::raw_device(device_id).unwrap_or_else(|e| {
+            panic!(
+                "failed to get CUDA device {device_id}: {e}\n\
+                 Ensure an NVIDIA GPU is visible to the process and the CUDA driver is installed."
+            )
+        });
+        unsafe { get_device_sm_name(dev) }.unwrap_or_else(|e| {
+            panic!(
+                "failed to query CUDA SM name for device {device_id}: {e}\n\
+                 Ensure the installed CUDA driver supports this GPU."
+            )
+        })
+    };
+
+    match NAMES.get(device_id) {
+        Some(slot) => slot.get_or_init(query).clone(),
+        None => query(),
     }
-    let dev = Device::raw_device(device_id).unwrap_or_else(|e| {
-        panic!(
-            "failed to get CUDA device {device_id}: {e}\n\
-             Ensure an NVIDIA GPU is visible to the process and the CUDA driver is installed."
-        )
-    });
-    let name = unsafe { get_device_sm_name(dev) }.unwrap_or_else(|e| {
-        panic!(
-            "failed to query CUDA SM name for device {device_id}: {e}\n\
-             Ensure the installed CUDA driver supports this GPU."
-        )
-    });
-    cache.lock().unwrap().insert(device_id, name.clone());
-    name
 }
 
 fn tileiras_executable_name() -> &'static str {
@@ -557,15 +561,21 @@ fn format_cuda_version(version: u32) -> String {
     format!("{}.{}", version / 1000, (version % 1000) / 10)
 }
 
+/// Returns whether the environment variable `var` is set to a truthy value
+/// (`1` / `true` / `yes` / `on`, case-insensitive, surrounding whitespace ignored).
+///
+/// Shared by the crate's on/off diagnostic env vars so they all parse the same way.
+pub fn env_flag_enabled(var: &str) -> bool {
+    env::var(var).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn setup_diagnostics_enabled() -> bool {
-    env::var(SETUP_DIAGNOSTICS_ENV)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+    env_flag_enabled(SETUP_DIAGNOSTICS_ENV)
 }
 
 fn emit_setup_diagnostic(args: std::fmt::Arguments<'_>) {
