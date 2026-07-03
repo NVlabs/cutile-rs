@@ -130,18 +130,6 @@ pub fn get_kernel_cache() -> &'static DashMap<String, Arc<OnceCell<CompiledKerne
     KERNEL_CACHE.get_or_init(DashMap::new)
 }
 
-/// Remove all compiled kernels from the in-memory cache.
-pub fn clear_kernel_cache() {
-    get_kernel_cache().clear();
-}
-
-/// Evict a single compiled kernel from the in-memory cache by its hash string.
-///
-/// Returns `true` if an entry was removed, `false` if the key was not present.
-pub fn evict_kernel(key_str: &str) -> bool {
-    get_kernel_cache().remove(key_str).is_some()
-}
-
 /// Get (or create) the single-flight compilation slot for `key_str`.
 ///
 /// The returned `OnceCell` lets the caller `get_or_try_init` the compile

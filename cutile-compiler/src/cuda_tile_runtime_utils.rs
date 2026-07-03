@@ -6,6 +6,7 @@
 //! Runtime utilities for compiling Tile IR modules to GPU cubins.
 //! Provides GPU detection and bytecode compilation helpers.
 
+use crate::error::JITError;
 use cuda_core::{get_device_sm_name, Device};
 use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion};
 use std::collections::HashMap;
@@ -361,7 +362,13 @@ fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
 }
 
 /// Compiles a `cutile_ir::Module` to a `.cubin` file via bytecode serialization and `tileiras`.
-pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> String {
+///
+/// Returns `Err` (not panic) on any failure so callers can propagate it and run
+/// their cache-cleanup paths; a panic would unwind past that and across FFI frames.
+pub fn compile_tile_ir_module(
+    module: &cutile_ir::Module,
+    gpu_name: &str,
+) -> Result<String, JITError> {
     let tmp_dir = env::temp_dir();
     let base_filename = tmp_dir.join(Uuid::new_v4().to_string());
     let bc_filename = format!("{}.bc", base_filename.to_str().unwrap());
@@ -369,11 +376,13 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
 
     module
         .verify_dominance()
-        .expect("tile-ir dominance verification failed");
+        .map_err(|e| JITError::Generic(format!("tile-ir dominance verification failed: {e}")))?;
 
-    module
-        .verify_bytecode_indices()
-        .expect("tile-ir bytecode value-index verification failed");
+    module.verify_bytecode_indices().map_err(|e| {
+        JITError::Generic(format!(
+            "tile-ir bytecode value-index verification failed: {e}"
+        ))
+    })?;
 
     // Dump IR via unified CUTILE_DUMP mechanism (also honors legacy TILE_IR_DUMP).
     crate::dump::dump_module(
@@ -383,8 +392,11 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
     );
 
     let bytecode_version = selected_bytecode_version();
-    let bytes = write_bytecode_version(module, bytecode_version)
-        .unwrap_or_else(|e| panic!("Failed to serialize bytecode for {bc_filename}: {e}"));
+    let bytes = write_bytecode_version(module, bytecode_version).map_err(|e| {
+        JITError::Generic(format!(
+            "Failed to serialize bytecode for {bc_filename}: {e}"
+        ))
+    })?;
 
     if crate::dump::should_dump(crate::dump::DumpStage::Bytecode) {
         let decoded = cutile_ir::decode_bytecode(&bytes)
@@ -392,8 +404,9 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         crate::dump::dump_module(crate::dump::DumpStage::Bytecode, &module.name, &decoded);
     }
 
-    std::fs::write(&bc_filename, &bytes)
-        .unwrap_or_else(|e| panic!("Failed to write bytecode for {bc_filename}: {e}"));
+    std::fs::write(&bc_filename, &bytes).map_err(|e| {
+        JITError::Generic(format!("Failed to write bytecode for {bc_filename}: {e}"))
+    })?;
     let tileiras = tileiras_binary();
     let args = [
         "--gpu-name",
@@ -407,16 +420,11 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
     let output = Command::new(&tileiras)
         .args(args)
         .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}",
-                tileiras_launch_error(&tileiras, &args, &bc_filename, e)
-            )
-        });
+        .map_err(|e| JITError::Generic(tileiras_launch_error(&tileiras, &args, &bc_filename, e)))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!(
+        return Err(JITError::Generic(format!(
             "{} failed while compiling Tile IR bytecode.\n\
              status: {}\n\
              command: {}\n\
@@ -429,9 +437,9 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
             tileiras.display(),
             output.status,
             display_command(&tileiras, &args),
-        );
+        )));
     }
-    cubin_filename
+    Ok(cubin_filename)
 }
 
 fn tileiras_launch_error(
@@ -764,7 +772,8 @@ mod tests {
         let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
 
         let module = empty_kernel_module();
-        let cubin_path = compile_tile_ir_module(&module, "sm_120");
+        let cubin_path = compile_tile_ir_module(&module, "sm_120")
+            .expect("compiling an empty kernel with the fake tileiras should succeed");
 
         let args_path = fake_tileiras.with_extension("args");
         let args = fs::read_to_string(&args_path).unwrap();

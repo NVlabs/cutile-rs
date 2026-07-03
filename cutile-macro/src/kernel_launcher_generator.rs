@@ -877,14 +877,16 @@ pub fn generate_kernel_launcher(
     launcher_method.block.stmts.extend(compile_stmts);
     launcher_method.block.stmts.extend(validator_statements);
 
+    // Above the `!_compile_only` gate so warmup validates the grid too.
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
+        launch_grid_expr_strs.join(",")
+    )));
+
     let mut launch_only_stmts: Vec<Stmt> = vec![parse_stmt(
         "let mut kernel_launch = AsyncKernelLaunch::new(function.clone());".to_string(),
     )];
     launch_only_stmts.extend(builder_statements);
-    launch_only_stmts.push(parse_stmt(format!(
-        "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
-        launch_grid_expr_strs.join(",")
-    )));
     launch_only_stmts.extend(
         syn::parse2::<ExprBlock>(quote! {{
             kernel_launch

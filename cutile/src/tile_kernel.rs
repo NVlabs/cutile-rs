@@ -342,7 +342,7 @@ fn compile_and_load_kernel(
                 ir_text.as_str(),
             );
         }
-        compile_tile_ir_module(&tile_module, gpu_name)
+        compile_tile_ir_module(&tile_module, gpu_name)?
     };
     let stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -481,11 +481,18 @@ pub fn compile_from_context<F: Fn() -> Module>(
     }) {
         Ok(compiled) => compiled,
         Err(e) => {
-            // A failed compile leaves an empty slot behind; drop it so repeated
-            // failing specializations (e.g. an autotuner probe) don't grow the
-            // cache unbounded. Remove only if still empty, in case a concurrent
-            // thread raced on this key and succeeded.
-            get_kernel_cache().remove_if(&key_str, |_, cell| cell.get().is_none());
+            // A failed compile leaves an empty slot; evict it so repeated failing
+            // specializations don't grow the cache unbounded.
+            //
+            // On failure, once_cell gives the cell to a blocked waiter to retry.
+            // To avoid removing the slot while that waiter is still compiling
+            // (which would orphan its success and break single-flight), drop our
+            // own `slot` first, then (under the shard write lock) remove only
+            // when the cell is still empty and `strong_count == 1`.
+            drop(slot);
+            get_kernel_cache().remove_if(&key_str, |_, cell| {
+                cell.get().is_none() && Arc::strong_count(cell) == 1
+            });
             return Err(e);
         }
     };
