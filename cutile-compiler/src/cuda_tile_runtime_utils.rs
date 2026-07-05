@@ -6,6 +6,7 @@
 //! Runtime utilities for compiling Tile IR modules to GPU cubins.
 //! Provides GPU detection and bytecode compilation helpers.
 
+use crate::error::JITError;
 use cuda_core::{get_device_sm_name, Device};
 use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion};
 use std::collections::HashMap;
@@ -30,20 +31,76 @@ const MIN_CUDA_VERSION: u32 = 13020;
 /// (e.g. `13.2`). Overrides toolkit detection and probing.
 pub const BYTECODE_VERSION_ENV: &str = "CUTILE_BYTECODE_VERSION";
 
+/// Returns the cutile compiler version (from the workspace Cargo.toml).
+pub fn get_compiler_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Returns the CUDA toolkit version by parsing `nvcc --version` output.
+///
+/// Result is cached process-wide; `nvcc` is spawned at most once. The
+/// `"unknown"` fallback is cached too — do not change this to retry on
+/// failure, or every call re-spawns the subprocess.
+pub fn get_cuda_toolkit_version() -> String {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            Command::new("nvcc")
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if !output.status.success() {
+                        return None;
+                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse lines like "Cuda compilation tools, release 12.4, V12.4.131"
+                    for line in stdout.lines() {
+                        if let Some(pos) = line.find("release ") {
+                            let rest = &line[pos + "release ".len()..];
+                            if let Some(comma) = rest.find(',') {
+                                return Some(rest[..comma].to_string());
+                            }
+                            return Some(rest.trim().to_string());
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_else(|| "unknown".to_string())
+        })
+        .clone()
+}
+
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
+///
+/// Cached per device: the driver is queried once per device and cache hits are
+/// lock-free (`OnceLock::get` is an atomic load). CUDA device ordinals are small
+/// and contiguous, so a fixed array of `OnceLock` suffices; an ordinal beyond it
+/// (never in practice) skips the cache and queries the driver each time.
 pub fn get_gpu_name(device_id: usize) -> String {
-    let dev = Device::raw_device(device_id).unwrap_or_else(|e| {
-        panic!(
-            "failed to get CUDA device {device_id}: {e}\n\
-             Ensure an NVIDIA GPU is visible to the process and the CUDA driver is installed."
-        )
-    });
-    unsafe { get_device_sm_name(dev) }.unwrap_or_else(|e| {
-        panic!(
-            "failed to query CUDA SM name for device {device_id}: {e}\n\
-             Ensure the installed CUDA driver supports this GPU."
-        )
-    })
+    const MAX_CACHED_DEVICES: usize = 64;
+    static NAMES: [OnceLock<String>; MAX_CACHED_DEVICES] =
+        [const { OnceLock::new() }; MAX_CACHED_DEVICES];
+
+    let query = || -> String {
+        let dev = Device::raw_device(device_id).unwrap_or_else(|e| {
+            panic!(
+                "failed to get CUDA device {device_id}: {e}\n\
+                 Ensure an NVIDIA GPU is visible to the process and the CUDA driver is installed."
+            )
+        });
+        unsafe { get_device_sm_name(dev) }.unwrap_or_else(|e| {
+            panic!(
+                "failed to query CUDA SM name for device {device_id}: {e}\n\
+                 Ensure the installed CUDA driver supports this GPU."
+            )
+        })
+    };
+
+    match NAMES.get(device_id) {
+        Some(slot) => slot.get_or_init(query).clone(),
+        None => query(),
+    }
 }
 
 fn tileiras_executable_name() -> &'static str {
@@ -309,7 +366,13 @@ fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
 }
 
 /// Compiles a `cutile_ir::Module` to a `.cubin` file via bytecode serialization and `tileiras`.
-pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> String {
+///
+/// Returns `Err` (not panic) on any failure so callers can propagate it and run
+/// their cache-cleanup paths; a panic would unwind past that and across FFI frames.
+pub fn compile_tile_ir_module(
+    module: &cutile_ir::Module,
+    gpu_name: &str,
+) -> Result<String, JITError> {
     let tmp_dir = env::temp_dir();
     let base_filename = tmp_dir.join(Uuid::new_v4().to_string());
     let bc_filename = format!("{}.bc", base_filename.to_str().unwrap());
@@ -317,11 +380,13 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
 
     module
         .verify_dominance()
-        .expect("tile-ir dominance verification failed");
+        .map_err(|e| JITError::Generic(format!("tile-ir dominance verification failed: {e}")))?;
 
-    module
-        .verify_bytecode_indices()
-        .expect("tile-ir bytecode value-index verification failed");
+    module.verify_bytecode_indices().map_err(|e| {
+        JITError::Generic(format!(
+            "tile-ir bytecode value-index verification failed: {e}"
+        ))
+    })?;
 
     // Dump IR via unified CUTILE_DUMP mechanism (also honors legacy TILE_IR_DUMP).
     crate::dump::dump_module(
@@ -331,8 +396,11 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
     );
 
     let bytecode_version = selected_bytecode_version();
-    let bytes = write_bytecode_version(module, bytecode_version)
-        .unwrap_or_else(|e| panic!("Failed to serialize bytecode for {bc_filename}: {e}"));
+    let bytes = write_bytecode_version(module, bytecode_version).map_err(|e| {
+        JITError::Generic(format!(
+            "Failed to serialize bytecode for {bc_filename}: {e}"
+        ))
+    })?;
 
     if crate::dump::should_dump(crate::dump::DumpStage::Bytecode) {
         let decoded = cutile_ir::decode_bytecode(&bytes)
@@ -340,8 +408,9 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
         crate::dump::dump_module(crate::dump::DumpStage::Bytecode, &module.name, &decoded);
     }
 
-    std::fs::write(&bc_filename, &bytes)
-        .unwrap_or_else(|e| panic!("Failed to write bytecode for {bc_filename}: {e}"));
+    std::fs::write(&bc_filename, &bytes).map_err(|e| {
+        JITError::Generic(format!("Failed to write bytecode for {bc_filename}: {e}"))
+    })?;
     let tileiras = tileiras_binary();
     let args = [
         "--gpu-name",
@@ -355,16 +424,11 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
     let output = Command::new(&tileiras)
         .args(args)
         .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}",
-                tileiras_launch_error(&tileiras, &args, &bc_filename, e)
-            )
-        });
+        .map_err(|e| JITError::Generic(tileiras_launch_error(&tileiras, &args, &bc_filename, e)))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!(
+        return Err(JITError::Generic(format!(
             "{} failed while compiling Tile IR bytecode.\n\
              status: {}\n\
              command: {}\n\
@@ -377,9 +441,9 @@ pub fn compile_tile_ir_module(module: &cutile_ir::Module, gpu_name: &str) -> Str
             tileiras.display(),
             output.status,
             display_command(&tileiras, &args),
-        );
+        )));
     }
-    cubin_filename
+    Ok(cubin_filename)
 }
 
 fn tileiras_launch_error(
@@ -497,15 +561,21 @@ fn format_cuda_version(version: u32) -> String {
     format!("{}.{}", version / 1000, (version % 1000) / 10)
 }
 
+/// Returns whether the environment variable `var` is set to a truthy value
+/// (`1` / `true` / `yes` / `on`, case-insensitive, surrounding whitespace ignored).
+///
+/// Shared by the crate's on/off diagnostic env vars so they all parse the same way.
+pub fn env_flag_enabled(var: &str) -> bool {
+    env::var(var).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn setup_diagnostics_enabled() -> bool {
-    env::var(SETUP_DIAGNOSTICS_ENV)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+    env_flag_enabled(SETUP_DIAGNOSTICS_ENV)
 }
 
 fn emit_setup_diagnostic(args: std::fmt::Arguments<'_>) {
@@ -712,7 +782,8 @@ mod tests {
         let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
 
         let module = empty_kernel_module();
-        let cubin_path = compile_tile_ir_module(&module, "sm_120");
+        let cubin_path = compile_tile_ir_module(&module, "sm_120")
+            .expect("compiling an empty kernel with the fake tileiras should succeed");
 
         let args_path = fake_tileiras.with_extension("args");
         let args = fs::read_to_string(&args_path).unwrap();
