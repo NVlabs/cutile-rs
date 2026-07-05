@@ -20,16 +20,13 @@ pub struct EncodingWriter {
 
 impl EncodingWriter {
     pub fn new() -> Self {
-        Self {
-            buf: Vec::new(),
-            required_alignment: 1,
-        }
+        Self::default()
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             buf: Vec::with_capacity(cap),
-            required_alignment: 1,
+            ..Self::default()
         }
     }
 
@@ -223,6 +220,15 @@ impl EncodingWriter {
     }
 }
 
+impl Default for EncodingWriter {
+    fn default() -> Self {
+        Self {
+            buf: Default::default(),
+            required_alignment: 1,
+        }
+    }
+}
+
 /// Patch a `u32` value at `offset` in the buffer (little-endian).
 pub fn patch_u32(buf: &mut [u8], offset: usize, value: u32) {
     buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -270,7 +276,7 @@ fn convert_to_f8(
     // Handle special values.
     if f64_exp == 0x7FF {
         // Inf or NaN
-        if f64_man != 0 || (nan_only_all_ones && f64_man == 0) {
+        if f64_man != 0 || nan_only_all_ones {
             // NaN (or Inf mapped to NaN for formats without infinities)
             if nan_only_all_ones {
                 return (sign << 7) | ((max_exp as u8) << man_bits) | man_mask;
