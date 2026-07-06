@@ -141,7 +141,6 @@ Runtime `CompileOptions` can override entry-level hints for autotuning. `occupan
 - Wrong dtype: using `f32` when `f16`, `bf16`, FP8, or block-scaled formats are acceptable can leave Tensor Core throughput unused.
 - Excessive synchronization: `.sync()` after every operation creates CPU/GPU gaps.
 - Unfused pipeline: intermediate tensors add global memory traffic.
-- First-launch JIT latency in a latency-sensitive path: each new specialization compiles on first use. Pre-compile hot specializations with kernel warmup (`api::meta` inputs and a `.compile()` terminal); see [Compilation](jit-compilation.md).
 - Strided access pattern: tile loads coalesce well, but algorithmic strides can still reduce effective bandwidth.
 
 Profile before and after each change. [Debugging and Profiling](debugging-and-profiling.md) describes Nsight Compute and Nsight Systems.

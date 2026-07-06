@@ -312,6 +312,30 @@ impl IntoFuture for Memcpy {
     }
 }
 
+/// Allocates a host `Vec<T>` and enqueues an async device-to-host copy into it.
+///
+/// # Safety
+/// `cu_deviceptr` must be valid for `size` elements of `T`, and the caller
+/// must not access the returned `Vec`'s contents until `stream` has
+/// synchronized past the enqueued copy.
+pub(crate) unsafe fn copy_device_ptr_to_host_vec<T: DType>(
+    cu_deviceptr: CUdeviceptr,
+    size: usize,
+    stream: &Arc<cuda_core::Stream>,
+) -> Vec<T> {
+    if size == 0 {
+        // A zero-size layout must not reach `alloc` (documented UB).
+        return Vec::new();
+    }
+    let layout = Layout::array::<T>(size).expect("overflow cannot happen");
+    let async_ptr = unsafe { alloc(layout).cast::<T>() };
+    if async_ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    memcpy_dtoh_async(async_ptr, cu_deviceptr, size, stream);
+    unsafe { Vec::from_raw_parts(async_ptr, size, size) }
+}
+
 /// Device operation for copying a tensor from GPU to CPU as a Vec.
 ///
 /// This internal type implements the async copy operation that transfers
@@ -333,10 +357,7 @@ impl<T: DType> DeviceOp for CopyDeviceToHostVec<T> {
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let cu_deviceptr = self.tensor.cu_deviceptr();
         let size = self.tensor.size();
-        let layout = Layout::array::<T>(size).expect("overflow cannot happen");
-        let async_ptr = unsafe { alloc(layout).cast::<T>() };
-        memcpy_dtoh_async(async_ptr, cu_deviceptr, size, ctx.get_cuda_stream());
-        Ok(unsafe { Vec::from_raw_parts(async_ptr, size, size) })
+        Ok(unsafe { copy_device_ptr_to_host_vec(cu_deviceptr, size, ctx.get_cuda_stream()) })
     }
 }
 

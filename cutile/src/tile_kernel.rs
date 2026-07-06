@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use cuda_async::error::DeviceError;
 use cuda_core::DType;
-use cuda_core::{memcpy_dtoh_async, Function};
+use cuda_core::Function;
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
@@ -16,7 +16,6 @@ use cutile_compiler::cuda_tile_runtime_utils::{
     get_gpu_name,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
-use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
 use std::path::PathBuf;
@@ -1040,10 +1039,9 @@ where
         let tensor = self.op.execute(context)?;
         let cu_deviceptr = tensor.cu_deviceptr();
         let size = tensor.size();
-        let layout = Layout::array::<T>(size).expect("overflow cannot happen");
-        let async_ptr = unsafe { alloc(layout).cast::<T>() };
-        memcpy_dtoh_async(async_ptr, cu_deviceptr, size, context.get_cuda_stream());
-        Ok(unsafe { Vec::from_raw_parts(async_ptr, size, size) })
+        Ok(unsafe {
+            crate::api::copy_device_ptr_to_host_vec(cu_deviceptr, size, context.get_cuda_stream())
+        })
     }
 }
 
