@@ -10,8 +10,7 @@ Thank you for your interest in contributing to cuTile Rust! Based on the type of
      - The error you're seeing (full error message / stack trace)
      - A minimal example to reproduce the error (if possible)
 2. You want to implement a feature, improvement, or bug fix:
-   - At this time we do not accept code contributions to the `cuda-bindings` crate.
-   - For all other crates, please ensure that your commits are signed [following GitHub’s instruction](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification).
+   - Please ensure that your commits are signed [following GitHub’s instruction](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification).
      - Before marking your PR as ready for review, please make sure all tests pass and all examples are running via `bash scripts/run_all.sh`.
 
 # Branch and PR Naming
