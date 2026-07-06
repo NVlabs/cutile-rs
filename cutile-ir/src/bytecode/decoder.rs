@@ -1168,10 +1168,13 @@ fn read_op(
     block: BlockId,
 ) -> Result<()> {
     use Opcode::*;
-    let result_types = read_result_types(opcode, r, ctx)?;
+    let mut result_types = read_result_types(opcode, r, ctx)?;
     let mut attrs: Vec<(String, Attribute)> = Vec::new();
     let mut operands: Vec<Value> = Vec::new();
     let mut seg: Vec<i32> = Vec::new(); // operandSegmentSizes for grouped ops
+    // Trailing results synthesized by a version upgrade; kept off `ctx.values`
+    // so they don't shift operand indices (see the `Print` arm).
+    let mut synthetic_results = 0usize;
     let mut regions: Vec<crate::ir::RegionId> = Vec::new();
 
     // helper to read N fixed operands into `operands`
@@ -1359,19 +1362,24 @@ fn read_op(
             let mut cr = Reader::new(raw);
             let len = cr.read_varint()? as usize;
             let data = cr.read_bytes(len)?.to_vec();
-            let element_type = match result_types.first() {
-                Some(Type::Tile(t)) => match &t.element_type {
-                    TileElementType::Scalar(s) => Type::Scalar(*s),
-                    TileElementType::Pointer(p) => Type::Pointer((**p).clone()),
-                },
-                Some(t) => t.clone(),
+            // Shape isn't on the wire; recover it (and the element type) from
+            // the result tile type so every element is rendered, not just one.
+            let (element_type, shape) = match result_types.first() {
+                Some(Type::Tile(t)) => {
+                    let elem = match &t.element_type {
+                        TileElementType::Scalar(s) => Type::Scalar(*s),
+                        TileElementType::Pointer(p) => Type::Pointer((**p).clone()),
+                    };
+                    (elem, t.shape.clone())
+                }
+                Some(t) => (t.clone(), Vec::new()),
                 None => return Err(err("constant has no result type")),
             };
             attrs.push((
                 "value".into(),
                 Attribute::DenseElements(DenseElements {
                     element_type,
-                    shape: Vec::new(),
+                    shape,
                     data,
                 }),
             ));
@@ -1688,6 +1696,12 @@ fn read_op(
             ));
             let (_, ops) = ctx.read_var_operands(r)?;
             operands = ops;
+            // The token result was added in v13.2; upgrade a v13.1 `print` by
+            // materializing it. Unreferenced here, so keep it off `ctx.values`.
+            if ctx.version < BytecodeVersion::V13_2 && result_types.is_empty() {
+                result_types.push(Type::Token);
+                synthetic_results += 1;
+            }
         }
 
         other => {
@@ -1711,7 +1725,9 @@ fn read_op(
         .regions(regions)
         .build(module);
     append_op(module, block, op_id);
-    ctx.values.extend(results);
+    // Register only wire results; synthesized ones (appended last) are skipped.
+    let registered = results.len() - synthetic_results;
+    ctx.values.extend(results.into_iter().take(registered));
     Ok(())
 }
 
