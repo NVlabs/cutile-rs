@@ -198,23 +198,6 @@ The fields mean:
 
 Values outside this pattern are ordinary launch or data inputs. Tensor contents, floating-point scalar values, and runtime grid values passed with `.grid(...)` do not create cache entries by themselves.
 
-## Kernel Warmup
-
-The first launch of each specialization pays JIT compilation — typically hundreds of milliseconds — while later launches of the same specialization are cache hits. When first-call latency matters, pre-compile a specialization before its first real launch: build the exact call you would launch, but pass `api::meta` tensors and end with `.compile()` (or `.compile_on(stream)`) instead of `.sync()`:
-
-```rust
-let z = api::meta::<f32>(&[1024]).partition([128]);
-let x = api::meta::<f32>(&[1024]);
-let y = api::meta::<f32>(&[1024]);
-kernels::vector_add(z, x, y).generics(["f32", "128"]).compile()?;
-```
-
-A meta tensor carries shape, stride, and specialization metadata but allocates no GPU memory. Because `.compile()` reuses the normal launcher and derives the cache key from argument metadata, the warmed entry is identical to what the real launch looks up — including specialization hints for reshaped, viewed, or sliced inputs. `.compile()` also performs the same argument and launch-grid validation as a launch, so a configuration that warms up successfully will not fail grid inference on its first real call.
-
-The kernel cache is process-global and deduplicated: a specialization compiles exactly once per process even when multiple threads race on the same kernel, and warmup on one thread benefits all threads. `.compile()` warms the calling thread's current device; `.compile_on(stream)` warms the stream's device, mirroring `sync`/`sync_on` for per-device or interop-stream warmup.
-
-Meta tensors exist only for warmup. Reading a meta tensor's device pointer — launching it in a kernel with `.sync()`, or copying to or from it — panics, because no allocation backs it.
-
 ## Compile-Only API
 
 Most users compile kernels by launching a generated `#[cutile::entry]` launcher. cuTile also exposes `cutile::compile_api::KernelCompiler` for pre-compilation and other compile-only workflows that need Tile IR text or bytecode without launching a kernel.
@@ -234,7 +217,7 @@ let bytecode = artifacts.bytecode()?;
 
 `KernelCompiler` takes the same specialization information that a launcher normally infers from its arguments: entry-function generics, tensor stride and specialization hints, scalar hints, target architecture, optional constant grid, and compile options. Use it for pre-compilation pipelines, tooling, tests, and CPU-only validation of generated IR or bytecode. The `.target("sm_...")` value supplies the target architecture explicitly because there is no active CUDA device in compile-only mode.
 
-Compile-only pre-compilation is separate from the launch-time JIT cache. `KernelCompiler` returns artifacts for the specialization you describe; it does not allocate tensors, launch CUDA work, insert a compiled function into the process-local JIT cache, or produce a host-side result value. A later call through the generated launcher still performs the normal cache lookup and may compile on first launch unless that launch path is taught to consume the precompiled artifacts. To pre-populate the launch-time JIT cache itself, use kernel warmup above instead.
+Compile-only pre-compilation is separate from the launch-time JIT cache. `KernelCompiler` returns artifacts for the specialization you describe; it does not allocate tensors, launch CUDA work, insert a compiled function into the process-local JIT cache, or produce a host-side result value. A later call through the generated launcher still performs the normal cache lookup and may compile on first launch unless that launch path is taught to consume the precompiled artifacts.
 
 ## Inspecting Compiler Output
 
