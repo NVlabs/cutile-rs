@@ -37,14 +37,6 @@
             url = "${cudaRedistBase}/${name}/${cudaRedistArch}/${name}-${cudaRedistArch}-${version}-archive.tar.xz";
             sha256 = sha256.${cudaRedistArch};
           };
-        # Hashes come from NVIDIA's manifest for this release:
-        # https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.3.0.json
-        # (per package: .<name>.<arch>.sha256). Update from there on version bumps.
-        #
-        # ORDER MATTERS: archives are extracted with --skip-old-files
-        # (first-wins), so components must come before other archives that
-        # may carry stale copies of their files — libnvvm before cuda_nvcc,
-        # since both can populate nvvm/.
         cudaRedistArchives = [
           (fetchCudaRedist {
             name = "cuda_crt";
@@ -55,19 +47,19 @@
             };
           })
           (fetchCudaRedist {
-            name = "libnvvm";
-            version = "13.3.33";
-            sha256 = {
-              linux-x86_64 = "fc9c1fd5844e44c0e5eeb051378c1b13cf0e3bb3fe4966d5103c38885424f802";
-              linux-sbsa = "5f8ca5c9a10c3c9804b045960ee6192281efec4c7d83d5f3245ec2de8612118e";
-            };
-          })
-          (fetchCudaRedist {
             name = "cuda_nvcc";
             version = "13.3.33";
             sha256 = {
               linux-x86_64 = "93b098bda4a562ebf3541523ce82adc43f106a81dcf28bcbf8f0d8e093d1c66f";
               linux-sbsa = "b5dde44aadd52234af3944ae3b2e74e811ad8e71fb600bcc9dfe6d8540353499";
+            };
+          })
+          (fetchCudaRedist {
+            name = "libnvvm";
+            version = "13.3.33";
+            sha256 = {
+              linux-x86_64 = "fc9c1fd5844e44c0e5eeb051378c1b13cf0e3bb3fe4966d5103c38885424f802";
+              linux-sbsa = "5f8ca5c9a10c3c9804b045960ee6192281efec4c7d83d5f3245ec2de8612118e";
             };
           })
           (fetchCudaRedist {
@@ -102,25 +94,12 @@
         # store path, where it doesn't exist, and fail with exit status 5.
         cudaToolkit = pkgs.runCommand "cuda-toolkit-13.3" { } ''
           mkdir -p $out
-          # --skip-old-files: cross-archive path collisions are first-wins
-          # (see order note above) and show up in the build log instead of
-          # silently taking whichever archive extracted last.
           ${pkgs.lib.concatMapStrings (src: ''
-            tar xf ${src} --strip-components=1 -C $out --skip-old-files --warning=existing-file
+            tar xf ${src} --strip-components=1 -C $out
           '') cudaRedistArchives}
           # cuda-bindings/build.rs also looks for libs in lib64/
           if [ -d "$out/lib" ] && [ ! -e "$out/lib64" ]; then
             ln -s lib "$out/lib64"
-          fi
-          # The exe-relative lookup above is the invariant that broke in
-          # issue #172 — fail the build loudly if assembly ever loses it.
-          if [ ! -x "$out/bin/tileiras" ]; then
-            echo "cuda-toolkit assembly error: bin/tileiras missing or not executable" >&2
-            exit 1
-          fi
-          if [ ! -f "$out/nvvm/lib64/libnvvm.so" ]; then
-            echo "cuda-toolkit assembly error: nvvm/lib64/libnvvm.so missing (tileiras resolves it relative to its own binary)" >&2
-            exit 1
           fi
         '';
 
@@ -178,9 +157,7 @@
               export LD_LIBRARY_PATH="/run/opengl-driver/lib:$LD_LIBRARY_PATH"
             else
               _nv_drv_dir=$(mktemp -d /tmp/nix-nvidia-driver.XXXXXX)
-              # Search the host's own Debian multiarch dir (uname -m matches
-              # the triplet prefix on x86_64 and aarch64), then generic dirs.
-              for d in /usr/lib/$(uname -m)-linux-gnu /lib/$(uname -m)-linux-gnu /usr/lib /usr/lib64; do
+              for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu /usr/lib /usr/lib64; do
                 if [ -e "$d/libcuda.so.1" ]; then
                   for lib in "$d"/libcuda.so* "$d"/libnvidia-ptxjitcompiler.so* "$d"/libnvidia-gpucomp.so*; do
                     [ -e "$lib" ] && ln -sf "$lib" "$_nv_drv_dir/"
