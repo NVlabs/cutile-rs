@@ -319,8 +319,28 @@ pub fn bounds_from_bop(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> O
             TileBinaryOp::Add => *a + *b,
             TileBinaryOp::Sub => *a - *b,
             TileBinaryOp::Mul => *a * *b,
-            TileBinaryOp::Eq => bop_bounds(a, b, |a, b| (a == b) as i64),
-            TileBinaryOp::Ne => bop_bounds(a, b, |a, b| (a != b) as i64),
+            TileBinaryOp::Eq => {
+                // Here we use overlap analysis instead of `bop_bounds`, because `f(x,y) = (x==y)` is
+                // not monotone, which can lead to the condition being observed as statically false,
+                // interpreted as dead code by the compiler and is silently removed.
+                if a.is_exact() && b.is_exact() {
+                    Bounds::exact((a.start == b.start) as i64)
+                } else if a.end < b.start || b.end < a.start {
+                    Bounds::exact(0) // disjoint - never equal
+                } else {
+                    Bounds::new(0, 1) // overlap - unknown
+                }
+            }
+            TileBinaryOp::Ne => {
+                // Same as above
+                if a.is_exact() && b.is_exact() {
+                    Bounds::exact((a.start != b.start) as i64)
+                } else if a.end < b.start || b.end < a.start {
+                    Bounds::exact(1) // disjoint - always not equal
+                } else {
+                    Bounds::new(0, 1) // overlap - unknown
+                }
+            }
             TileBinaryOp::Lt => bop_bounds(a, b, |a, b| (a < b) as i64),
             TileBinaryOp::Le => bop_bounds(a, b, |a, b| (a <= b) as i64),
             TileBinaryOp::Gt => bop_bounds(a, b, |a, b| (a > b) as i64),
