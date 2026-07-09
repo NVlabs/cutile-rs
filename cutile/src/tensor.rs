@@ -204,7 +204,7 @@ use crate::api::{copy_device_to_host_vec, copy_host_vec_to_device};
 use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
-use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
+use cuda_async::device_buffer::{DeviceAllocation, DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
 use cuda_core::sys::CUdeviceptr;
@@ -620,6 +620,32 @@ fn checked_num_bytes_i32<T>(shape: &[i32]) -> Result<usize, Error> {
         .ok_or_else(|| crate::error::tensor_error("Tensor byte size overflowed usize."))
 }
 
+// Largest byte extent any element of `(shape, strides)` addresses from the base
+// pointer: `(1 + Σ (shape[i]-1) * strides[i]) * size_of::<T>()`. Strides can
+// push this beyond `product(shape) * size_of::<T>()`, so it — not the logical
+// size — is what a backing allocation must cover. Assumes non-negative strides
+// (a negative stride would place addresses below the base, which the safe
+// `from_foreign` cannot bound; empty shapes address nothing).
+fn addressable_bytes<T>(shape: &[i32], strides: &[i32]) -> usize {
+    assert_eq!(
+        shape.len(),
+        strides.len(),
+        "Tensor shape/stride rank mismatch."
+    );
+    if shape.iter().any(|&d| d <= 0) {
+        return 0;
+    }
+    let mut max_elem_offset: usize = 0;
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        assert!(
+            stride >= 0,
+            "from_foreign requires non-negative strides; use borrow_raw_parts for negative-stride views."
+        );
+        max_elem_offset += (dim as usize - 1) * (stride as usize);
+    }
+    (max_elem_offset + 1) * size_of::<T>()
+}
+
 impl<T: DType> Tensor<T> {
     // Enforces the core tensor invariant: shape/stride ranks must agree and the logical
     // typed byte size must exactly match the backing storage byte length.
@@ -638,8 +664,9 @@ impl<T: DType> Tensor<T> {
         );
     }
 
-    /// Wraps an owned byte allocation as a tensor after validating that the supplied
-    /// shape/stride metadata is consistent with the allocation size.
+    /// Wraps a byte allocation (owned, foreign, or raw-borrowed) as a tensor after
+    /// validating that the supplied shape/stride metadata is consistent with the
+    /// allocation's logical size.
     pub(crate) fn from_device_buffer(
         device_buffer: DeviceBuffer,
         shape: Vec<i32>,
@@ -677,6 +704,98 @@ impl<T: DType> Tensor<T> {
             shape,
             strides,
         )
+    }
+
+    /// Low-level, `unsafe` borrow of a bare device pointer as a tensor, without
+    /// taking ownership: dropping the returned tensor — or any tensor sharing
+    /// its storage — never frees `dptr`. The byte length is derived from `shape`
+    /// and `T`.
+    ///
+    /// **Prefer [`from_foreign`](Self::from_foreign)** when the memory has an
+    /// owner object (a cudarc buffer, a torch storage, ...): it holds that owner
+    /// alive, making the borrow a safe call whose liveness is guaranteed at
+    /// construction. Reach for `borrow_raw_parts` only when you hold a bare
+    /// pointer with no owner to hand over, and can uphold the obligations below
+    /// yourself.
+    ///
+    /// # Safety
+    /// Unlike `Vec::from_raw_parts`, this does **not** transfer ownership of
+    /// `dptr` to cutile — it is a borrow. The caller keeps ownership and must
+    /// uphold all of the following for the entire lifetime of the returned
+    /// tensor *and everything derived from it* (clones, partitions,
+    /// `TensorView`s, and any `DeviceOp` built from them):
+    ///
+    /// - **Validity.** `dptr` points to device memory on `device_id` valid for
+    ///   the extent implied by `shape`/`strides` (at least
+    ///   `product(shape) * size_of::<T>()` bytes).
+    /// - **Liveness.** The allocation stays mapped at `dptr` — never freed,
+    ///   reallocated, or resized by its owner — until *every* cutile operation
+    ///   referencing it has completed. Launches are asynchronous, so
+    ///   "completed" means past the final stream synchronize / `.await`, not
+    ///   the return of the builder call.
+    /// - **Aliasing.** While this tensor (or a partition of it) is used as a
+    ///   mutable output, the owner must not read or write the same memory
+    ///   through any other path — its own kernels, copies, or host access —
+    ///   until that work completes. An immutable (`&Tensor`) use only requires
+    ///   that the owner not mutate the memory concurrently. cutile cannot see
+    ///   the foreign owner, so this aliasing-XOR-mutability obligation is the
+    ///   caller's to enforce.
+    /// - **Freeing.** cutile never frees a borrowed allocation; the owner frees
+    ///   it exactly once, after all cutile work above has completed.
+    ///
+    /// [`Device::borrow_raw`]: cuda_core::Device::borrow_raw
+    /// [`Stream::borrow_raw`]: cuda_core::Stream::borrow_raw
+    pub unsafe fn borrow_raw_parts(
+        dptr: CUdeviceptr,
+        device_id: usize,
+        shape: Vec<i32>,
+        strides: Vec<i32>,
+    ) -> Self {
+        let len_bytes = checked_num_bytes_i32::<T>(&shape)
+            .expect("Tensor shape contains invalid dimensions or overflows.");
+        Self::from_device_buffer(
+            DeviceBuffer::borrowed_from_raw_parts(dptr, len_bytes, device_id),
+            shape,
+            strides,
+        )
+    }
+
+    /// Wraps device memory owned by an external framework (cudarc, torch, a VMM
+    /// allocation, ...) as a tensor, holding the owner alive so the memory
+    /// provably outlives every use — **no copy, no ownership transfer**.
+    ///
+    /// This is the safe, preferred interop entry point (unlike the `unsafe`
+    /// [`borrow_raw_parts`](Self::borrow_raw_parts), which takes a bare pointer).
+    /// `owner` implements [`DeviceAllocation`] — which is where the one-time
+    /// pointer-validity assertion is discharged — and holding it keeps the
+    /// allocation mapped for the whole life of this tensor and everything derived
+    /// from it (clones, partitions, `DeviceOp`s). Liveness is therefore a
+    /// refcount fact established at construction, not an ongoing obligation.
+    ///
+    /// The one residual applies only when the tensor is used as a **mutable
+    /// output**: the owner must not read or write the same device bytes through
+    /// another path while cutile holds them mutably. That obligation cannot be
+    /// machine-checked across the FFI boundary (the device bytes are not a Rust
+    /// value), so it is asserted at the borrow — exactly like a raw-pointer
+    /// opt-out. Immutable (`&Tensor`) uses carry no such obligation.
+    pub fn from_foreign(
+        owner: Arc<dyn DeviceAllocation>,
+        shape: Vec<i32>,
+        strides: Vec<i32>,
+    ) -> Self {
+        let len_bytes = checked_num_bytes_i32::<T>(&shape)
+            .expect("Tensor shape contains invalid dimensions or overflows.");
+        // Validate the *addressable* extent (which strides can grow beyond the
+        // shape product), not just the logical size — otherwise a strided borrow
+        // could address past `owner`'s allocation from safe code.
+        let extent_bytes = addressable_bytes::<T>(&shape, &strides);
+        assert!(
+            owner.len_bytes() >= extent_bytes,
+            "foreign allocation ({} bytes) is smaller than the tensor's addressable extent \
+             ({extent_bytes} bytes for the given shape/strides)",
+            owner.len_bytes(),
+        );
+        Self::from_device_buffer(DeviceBuffer::foreign(owner, len_bytes), shape, strides)
     }
 
     /// Builds a metadata-only tensor (no GPU allocation) with contiguous strides.
@@ -1862,6 +1981,49 @@ impl<'a, T: DType + Sync> IntoDeviceOp<&'a TensorView<'a, T>> for &'a TensorView
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A fake foreign allocation with a caller-chosen byte length; the pointer is
+    // never dereferenced on the metadata-only paths exercised here.
+    struct FakeAlloc {
+        len_bytes: usize,
+    }
+    unsafe impl DeviceAllocation for FakeAlloc {
+        fn device_ptr(&self) -> CUdeviceptr {
+            16 // 16-aligned sentinel; not dereferenced in from_foreign's spec calc
+        }
+        fn len_bytes(&self) -> usize {
+            self.len_bytes
+        }
+        fn device_id(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn addressable_bytes_accounts_for_strides() {
+        // Contiguous 4-element f32: extent == logical size.
+        assert_eq!(addressable_bytes::<f32>(&[4], &[1]), 4 * 4);
+        // Strided: last element at offset (4-1)*10 = 30, extent 31 elements.
+        assert_eq!(addressable_bytes::<f32>(&[4], &[10]), 31 * 4);
+        // Empty shape addresses nothing.
+        assert_eq!(addressable_bytes::<f32>(&[0], &[1]), 0);
+    }
+
+    #[test]
+    fn from_foreign_accepts_allocation_covering_strided_extent() {
+        // 4 elements at stride 10 → needs 31 f32 = 124 bytes.
+        let owner: Arc<dyn DeviceAllocation> = Arc::new(FakeAlloc { len_bytes: 124 });
+        let _t = Tensor::<f32>::from_foreign(owner, vec![4], vec![10]);
+    }
+
+    #[test]
+    #[should_panic(expected = "addressable extent")]
+    fn from_foreign_rejects_strides_overrunning_allocation() {
+        // Logical size is 16 bytes, but stride 10 addresses 124 bytes; an owner
+        // that only covers the logical size must be rejected by the safe API.
+        let owner: Arc<dyn DeviceAllocation> = Arc::new(FakeAlloc { len_bytes: 16 });
+        let _t = Tensor::<f32>::from_foreign(owner, vec![4], vec![10]);
+    }
 
     #[test]
     fn swizzle_accepts_tile_block_count() {

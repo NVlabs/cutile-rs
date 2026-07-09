@@ -55,3 +55,6 @@ mod warmup;
 
 #[path = "gpu/warmup_bench.rs"]
 mod warmup_bench;
+
+#[path = "gpu/borrow_raw_parts.rs"]
+mod borrow_raw_parts;
