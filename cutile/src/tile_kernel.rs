@@ -12,10 +12,13 @@ use cuda_core::{memcpy_dtoh_async, Function};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
-    compile_tile_ir_module, env_flag_enabled, get_compiler_version, get_cuda_toolkit_version,
-    get_gpu_name,
+    compile_bytecode_cached, env_flag_enabled, get_compiler_version, get_gpu_name,
+    recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint,
+    Stage2Source, DEFAULT_OPT_LEVEL,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
+use dashmap::DashMap;
+use once_cell::sync::OnceCell;
 use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
@@ -43,6 +46,11 @@ static JIT_COMPILE_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Process-global JIT compile counter: +1 per successful compile, +0 on cache
 /// hits and on failed compiles. Equals the number of distinct kernels cached.
 /// Snapshot before a call and check the delta to get exact miss counts.
+///
+/// A disk-cache hit still counts: the counter tracks in-memory misses, which
+/// run the compiler frontend either way. Absent failures,
+/// `jit_compile_count == jit_backend_compile_count + jit_disk_hit_count`
+/// (both in [`crate::jit_cache`]).
 pub fn jit_compile_count() -> u64 {
     JIT_COMPILE_COUNT.load(Ordering::Relaxed)
 }
@@ -68,7 +76,18 @@ pub use cutile_compiler::compiler::utils::CompileOptions;
 /// CUDA module and function, avoiding recompilation. The key captures everything that can
 /// change the generated GPU code: module name, function name, generic type/const parameters,
 /// tensor stride layouts, (optionally) the launch grid, compile options, source hash,
-/// GPU architecture, compiler version, and CUDA toolkit version.
+/// GPU architecture, compiler version, and the `tileiras` binary that assembles the cubin.
+///
+/// Tensor extents are deliberately absent: `stride_args` records only which
+/// dimensions have stride 1, and `spec_args` only power-of-two divisibility. A
+/// `[1024, 1024]` and a `[4096, 4096]` matmul share one key, because extents are
+/// runtime kernel arguments and do not reach the generated code.
+///
+/// `source_hash` covers the kernel's own module, not the dependency modules the
+/// use-graph links in. Editing a helper module that the kernel
+/// calls changes the cubin without changing this field. Within a process this is
+/// harmless, since a rebuild restarts it; it is why the on-disk cache keys on the
+/// serialized bytecode rather than on this struct.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TileFunctionKey {
     module_name: String,
@@ -83,7 +102,10 @@ pub struct TileFunctionKey {
     device_id: usize,
     gpu_name: String,
     compiler_version: String,
-    cuda_toolkit_version: String,
+    /// Output of `tileiras --version`, not `nvcc --version`: the JIT resolves
+    /// `tileiras` on its own, so `CUTILE_TILEIRAS_PATH` can point at a binary the
+    /// toolkit version knows nothing about.
+    tileiras_fingerprint: String,
 }
 
 /// Builder for [`TileFunctionKey`].
@@ -101,7 +123,7 @@ pub struct TileFunctionKey {
 ///     .device_id(device_id)
 ///     .gpu_name(get_gpu_name(device_id))
 ///     .compiler_version(get_compiler_version())
-///     .cuda_toolkit_version(get_cuda_toolkit_version())
+///     .tileiras_fingerprint(tileiras_fingerprint())
 ///     .build();
 /// ```
 pub struct TileFunctionKeyBuilder {
@@ -117,7 +139,7 @@ pub struct TileFunctionKeyBuilder {
     device_id: usize,
     gpu_name: String,
     compiler_version: String,
-    cuda_toolkit_version: String,
+    tileiras_fingerprint: String,
 }
 
 impl TileFunctionKeyBuilder {
@@ -161,8 +183,9 @@ impl TileFunctionKeyBuilder {
         self.compiler_version = version.into();
         self
     }
-    pub fn cuda_toolkit_version(mut self, version: impl Into<String>) -> Self {
-        self.cuda_toolkit_version = version.into();
+    /// Output of `tileiras --version`; see [`tileiras_fingerprint`].
+    pub fn tileiras_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.tileiras_fingerprint = fingerprint.into();
         self
     }
     pub fn build(self) -> TileFunctionKey {
@@ -179,7 +202,7 @@ impl TileFunctionKeyBuilder {
             device_id: self.device_id,
             gpu_name: self.gpu_name,
             compiler_version: self.compiler_version,
-            cuda_toolkit_version: self.cuda_toolkit_version,
+            tileiras_fingerprint: self.tileiras_fingerprint,
         }
     }
 }
@@ -204,12 +227,65 @@ impl TileFunctionKey {
             device_id: 0,
             gpu_name: String::new(),
             compiler_version: String::new(),
-            cuda_toolkit_version: String::new(),
+            tileiras_fingerprint: String::new(),
         }
     }
 }
 
 impl FunctionKey for TileFunctionKey {}
+
+// ── Global kernel cache (process-wide, cross-thread) ────────────────────────
+
+/// Global kernel cache. `DashMap` for cross-thread sharing; inner `OnceCell` for
+/// single-flight compilation dedup (if multiple threads need the same kernel,
+/// only one compiles while the rest wait). `once_cell::sync::OnceCell` gives
+/// fallible initialization (`get_or_try_init`).
+///
+/// Keyed on the whole [`TileFunctionKey`], not on a digest of it: 64 bits collide
+/// often enough to matter once a process caches many kernels, and a collision
+/// here hands back a cubin compiled for a different kernel.
+///
+/// Intentionally unbounded: no cap or LRU. Capacity management lives in the L2
+/// disk cache, not here — the same shape as cutile-python (unbounded in-memory
+/// kernel cache, 2 GiB LRU on disk). Bounding L1 is a harder problem than L2:
+/// evicting a `CompiledKernel` unloads its `Module`, which may still be
+/// executing on the GPU, whereas deleting an L2 file is always safe.
+static KERNEL_CACHE: OnceLock<DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>> =
+    OnceLock::new();
+
+pub fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>> {
+    KERNEL_CACHE.get_or_init(DashMap::new)
+}
+
+/// Get (or create) the single-flight compilation slot for `key`.
+///
+/// The returned `OnceCell` lets the caller `get_or_try_init` the compile
+/// exactly once across threads. The DashMap shard lock is released before
+/// this returns, so the slow compile never holds it.
+///
+/// Hits take the read path (shard read lock, no allocation); only a miss falls
+/// back to `entry()` (write lock + owned key).
+pub fn kernel_cache_slot(key: &TileFunctionKey) -> Arc<OnceCell<CompiledKernel>> {
+    let cache = get_kernel_cache();
+    if let Some(existing) = cache.get(key) {
+        return Arc::clone(existing.value());
+    }
+    // `get` returned None holding no lock, so the write path is deadlock-free;
+    // `or_insert_with` still resolves a concurrent insert into one slot per key.
+    Arc::clone(
+        cache
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .value(),
+    )
+}
+
+/// Check whether a kernel with the given key has already been compiled and cached.
+pub fn contains_cuda_function(key: &TileFunctionKey) -> bool {
+    get_kernel_cache()
+        .get(key)
+        .is_some_and(|slot| slot.value().get().is_some())
+}
 
 /// Reads Tile IR text from a file.
 ///
@@ -324,45 +400,91 @@ fn compile_and_load_kernel(
     let stage1_ms = stage1_start.elapsed().as_secs_f64() * 1000.0;
 
     let stage2_start = std::time::Instant::now();
-    let cubin_filename = {
-        let ir_text = tile_module.to_mlir_text();
-        if modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")? {
-            println!("COMPILED IR: {module_name}::{function_name}\n{ir_text}");
-        }
-        if let Some(path) = modules.get_entry_arg_string_by_function_name(
+    {
+        let print_ir =
+            modules.get_entry_arg_bool_by_function_name(module_name, function_name, "print_ir")?;
+        let dump_mlir_dir = modules.get_entry_arg_string_by_function_name(
             module_name,
             function_name,
             "dump_mlir_dir",
-        )? {
-            write_ir(
-                module_name,
-                function_name,
-                key_str,
-                "mlir",
-                path.as_str(),
-                ir_text.as_str(),
-            );
+        )?;
+        // `to_mlir_text` renders the whole module; only pay for it when asked.
+        if print_ir || dump_mlir_dir.is_some() {
+            let ir_text = tile_module.to_mlir_text();
+            if print_ir {
+                println!("COMPILED IR: {module_name}::{function_name}\n{ir_text}");
+            }
+            if let Some(path) = dump_mlir_dir {
+                write_ir(
+                    module_name,
+                    function_name,
+                    key_str,
+                    "mlir",
+                    path.as_str(),
+                    ir_text.as_str(),
+                );
+            }
         }
-        compile_tile_ir_module(&tile_module, gpu_name)?
-    };
-    let stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
+    }
+    let (bytecode, bc_version) = serialize_tile_ir_bytecode(&tile_module)?;
+    let (cubin, mut stage2_source) =
+        compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL)?;
+    let mut stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
 
+    // A retry recompile (below) runs inside the stage-3 window but is really
+    // stage-2 work; track it so the timing line attributes it to stage2 (which
+    // then reports source=tileiras) instead of inflating stage3.
+    let mut recompile_ms = 0.0;
     let stage3_start = std::time::Instant::now();
-    let module = load_module_from_file(&cubin_filename, device_id)?;
+    let module = match load_module_from_bytes(&cubin, device_id) {
+        Ok(module) => module,
+        // A disk-served cubin the driver rejects (partial write the checksum
+        // missed, driver/toolkit skew, …) must not fail the launch: evict that
+        // exact entry and recompile with tileiras, bypassing the cache read so a
+        // still-present bad entry can't be re-served. `mem::replace` moves the
+        // store/key out and leaves `Tileiras`, which is now the true source of
+        // the loaded cubin. Only a second failure is a real error.
+        Err(e) => match std::mem::replace(&mut stage2_source, Stage2Source::Tileiras) {
+            Stage2Source::DiskCache { store, key } => {
+                jit_log!(
+                    "{module_name}::{function_name} → cached cubin rejected by the driver ({e}); \
+                     evicting and recompiling"
+                );
+                let recompile_start = std::time::Instant::now();
+                let cubin = recompile_after_disk_rejection(
+                    store.as_ref(),
+                    &key,
+                    &bytecode,
+                    gpu_name,
+                    DEFAULT_OPT_LEVEL,
+                )?;
+                recompile_ms = recompile_start.elapsed().as_secs_f64() * 1000.0;
+                stage2_ms += recompile_ms;
+                load_module_from_bytes(&cubin, device_id)?
+            }
+            Stage2Source::Tileiras => return Err(e.into()),
+        },
+    };
     let function = Arc::new(module.load_function(function_entry).map_err(|e| {
         Error::KernelLaunch(KernelLaunchError(format!(
             "failed to load '{function_entry}' from compiled cubin: {e}"
         )))
     })?);
-    let stage3_ms = stage3_start.elapsed().as_secs_f64() * 1000.0;
+    // Exclude the retry recompile: it was moved into stage2_ms above, so the
+    // stage-3 figure stays "module load only". `max(0.0)` guards float noise.
+    let stage3_ms = (stage3_start.elapsed().as_secs_f64() * 1000.0 - recompile_ms).max(0.0);
 
     jit_log!(
         "{module_name}::{function_name} → JIT compiled in {:.1?}",
         t0.elapsed()
     );
     if std::env::var_os("CUTILE_JIT_TIMING").is_some() {
+        let stage2_source = match stage2_source {
+            Stage2Source::Tileiras => "tileiras",
+            Stage2Source::DiskCache { .. } => "disk",
+        };
         eprintln!(
-            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage3_ms={stage3_ms:.3} generics={}",
+            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage2_source={stage2_source} stage3_ms={stage3_ms:.3} generics={}",
             generics.join(","),
         );
     }
@@ -434,7 +556,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
     let device_id: usize = ctx.get_device_id();
     let gpu_name = get_gpu_name(device_id);
     let compiler_version = get_compiler_version();
-    let cuda_toolkit_version = get_cuda_toolkit_version();
+    let tileiras_fp = tileiras_fingerprint();
     let mut key_builder = TileFunctionKey::builder(module_name, function_name)
         .generics(function_generics)
         .stride_args(stride_args)
@@ -445,13 +567,12 @@ pub fn compile_from_context<F: Fn() -> Module>(
         .device_id(device_id)
         .gpu_name(gpu_name.clone())
         .compiler_version(compiler_version)
-        .cuda_toolkit_version(cuda_toolkit_version);
+        .tileiras_fingerprint(tileiras_fp);
     if let Some(grid) = const_grid {
         key_builder = key_builder.grid(grid);
     }
     let key = key_builder.build();
-    let key_str = key.get_hash_string();
-    let slot = kernel_cache_slot(&key_str);
+    let slot = kernel_cache_slot(&key);
 
     // Use OnceCell::get_or_try_init for single-flight compilation dedup.
     // Only one thread executes the closure; others block and see the result.
@@ -472,7 +593,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
             &gpu_name,
             &key.compile_options,
             device_id,
-            &key_str,
+            &key.display_hash(),
         )?;
         // Count only a successful compile: a failed attempt leaves the slot empty
         // and retries, so counting at the top would double-count on retry and
@@ -491,7 +612,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
             // own `slot` first, then (under the shard write lock) remove only
             // when the cell is still empty and `strong_count == 1`.
             drop(slot);
-            get_kernel_cache().remove_if(&key_str, |_, cell| {
+            get_kernel_cache().remove_if(&key, |_, cell| {
                 cell.get().is_none() && Arc::strong_count(cell) == 1
             });
             return Err(e);

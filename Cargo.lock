@@ -418,10 +418,8 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "cuda-core",
- "dashmap",
  "futures",
  "half",
- "once_cell",
  "thiserror 1.0.69",
 ]
 
@@ -464,9 +462,11 @@ dependencies = [
  "cutile-compiler",
  "cutile-ir",
  "cutile-macro",
+ "dashmap",
  "half",
  "linkme",
  "num-traits",
+ "once_cell",
  "proc-macro2",
  "quote",
  "syn",
@@ -499,6 +499,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
+ "sha2",
  "stacker",
  "syn",
  "uuid",

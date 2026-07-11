@@ -199,6 +199,37 @@ impl Device {
         }))
     }
 
+    /// Loads a CUDA module from an in-memory **cubin** image.
+    ///
+    /// The image must be a cubin — an ELF, which encodes its own length. This is
+    /// deliberately *not* a PTX loader: `cuModuleLoadData` parses PTX as a
+    /// NUL-terminated C string, and a byte slice carries no terminator, so PTX
+    /// bytes would be read past the end of the slice. Use
+    /// [`load_module_from_ptx_src`](Self::load_module_from_ptx_src) for PTX; it
+    /// builds a `CString`. The ELF-magic check below rejects a non-cubin image
+    /// (an empty slice included) with `CUDA_ERROR_INVALID_IMAGE` rather than
+    /// letting the driver over-read.
+    pub fn load_module_from_bytes(
+        self: &Arc<Self>,
+        image: &[u8],
+    ) -> Result<Arc<Module>, DriverError> {
+        // ELF magic `\x7fELF`; a bounded prefix check that also covers the empty
+        // slice, so the raw pointer handed to `cuModuleLoadData` is never PTX
+        // text (which it would read up to an out-of-bounds NUL).
+        if !image.starts_with(b"\x7fELF") {
+            return Err(DriverError(
+                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_IMAGE,
+            ));
+        }
+        self.bind_to_thread()?;
+        let cu_module = unsafe { module::load_data(image.as_ptr().cast()) }?;
+        Ok(Arc::new(Module {
+            cu_module,
+            device: self.clone(),
+            owned: true,
+        }))
+    }
+
     /// Creates a new memory pool on this device.
     ///
     /// The returned pool is owned — it will be destroyed when the last `Arc`

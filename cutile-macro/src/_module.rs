@@ -353,6 +353,15 @@ fn module_inner(
     let source_hash_const = quote! {
         /// SHA-256 hash of the module source, computed at compile time.
         /// Changes whenever any kernel source in this module changes.
+        ///
+        /// **Covers this module only.** The JIT walks the use-graph and links in
+        /// the dependency modules a kernel calls, so editing one of those changes
+        /// the generated cubin while this constant stays put.
+        ///
+        /// That makes it unsound as a persistent cache key on its own. Within a
+        /// process it is fine: reaching an edited helper requires a rebuild, which
+        /// restarts the process. The on-disk cache instead keys on the serialized
+        /// Tile IR bytecode, which already has every dependency inlined.
         pub const _SOURCE_HASH: &str = #source_hash;
     };
 

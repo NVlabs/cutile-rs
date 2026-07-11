@@ -14,7 +14,7 @@ use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 /// Environment variable used to override the `tileiras` executable.
@@ -34,41 +34,6 @@ pub const BYTECODE_VERSION_ENV: &str = "CUTILE_BYTECODE_VERSION";
 /// Returns the cutile compiler version (from the workspace Cargo.toml).
 pub fn get_compiler_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
-}
-
-/// Returns the CUDA toolkit version by parsing `nvcc --version` output.
-///
-/// Result is cached process-wide; `nvcc` is spawned at most once. The
-/// `"unknown"` fallback is cached too — do not change this to retry on
-/// failure, or every call re-spawns the subprocess.
-pub fn get_cuda_toolkit_version() -> String {
-    static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION
-        .get_or_init(|| {
-            Command::new("nvcc")
-                .arg("--version")
-                .output()
-                .ok()
-                .and_then(|output| {
-                    if !output.status.success() {
-                        return None;
-                    }
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Parse lines like "Cuda compilation tools, release 12.4, V12.4.131"
-                    for line in stdout.lines() {
-                        if let Some(pos) = line.find("release ") {
-                            let rest = &line[pos + "release ".len()..];
-                            if let Some(comma) = rest.find(',') {
-                                return Some(rest[..comma].to_string());
-                            }
-                            return Some(rest.trim().to_string());
-                        }
-                    }
-                    None
-                })
-                .unwrap_or_else(|| "unknown".to_string())
-        })
-        .clone()
 }
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
@@ -213,6 +178,83 @@ fn resolve_tileiras_binary_with_candidates(
 /// 4. `tileiras` through normal `PATH` lookup.
 pub fn tileiras_binary() -> PathBuf {
     tileiras_and_toolkit().0
+}
+
+/// Identifies which `tileiras` binary compiled a cubin.
+///
+/// This belongs in every cache key that names a cubin: without it, upgrading the
+/// toolkit leaves the key unchanged and a cubin built by the previous `tileiras`
+/// is served as a hit.
+///
+/// The fingerprint is the `--version` stdout. It carries the build number
+/// (`Build local.local.37905922_`), and unlike `(size, mtime)` it survives a
+/// reinstall of the same toolkit, so the cache stays warm. Measured cost on
+/// CUDA 13.3: under 5 ms, `maxrss` 21.4 MB. Cached per process, and the key path
+/// runs on cache hits too, so this must stay cheap.
+///
+/// Note it does not distinguish two binaries that report the same version, such
+/// as a locally patched one.
+///
+/// Falls back to `(canonical path, size, mtime)` when `--version` fails, which
+/// covers a future `tileiras` that drops the flag. An empty fingerprint is never
+/// returned: that would drop the compiler out of the key.
+pub fn tileiras_fingerprint() -> &'static str {
+    fingerprint_of(&tileiras_binary())
+}
+
+/// Fingerprint of a specific resolved `tileiras`, cached **per path** rather than
+/// once per process. A process that switches `CUTILE_TILEIRAS_PATH` mid-run then
+/// keys entries by the binary actually in effect, not the one seen at the first
+/// call — otherwise cubins built by the new binary are stored under the old
+/// binary's fingerprint and served to a process that genuinely uses the old one.
+/// Mirrors [`cached_bytecode_version`]. The `--version` spawn happens once per
+/// distinct binary; the interned string lives for the process (bounded: one per
+/// tileiras path, normally one).
+fn fingerprint_of(tileiras: &Path) -> &'static str {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, &'static str>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&fp) = cache.lock().unwrap().get(tileiras) {
+        return fp;
+    }
+    let fp: &'static str = Box::leak(compute_tileiras_fingerprint(tileiras).into_boxed_str());
+    cache.lock().unwrap().insert(tileiras.to_path_buf(), fp);
+    fp
+}
+
+fn compute_tileiras_fingerprint(tileiras: &Path) -> String {
+    if let Ok(output) = Command::new(tileiras).arg("--version").output() {
+        if output.status.success() {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !version.is_empty() {
+                return version;
+            }
+        }
+    }
+    emit_setup_diagnostic(format_args!(
+        "{} --version failed; fingerprinting it by path, size and mtime instead",
+        tileiras.display()
+    ));
+    stat_fingerprint(tileiras)
+}
+
+/// `(canonical path, size, mtime)`, the fallback when `--version` is unavailable.
+///
+/// Weaker than the version string in one direction: reinstalling the same
+/// toolkit changes `mtime`, so every key changes and the disk cache misses
+/// across the board. That costs one recompile per kernel, not correctness.
+fn stat_fingerprint(tileiras: &Path) -> String {
+    let path = std::fs::canonicalize(tileiras).unwrap_or_else(|_| tileiras.to_path_buf());
+    let (len, mtime_ns) = std::fs::metadata(&path)
+        .map(|meta| {
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            (meta.len(), mtime_ns)
+        })
+        .unwrap_or((0, 0));
+    format!("stat\0{}\0{len}\0{mtime_ns}", path.display())
 }
 
 /// Resolves `tileiras` together with the CUDA toolkit root (when applicable),
@@ -365,19 +407,50 @@ fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
     BytecodeVersion::MIN_SUPPORTED
 }
 
-/// Compiles a `cutile_ir::Module` to a `.cubin` file via bytecode serialization and `tileiras`.
-///
-/// Returns `Err` (not panic) on any failure so callers can propagate it and run
-/// their cache-cleanup paths; a panic would unwind past that and across FFI frames.
-pub fn compile_tile_ir_module(
-    module: &cutile_ir::Module,
-    gpu_name: &str,
-) -> Result<String, JITError> {
-    let tmp_dir = env::temp_dir();
-    let base_filename = tmp_dir.join(Uuid::new_v4().to_string());
-    let bc_filename = format!("{}.bc", base_filename.to_str().unwrap());
-    let cubin_filename = format!("{}.cubin", base_filename.to_str().unwrap());
+/// `--opt-level` passed to `tileiras`. Not configurable yet.
+/// Numeric, not a string: the disk-cache key and entry header store it as one
+/// byte.
+pub const DEFAULT_OPT_LEVEL: u8 = 3;
 
+/// A path removed when dropped, so the error paths clean up too.
+struct ScopedTempFile(Option<PathBuf>);
+
+impl ScopedTempFile {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("path is taken only by `keep`")
+    }
+
+    /// Leaves the file on disk. Used for the `.bc` a failing `tileiras` run was
+    /// given, which the error message points at.
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ScopedTempFile {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Serializes a `cutile_ir::Module` to Tile IR bytecode (the `.bc` image).
+///
+/// Runs the module verifiers first, so bytecode returned here is what `tileiras`
+/// is expected to accept. Together with the target and opt level, these bytes are
+/// the complete input to [`run_tileiras`].
+///
+/// Also returns the [`BytecodeVersion`] actually written into the image, so the
+/// disk-cache key names that exact version instead of re-resolving it (which
+/// could drift from the bytes if the toolchain env changed in between).
+pub fn serialize_tile_ir_bytecode(
+    module: &cutile_ir::Module,
+) -> Result<(Vec<u8>, BytecodeVersion), JITError> {
     module
         .verify_dominance()
         .map_err(|e| JITError::Generic(format!("tile-ir dominance verification failed: {e}")))?;
@@ -389,16 +462,20 @@ pub fn compile_tile_ir_module(
     })?;
 
     // Dump IR via unified CUTILE_DUMP mechanism (also honors legacy TILE_IR_DUMP).
-    crate::dump::dump_module(
-        crate::dump::DumpStage::Ir,
-        &module.name,
-        &module.to_mlir_text(),
-    );
+    // `to_mlir_text` renders the whole module, so it stays behind `should_dump`.
+    if crate::dump::should_dump(crate::dump::DumpStage::Ir) {
+        crate::dump::dump_module(
+            crate::dump::DumpStage::Ir,
+            &module.name,
+            &module.to_mlir_text(),
+        );
+    }
 
     let bytecode_version = selected_bytecode_version();
     let bytes = write_bytecode_version(module, bytecode_version).map_err(|e| {
         JITError::Generic(format!(
-            "Failed to serialize bytecode for {bc_filename}: {e}"
+            "Failed to serialize bytecode for module {}: {e}",
+            module.name
         ))
     })?;
 
@@ -408,15 +485,35 @@ pub fn compile_tile_ir_module(
         crate::dump::dump_module(crate::dump::DumpStage::Bytecode, &module.name, &decoded);
     }
 
-    std::fs::write(&bc_filename, &bytes).map_err(|e| {
+    Ok((bytes, bytecode_version))
+}
+
+/// Compiles Tile IR bytecode to a cubin image by spawning `tileiras`.
+///
+/// `bytecode`, `gpu_name` and `opt_level`, plus the `tileiras` binary itself, are
+/// the complete input to this stage.
+///
+/// The temporary `.bc` and `.cubin` are removed before returning. The one
+/// exception is a failing `tileiras` run, which leaves the `.bc` on disk because
+/// the error message names it.
+pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Vec<u8>, JITError> {
+    let base_filename = env::temp_dir().join(Uuid::new_v4().to_string());
+    let bc_file = ScopedTempFile::new(base_filename.with_extension("bc"));
+    let cubin_file = ScopedTempFile::new(base_filename.with_extension("cubin"));
+    let bc_filename = bc_file.path().to_string_lossy().into_owned();
+    let cubin_filename = cubin_file.path().to_string_lossy().into_owned();
+
+    std::fs::write(bc_file.path(), bytecode).map_err(|e| {
         JITError::Generic(format!("Failed to write bytecode for {bc_filename}: {e}"))
     })?;
+
     let tileiras = tileiras_binary();
+    let opt_level_arg = opt_level.to_string();
     let args = [
         "--gpu-name",
         gpu_name,
         "--opt-level",
-        "3",
+        &opt_level_arg,
         "-o",
         &cubin_filename,
         &bc_filename,
@@ -428,12 +525,14 @@ pub fn compile_tile_ir_module(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
+        // The message points at the bytecode, so it has to outlive this call.
+        bc_file.keep();
         return Err(JITError::Generic(format!(
             "{} failed while compiling Tile IR bytecode.\n\
              status: {}\n\
              command: {}\n\
              target gpu: {gpu_name}\n\
-             bytecode: {bc_filename}\n\
+             bytecode: {bc_filename} (kept for inspection)\n\
              output cubin: {cubin_filename}\n\
              stdout:\n{stdout}\n\
              stderr:\n{stderr}\n\
@@ -443,7 +542,166 @@ pub fn compile_tile_ir_module(
             display_command(&tileiras, &args),
         )));
     }
-    Ok(cubin_filename)
+
+    let cubin = std::fs::read(cubin_file.path()).map_err(|e| {
+        JITError::Generic(format!(
+            "{} reported success but its output cubin at {cubin_filename} could not be read: {e}",
+            tileiras.display(),
+        ))
+    })?;
+    if cubin.is_empty() {
+        return Err(JITError::Generic(format!(
+            "{} reported success but wrote an empty cubin at {cubin_filename}",
+            tileiras.display(),
+        )));
+    }
+    crate::jit_store::record_backend_compile();
+    Ok(cubin)
+}
+
+/// Where a stage-2 cubin came from.
+///
+/// `DiskCache` carries the store it was served from and the key it validated
+/// against, so a `cuModuleLoadData` rejection can evict *that exact entry* from
+/// *that exact store* and recompile — see [`recompile_after_disk_rejection`] —
+/// without re-deriving the key (which would drift if `opt_level` ever became
+/// configurable) or re-reading a possibly-swapped global store slot.
+#[derive(Clone)]
+pub enum Stage2Source {
+    Tileiras,
+    DiskCache {
+        store: Arc<dyn crate::jit_store::JitStore>,
+        key: String,
+    },
+}
+
+/// Compiles Tile IR bytecode to a cubin, consulting the disk cache when one is
+/// installed (see [`crate::jit_store::enable`]).
+///
+/// The lookup sits exactly between bytecode serialization and the `tileiras`
+/// spawn: `bytecode` plus `gpu_name`, `opt_level` and the resolved `tileiras`
+/// are the subprocess's complete input, so the content-addressed key derived
+/// from them (see [`crate::jit_store::l2_key`]) is correct by construction.
+///
+/// Store I/O failures are soft: counted in `stats().io_errors`, logged, and
+/// the compile proceeds as if no cache were installed.
+pub fn compile_bytecode_cached(
+    bytecode: &[u8],
+    bc_version: BytecodeVersion,
+    gpu_name: &str,
+    opt_level: u8,
+) -> Result<(Vec<u8>, Stage2Source), JITError> {
+    use crate::jit_store::{self, EntryParams};
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::Ordering;
+
+    let Some(store) = jit_store::installed_store() else {
+        return run_tileiras(bytecode, gpu_name, opt_level).map(|c| (c, Stage2Source::Tileiras));
+    };
+
+    // `bc_version` is the version the caller actually serialized into `bytecode`,
+    // not a fresh re-resolution — so the key's version field can never disagree
+    // with the bytes it sits next to (see #7).
+    let tileiras_fp = tileiras_fingerprint();
+    let key = jit_store::l2_key(bytecode, bc_version, gpu_name, opt_level, tileiras_fp);
+    let params = EntryParams {
+        bc_sha256: Sha256::digest(bytecode).into(),
+        gpu_name,
+        opt_level,
+        tileiras_fp,
+    };
+
+    match store.get(&key) {
+        Ok(Some(entry)) => {
+            if let Some(cubin) = jit_store::decode_entry(&entry, &params) {
+                jit_store::STATS.hits.fetch_add(1, Ordering::Relaxed);
+                // Hand the store and key back so a driver rejection recovers
+                // against this exact entry (see `recompile_after_disk_rejection`).
+                return Ok((cubin, Stage2Source::DiskCache { store, key }));
+            }
+            // Key matched but the entry does not validate against this request:
+            // a torn write, tampering, or a hash collision. Drop it and recompile
+            // rather than ever serving it.
+            crate::jit_store::cache_log(format_args!(
+                "disk cache entry {key} failed validation; deleting and recompiling"
+            ));
+            if let Err(e) = store.delete(&key) {
+                jit_store::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
+                crate::jit_store::cache_log(format_args!(
+                    "failed to delete invalid entry {key}: {e}"
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            jit_store::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
+            crate::jit_store::cache_log(format_args!("disk cache read for {key} failed: {e}"));
+        }
+    }
+
+    jit_store::STATS.misses.fetch_add(1, Ordering::Relaxed);
+    let cubin = run_tileiras(bytecode, gpu_name, opt_level)?;
+
+    match jit_store::encode_entry(&params, &cubin) {
+        Some(entry) => match store.put(&key, &entry) {
+            Ok(()) => {
+                jit_store::STATS.puts.fetch_add(1, Ordering::Relaxed);
+                jit_store::STATS
+                    .bytes_written
+                    .fetch_add(entry.len() as u64, Ordering::Relaxed);
+            }
+            Err(e) => {
+                jit_store::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
+                crate::jit_store::cache_log(format_args!("disk cache write for {key} failed: {e}"));
+            }
+        },
+        None => crate::jit_store::cache_log(format_args!(
+            "not caching {key}: gpu name or tileiras fingerprint exceeds the entry format's u16 length field"
+        )),
+    }
+
+    Ok((cubin, Stage2Source::Tileiras))
+}
+
+/// Recovery for a disk-served cubin the driver rejected (a torn write the
+/// checksum missed, driver/toolkit skew, …).
+///
+/// Deletes the offending entry from the store it came from (best-effort) and
+/// compiles with `tileiras` **directly, without consulting the cache**. The
+/// bypass is the point: if the delete fails — a read-only or shared cache
+/// directory, an entry owned by another user — reading the store again would
+/// just re-serve the very cubin the driver already rejected, and the launch
+/// would fail permanently. `store` and `key` come from the [`Stage2Source::DiskCache`]
+/// that produced the bad cubin, so this evicts exactly that entry.
+pub fn recompile_after_disk_rejection(
+    store: &dyn crate::jit_store::JitStore,
+    key: &str,
+    bytecode: &[u8],
+    gpu_name: &str,
+    opt_level: u8,
+) -> Result<Vec<u8>, JITError> {
+    use std::sync::atomic::Ordering;
+
+    if let Err(e) = store.delete(key) {
+        crate::jit_store::STATS
+            .io_errors
+            .fetch_add(1, Ordering::Relaxed);
+        crate::jit_store::cache_log(format_args!("failed to evict entry {key}: {e}"));
+    }
+    run_tileiras(bytecode, gpu_name, opt_level)
+}
+
+/// Compiles a `cutile_ir::Module` to a cubin image via bytecode serialization and
+/// `tileiras`, consulting the disk cache when one is installed.
+///
+/// Returns `Err` (not panic) on any failure so callers can propagate it and run
+/// their cache-cleanup paths; a panic would unwind past that and across FFI frames.
+pub fn compile_tile_ir_module(
+    module: &cutile_ir::Module,
+    gpu_name: &str,
+) -> Result<Vec<u8>, JITError> {
+    let (bytecode, bc_version) = serialize_tile_ir_bytecode(module)?;
+    compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL).map(|(cubin, _)| cubin)
 }
 
 fn tileiras_launch_error(
@@ -782,7 +1040,7 @@ mod tests {
         let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
 
         let module = empty_kernel_module();
-        let cubin_path = compile_tile_ir_module(&module, "sm_120")
+        let cubin = compile_tile_ir_module(&module, "sm_120")
             .expect("compiling an empty kernel with the fake tileiras should succeed");
 
         let args_path = fake_tileiras.with_extension("args");
@@ -794,15 +1052,86 @@ mod tests {
             "expected fake tileiras to record its own path, got:\n{args}"
         );
         assert!(args.contains("--gpu-name\nsm_120"), "args:\n{args}");
+        assert!(args.contains("--opt-level\n3"), "args:\n{args}");
         assert!(args.contains("-o\n"), "args:\n{args}");
-        assert!(PathBuf::from(&cubin_path).exists());
 
+        // `write_fake_tileiras` writes exactly this to the `-o` path.
+        assert_eq!(cubin, b"fake cubin\n".to_vec());
+
+        // Both temp files are removed before `run_tileiras` returns. The fake
+        // tileiras recorded their paths, so check them directly.
+        let cubin_path = {
+            let mut lines = args.lines();
+            lines.find(|line| *line == "-o");
+            lines
+                .next()
+                .expect("fake tileiras should have recorded an -o path")
+        };
         let bc_path = args.lines().last().unwrap_or_default();
-        let _ = fs::remove_file(bc_path);
-        let _ = fs::remove_file(&cubin_path);
+        assert!(
+            !PathBuf::from(cubin_path).exists(),
+            "run_tileiras leaked its output cubin at {cubin_path}"
+        );
+        assert!(
+            !PathBuf::from(bc_path).exists(),
+            "run_tileiras leaked its input bytecode at {bc_path}"
+        );
+
         let _ = fs::remove_file(args_path);
         let _ = fs::remove_file(fake_tileiras);
         let _ = fs::remove_dir(temp_dir);
+    }
+
+    /// End-to-end cache path with a fake `tileiras`: the first compile spawns
+    /// the subprocess and writes the store entry, the second is served from
+    /// disk without spawning. `enable`/`disable` happen under `ENV_LOCK`, the
+    /// same lock the other tileiras-spawning test takes, so the global store
+    /// never leaks into it.
+    #[test]
+    #[cfg(unix)]
+    fn disk_cache_serves_second_compile_without_spawning() {
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = env::temp_dir().join(format!("cutile_jit_cache_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let fake_tileiras = temp_dir.join("tileiras");
+        write_fake_tileiras(&fake_tileiras);
+        let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
+
+        let store_dir = temp_dir.join("store");
+        crate::jit_store::enable(std::sync::Arc::new(
+            crate::jit_store::FileSystemJitStore::new(&store_dir).unwrap(),
+        ));
+
+        let module = empty_kernel_module();
+        let backend_before = crate::jit_store::jit_backend_compile_count();
+        let hits_before = crate::jit_store::jit_disk_hit_count();
+
+        let first =
+            compile_tile_ir_module(&module, "sm_120").expect("first compile (miss) should succeed");
+        let second =
+            compile_tile_ir_module(&module, "sm_120").expect("second compile (hit) should succeed");
+
+        // A different target is a different key: this one must miss.
+        let other_arch = compile_tile_ir_module(&module, "sm_100")
+            .expect("different-arch compile should succeed");
+
+        crate::jit_store::disable();
+
+        assert_eq!(first, second, "hit must return the exact bytes stored");
+        assert_eq!(first, other_arch, "fake tileiras writes constant bytes");
+        assert_eq!(
+            crate::jit_store::jit_backend_compile_count() - backend_before,
+            2,
+            "exactly the two misses spawn tileiras"
+        );
+        assert_eq!(
+            crate::jit_store::jit_disk_hit_count() - hits_before,
+            1,
+            "exactly the repeat compile hits the disk"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     struct EnvVarGuard {
