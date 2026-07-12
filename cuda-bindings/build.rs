@@ -155,6 +155,7 @@ fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
             "/usr/local/cuda-13.2",
             "/usr/local/cuda-13",
             "/usr/local/cuda",
+            "/opt/cuda",
         ];
 
         candidates.into_iter().map(PathBuf::from).collect()
