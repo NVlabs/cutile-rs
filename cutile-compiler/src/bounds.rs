@@ -103,7 +103,7 @@ fn div_ceil_i64(lhs: i64, rhs: i64) -> i64 {
 }
 
 /// An inclusive interval `[start, end]` over a copyable type.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Bounds<T: Copy + PartialEq> {
     pub start: T, // Inclusive.
     pub end: T,   // Inclusive.
@@ -132,11 +132,14 @@ impl Add for Bounds<i64> {
     fn add(self, rhs: Bounds<i64>) -> Bounds<i64> {
         let a = self;
         let b = rhs;
+        // Saturating so overflow widens to the i64 range (a sound over-
+        // approximation) rather than panicking (debug) or wrapping (release,
+        // which would be an unsound bound).
         let possible_bounds = vec![
-            a.start + b.start,
-            a.start + b.end,
-            a.end + b.start,
-            a.end + b.end,
+            a.start.saturating_add(b.start),
+            a.start.saturating_add(b.end),
+            a.end.saturating_add(b.start),
+            a.end.saturating_add(b.end),
         ];
         let start = *possible_bounds
             .iter()
@@ -155,11 +158,12 @@ impl Sub for Bounds<i64> {
     fn sub(self, rhs: Bounds<i64>) -> Bounds<i64> {
         let a = self;
         let b = rhs;
+        // Saturating: see `Add` — overflow widens to the i64 range soundly.
         let possible_bounds = vec![
-            a.start - b.start,
-            a.start - b.end,
-            a.end - b.start,
-            a.end - b.end,
+            a.start.saturating_sub(b.start),
+            a.start.saturating_sub(b.end),
+            a.end.saturating_sub(b.start),
+            a.end.saturating_sub(b.end),
         ];
         let start = *possible_bounds
             .iter()
@@ -178,11 +182,13 @@ impl Mul for Bounds<i64> {
     fn mul(self, rhs: Bounds<i64>) -> Bounds<i64> {
         let a = self;
         let b = rhs;
+        // Saturating: see `Add` — products can overflow i64 for wide inputs;
+        // widening to the i64 range keeps the bound sound.
         let possible_bounds = vec![
-            a.start * b.start,
-            a.start * b.end,
-            a.end * b.start,
-            a.end * b.end,
+            a.start.saturating_mul(b.start),
+            a.start.saturating_mul(b.end),
+            a.end.saturating_mul(b.start),
+            a.end.saturating_mul(b.end),
         ];
         let start = *possible_bounds
             .iter()
@@ -213,11 +219,15 @@ impl Div for Bounds<i64> {
             (_, 0) => panic!("Division by zero"),
             (0, _) => panic!("Division by zero"),
             _ => {
+                // Saturating: the only signed-division overflow is
+                // `i64::MIN / -1`; saturating it to `i64::MAX` keeps the bound
+                // sound instead of panicking. Divisors are non-zero here (the
+                // caller of `bounds_from_bop` rejects zero divisors).
                 let possible_bounds = vec![
-                    a.start / b.start,
-                    a.start / b.end,
-                    a.end / b.start,
-                    a.end / b.end,
+                    a.start.saturating_div(b.start),
+                    a.start.saturating_div(b.end),
+                    a.end.saturating_div(b.start),
+                    a.end.saturating_div(b.end),
                 ];
                 let start = *possible_bounds
                     .iter()
@@ -286,24 +296,29 @@ pub fn bop_bounds<F: Fn(i64, i64) -> i64>(a: &Bounds<i64>, b: &Bounds<i64>, f: F
 /// Returns the result bounds for a [`TileBinaryOp`], or `None` on division by zero.
 pub fn bounds_from_bop(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> Option<Bounds<i64>> {
     match op {
-        TileBinaryOp::CeilDiv | TileBinaryOp::Div | TileBinaryOp::TrueDiv => {
-            // Deal with division separately to handle division by zero.
-            match (b.start, b.end) {
-                (0, 0) => None,
-                (_, 0) => None,
-                (0, _) => None,
-                _ => Some(match op {
+        TileBinaryOp::CeilDiv | TileBinaryOp::Div | TileBinaryOp::TrueDiv | TileBinaryOp::Rem => {
+            // Any op with a divisor is handled here so it can reject a zero
+            // divisor. Reject when zero lies anywhere in the divisor's inclusive
+            // range, not just at an endpoint: an interior zero (e.g. `b=[-1, 2]`)
+            // is a genuine division by zero the caller must handle, and it also
+            // makes the corner sampling unsound (quotients diverge as the divisor
+            // approaches 0). For `Rem`, this guard is also what prevents a `% 0`
+            // panic — the previous code applied `%` with no zero check.
+            if b.start <= 0 && 0 <= b.end {
+                None
+            } else {
+                Some(match op {
                     TileBinaryOp::Div | TileBinaryOp::TrueDiv => *a / *b,
                     TileBinaryOp::CeilDiv => bop_bounds(a, b, div_ceil_i64),
+                    TileBinaryOp::Rem => *a % *b,
                     _ => unreachable!(),
-                }),
+                })
             }
         }
         _ => Some(match op {
             TileBinaryOp::Add => *a + *b,
             TileBinaryOp::Sub => *a - *b,
             TileBinaryOp::Mul => *a * *b,
-            TileBinaryOp::Rem => *a % *b,
             TileBinaryOp::Eq => bop_bounds(a, b, |a, b| (a == b) as i64),
             TileBinaryOp::Ne => bop_bounds(a, b, |a, b| (a != b) as i64),
             TileBinaryOp::Lt => bop_bounds(a, b, |a, b| (a < b) as i64),
@@ -317,5 +332,102 @@ pub fn bounds_from_bop(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> O
             TileBinaryOp::BitXor => bop_bounds(a, b, |a, b| a ^ b),
             _ => unreachable!(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bnd(start: i64, end: i64) -> Bounds<i64> {
+        Bounds::new(start, end)
+    }
+
+    // --- Division-by-zero guard (div / ceil_div / true_div / rem) ------------
+
+    #[test]
+    fn div_rejects_zero_at_an_endpoint() {
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Div, &bnd(1, 10), &bnd(0, 5)),
+            None
+        );
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Div, &bnd(1, 10), &bnd(-5, 0)),
+            None
+        );
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Div, &bnd(1, 10), &bnd(0, 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn div_rejects_zero_in_the_interior() {
+        // Previously accepted (endpoints are non-zero), which both missed a real
+        // division by zero and produced an unsound bound: 100 / [-1, 2] can reach
+        // 100 (at b = 1) but corner sampling gives only [-100, 50].
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Div, &bnd(100, 100), &bnd(-1, 2)),
+            None
+        );
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::CeilDiv, &bnd(1, 10), &bnd(-1, 3)),
+            None
+        );
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::TrueDiv, &bnd(1, 10), &bnd(-2, 4)),
+            None
+        );
+    }
+
+    #[test]
+    fn div_accepts_sign_consistent_divisor() {
+        // Divisor entirely positive: corner bounds are sound.
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Div, &bnd(0, 10), &bnd(2, 2)),
+            Some(bnd(0, 5))
+        );
+    }
+
+    #[test]
+    fn rem_rejects_zero_divisor_instead_of_panicking() {
+        // Previously `a % 0` panicked the compiler; now it is rejected like div.
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Rem, &bnd(0, 10), &bnd(0, 3)),
+            None
+        );
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Rem, &bnd(0, 10), &bnd(-1, 2)),
+            None
+        );
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Rem, &bnd(0, 10), &bnd(0, 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn rem_accepts_nonzero_divisor() {
+        // Divisor away from zero returns Some. (Tightening the *range* for rem —
+        // the corner-sampling imprecision — is tracked separately.)
+        assert!(bounds_from_bop(&TileBinaryOp::Rem, &bnd(0, 3), &bnd(3, 3)).is_some());
+    }
+
+    // --- Saturating arithmetic: overflow widens soundly, never panics -------
+
+    #[test]
+    fn add_saturates_on_overflow() {
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Add, &bnd(i64::MAX, i64::MAX), &bnd(1, 1)),
+            Some(bnd(i64::MAX, i64::MAX))
+        );
+    }
+
+    #[test]
+    fn mul_saturates_on_overflow() {
+        assert_eq!(
+            bounds_from_bop(&TileBinaryOp::Mul, &bnd(0, i64::MAX), &bnd(2, 2)),
+            Some(bnd(0, i64::MAX))
+        );
     }
 }
