@@ -491,6 +491,32 @@ mod memory_and_atomic_ops_module {
 
 use memory_and_atomic_ops_module::__module_ast_self;
 
+#[cutile::module]
+mod atomic_red_view_module {
+    use cutile::core::*;
+    use cutile::tileir::*;
+
+    /// Split-K style accumulation: atomically reduce a tile into the
+    /// output view, no old values returned.
+    #[cutile::entry()]
+    unsafe fn atomic_red_view_kernel(output: &mut Tensor<f32, { [-1, -1] }>) {
+        let mut out_part: PartitionMut<f32, { [16, 16] }> =
+            unsafe { output.partition_mut(const_shape![16, 16]) };
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, const_shape![16, 16]);
+        let _tok: Token = unsafe {
+            atomic_red_view_tko(
+                &mut out_part,
+                tile,
+                [pid.0, 0i32],
+                atomic::AddF,
+                ordering::Relaxed,
+                scope::Device,
+            )
+        };
+    }
+}
+
 fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
     common::compile_to_ir(
         __module_ast_self,
@@ -1066,5 +1092,181 @@ fn compile_padded_partition_view() -> () {
         );
 
         println!("\n✓ make_partition_view with neg_inf padding verified");
+    });
+}
+
+#[test]
+fn compile_atomic_red_view_tko() -> () {
+    common::with_test_stack(|| {
+        let module_op_str = common::compile_to_ir(
+            atomic_red_view_module::__module_ast_self,
+            "atomic_red_view_module",
+            "atomic_red_view_kernel",
+            &[],
+            &[("output", &[16, 1])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        assert!(
+            module_op_str.contains("atomic_red_view_tko"),
+            "Expected atomic_red_view_tko operation in MLIR output.\n{module_op_str}"
+        );
+    });
+}
+
+// ── GatherScatterView / StridedView tests ─────────────────────────────────────
+
+#[cutile::module]
+mod gather_scatter_view_module {
+    use cutile::core::*;
+    use cutile::tileir::*;
+
+    #[cutile::entry()]
+    unsafe fn gsv_kernel(data: &Tensor<f32, { [-1, -1] }>) {
+        let tok: Token = new_token_unordered();
+        let gsv: GatherScatterView<f32, { [8, 64] }, 0> =
+            unsafe { make_gather_scatter_view(data, const_shape![8, 64], padding::None) };
+        let sparse_idx: Tile<i32, { [8] }> = constant(0i32, const_shape![8]);
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let (_tile, _tok): (Tile<f32, { [8, 64] }>, Token) = unsafe {
+            load_gather_scatter_view_tko(
+                &gsv,
+                sparse_idx,
+                pid.1,
+                tok,
+                ordering::Relaxed,
+                scope::TileBlock,
+            )
+        };
+    }
+}
+
+#[test]
+fn compile_make_gather_scatter_view() -> () {
+    common::with_test_stack(|| {
+        let module_op_str = common::compile_to_ir(
+            gather_scatter_view_module::__module_ast_self,
+            "gather_scatter_view_module",
+            "gsv_kernel",
+            &[],
+            &[("data", &[64, 64])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        assert!(
+            module_op_str.contains("make_gather_scatter_view"),
+            "Expected make_gather_scatter_view in MLIR output.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("load_view_tko"),
+            "Expected load_view_tko in MLIR output.\n{module_op_str}"
+        );
+    });
+}
+
+#[cutile::module]
+mod strided_view_module {
+    use cutile::core::*;
+    use cutile::tileir::*;
+
+    #[cutile::entry()]
+    unsafe fn sv_kernel(data: &Tensor<f32, { [-1, -1] }>) {
+        let tok: Token = new_token_unordered();
+        let sv: StridedView<f32, { [16, 16] }, { [2, 1] }, { [0, 1] }> =
+            unsafe { make_strided_view(data, const_shape![16, 16], padding::None) };
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let (_tile, _tok): (Tile<f32, { [16, 16] }>, Token) = unsafe {
+            load_strided_view_tko(
+                &sv,
+                [pid.0, pid.1],
+                tok,
+                ordering::Relaxed,
+                scope::TileBlock,
+            )
+        };
+    }
+}
+
+#[test]
+fn compile_make_strided_view() -> () {
+    common::with_test_stack(|| {
+        let module_op_str = common::compile_to_ir(
+            strided_view_module::__module_ast_self,
+            "strided_view_module",
+            "sv_kernel",
+            &[],
+            &[("data", &[64, 64])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        assert!(
+            module_op_str.contains("make_strided_view"),
+            "Expected make_strided_view in MLIR output.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("load_view_tko"),
+            "Expected load_view_tko in MLIR output.\n{module_op_str}"
+        );
+    });
+}
+
+// A non-identity `DIM_MAP` so the emitted type actually carries it: the fmt
+// omits `dim_map` when it is the identity permutation, so an identity map
+// cannot distinguish "DIM_MAP threaded" from "DIM_MAP dropped".
+#[cutile::module]
+mod strided_view_permuted_module {
+    use cutile::core::*;
+    use cutile::tileir::*;
+
+    #[cutile::entry()]
+    unsafe fn sv_permuted_kernel(data: &Tensor<f32, { [-1, -1] }>) {
+        let tok: Token = new_token_unordered();
+        let sv: StridedView<f32, { [16, 16] }, { [2, 1] }, { [1, 0] }> =
+            unsafe { make_strided_view(data, const_shape![16, 16], padding::None) };
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let (_tile, _tok): (Tile<f32, { [16, 16] }>, Token) = unsafe {
+            load_strided_view_tko(
+                &sv,
+                [pid.0, pid.1],
+                tok,
+                ordering::Relaxed,
+                scope::TileBlock,
+            )
+        };
+    }
+}
+
+#[test]
+fn compile_strided_view_threads_dim_map() -> () {
+    common::with_test_stack(|| {
+        let module_op_str = common::compile_to_ir(
+            strided_view_permuted_module::__module_ast_self,
+            "strided_view_permuted_module",
+            "sv_permuted_kernel",
+            &[],
+            &[("data", &[64, 64])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed.");
+        assert!(
+            module_op_str.contains("traversal_strides=[2,1]"),
+            "Expected traversal_strides=[2,1] in MLIR output.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("dim_map=[1,0]"),
+            "Expected dim_map=[1,0] in MLIR output.\n{module_op_str}"
+        );
     });
 }

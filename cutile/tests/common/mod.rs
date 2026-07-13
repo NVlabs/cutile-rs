@@ -2,31 +2,12 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-//! Common test utilities and constants shared across all test modules.
-
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
-use cutile::compile_api::KernelCompiler;
+/// Common test utilities and constants shared across all test modules.
+use cutile::compile_api::{CheckPlacementCounts, KernelCompiler};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::error::JITError;
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
-
-/// Process-wide lock serializing tests that assert on global kernel-cache
-/// state (presence of a key) or the global JIT compile counter.
-///
-/// The in-memory kernel cache and `cutile::tile_kernel::jit_compile_count()`
-/// are process-global. A test that measures "did this call compile or hit the
-/// cache" must hold this lock for the whole measured window so no other test's
-/// concurrent compile can move the counter between snapshots. All cache-state
-/// tests (in `warmup.rs` and `warmup_bench.rs`) share this single lock.
-#[allow(dead_code)]
-pub fn cache_test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// Stack size for test threads.
 ///
@@ -84,6 +65,36 @@ pub fn compile_to_ir<F>(
 where
     F: Fn() -> Module,
 {
+    compile_to_ir_with_counts(
+        module_ast_fn,
+        module_name,
+        function_name,
+        generics,
+        strides,
+        spec_args,
+        scalar_hints,
+        const_grid,
+        options,
+    )
+    .map(|(ir, _)| ir)
+}
+
+/// `compile_to_ir` that also returns the bounds-check placement counters.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub fn compile_to_ir_with_counts<F>(
+    module_ast_fn: F,
+    module_name: &str,
+    function_name: &str,
+    generics: &[String],
+    strides: &[(&str, &[i32])],
+    spec_args: &[(&str, &SpecializationBits)],
+    scalar_hints: &[(&str, &DivHint)],
+    const_grid: Option<(u32, u32, u32)>,
+    options: &CompileOptions,
+) -> Result<(String, CheckPlacementCounts), JITError>
+where
+    F: Fn() -> Module,
+{
     let spec_args = spec_args
         .iter()
         .map(|(name, spec)| (*name, (*spec).clone()))
@@ -105,5 +116,7 @@ where
         compiler = compiler.grid(grid);
     }
 
-    compiler.compile().map(|artifacts| artifacts.ir_text())
+    compiler
+        .compile()
+        .map(|artifacts| (artifacts.ir_text(), artifacts.check_counts()))
 }

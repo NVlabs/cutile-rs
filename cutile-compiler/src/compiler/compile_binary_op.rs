@@ -319,6 +319,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 .result(operand_result_ty.clone())
                                 .build(module)
                         }
+                        TileBinaryOp::Shl => OpBuilder::new(Opcode::ShLI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr("overflow", Attribute::i32(0))
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Shr => OpBuilder::new(Opcode::ShRI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr(sign_attr.0, sign_attr.1)
+                            .result(operand_result_ty.clone())
+                            .build(module),
                         _ => {
                             return self.jit_error_result(
                                 span,
@@ -469,6 +481,50 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let value = results[0];
         let mut tr_value = TileRustValue::new_value_kind_like(value, return_type.clone());
         tr_value.bounds = op_bounds;
+        tr_value.affine = Self::propagate_affine(tile_rust_arithmetic_op, &lhs, &rhs);
         Ok(tr_value)
+    }
+
+    /// Propagates `scale * var + offset` affine dependence through a binary
+    /// op when one operand is affine and the other is a compile-time
+    /// constant (exact bounds). Bounds checks use this to substitute the
+    /// strongest instance of an affine loop index at the loop bound.
+    fn propagate_affine(
+        op: &TileBinaryOp,
+        lhs: &TileRustValue,
+        rhs: &TileRustValue,
+    ) -> Option<crate::compiler::_value::AffineForm> {
+        use crate::compiler::_value::AffineForm;
+        let exact = |v: &TileRustValue| v.bounds.filter(|b| b.is_exact()).map(|b| b.start);
+        let (form, constant, const_on_left) = match (lhs.affine, exact(lhs), rhs.affine, exact(rhs))
+        {
+            (Some(form), _, None, Some(c)) => (form, c, false),
+            (None, Some(c), Some(form), _) => (form, c, true),
+            _ => return None,
+        };
+        let combined = match (op, const_on_left) {
+            (TileBinaryOp::Add, _) => AffineForm {
+                scale: form.scale,
+                var: form.var,
+                offset: form.offset.checked_add(constant)?,
+            },
+            (TileBinaryOp::Sub, false) => AffineForm {
+                scale: form.scale,
+                var: form.var,
+                offset: form.offset.checked_sub(constant)?,
+            },
+            (TileBinaryOp::Sub, true) => AffineForm {
+                scale: form.scale.checked_neg()?,
+                var: form.var,
+                offset: constant.checked_sub(form.offset)?,
+            },
+            (TileBinaryOp::Mul, _) => AffineForm {
+                scale: form.scale.checked_mul(constant)?,
+                var: form.var,
+                offset: form.offset.checked_mul(constant)?,
+            },
+            _ => return None,
+        };
+        Some(combined)
     }
 }

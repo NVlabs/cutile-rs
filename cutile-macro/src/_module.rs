@@ -57,7 +57,6 @@ use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::{env, fs};
@@ -341,21 +340,8 @@ fn module_inner(
     let ast_module_tokens = emit_module_ast_self_and_registry_entry(
         ast_module_item,
         tile_rust_crate_root,
-        raw_item_source.clone(),
+        raw_item_source,
     );
-
-    // Compute SHA-256 source hash at macro expansion time.
-    let source_hash = format!("{:x}", Sha256::digest(raw_item_source.as_bytes()));
-
-    // Per-module source hash, used by the launch/compile path for cache keying.
-    // Warmup no longer needs generated entry metadata: pre-compilation is done
-    // per kernel via the `.compile()` terminal (see `TileKernel`).
-    let source_hash_const = quote! {
-        /// SHA-256 hash of the module source, computed at compile time.
-        /// Changes whenever any kernel source in this module changes.
-        pub const _SOURCE_HASH: &str = #source_hash;
-    };
-
     let res = if entry_functions.is_empty() {
         quote! {
             pub mod #name {
@@ -366,8 +352,6 @@ fn module_inner(
                 use #ast_path;
                 #ast_module_tokens
                 #(#concrete_items)*
-                // Warmup metadata.
-                #source_hash_const
             }
         }
     } else {
@@ -394,8 +378,6 @@ fn module_inner(
                 #(#concrete_items)*
                 // Entry point code.
                 #(#entry_functions)*
-                // Warmup metadata.
-                #source_hash_const
             }
         }
     };
@@ -823,8 +805,6 @@ pub fn kernel_launcher(
             function_generics: Option<Vec<String>>,
             _phantom: std::marker::PhantomData<( #(#ki_phantom_types,)* )>,
             _compile_options: CompileOptions,
-            // When true, `execute` skips its launch block (set by `.compile()`).
-            _compile_only: bool,
         }
 
         impl #tile_kernel_impl_type_params #launcher_ident #struct_args {
@@ -836,24 +816,7 @@ pub fn kernel_launcher(
                     function_generics: None,
                     _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
-                    _compile_only: false,
                 }
-            }
-
-            // JIT-compiles and caches this specialization without launching.
-            pub fn compile(mut self) -> Result<(), DeviceError> {
-                self._compile_only = true;
-                let stream = with_default_device_policy(|policy| policy.next_stream())??;
-                let ctx = ExecutionContext::new(stream);
-                unsafe { self.execute(&ctx)?; }
-                Ok(())
-            }
-
-            pub fn compile_on(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
-                self._compile_only = true;
-                let ctx = ExecutionContext::new(stream.clone());
-                unsafe { self.execute(&ctx)?; }
-                Ok(())
             }
         }
 

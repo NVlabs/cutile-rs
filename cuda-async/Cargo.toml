@@ -15,5 +15,3 @@ half = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-dashmap = { workspace = true }
-once_cell = { workspace = true }

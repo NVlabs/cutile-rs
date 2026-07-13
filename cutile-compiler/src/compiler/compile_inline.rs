@@ -122,7 +122,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .map(|arg| arg.ty.rust_ty.clone())
                 .collect::<Vec<_>>();
             // println!("{call_arg_rust_tys:#?}");
-            generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None);
+            generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None, generic_vars)?;
             // Bind new variables.
             // The variables must:
             // - Have the names of the parameters in the callee.
@@ -130,6 +130,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let param_names = get_sig_param_names(&fn_item.sig);
             let (input_params, _output_param) = get_sig_types(&fn_item.sig, None);
             let mut call_variables = CompilerContext::empty();
+            // The callee body is compiled into the caller's current block, so
+            // the caller's loop context governs check hoisting inside it.
+            call_variables.loop_frames = ctx.loop_frames.clone();
             call_variables.module_scope.push(module_name.clone());
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
@@ -166,7 +169,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .iter()
                     .map(|arg| arg.ty.rust_ty.clone())
                     .collect::<Vec<_>>();
-                generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None);
+                generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None, generic_vars)?;
                 // println!("inline_function_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ngeneric_arg_inference={generic_arg_inference:#?}", fn_item.sig.ident.to_string());
                 generic_arg_inference
                     .get_generic_vars_instance(&generic_vars, &self.modules.primitives())
@@ -343,6 +346,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let param_names = get_sig_param_names(&impl_method.sig);
             let (input_params, _output_param) = get_sig_types(&impl_method.sig, Some(self_ty));
             let mut call_variables = CompilerContext::empty();
+            // The callee body is compiled into the caller's current block, so
+            // the caller's loop context governs check hoisting inside it.
+            call_variables.loop_frames = ctx.loop_frames.clone();
             call_variables.module_scope.push(module_name.clone());
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&impl_method.sig);

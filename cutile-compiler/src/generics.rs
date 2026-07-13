@@ -918,7 +918,7 @@ impl Instantiable for TypeInstanceStructuredType {
         let structured_type_name = get_type_ident(maybe_generic_ty).map(|ident| ident.to_string());
         let allows_extra_cga = matches!(
             structured_type_name.as_deref(),
-            Some("MappedPartitionMut" | "PartitionIndices")
+            Some("MappedPartitionMut" | "PartitionIndices" | "GatherScatterView" | "StridedView")
         );
 
         let inst_mut_ref = if let Type::Reference(inner_elem) = &mut instance_ty {
@@ -1248,6 +1248,12 @@ pub struct GenericArgInference {
     pub params: Vec<String>,
     pub param2arg: HashMap<String, Option<(GenericArgType, String)>>,
     pub param2cga: HashMap<String, Type>,
+    /// Caller-side const-generic instances (`D` → `128`), used to normalize
+    /// symbolic shape elements before unification: argument types reaching
+    /// inline inference mix entry-substituted literals with unsubstituted
+    /// caller symbols, and both forms of the same dimension must unify.
+    /// Populated by [`Self::map_args_to_params`]; empty otherwise.
+    caller_scalars: HashMap<String, i32>,
 }
 
 // TODO (hme): Separate generic parameter inference from type inference procedure.
@@ -1291,6 +1297,7 @@ impl GenericArgInference {
             param2arg,
             params,
             method_params: Some(method_params),
+            caller_scalars: HashMap::new(),
         }
     }
 
@@ -1312,22 +1319,31 @@ impl GenericArgInference {
             param2arg,
             params,
             method_params: None,
+            caller_scalars: HashMap::new(),
         }
     }
 
     /// Maps positional call arguments to their corresponding parameter names.
+    ///
+    /// `caller_generic_vars` supplies the caller's const-generic instances so
+    /// symbolic shape elements normalize before unification: argument types
+    /// mix entry-substituted literals (`128`) with unsubstituted caller
+    /// symbols (`D`) for the same dimension.
     pub fn map_args_to_params(
         &mut self,
         call_arg_rust_tys: &Vec<syn::Type>,
         self_ty: Option<&Type>,
-    ) -> () {
+        caller_generic_vars: &GenericVars,
+    ) -> Result<(), JITError> {
+        self.caller_scalars = caller_generic_vars.inst_i32.clone();
         let (fn_arg_types, _return_type) = get_sig_types(&self.sig, self_ty);
         // Get the generic parameters in this function signature.
         for i in 0..call_arg_rust_tys.len() {
             let call_arg_rust_ty = &call_arg_rust_tys[i];
             let fn_arg_types = &fn_arg_types[i];
-            self.add_generic_args(fn_arg_types, call_arg_rust_ty);
+            self.add_generic_args(fn_arg_types, call_arg_rust_ty)?;
         }
+        Ok(())
     }
     /// Applies explicitly provided generic arguments from a function call expression.
     pub fn apply_provided_generics_fn_call(
@@ -1450,9 +1466,11 @@ impl GenericArgInference {
             )
         };
         assert_eq!(expr_generic_args.args.len(), method_params.len());
-        for i in 0..expr_generic_args.args.len() {
-            let param = &self.params[i];
-            let arg = &expr_generic_args.args[i];
+        // A method turbofish names the METHOD generics only (Rust semantics);
+        // impl generics come from the receiver. `self.params` is impl params
+        // followed by method params, so pair against the latter.
+        let method_params = method_params.clone();
+        for (param, arg) in method_params.iter().zip(expr_generic_args.args.iter()) {
             if let Some(Some(_)) = self.param2arg.get(param) {
                 // The type for this has already been inferred.
                 // Our compiler doesn't need to check anything. Rust already has.
@@ -1568,7 +1586,12 @@ impl GenericArgInference {
         // arg_map keys are target param names, and values are their values.
         for (name, v) in &self.param2arg {
             let Some((ast_name, ast_string)) = v else {
-                panic!("Unexpected None value for key={name}");
+                // Not inferable from the argument types — e.g. a method const
+                // generic supplied only via turbofish (`load_pipelined::<4>`).
+                // Leave it unresolved; callers merge explicit turbofish args
+                // afterward, and a genuinely missing param still fails with a
+                // spanned "no resolved value" error at its use site.
+                continue;
             };
             match *ast_name {
                 GenericArgType::Type => {
@@ -1697,11 +1720,19 @@ impl GenericArgInference {
         to_generic_vars
     }
 
-    pub(crate) fn add_type_constraints(&mut self, type_param: &syn::Type, type_arg: &syn::Type) {
-        self.add_generic_args(type_param, type_arg);
+    pub(crate) fn add_type_constraints(
+        &mut self,
+        type_param: &syn::Type,
+        type_arg: &syn::Type,
+    ) -> Result<(), JITError> {
+        self.add_generic_args(type_param, type_arg)
     }
 
-    fn add_generic_args(&mut self, type_param: &syn::Type, type_arg: &syn::Type) -> () {
+    fn add_generic_args(
+        &mut self,
+        type_param: &syn::Type,
+        type_arg: &syn::Type,
+    ) -> Result<(), JITError> {
         // Adds generic arguments to arg_map.
         // arg_map maps generic parameters (present in arg_map upon initialization) to various GenericArgument patterns (see below).
         // Each key in arg_map specifies the set of generic parameters in a function / method signature.
@@ -1721,12 +1752,12 @@ impl GenericArgInference {
         if let (syn::Type::Tuple(param_tuple), syn::Type::Tuple(arg_tuple)) = (type_param, type_arg)
         {
             if param_tuple.elems.len() != arg_tuple.elems.len() {
-                return;
+                return Ok(());
             }
             for (param_elem, arg_elem) in param_tuple.elems.iter().zip(arg_tuple.elems.iter()) {
-                self.add_generic_args(param_elem, arg_elem);
+                self.add_generic_args(param_elem, arg_elem)?;
             }
-            return;
+            return Ok(());
         }
 
         let (Some(mut param_generic_args), Some(mut arg_generic_args)) =
@@ -1734,7 +1765,7 @@ impl GenericArgInference {
         else {
             // Check if type itself is a generic param.
             self.add_generic_type(type_param, type_arg);
-            return;
+            return Ok(());
         };
         strip_generic_args_lifetimes(&mut param_generic_args);
         strip_generic_args_lifetimes(&mut arg_generic_args);
@@ -1771,7 +1802,7 @@ impl GenericArgInference {
                             if maybe_generic_args(param_type).is_some()
                                 && maybe_generic_args(arg_type).is_some()
                             {
-                                self.add_generic_args(param_type, arg_type);
+                                self.add_generic_args(param_type, arg_type)?;
                             }
                             // Something like (Tensor<f32, ...>, Tensor<E, ...>)
                             let param_ident = &param_type_path
@@ -1812,7 +1843,7 @@ impl GenericArgInference {
                             }
                         }
                         (syn::Type::Reference(arg_ref), syn::Type::Reference(param_ref)) => {
-                            self.add_generic_args(&param_ref.elem, &arg_ref.elem);
+                            self.add_generic_args(&param_ref.elem, &arg_ref.elem)?;
                         }
                         _ => {}
                     }
@@ -1880,6 +1911,15 @@ impl GenericArgInference {
                                                 },
                                                 _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
                                             };
+                                            // Normalize symbolic elements through the
+                                            // caller's generics: argument types mix
+                                            // entry-substituted literals with caller
+                                            // symbols for the same dimension (`128` vs
+                                            // `D`), and both must unify.
+                                            let arg_val = match self.caller_scalars.get(&arg_val) {
+                                                Some(value) => value.to_string(),
+                                                None => arg_val,
+                                            };
                                             // Skip inference from dynamic dims (-1): they
                                             // carry no information about the generic param.
                                             if arg_val == "- 1" || arg_val == "-1" {
@@ -1887,11 +1927,18 @@ impl GenericArgInference {
                                             }
                                             let replaced_arg = self.param2arg.insert(param_var.to_string(), Some((GenericArgType::GenericConstExpr, arg_val.to_string())));
                                             if let Some(Some((_arg_type, arg))) = replaced_arg {
+                                                let arg = match self.caller_scalars.get(&arg) {
+                                                    Some(value) => value.to_string(),
+                                                    None => arg,
+                                                };
                                                 // Allow overriding a previous -1 (dynamic)
                                                 // inference with a concrete value, but
                                                 // two different concrete values conflict.
-                                                if arg != "- 1" && arg != "-1" {
-                                                    assert_eq!(arg, arg_val.to_string());
+                                                if arg != "- 1" && arg != "-1" && arg != arg_val {
+                                                    return Err(JITError::Generic(format!(
+                                                        "conflicting const-generic inference for `{param_var}` in call to `{callee}`: one argument implies `{arg}`, another implies `{arg_val}`",
+                                                        callee = self.sig.ident,
+                                                    )));
                                                 }
                                             }
                                         }
@@ -1905,10 +1952,14 @@ impl GenericArgInference {
                             }
                         }
                         (Expr::Lit(arg_lit), Expr::Lit(param_lit)) => {
-                            assert_eq!(
-                                arg_lit.to_token_stream().to_string(),
-                                param_lit.to_token_stream().to_string()
-                            );
+                            let arg_lit_str = arg_lit.to_token_stream().to_string();
+                            let param_lit_str = param_lit.to_token_stream().to_string();
+                            if arg_lit_str != param_lit_str {
+                                return Err(JITError::Generic(format!(
+                                    "const-generic mismatch in call to `{callee}`: the signature fixes `{param_lit_str}` but the argument provides `{arg_lit_str}`",
+                                    callee = self.sig.ident,
+                                )));
+                            }
                         }
                         _ => unimplemented!(
                             "Unsupported Const inference {param_const:#?} {arg_const:#?}"
@@ -1918,6 +1969,7 @@ impl GenericArgInference {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     fn add_generic_type(&mut self, param_type: &Type, arg_type: &Type) {
@@ -2439,5 +2491,86 @@ pub fn parse_expr_as_i32(expr: &Expr, generic_args: &GenericVars) -> i32 {
             *dim
         }
         _ => unimplemented!("Unexpected expression {expr:#?}"),
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+
+    fn mma_like_inference() -> GenericArgInference {
+        let sig: Signature = syn::parse_quote! {
+            fn mma_like<const M: i32, const N: i32, const K: i32>(
+                lhs: Tile<f32, { [M, K] }>,
+                rhs: Tile<f32, { [K, N] }>,
+            ) -> Tile<f32, { [M, N] }>
+        };
+        GenericArgInference::new_function(sig)
+    }
+
+    /// Two arguments implying different concrete values for the same shape
+    /// param is a genuine conflict: it must produce the named JIT error,
+    /// never silently unify.
+    #[test]
+    fn conflicting_concrete_dims_error_instead_of_unifying() {
+        let mut inference = mma_like_inference();
+        let args: Vec<Type> = vec![
+            syn::parse_quote!(Tile<f32, { [16, 128] }>),
+            syn::parse_quote!(Tile<f32, { [64, 32] }>),
+        ];
+        let err = inference
+            .map_args_to_params(&args, None, &GenericVars::empty_unchecked())
+            .expect_err("K = 128 vs K = 64 must conflict");
+        let message = err.to_string();
+        assert!(
+            message.contains("conflicting const-generic inference")
+                && message.contains("`K`")
+                && message.contains("mma_like")
+                && message.contains("128")
+                && message.contains("64"),
+            "conflict error must name the param, callee, and both values: {message}"
+        );
+    }
+
+    /// Normalization is evaluation under the caller's instantiation: a
+    /// symbol and its instance are the same dimension and must unify.
+    #[test]
+    fn symbolic_and_substituted_forms_of_one_dim_unify() {
+        let mut inference = mma_like_inference();
+        let mut caller = GenericVars::empty_unchecked();
+        caller.inst_i32.insert("D".to_string(), 128);
+        let args: Vec<Type> = vec![
+            syn::parse_quote!(Tile<f32, { [16, D] }>),
+            syn::parse_quote!(Tile<f32, { [128, 32] }>),
+        ];
+        inference
+            .map_args_to_params(&args, None, &caller)
+            .expect("D (=128) and 128 are the same dimension");
+        let vars = inference.get_generic_vars_instance(&caller, &HashMap::new());
+        assert_eq!(vars.inst_i32.get("K"), Some(&128));
+        assert_eq!(vars.inst_i32.get("M"), Some(&16));
+        assert_eq!(vars.inst_i32.get("N"), Some(&32));
+    }
+
+    /// Normalization cannot over-normalize: two different symbols with
+    /// different instances still conflict after resolution.
+    #[test]
+    fn distinct_symbols_with_distinct_instances_still_conflict() {
+        let mut inference = mma_like_inference();
+        let mut caller = GenericVars::empty_unchecked();
+        caller.inst_i32.insert("D".to_string(), 128);
+        caller.inst_i32.insert("E".to_string(), 64);
+        let args: Vec<Type> = vec![
+            syn::parse_quote!(Tile<f32, { [16, D] }>),
+            syn::parse_quote!(Tile<f32, { [E, 32] }>),
+        ];
+        let err = inference
+            .map_args_to_params(&args, None, &caller)
+            .expect_err("D (=128) vs E (=64) must conflict after normalization");
+        assert!(
+            err.to_string()
+                .contains("conflicting const-generic inference"),
+            "unexpected error: {err}"
+        );
     }
 }

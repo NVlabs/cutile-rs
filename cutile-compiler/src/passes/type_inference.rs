@@ -2036,7 +2036,17 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
 
     fn infer_for_iter_ty(&mut self, iter_expr: &Expr) -> Result<Option<TileRustType>, JITError> {
         if let Expr::MethodCall(method_call) = iter_expr {
-            if method_call.method == "iter_indices" && method_call.args.is_empty() {
+            let is_mapped_indices_iter = matches!(
+                (
+                    method_call.method.to_string().as_str(),
+                    method_call.args.len()
+                ),
+                ("iter_indices", 0)
+                    | ("iter_indices_with", 1)
+                    | ("iter_indices_within", 1)
+                    | ("iter_indices_within_with", 2)
+            );
+            if is_mapped_indices_iter {
                 if let Some(receiver_ty) = self.infer_expr_syn_type(&method_call.receiver, None)? {
                     if get_type_ident(&receiver_ty)
                         .is_some_and(|ident| ident.to_string().starts_with("MappedPartitionMut"))
@@ -2439,7 +2449,9 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
 
         let mut generic_arg_inf = GenericArgInference::new_function(fn_item.sig.clone());
         if let Some(expected_return) = expected_return {
-            generic_arg_inf.add_type_constraints(&return_type, &expected_return.rust_ty);
+            // Speculative seed from the expected type: a conflict just means
+            // the hint doesn't apply, the strict check runs at inline time.
+            let _ = generic_arg_inf.add_type_constraints(&return_type, &expected_return.rust_ty);
         }
         generic_arg_inf.apply_provided_generics_fn_call(call, self.generic_vars);
 
@@ -2479,7 +2491,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 if type_mentions_any_name(param_type, &closure_generics)
                     && can_add_type_constraint(param_type, &arg_ty)
                 {
-                    generic_arg_inf.add_type_constraints(param_type, &arg_ty);
+                    let _ = generic_arg_inf.add_type_constraints(param_type, &arg_ty);
                 }
             }
         }
@@ -2676,7 +2688,9 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let (param_types, return_type) = get_sig_types(&fn_item.sig, None);
         let mut generic_arg_inf = GenericArgInference::new_function(fn_item.sig.clone());
         if let Some(expected_return) = expected_return {
-            generic_arg_inf.add_type_constraints(&return_type, &expected_return.rust_ty);
+            // Speculative seed from the expected type: a conflict just means
+            // the hint doesn't apply, the strict check runs at inline time.
+            let _ = generic_arg_inf.add_type_constraints(&return_type, &expected_return.rust_ty);
         }
         generic_arg_inf.apply_provided_generics_fn_call(call, self.generic_vars);
 
@@ -2916,6 +2930,14 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let method_name = method_call.method.to_string();
         let mut matches = Vec::new();
 
+        // Same-named methods defined per rank (e.g. `BoundedPartition::load`
+        // for rank 2 and rank 3) stay unique after filtering impls whose
+        // const-generic array rank cannot match the receiver.
+        let receiver_lookup_ty = crate::compiler::_module::instantiate_type_for_lookup(
+            receiver_ty,
+            self.generic_vars,
+            self.compiler.modules.primitives(),
+        );
         for (_module_name, item_impl) in self
             .compiler
             .modules
@@ -2923,6 +2945,13 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             .get(&receiver_type)?
             .iter()
         {
+            if !crate::compiler::_module::impl_self_type_rank_matches(
+                item_impl,
+                &receiver_lookup_ty,
+                self.generic_vars,
+            ) {
+                continue;
+            }
             for item in &item_impl.items {
                 let syn::ImplItem::Fn(method) = item else {
                     continue;
@@ -2939,7 +2968,8 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let self_ty = &*item_impl.self_ty;
         let (param_types, _return_type) = get_sig_types(&method.sig, Some(self_ty));
         let mut generic_arg_inf = GenericArgInference::new_method(item_impl, method);
-        generic_arg_inf.add_type_constraints(self_ty, receiver_ty);
+        // Probing for a unique method match: constraint conflicts mean no match.
+        let _ = generic_arg_inf.add_type_constraints(self_ty, receiver_ty);
         let receiver_rank = rank_from_type_shape_arg(receiver_ty, self.generic_vars);
         Some(
             param_types
@@ -3015,7 +3045,11 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             return Ok(None);
         }
         let mut generic_arg_inf = GenericArgInference::new_method(impl_item, impl_method);
-        generic_arg_inf.map_args_to_params(&call_arg_rust_tys.to_vec(), Some(self_ty));
+        generic_arg_inf.map_args_to_params(
+            &call_arg_rust_tys.to_vec(),
+            Some(self_ty),
+            self.generic_vars,
+        )?;
         generic_arg_inf.apply_provided_generics_method_call(method_call, self.generic_vars);
         if !generic_arg_inf.verify() {
             return Ok(None);
@@ -3069,7 +3103,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             return Ok(expected);
         }
         let mut generic_arg_inf = GenericArgInference::new_function(fn_item.sig.clone());
-        generic_arg_inf.map_args_to_params(&call_arg_rust_tys, None);
+        generic_arg_inf.map_args_to_params(&call_arg_rust_tys, None, self.generic_vars)?;
         generic_arg_inf.apply_provided_generics_fn_call(call, self.generic_vars);
         if !generic_arg_inf.verify() {
             return Ok(expected);
@@ -4430,7 +4464,11 @@ pub fn infer_method_generics(
     }
 
     let mut generic_arg_inference = GenericArgInference::new_method(impl_item, impl_method);
-    generic_arg_inference.map_args_to_params(&call_arg_rust_tys.to_vec(), Some(self_ty));
+    generic_arg_inference.map_args_to_params(
+        &call_arg_rust_tys.to_vec(),
+        Some(self_ty),
+        caller_generic_vars,
+    )?;
     let inferred = generic_arg_inference.get_generic_vars_instance(caller_generic_vars, primitives);
 
     if method_call.turbofish.is_some() {

@@ -171,7 +171,7 @@ cuda-bindings          NVIDIA CUDA bindings
 
 - [Grout](https://github.com/huggingface/grout): Qwen 3 inference engine in Rust by Hugging Face, built with cuTile Rust and useful as a reference for production kernel call sites.
 - [cuTile Python](https://github.com/nvidia/cutile-python): Python kernel programming with CUDA Tile.
-- [TileGym](https://github.com/NVIDIA/TileGym): CUDA Tile kernel examples and tuning patterns, including a set of ready-to-use cuTile Rust kernels under [`ops/cutile_rs`](https://github.com/NVIDIA/TileGym/tree/main/src/tilegym/ops/cutile_rs).
+- [TileGym](https://github.com/NVIDIA/TileGym): CUDA Tile kernel examples and tuning patterns.
 - [cuda-oxide](https://github.com/NVlabs/cuda-oxide): NVlabs experimental Rust-to-CUDA compiler for writing SIMT-style GPU kernels in Rust.
 - [CUDA Tile IR documentation](https://docs.nvidia.com/cuda/tile-ir/latest/index.html): CUDA Tile IR reference documentation.
 - [CUDA documentation](https://docs.nvidia.com/cuda/): CUDA toolkit documentation.

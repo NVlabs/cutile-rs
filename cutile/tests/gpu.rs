@@ -50,8 +50,11 @@ mod book_snippets;
 #[path = "gpu/tensor_permute.rs"]
 mod tensor_permute;
 
-#[path = "gpu/warmup.rs"]
-mod warmup;
+#[path = "gpu/mapped_partition_values.rs"]
+mod mapped_partition_values;
 
-#[path = "gpu/warmup_bench.rs"]
-mod warmup_bench;
+#[path = "gpu/mapped_partition_schedule_matrix.rs"]
+mod mapped_partition_schedule_matrix;
+
+#[path = "gpu/atomic_red_view.rs"]
+mod atomic_red_view;

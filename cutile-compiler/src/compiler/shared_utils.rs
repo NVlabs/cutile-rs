@@ -31,6 +31,10 @@ pub(crate) const STACK_RED_ZONE: usize = 4 * 1024 * 1024;
 /// Size of each new stack segment when growth is needed (10 MiB).
 pub(crate) const STACK_GROW_SIZE: usize = 10 * 1024 * 1024;
 
+/// Maximum rank of a mapped partition (`MappedPartitionMut` / `iter_indices`).
+/// Matches the DSL's `variadic_struct(N = 6)` expansion ceiling.
+pub(crate) const MAX_MAPPED_PARTITION_RANK: usize = 6;
+
 // ---------------------------------------------------------------------------
 // AtomicMode
 // ---------------------------------------------------------------------------

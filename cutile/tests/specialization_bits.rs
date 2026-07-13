@@ -183,15 +183,36 @@ fn different_spec_bits_different_cache_keys() {
         elements_disjoint: true,
     };
 
-    let key_a = TileFunctionKey::builder("m", "f")
-        .spec_args(vec![("output".into(), spec_a.clone())])
-        .build();
-    let key_b = TileFunctionKey::builder("m", "f")
-        .spec_args(vec![("output".into(), spec_b.clone())])
-        .build();
-    let key_a2 = TileFunctionKey::builder("m", "f")
-        .spec_args(vec![("output".into(), spec_a)])
-        .build();
+    let key_a = TileFunctionKey::new(
+        "m".into(),
+        "f".into(),
+        vec![],
+        vec![],
+        vec![("output".into(), spec_a.clone())],
+        vec![],
+        None,
+        CompileOptions::default(),
+    );
+    let key_b = TileFunctionKey::new(
+        "m".into(),
+        "f".into(),
+        vec![],
+        vec![],
+        vec![("output".into(), spec_b.clone())],
+        vec![],
+        None,
+        CompileOptions::default(),
+    );
+    let key_a2 = TileFunctionKey::new(
+        "m".into(),
+        "f".into(),
+        vec![],
+        vec![],
+        vec![("output".into(), spec_a)],
+        vec![],
+        None,
+        CompileOptions::default(),
+    );
 
     assert_ne!(
         key_a, key_b,

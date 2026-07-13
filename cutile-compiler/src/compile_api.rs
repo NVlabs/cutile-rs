@@ -29,18 +29,35 @@ use crate::error::JITError;
 use crate::hints::CompileOptions;
 use crate::specialization::{DivHint, SpecializationBits};
 
+/// Where each checked partition access's bounds check ended up: proven at
+/// compile time (nothing emitted), hoisted to a loop preheader, or emitted
+/// in place at the access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CheckPlacementCounts {
+    pub discharged: u32,
+    pub hoisted: u32,
+    pub in_place: u32,
+}
+
 /// Compiled kernel artifacts: IR and bytecode.
 ///
 /// Produced by [`KernelCompiler::compile`]. All methods are pure Rust and
 /// do not require a GPU or CUDA driver.
 pub struct CompileArtifacts {
     module: cutile_ir::Module,
+    check_counts: CheckPlacementCounts,
 }
 
 impl CompileArtifacts {
     /// Returns the human-readable Tile IR text (MLIR-like syntax).
     pub fn ir_text(&self) -> String {
         self.module.to_mlir_text()
+    }
+
+    /// Bounds-check placement counters for the compiled kernel — the same
+    /// numbers reported on the `CUTILE_JIT_TIMING` line.
+    pub fn check_counts(&self) -> CheckPlacementCounts {
+        self.check_counts
     }
 
     /// Serializes the compiled module to bytecode.
@@ -198,6 +215,14 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         )?;
 
         let module = compiler.compile()?;
-        Ok(CompileArtifacts { module })
+        let check_counts = CheckPlacementCounts {
+            discharged: compiler.check_stats.discharged.get(),
+            hoisted: compiler.check_stats.hoisted.get(),
+            in_place: compiler.check_stats.in_place.get(),
+        };
+        Ok(CompileArtifacts {
+            module,
+            check_counts,
+        })
     }
 }

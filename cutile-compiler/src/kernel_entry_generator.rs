@@ -120,9 +120,12 @@ impl TensorInput {
 
     pub fn validate(&self) -> Result<(), JITError> {
         if let TensorParamKind::MappedPartitionMut { .. } = &self.param_kind {
-            if self.rank != 2 {
+            // Mutable partitions are capped at rank 3 below; rank-1 and rank-2
+            // mapped partitions traverse linearly or with a grouped 2-D
+            // swizzle, rank-3 adds a linear leading axis.
+            if self.rank < 1 || self.rank > 3 {
                 return SourceLocation::unknown()
-                    .jit_error_result("swizzled MappedPartitionMut parameters must have rank 2.");
+                    .jit_error_result("MappedPartitionMut parameters must have rank 1 through 3.");
             }
         }
         if self.mutable {

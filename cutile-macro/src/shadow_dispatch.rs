@@ -1379,7 +1379,15 @@ fn replace_lifetimes_with(ty: &Type, dead: &[String], replacement: &syn::Lifetim
 /// When `rewrite_ty_for_rank` rewrites `Shape<...>` → `Shape_N<...>`, we must
 /// prepend `'_` to the rank-instance form because `Shape_N<'a, const D_0: i32, ...>`
 /// has a lifetime that is NOT elidable in impl header positions (E0726).
-const LIFETIME_BEARING_BASES: &[&str] = &["Shape", "Array", "Partition", "PartitionMut"];
+const LIFETIME_BEARING_BASES: &[&str] = &[
+    "Shape",
+    "Array",
+    "Partition",
+    "PartitionMut",
+    "BoundedPartition",
+    "GatherScatterView",
+    "StridedView",
+];
 
 fn base_has_lifetime(base: &Ident) -> bool {
     let s = base.to_string();

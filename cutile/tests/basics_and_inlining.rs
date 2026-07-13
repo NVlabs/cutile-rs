@@ -90,6 +90,19 @@ mod basics_and_inlining_module {
         let _tile = tensor.partition(tile_shape).load([pid.0]);
     }
 
+    /// Nibble unpacking shape: shifts and masks on integer tiles and scalars.
+    #[cutile::entry()]
+    unsafe fn shift_ops_kernel(x: &Tensor<i32, { [-1] }>, z: &mut Tensor<i32, { [-1] }>, s: i32) {
+        let tile: Tile<i32, { [64] }> = x.partition(const_shape![64]).load([0]);
+        let four: Tile<i32, { [64] }> = constant(4i32, const_shape![64]);
+        let mask: Tile<i32, { [64] }> = constant(0xFi32, const_shape![64]);
+        let lo = tile & mask;
+        let hi = (tile >> four) & mask;
+        let scaled = lo << four;
+        let _scalar_shift: i32 = s >> 1;
+        z.partition_mut(const_shape![64]).store(hi + scaled, [0]);
+    }
+
     #[cutile::entry()]
     unsafe fn ptr_partition_mut_store_kernel(ptr: *mut f32, len: i32) {
         let mut tensor: Tensor<f32, { [-1] }> = tensor_from_ptr(ptr, len);
@@ -406,6 +419,49 @@ mod basics_and_inlining_module {
         let _neg_int: Tile<i32, S> = constant(-42i32, shape);
         let _neg_suffixed: Tile<f32, S> = constant(-2.5f32, shape);
     }
+
+    // Distilled from grout's fmha_prefill_causal_mapped: `mma` unifies its
+    // shared shape params against a mix of annotation-typed values (symbolic
+    // `D`) and op-computed values (substituted `128`). Inline inference must
+    // normalize both forms of the same dimension before unifying.
+    #[cutile::entry(unchecked_accesses = false)]
+    fn symbolic_dim_mma_kernel<
+        const BM: i32,
+        const BN: i32,
+        const D: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut out: MappedPartitionMut<f16, { [BM, 1, D] }, MAP_SHAPE>,
+        q: &Tensor<f16, { [-1, -1, D] }>,
+        k: &Tensor<f16, { [-1, -1, D] }>,
+    ) {
+        let q_part: Partition<f16, { [BM, 1, D] }> = q.partition(const_shape![BM, 1, D]);
+        let k_part = k.partition(const_shape![1, BN, D]);
+        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+            dims: &[1i32, 0i32],
+        };
+        for index in out.iter_indices() {
+            let [q_m_idx, q_head_idx, _d0] = index.coords();
+            let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, const_shape![BM, D]);
+            let tq_raw: Tile<f16, { [BM, 1, D] }> = q_part.load([q_m_idx, q_head_idx, 0i32]);
+            let tq: Tile<f16, { [BM, D] }> = tq_raw.reshape(const_shape![BM, D]);
+            for j in 0i32..2i32 {
+                let k_tile: Tile<f16, { [1, BN, D] }> = k_part.load([q_head_idx, j, 0i32]);
+                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                let mut qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+                qk = mma(tq, k_trans, qk);
+                let p: Tile<f16, { [BM, BN] }> = convert_tile(qk);
+                let v_tile: Tile<f16, { [BN, D] }> = k_part
+                    .load([q_head_idx, j, 0i32])
+                    .reshape(const_shape![BN, D]);
+                acc = mma(p, v_tile, acc);
+            }
+            let out_tile: Tile<f16, { [BM, 1, D] }> =
+                convert_tile(acc.reshape(const_shape![BM, 1, D]));
+            out.store(out_tile, index);
+        }
+    }
 }
 
 use basics_and_inlining_module::__module_ast_self;
@@ -448,6 +504,22 @@ fn compile_ptr_partition_load_helper() -> () {
         assert!(
             module_op_str.contains("load_view_tko"),
             "Expected partition load helper to emit load_view_tko.\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
+fn compile_shift_ops_kernel() -> () {
+    common::with_test_stack(|| {
+        let module_op_str =
+            compile_ir("shift_ops_kernel", &[], &[("x", &[1][..]), ("z", &[1][..])]);
+        assert!(
+            module_op_str.contains("shri"),
+            "Expected `>>` to lower to shri.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("shli"),
+            "Expected `<<` to lower to shli.\n{module_op_str}"
         );
     });
 }
@@ -565,6 +637,32 @@ fn compile_ptr_tile_reshape() -> () {
         assert!(
             module_op_str.contains("broadcast"),
             "Expected broadcast operation on pointer tile type"
+        );
+    });
+}
+
+#[test]
+fn symbolic_dim_mma_unifies_substituted_and_symbolic_shapes() {
+    common::with_test_stack(|| {
+        let mlir = compile_ir(
+            "symbolic_dim_mma_kernel",
+            &[
+                "16".to_string(),
+                "32".to_string(),
+                "128".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ],
+            &[
+                ("out", &[128, 128, 1]),
+                ("q", &[512, 128, 1]),
+                ("k", &[512, 128, 1]),
+            ],
+        );
+        assert!(
+            mlir.contains("mma"),
+            "expected an mma op in the symbolic-dim kernel:\n{mlir}"
         );
     });
 }

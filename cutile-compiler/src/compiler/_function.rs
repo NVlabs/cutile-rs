@@ -56,6 +56,18 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) validator: Validator,
     pub(crate) module_name_stack: Vec<String>,
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
+    /// Per-compile partition-access check accounting: statically discharged /
+    /// hoisted to a loop preheader / emitted in the access's own block.
+    /// Reported on the `CUTILE_JIT_TIMING` line for coverage measurement.
+    pub check_stats: CheckHoistStats,
+}
+
+/// Counters for where partition-access bounds checks ended up.
+#[derive(Debug, Default)]
+pub struct CheckHoistStats {
+    pub discharged: std::cell::Cell<u32>,
+    pub hoisted: std::cell::Cell<u32>,
+    pub in_place: std::cell::Cell<u32>,
 }
 
 struct FunctionParamTypes {
@@ -202,6 +214,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             stride_args,
             module_name_stack: vec![module_name.to_string()],
             typeck_results: RefCell::new(None),
+            check_stats: CheckHoistStats::default(),
         })
     }
 

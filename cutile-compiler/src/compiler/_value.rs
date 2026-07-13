@@ -63,6 +63,45 @@ impl TypeMeta {
     }
 }
 
+/// One enclosing loop, for hoisting bounds checks out of hot loop bodies.
+///
+/// `value_watermark` is the module's value count taken just before the loop
+/// body block was built: a value with a smaller index was defined before the
+/// loop and therefore dominates `preheader_block` (the block the `for` op is
+/// appended to; ops emitted there during body compilation land before it).
+#[derive(Debug, Clone)]
+pub(crate) struct LoopFrame {
+    pub(crate) preheader_block: cutile_ir::ir::BlockId,
+    /// The loop body block. Hoisting is only sound for checks emitted
+    /// directly in the body — never from nested conditional blocks, where
+    /// the guarded access may not execute on every iteration.
+    pub(crate) body_block: cutile_ir::ir::BlockId,
+    pub(crate) value_watermark: u32,
+    /// The raw induction block argument and any assumption-wrapped aliases
+    /// the loop variable was bound to.
+    pub(crate) induction_values: Vec<Value>,
+    /// Loop bounds `[lower, upper)` as preheader values.
+    pub(crate) lower: Value,
+    pub(crate) upper: Value,
+    /// True when the step is the constant 1, making `upper - 1` the exact
+    /// maximum induction value for a non-empty loop.
+    pub(crate) unit_step: bool,
+    /// True when static bounds prove the loop executes at least once
+    /// (`max(lower) < min(upper)`). Lets hoisted checks skip the vacuous-trip
+    /// guard, and lets checks hoist past this loop entirely.
+    pub(crate) known_non_empty: bool,
+}
+
+/// Affine dependence of a scalar on a loop induction variable:
+/// `scale * var + offset`. Tracked through binary ops so bounds checks on
+/// affine indices can substitute the strongest instance at the loop bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AffineForm {
+    pub(crate) scale: i64,
+    pub(crate) var: Value,
+    pub(crate) offset: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionAxisOrigin {
     pub(crate) tensor: String,
@@ -98,12 +137,13 @@ pub struct TileRustValue {
     pub(crate) string_literal: Option<syn::Expr>,
     pub(crate) enum_variant: Option<String>,
     pub(crate) enum_payload: Option<Box<syn::Expr>>,
-    pub(crate) partition_origin: Option<Value>,
+    pub(crate) partition_origins: Option<Vec<Value>>,
     pub(crate) tensor_origin: Option<String>,
     pub(crate) partition_axis_origin: Option<PartitionAxisOrigin>,
     pub(crate) dim_origin: Option<DimOrigin>,
     pub(crate) index_origin: Option<DimOrigin>,
     pub(crate) bounded_axes: Option<Vec<DimOrigin>>,
+    pub(crate) affine: Option<AffineForm>,
 }
 
 impl TileRustValue {
@@ -120,12 +160,13 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -142,12 +183,13 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -168,12 +210,13 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -194,12 +237,13 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -216,12 +260,13 @@ impl TileRustValue {
             string_literal: Some(string_literal),
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -242,12 +287,13 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: Some(variant.into()),
             enum_payload: payload.map(Box::new),
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -273,12 +319,13 @@ impl TileRustValue {
                 string_literal: None,
                 enum_variant: None,
                 enum_payload: None,
-                partition_origin: None,
+                partition_origins: None,
                 tensor_origin: None,
                 partition_axis_origin: None,
                 dim_origin: None,
                 index_origin: None,
                 bounded_axes: None,
+                affine: None,
             },
         }
     }
@@ -296,12 +343,13 @@ impl TileRustValue {
             string_literal: Some(literal_expr),
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            affine: None,
         }
     }
 
@@ -499,6 +547,10 @@ pub struct CompilerContext {
     pub carry_vars: Option<Vec<String>>,
     pub default_terminator: Option<BlockTerminator>,
     pub module_scope: Vec<String>,
+    /// Enclosing loops, innermost last. Lets check emission hoist
+    /// loop-invariant and induction-variable bounds checks into the
+    /// innermost loop's preheader instead of the hot loop body.
+    pub(crate) loop_frames: Vec<LoopFrame>,
 }
 
 impl CompilerContext {
@@ -508,6 +560,7 @@ impl CompilerContext {
             carry_vars: None,
             default_terminator: None,
             module_scope: vec![],
+            loop_frames: vec![],
         }
     }
 
@@ -534,6 +587,7 @@ impl CompilerContext {
             carry_vars,
             default_terminator,
             module_scope,
+            loop_frames: self.loop_frames.clone(),
         })
     }
 

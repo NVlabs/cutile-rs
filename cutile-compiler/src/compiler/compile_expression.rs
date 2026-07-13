@@ -11,14 +11,15 @@
 
 use super::_function::CUDATileFunctionCompiler;
 use super::_value::{
-    BlockTerminator, CompilerContext, DimOrigin, PartitionAxisOrigin, TileRustValue,
+    AffineForm, BlockTerminator, CompilerContext, DimOrigin, LoopFrame, PartitionAxisOrigin,
+    TileRustValue,
 };
 use super::shared_types::Kind;
 use super::shared_utils::{
     collect_mutated_variables, collect_mutated_variables_from_block,
     collect_mutated_variables_from_expr, collect_mutated_variables_loop,
     collect_mutated_variables_while, dedup, update_outer_block_type_meta, TileBinaryOp,
-    STACK_GROW_SIZE, STACK_RED_ZONE,
+    MAX_MAPPED_PARTITION_RANK, STACK_GROW_SIZE, STACK_RED_ZONE,
 };
 use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
@@ -308,13 +309,22 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "failed to resolve MappedPartitionMut map-shape const generic array",
             );
         };
-        if tile_shape.len() != 2 || map_shape.len() != 2 {
+        if tile_shape.len() != map_shape.len() {
             return self.jit_error_result(
                 span,
                 &format!(
-                    "`iter_indices()` currently supports rank-2 MappedPartitionMut values, got tile rank {} and map rank {}",
+                    "`iter_indices()` requires matching tile and map ranks, got tile rank {} and map rank {}",
                     tile_shape.len(),
                     map_shape.len()
+                ),
+            );
+        }
+        if tile_shape.is_empty() || tile_shape.len() > MAX_MAPPED_PARTITION_RANK {
+            return self.jit_error_result(
+                span,
+                &format!(
+                    "`iter_indices()` supports rank-1 through rank-{MAX_MAPPED_PARTITION_RANK} MappedPartitionMut values, got rank {}",
+                    tile_shape.len(),
                 ),
             );
         }
@@ -400,10 +410,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
         let rank = pv.tile_shape.len();
-        if rank != 2 {
+        if rank == 0 || rank > MAX_MAPPED_PARTITION_RANK {
             return self.jit_error_result(
                 span,
-                &format!("`iter_indices()` currently supports rank-2 partitions, got rank {rank}"),
+                &format!(
+                    "`iter_indices()` supports rank-1 through rank-{MAX_MAPPED_PARTITION_RANK} partitions, got rank {rank}"
+                ),
             );
         }
 
@@ -666,14 +678,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let Some(bound_values) = bounds.values else {
             return self.jit_error_result(
                 &method_call.args[0].span(),
-                "`Partition::with_bounds` expects a rank-2 tuple",
+                "`Partition::with_bounds` expects a tuple of dimensions",
             );
         };
-        if bound_values.len() != 2 {
+        let (static_tile, _, _) =
+            self.partition_static_geometry(&partition, &method_call.receiver.span())?;
+        if bound_values.len() != static_tile.len() {
             return self.jit_error_result(
                 &method_call.args[0].span(),
                 &format!(
-                    "`Partition::with_bounds` expects rank-2 bounds, got rank {}",
+                    "`Partition::with_bounds` expects rank-{} bounds for this partition, got rank {}",
+                    static_tile.len(),
                     bound_values.len()
                 ),
             );
@@ -764,15 +779,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let Expr::MethodCall(method_call) = &*for_expr.expr else {
             return Ok(false);
         };
-        if method_call.method != "iter_indices" {
-            return Ok(false);
-        }
-        if !method_call.args.is_empty() {
+        let method_name = method_call.method.to_string();
+        let (has_ranges, is_shared) = match method_name.as_str() {
+            "iter_indices" => (false, false),
+            "iter_indices_with" => (false, true),
+            "iter_indices_within" => (true, false),
+            "iter_indices_within_with" => (true, true),
+            _ => return Ok(false),
+        };
+        let expected_args = usize::from(has_ranges) + usize::from(is_shared);
+        if method_call.args.len() != expected_args {
             return self.jit_error_result(
                 &method_call.args.span(),
-                "MappedPartitionMut::iter_indices does not take arguments",
+                &format!(
+                    "MappedPartitionMut::{method_name} expects {expected_args} argument(s), got {}",
+                    method_call.args.len()
+                ),
             );
         }
+        let ranges_arg = has_ranges.then(|| &method_call.args[0]);
+        let other_arg_index = usize::from(has_ranges);
         let Pat::Ident(iterand_ident) = &*for_expr.pat else {
             return self.jit_error_result(
                 &for_expr.pat.span(),
@@ -806,6 +832,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             generic_vars,
             &method_call.receiver.span(),
         )?;
+        let rank = tile_shape.len();
         let i32_ty = self.compile_i32_type(generic_vars, &for_expr.span())?;
         let index_space = self.compile_index_space_shape_values(
             module,
@@ -814,19 +841,348 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             &i32_ty,
             &method_call.receiver.span(),
         )?;
-        let num_bid_m = index_space[0].clone();
-        let num_bid_n = index_space[1].clone();
-        let total_tiles = self.compile_binary_op_from_values(
-            module,
-            block_id,
-            num_bid_m.clone(),
-            num_bid_n.clone(),
-            &TileBinaryOp::Mul,
-            generic_vars,
-            ctx,
-            None,
-            &for_expr.span(),
-        )?;
+
+        // Shared maps: a second mapped partition whose stores accept the same
+        // indices. The type already forces equal tile/map shapes; the logical
+        // partition grids must also match so every minted index is in bounds
+        // for both partitions. Static grids are compared here; dynamic grids
+        // get a runtime assert per axis.
+        let mut extra_origins: Vec<cutile_ir::ir::Value> = vec![];
+        if is_shared {
+            let other_arg = &method_call.args[other_arg_index];
+            let other_expr: &Expr = match other_arg {
+                Expr::Reference(reference) => &reference.expr,
+                other => other,
+            };
+            let other_value = self
+                .compile_expression(module, block_id, other_expr, generic_vars, ctx, None)?
+                .ok_or_else(|| {
+                    self.jit_error(
+                        &other_arg.span(),
+                        "failed to compile shared mapped partition argument",
+                    )
+                })?;
+            let other_origin = other_value.value.ok_or_else(|| {
+                self.jit_error(
+                    &other_arg.span(),
+                    "shared mapped partition argument did not produce a direct value",
+                )
+            })?;
+            let (other_tile_shape, other_map_shape) =
+                self.mapped_partition_type_shapes(&other_value, generic_vars, &other_arg.span())?;
+            if other_tile_shape != tile_shape || other_map_shape != map_shape {
+                return self.jit_error_result(
+                    &other_arg.span(),
+                    "iter_indices_with requires both mapped partitions to share tile and map shapes",
+                );
+            }
+            let other_index_space = self.compile_index_space_shape_values(
+                module,
+                block_id,
+                &other_value,
+                &i32_ty,
+                &other_arg.span(),
+            )?;
+            for axis in 0..rank {
+                let lhs = &index_space[axis];
+                let rhs = &other_index_space[axis];
+                if let (Some(lhs_bounds), Some(rhs_bounds)) = (lhs.bounds, rhs.bounds) {
+                    if lhs_bounds.is_exact() && rhs_bounds.is_exact() {
+                        if lhs_bounds.start != rhs_bounds.start {
+                            return self.jit_error_result(
+                                &other_arg.span(),
+                                &format!(
+                                    "iter_indices_with requires equal logical partition grids: axis {axis} has {} vs {} tiles",
+                                    lhs_bounds.start, rhs_bounds.start
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+                }
+                let eq_value = self.compile_binary_op_from_values(
+                    module,
+                    block_id,
+                    lhs.clone(),
+                    rhs.clone(),
+                    &TileBinaryOp::Eq,
+                    generic_vars,
+                    ctx,
+                    None,
+                    &other_arg.span(),
+                )?;
+                let eq_result = eq_value.value.ok_or_else(|| {
+                    self.jit_error(
+                        &other_arg.span(),
+                        "failed to compile shared mapped partition grid comparison",
+                    )
+                })?;
+                let message = format!(
+                    "shared mapped partitions require equal logical partition grids: axis {axis}"
+                );
+                let (assert_op_id, _) =
+                    OpBuilder::new(Opcode::Assert, self.ir_location(&other_arg.span()))
+                        .attr("message", Attribute::String(message))
+                        .operand(eq_result)
+                        .build(module);
+                append_op(module, block_id, assert_op_id);
+            }
+            extra_origins.push(other_origin);
+        }
+
+        // Sub-range iteration: per-axis (start_tile, num_tiles) pairs narrow
+        // the traversed grid. The schedule below runs over the effective
+        // lengths and the axis starts are added to the minted coordinates.
+        // Each range is validated against the grid — statically when bounds
+        // prove it, otherwise with a runtime assert — so indices keep the
+        // in-bounds store proof.
+        let mut axis_starts: Vec<Option<TileRustValue>> = vec![None; rank];
+        let mut axis_lens: Vec<TileRustValue> = index_space.clone();
+        if let Some(ranges_expr) = ranges_arg {
+            let ranges_value = self
+                .compile_expression(module, block_id, ranges_expr, generic_vars, ctx, None)?
+                .ok_or_else(|| {
+                    self.jit_error(
+                        &ranges_expr.span(),
+                        "failed to compile mapped partition sub-range argument",
+                    )
+                })?;
+            let Some(range_tuples) = &ranges_value.values else {
+                return self.jit_error_result(
+                    &ranges_expr.span(),
+                    "sub-range iteration expects an array of (start_tile, num_tiles) pairs",
+                );
+            };
+            if range_tuples.len() != rank {
+                return self.jit_error_result(
+                    &ranges_expr.span(),
+                    &format!(
+                        "sub-range iteration expects {rank} (start_tile, num_tiles) pairs, got {}",
+                        range_tuples.len()
+                    ),
+                );
+            }
+            for axis in 0..rank {
+                let Some(parts) = &range_tuples[axis].values else {
+                    return self.jit_error_result(
+                        &ranges_expr.span(),
+                        &format!("sub-range axis {axis} must be a (start_tile, num_tiles) pair"),
+                    );
+                };
+                if parts.len() != 2 {
+                    return self.jit_error_result(
+                        &ranges_expr.span(),
+                        &format!("sub-range axis {axis} must be a (start_tile, num_tiles) pair"),
+                    );
+                }
+                let start = parts[0].clone();
+                let len = parts[1].clone();
+                let num_bid = index_space[axis].clone();
+
+                let start_exact = start.bounds.filter(|bounds| bounds.is_exact());
+                let len_exact = len.bounds.filter(|bounds| bounds.is_exact());
+                let grid_exact = num_bid.bounds.filter(|bounds| bounds.is_exact());
+
+                // Reject provably-bad ranges at compile time.
+                if let Some(bounds) = start_exact {
+                    if bounds.start < 0 {
+                        return self.jit_error_result(
+                            &ranges_expr.span(),
+                            &format!("sub-range axis {axis} start {} is negative", bounds.start),
+                        );
+                    }
+                }
+                if let Some(bounds) = len_exact {
+                    if bounds.start < -1 {
+                        return self.jit_error_result(
+                            &ranges_expr.span(),
+                            &format!(
+                                "sub-range axis {axis} length {} is negative (-1 means the rest of the axis)",
+                                bounds.start
+                            ),
+                        );
+                    }
+                }
+
+                // `num_tiles = -1`: the rest of the axis from `start_tile`.
+                // The resulting length is in bounds by construction, so only
+                // the start needs validation.
+                let is_remainder = len_exact.is_some_and(|bounds| bounds.start == -1);
+                let len = if is_remainder {
+                    self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        num_bid.clone(),
+                        start.clone(),
+                        &TileBinaryOp::Sub,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &ranges_expr.span(),
+                    )?
+                } else {
+                    len
+                };
+
+                let emit_range_assert = |compiler: &Self,
+                                         module: &mut Module,
+                                         ctx: &mut CompilerContext,
+                                         lhs: TileRustValue,
+                                         rhs: TileRustValue,
+                                         op: TileBinaryOp,
+                                         detail: &str|
+                 -> Result<(), JITError> {
+                    let cmp = compiler.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        lhs,
+                        rhs,
+                        &op,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &ranges_expr.span(),
+                    )?;
+                    let cmp_value = cmp.value.ok_or_else(|| {
+                        compiler.jit_error(
+                            &ranges_expr.span(),
+                            "failed to compile sub-range bounds comparison",
+                        )
+                    })?;
+                    let message =
+                        format!("mapped partition sub-range out of bounds: axis {axis}: {detail}");
+                    let (assert_op_id, _) =
+                        OpBuilder::new(Opcode::Assert, compiler.ir_location(&ranges_expr.span()))
+                            .attr("message", Attribute::String(message))
+                            .operand(cmp_value)
+                            .build(module);
+                    append_op(module, block_id, assert_op_id);
+                    Ok(())
+                };
+
+                // start >= 0, unless proven above.
+                if start_exact.is_none() {
+                    let zero = self.compile_constant(module, block_id, generic_vars, 0)?;
+                    emit_range_assert(
+                        self,
+                        module,
+                        ctx,
+                        start.clone(),
+                        zero,
+                        TileBinaryOp::Ge,
+                        "start is negative",
+                    )?;
+                }
+                if is_remainder {
+                    // Remainder length: assert start <= grid so the length is
+                    // non-negative, unless both are static.
+                    let statically_ok = match (start_exact, grid_exact) {
+                        (Some(start_bounds), Some(grid_bounds)) => {
+                            if start_bounds.start > grid_bounds.start {
+                                return self.jit_error_result(
+                                    &ranges_expr.span(),
+                                    &format!(
+                                        "sub-range axis {axis} start {} exceeds the {}-tile grid",
+                                        start_bounds.start, grid_bounds.start
+                                    ),
+                                );
+                            }
+                            true
+                        }
+                        // `(0, -1)` spells "the whole axis": in bounds for any
+                        // grid, no assert needed.
+                        (Some(start_bounds), None) => start_bounds.start == 0,
+                        _ => false,
+                    };
+                    if !statically_ok {
+                        emit_range_assert(
+                            self,
+                            module,
+                            ctx,
+                            start.clone(),
+                            num_bid.clone(),
+                            TileBinaryOp::Le,
+                            "start exceeds the logical grid",
+                        )?;
+                    }
+                } else {
+                    // Explicit length: len >= 0 and start + len <= grid,
+                    // unless both are static.
+                    if len_exact.is_none() {
+                        let zero = self.compile_constant(module, block_id, generic_vars, 0)?;
+                        emit_range_assert(
+                            self,
+                            module,
+                            ctx,
+                            len.clone(),
+                            zero,
+                            TileBinaryOp::Ge,
+                            "length is negative (the -1 rest-of-axis spelling must be a literal)",
+                        )?;
+                    }
+                    let statically_ok = match (start_exact, len_exact, grid_exact) {
+                        (Some(start_bounds), Some(len_bounds), Some(grid_bounds)) => {
+                            if start_bounds.start + len_bounds.start > grid_bounds.start {
+                                return self.jit_error_result(
+                                    &ranges_expr.span(),
+                                    &format!(
+                                        "sub-range axis {axis} [{}, {}) exceeds the {}-tile grid",
+                                        start_bounds.start,
+                                        start_bounds.start + len_bounds.start,
+                                        grid_bounds.start
+                                    ),
+                                );
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !statically_ok {
+                        let start_plus_len = self.compile_binary_op_from_values(
+                            module,
+                            block_id,
+                            start.clone(),
+                            len.clone(),
+                            &TileBinaryOp::Add,
+                            generic_vars,
+                            ctx,
+                            None,
+                            &ranges_expr.span(),
+                        )?;
+                        emit_range_assert(
+                            self,
+                            module,
+                            ctx,
+                            start_plus_len,
+                            num_bid.clone(),
+                            TileBinaryOp::Le,
+                            "range end exceeds the logical grid",
+                        )?;
+                    }
+                }
+
+                // A statically-zero start needs no coordinate offset.
+                if start_exact.is_none_or(|bounds| bounds.start != 0) {
+                    axis_starts[axis] = Some(start);
+                }
+                axis_lens[axis] = len;
+            }
+        }
+
+        let mut total_tiles = axis_lens[0].clone();
+        for axis_len in axis_lens.iter().skip(1) {
+            total_tiles = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                total_tiles,
+                axis_len.clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                &for_expr.span(),
+            )?;
+        }
         let total_tiles_value = total_tiles.value.ok_or_else(|| {
             self.jit_error(
                 &for_expr.span(),
@@ -866,6 +1222,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let for_iterand_type = Self::scalar_i32_ir_type();
         let loop_block_arg_tys = [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+        let value_watermark = module.num_values() as u32;
         let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
 
         let mut for_variables = ctx.clone();
@@ -873,21 +1230,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
+        // Persistent tile-id loop: the step is the physical grid size, so
+        // induction-substitution hoisting stays off (unit_step = false), but
+        // loop-invariant checks in the body can still move to the preheader.
+        for_variables.loop_frames.push(LoopFrame {
+            preheader_block: block_id,
+            body_block: loop_block_id,
+            value_watermark,
+            induction_values: vec![loop_block_args[0]],
+            lower: lower_bound,
+            upper: total_tiles_value,
+            unit_step: false,
+            known_non_empty: false,
+        });
 
-        let tile_id_name = "__cutile_mapped_partition_tile_id";
-        let num_bid_m_name = "__cutile_mapped_partition_num_bid_m";
-        let num_bid_n_name = "__cutile_mapped_partition_num_bid_n";
         let tile_id = TileRustValue::new_primitive(loop_block_args[0], i32_ty.clone(), None);
-        for_variables.vars.insert(tile_id_name.to_string(), tile_id);
-        for_variables
-            .vars
-            .insert(num_bid_m_name.to_string(), num_bid_m);
-        for_variables
-            .vars
-            .insert(num_bid_n_name.to_string(), num_bid_n);
 
         let tile_shape_arg = Self::cga_type_arg(&tile_shape);
-        let map_shape_arg = Self::cga_type_arg(&map_shape);
         let index_ty: syn::Type = syn::parse_str(&format!("PartitionIndex<{tile_shape_arg}>"))
             .map_err(|err| {
                 self.jit_error(
@@ -900,28 +1259,43 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .ok_or_else(|| {
                 self.jit_error(&for_expr.span(), "failed to compile PartitionIndex type")
             })?;
-        let swizzle_expr: Expr = syn::parse_str(&format!(
-            "swizzle_partition_index_2d::<{tile_shape_arg}, {map_shape_arg}>({tile_id_name}, {num_bid_m_name}, {num_bid_n_name})"
-        ))
-        .map_err(|err| {
-            self.jit_error(
-                &for_expr.span(),
-                &format!("failed to build mapped partition index expression: {err}"),
-            )
-        })?;
-        let mut index_value = self
-            .compile_expression(
+        let mut bids = self.emit_mapped_partition_schedule(
+            module,
+            loop_block_id,
+            &tile_id,
+            &axis_lens,
+            &map_shape,
+            generic_vars,
+            &mut for_variables,
+            &for_expr.span(),
+        )?;
+        // Sub-range iteration: offset the minted coordinates by the axis
+        // starts. Bounds propagate through the add, so downstream proofs see
+        // [start, start + len - 1].
+        for (axis, start) in axis_starts.iter().enumerate() {
+            let Some(start) = start else {
+                continue;
+            };
+            bids[axis] = self.compile_binary_op_from_values(
                 module,
                 loop_block_id,
-                &swizzle_expr,
+                start.clone(),
+                bids[axis].clone(),
+                &TileBinaryOp::Add,
                 generic_vars,
                 &mut for_variables,
-                Some(index_return_ty),
-            )?
-            .ok_or_else(|| {
-                self.jit_error(&for_expr.span(), "failed to compile mapped partition index")
-            })?;
-        index_value.partition_origin = Some(partition_origin);
+                None,
+                &for_expr.span(),
+            )?;
+        }
+        let coords_ty = self.array_i32_type(rank, generic_vars, &for_expr.span())?;
+        let coords = TileRustValue::new_compound(bids, coords_ty);
+        let mut index_fields = BTreeMap::new();
+        index_fields.insert("coords".to_string(), coords);
+        let mut index_value = TileRustValue::new_struct(index_fields, index_return_ty);
+        let mut origins = vec![partition_origin];
+        origins.extend(extra_origins);
+        index_value.partition_origins = Some(origins);
         let index_tensor_origin = Self::simple_path_name(&method_call.receiver)
             .or_else(|| partition_value.tensor_origin.clone());
         if let (Some(tensor_origin), Some(fields)) =
@@ -1298,6 +1672,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // Add iterand as first argument.
                     let loop_block_arg_tys =
                         [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+                    let value_watermark = module.num_values() as u32;
                     let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
 
                     let mut for_variables = ctx.clone();
@@ -1362,6 +1737,34 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         {
                             iterand_val.index_origin = Self::value_dim_origin(&end_val);
                         }
+                        let mut induction_values = vec![loop_block_args[0]];
+                        if let Some(alias) = iterand_val.value {
+                            induction_values.push(alias);
+                        }
+                        // Static bounds prove the loop non-empty when the
+                        // largest possible lower bound is below the smallest
+                        // possible upper bound.
+                        let known_non_empty = match (&start_val.bounds, &end_val.bounds) {
+                            (Some(lower), Some(upper)) => lower.end < upper.start,
+                            _ => false,
+                        };
+                        if let Some(alias) = iterand_val.value {
+                            iterand_val.affine = Some(AffineForm {
+                                scale: 1,
+                                var: alias,
+                                offset: 0,
+                            });
+                        }
+                        for_variables.loop_frames.push(LoopFrame {
+                            preheader_block: block_id,
+                            body_block: loop_block_id,
+                            value_watermark,
+                            induction_values,
+                            lower: lower_bound,
+                            upper: upper_bound,
+                            unit_step: maybe_step_expr.is_none(),
+                            known_non_empty,
+                        });
                         for_variables.vars.insert(iterand_name, iterand_val);
                     }
                     for_variables.carry_vars = Some(loop_carry_vars.clone());

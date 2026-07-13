@@ -147,6 +147,61 @@ mod opt_hints_module {
             tma::Enabled,
         );
     }
+
+    /// Safe checked load with a literal latency hint.
+    #[cutile::entry(unchecked_accesses = false)]
+    fn safe_load_pipelined_kernel<const S: [i32; 1]>(
+        z: &mut Tensor<f32, S>,
+        x: &Tensor<f32, { [-1] }>,
+    ) {
+        let part = x.partition(const_shape!(S));
+        let tile = part.load_pipelined::<6>([0]);
+        z.store(tile);
+    }
+
+    /// Safe checked load with the latency hint from a kernel const generic.
+    #[cutile::entry(unchecked_accesses = false)]
+    fn safe_load_pipelined_const_kernel<const S: [i32; 1], const L: i32>(
+        z: &mut Tensor<f32, S>,
+        x: &Tensor<f32, { [-1] }>,
+    ) {
+        let part = x.partition(const_shape!(S));
+        let tile = part.load_pipelined::<L>([0]);
+        z.store(tile);
+    }
+
+    /// Two loads with different latency hints in one kernel: each must keep
+    /// its own hint (not last-wins).
+    #[cutile::entry(unchecked_accesses = false)]
+    fn safe_load_two_latencies_kernel<const S: [i32; 1]>(
+        z: &mut Tensor<f32, S>,
+        x: &Tensor<f32, { [-1] }>,
+        y: &Tensor<f32, { [-1] }>,
+    ) {
+        let part_x = x.partition(const_shape!(S));
+        let part_y = y.partition(const_shape!(S));
+        let tile_x = part_x.load_pipelined::<3>([0]);
+        let tile_y = part_y.load_pipelined::<9>([0]);
+        z.store(tile_x + tile_y);
+    }
+
+    /// Safe bounded load with a latency hint: the proof path (`with_bounds`
+    /// + `coord`) and the pipelining knob compose.
+    #[cutile::entry(unchecked_accesses = false)]
+    fn safe_bounded_load_pipelined_kernel<const BM: i32, const BN: i32>(
+        z: &mut Tensor<f32, { [BM, BN] }>,
+        x: &Tensor<f32, { [-1, -1] }>,
+    ) {
+        let m = Dim::new(x.shape()[0] / BM);
+        let n = Dim::new(x.shape()[1] / BN);
+        let part = x.partition(const_shape![BM, BN]).with_bounds((m, n));
+        for i in m {
+            for j in n {
+                let tile = part.load_pipelined::<7>(coord((i, j)));
+                z.store(tile);
+            }
+        }
+    }
 }
 
 use opt_hints_module::__module_ast_self;
@@ -335,6 +390,84 @@ fn load_view_const_latency_in_mlir() {
         assert!(
             mlir.contains("latency = 5"),
             "Expected latency=5 from const generic L=5.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn safe_load_pipelined_latency_in_mlir() {
+    common::with_test_stack(|| {
+        let mlir = compile_kernel(
+            "safe_load_pipelined_kernel",
+            &[("z", &[1]), ("x", &[1])],
+            &CompileOptions::default(),
+        );
+        assert!(
+            mlir.contains("latency = 6"),
+            "Expected latency=6 from Partition::load_pipelined.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn safe_load_pipelined_const_latency_in_mlir() {
+    common::with_test_stack(|| {
+        let mlir = common::compile_to_ir(
+            __module_ast_self,
+            "opt_hints_module",
+            "safe_load_pipelined_const_kernel",
+            &[128.to_string(), 5.to_string()], // S=128, L=5
+            &[("z", &[1]), ("x", &[1])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed to compile");
+        assert!(
+            mlir.contains("latency = 5"),
+            "Expected latency=5 from load_pipelined::<L> with L=5.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn safe_bounded_load_pipelined_latency_in_mlir() {
+    common::with_test_stack(|| {
+        let mlir = common::compile_to_ir(
+            __module_ast_self,
+            "opt_hints_module",
+            "safe_bounded_load_pipelined_kernel",
+            &[16.to_string(), 16.to_string()], // BM=16, BN=16
+            &[("z", &[16, 1]), ("x", &[128, 1])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed to compile");
+        assert!(
+            mlir.contains("latency = 7"),
+            "Expected latency=7 from BoundedPartition::load_pipelined.\nMLIR:\n{mlir}"
+        );
+        assert!(
+            !mlir.contains("partition access out of bounds"),
+            "Bounded pipelined loads must keep the discharge proof.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn two_pipelined_loads_keep_distinct_latencies_in_mlir() {
+    common::with_test_stack(|| {
+        let mlir = compile_kernel(
+            "safe_load_two_latencies_kernel",
+            &[("z", &[1]), ("x", &[1]), ("y", &[1])],
+            &CompileOptions::default(),
+        );
+        assert!(
+            mlir.contains("latency = 3") && mlir.contains("latency = 9"),
+            "each load must keep its own latency hint (not last-wins).\nMLIR:\n{mlir}"
         );
     });
 }

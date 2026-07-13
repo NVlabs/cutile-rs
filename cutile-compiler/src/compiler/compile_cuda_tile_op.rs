@@ -15,7 +15,7 @@ use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
 use crate::error::JITError;
 use crate::generics::{
-    get_cga_from_generic_argument, get_cga_from_type, GenericVars, TypeInstance,
+    get_cga_from_generic_argument, get_cga_from_type, parse_expr_as_i32, GenericVars, TypeInstance,
 };
 use crate::passes::name_resolution::{DefKind, Res};
 use crate::syn_utils::*;
@@ -28,7 +28,8 @@ use super::utils::*;
 use cutile_ir::builder::{append_op, build_block, OpBuilder};
 use cutile_ir::bytecode::Opcode;
 use cutile_ir::ir::{
-    Attribute, BlockId, Module, PartitionViewType, Region, Type as TileIrType, Value,
+    Attribute, BlockId, GatherScatterViewType, Module, PartitionViewType, Region, StridedViewType,
+    Type as TileIrType, Value,
 };
 
 use quote::ToTokens;
@@ -504,6 +505,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 ctx,
                 return_type,
             ),
+            "cuda_tile.atomic_red_view_tko" => {
+                self.compile_atomic_red_view_tko(module, block_id, call_expr, generic_args, ctx)
+            }
             "load_view_tko" => self.compile_load_view_tko(
                 module,
                 block_id,
@@ -550,6 +554,40 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             "cuda_tile.scan" => {
                 self.compile_scan_op(module, block_id, call_expr, generic_args, ctx)
             }
+            "cuda_tile.make_gather_scatter_view" => self.compile_make_gather_scatter_view(
+                module,
+                block_id,
+                call_expr,
+                generic_args,
+                ctx,
+                return_type.clone(),
+            ),
+            "cuda_tile.make_strided_view" => self.compile_make_strided_view(
+                module,
+                block_id,
+                call_expr,
+                generic_args,
+                ctx,
+                return_type.clone(),
+            ),
+            "cuda_tile.load_gather_scatter_view_tko" => self.compile_load_gather_scatter_view_tko(
+                module,
+                block_id,
+                call_expr,
+                fn_item,
+                generic_args,
+                ctx,
+                return_type,
+            ),
+            "cuda_tile.load_strided_view_tko" => self.compile_load_strided_view_tko(
+                module,
+                block_id,
+                call_expr,
+                fn_item,
+                generic_args,
+                ctx,
+                return_type,
+            ),
             _ => Ok(None),
         }
     }
@@ -1381,6 +1419,170 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             None,
         ));
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
+    }
+
+    fn compile_atomic_red_view_tko(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        let token_result_ir_ty = TileIrType::Token;
+        let view_arg = &call_expr.args[0];
+        let Some(view_value) =
+            self.compile_expression(module, block_id, view_arg, generic_args, ctx, None)?
+        else {
+            return self.jit_error_result(&view_arg.span(), "Unable to compile view");
+        };
+        let Some(cuda_tile_view_value) = view_value.value else {
+            return self.jit_error_result(&view_arg.span(), "Unable to compile view");
+        };
+        let Some(type_meta) = view_value.type_meta.as_ref() else {
+            return self.jit_error_result(&view_arg.span(), "Expected some TypeMeta for view");
+        };
+        let Some(token_value) = type_meta.fields.get("token") else {
+            return self.jit_error_result(
+                &view_arg.span(),
+                "Expected token value in TypeMeta for view",
+            );
+        };
+        let Some(cuda_tile_token) = token_value.value else {
+            return self.jit_error_result(
+                &view_arg.span(),
+                "Expected token value in TypeMeta for view",
+            );
+        };
+        let nested_access_offset = type_meta
+            .fields
+            .get(NESTED_MUTABLE_ACCESS_OFFSET_META)
+            .cloned();
+
+        let value_value = self
+            .compile_expression(
+                module,
+                block_id,
+                &call_expr.args[1],
+                generic_args,
+                ctx,
+                None,
+            )?
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[1].span(),
+                    "unable to compile value for `atomic_red_view_tko`",
+                )
+            })?;
+        let Some(value_val) = value_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[1].span(),
+                "expected a tile value for `atomic_red_view_tko`",
+            );
+        };
+
+        let index_arg = &call_expr.args[2];
+        let index_value = self
+            .compile_expression(module, block_id, index_arg, generic_args, ctx, None)?
+            .ok_or_else(|| self.jit_error(&index_arg.span(), "unable to compile index"))?;
+        let Some(index_elems) = index_value.values else {
+            return self.jit_error_result(&index_arg.span(), "Expected values for index");
+        };
+        let mut index_value_elems = Vec::new();
+        for value in index_elems.into_iter() {
+            if value.value.is_none() {
+                return self.jit_error_result(&index_arg.span(), "unexpected nested array index");
+            }
+            index_value_elems.push(value);
+        }
+        if let Some(access_offset) = nested_access_offset.as_ref() {
+            index_value_elems = self.offset_nested_mutable_indices(
+                module,
+                block_id,
+                &call_expr.span(),
+                access_offset,
+                index_value_elems,
+                generic_args,
+                ctx,
+            )?;
+        }
+        let index_values = index_value_elems
+            .iter()
+            .map(|value| value.value.expect("validated index value"))
+            .collect::<Vec<_>>();
+
+        let mode = super::shared_utils::extract_zst_type_name(&call_expr.args[3], "mode")?;
+        let memory_ordering =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[4], "memory_ordering")?;
+        let memory_scope =
+            super::shared_utils::extract_zst_type_name(&call_expr.args[5], "memory_scope")?;
+
+        if memory_ordering != "Relaxed" {
+            return self.jit_error_result(
+                &call_expr.args[4].span(),
+                &format!(
+                    "invalid `memory_ordering` for `atomic_red_view_tko`: '{memory_ordering}'. Valid: Relaxed"
+                ),
+            );
+        }
+        let memory_ordering_value: i64 = 1;
+        let memory_scope_value: i64 = match memory_scope.as_str() {
+            "TileBlock" => 0,
+            "Device" => 1,
+            _ => {
+                return self.jit_error_result(
+                    &call_expr.args[5].span(),
+                    &format!(
+                        "invalid `memory_scope` for `atomic_red_view_tko`: '{memory_scope}'. Valid: TileBlock, Device"
+                    ),
+                )
+            }
+        };
+        let elem_ty_prefix = view_value
+            .ty
+            .get_cuda_tile_element_type_prefix(&self.modules.primitives())?;
+        let atomic_mode = AtomicMode::new(mode.as_str(), elem_ty_prefix)? as i64;
+
+        let mut all_operands = vec![cuda_tile_view_value];
+        all_operands.extend_from_slice(&index_values);
+        all_operands.push(value_val);
+        all_operands.push(cuda_tile_token);
+        let operand_segments: Vec<i64> = vec![1, index_values.len() as i64, 1, 1];
+
+        let (op_id, results) = OpBuilder::new(
+            Opcode::AtomicRedViewTko,
+            self.ir_location(&call_expr.span()),
+        )
+        .result(token_result_ir_ty)
+        .operands(all_operands.iter().copied())
+        .attr(
+            "memory_ordering_semantics",
+            Attribute::i32(memory_ordering_value),
+        )
+        .attr("memory_scope", Attribute::i32(memory_scope_value))
+        .attr("mode", Attribute::i32(atomic_mode))
+        .attr(
+            "operandSegmentSizes",
+            Attribute::Array(
+                operand_segments
+                    .iter()
+                    .map(|&x| Attribute::i32(x))
+                    .collect(),
+            ),
+        )
+        .build(module);
+        append_op(module, block_id, op_id);
+        let _old = super::shared_utils::update_token(view_arg, results[0], ctx);
+        let Some(var_arg_ident) = get_ident_from_expr(view_arg) else {
+            return self.jit_error_result(&view_arg.span(), "Unexpected expression");
+        };
+        let Some(result) = ctx.vars.get(var_arg_ident.to_string().as_str()) else {
+            return self.jit_error_result(
+                &view_arg.span(),
+                &format!("Unexpected state: Expected {var_arg_ident} in ctx"),
+            );
+        };
+        Ok(Some(result.clone()))
     }
 
     /// Reads `memory_ordering`, `memory_scope` ZST args from a view op call.
@@ -3080,6 +3282,707 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &format!("unrecognized macro `{}`", mac_ident),
             ),
         }
+    }
+
+    // ── GatherScatterView / StridedView handlers ─────────────────────────────
+
+    /// Read a scalar `i32` const generic from a return-type annotation at `pos`
+    /// (0-indexed angle-bracket arg, lifetimes excluded). Used for params like
+    /// `SPARSE_DIM` that cannot be inferred from regular function arguments and
+    /// must come from the let binding's type annotation.
+    fn return_type_scalar_generic_arg(
+        &self,
+        return_ty: &TileRustType,
+        generic_args: &GenericVars,
+        pos: usize,
+        fn_name: &str,
+        param_name: &str,
+    ) -> Result<i32, JITError> {
+        let syn::Type::Path(type_path) = &return_ty.rust_ty else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: expected a path type for return type annotation"),
+            );
+        };
+        let Some(last_segment) = type_path.path.segments.last() else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: missing path segment in return type"),
+            );
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: return type has no generic arguments"),
+            );
+        };
+        let Some(arg) = args.args.iter().nth(pos) else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!(
+                    "{fn_name}: return type missing `{param_name}` at generic argument {}",
+                    pos + 1
+                ),
+            );
+        };
+        let syn::GenericArgument::Const(expr) = arg else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: generic argument {pos} for `{param_name}` must be a const expression"),
+            );
+        };
+        Ok(parse_expr_as_i32(expr, generic_args))
+    }
+
+    /// Read an array const generic `[i32; N]` from a return-type annotation at
+    /// `pos` (0-indexed, lifetimes excluded). Used for params like
+    /// `TRAVERSAL_STRIDES` and `DIM_MAP` that must come from the let binding's
+    /// type annotation.
+    fn return_type_cga_generic_arg(
+        &self,
+        return_ty: &TileRustType,
+        generic_args: &GenericVars,
+        pos: usize,
+        fn_name: &str,
+        param_name: &str,
+    ) -> Result<Vec<i32>, JITError> {
+        let syn::Type::Path(type_path) = &return_ty.rust_ty else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: expected a path type for return type annotation"),
+            );
+        };
+        let Some(last_segment) = type_path.path.segments.last() else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: missing path segment in return type"),
+            );
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!("{fn_name}: return type has no generic arguments"),
+            );
+        };
+        let Some(arg) = args.args.iter().nth(pos) else {
+            return self.jit_error_result(
+                &return_ty.rust_ty.span(),
+                &format!(
+                    "{fn_name}: return type missing `{param_name}` at generic argument {}",
+                    pos + 1
+                ),
+            );
+        };
+        get_cga_from_generic_argument(arg, generic_args).ok_or_else(|| {
+            self.jit_error(
+                &return_ty.rust_ty.span(),
+                &format!(
+                    "{fn_name}: failed to resolve `{param_name}` from return type argument {pos}"
+                ),
+            )
+        })
+    }
+
+    fn compile_make_gather_scatter_view(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 3 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "make_gather_scatter_view expects 3 arguments, got {}",
+                    call_expr.args.len()
+                ),
+            );
+        }
+        let Some(tensor_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[0],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "failed to compile gather_scatter_view tensor argument",
+            );
+        };
+        let Some(tensor_view_value) = tensor_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "gather_scatter_view tensor must be an SSA value",
+            );
+        };
+        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value.ty.tile_ir_ty.clone()
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "gather_scatter_view source must be a tensor view",
+            );
+        };
+
+        let Some(shape_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[1],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[1].span(),
+                "failed to compile gather_scatter_view tile shape",
+            );
+        };
+        let tile_shape = match &shape_value.ty.type_instance {
+            TypeInstance::StructuredType(instance) => instance.shape.clone(),
+            _ => get_cga_from_type(&shape_value.ty.rust_ty, generic_args).ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[1].span(),
+                    "gather_scatter_view tile shape must be static",
+                )
+            })?,
+        };
+        // SPARSE_DIM is not inferable from the function arguments; read it from
+        // the return-type annotation on the let binding (angle-bracket arg 2:
+        // GatherScatterView<E, TILE_SHAPE, SPARSE_DIM>).
+        let Some(return_ty) = return_type else {
+            return self.jit_error_result(
+                &call_expr.span(),
+                "make_gather_scatter_view: add a return type annotation to specify SPARSE_DIM \
+                (e.g. `let gsv: GatherScatterView<f32, {[8,64]}, 0> = ...`)",
+            );
+        };
+        let sparse_dim = self.return_type_scalar_generic_arg(
+            &return_ty,
+            generic_args,
+            2,
+            "make_gather_scatter_view",
+            "SPARSE_DIM",
+        )?;
+
+        let element_type = tensor_value
+            .ty
+            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[0].span(),
+                    "failed to determine gather_scatter_view element type",
+                )
+            })?;
+        let shape_expr = format!(
+            "{{[{}]}}",
+            tile_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rust_ty: Type = syn::parse2(
+            format!("GatherScatterView<{element_type}, {shape_expr}, {sparse_dim}>")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let type_instance = generic_args.instantiate_type(&rust_ty, self.modules.primitives())?;
+        let return_type = TileRustType {
+            cuda_tile_ty_str: None,
+            tile_ir_ty: Some(TileIrType::GatherScatterView(GatherScatterViewType {
+                tile_shape: tile_shape.clone(),
+                tensor_view: tensor_view_ty,
+                sparse_dim,
+                padding_value: None,
+            })),
+            cuda_tile_name: Some("!cuda_tile.gather_scatter_view".to_string()),
+            params: vec![],
+            rust_ty,
+            type_instance,
+            kind: Kind::StructuredType,
+        };
+
+        let result_ir_ty = super::_type::convert_type(&return_type).ok_or_else(|| {
+            self.jit_error(
+                &call_expr.span(),
+                "failed to convert gather_scatter_view return type",
+            )
+        })?;
+        let (op_id, results) = OpBuilder::new(
+            Opcode::MakeGatherScatterView,
+            self.ir_location(&call_expr.span()),
+        )
+        .operand(tensor_view_value)
+        .result(result_ir_ty)
+        .build(module);
+        append_op(module, block_id, op_id);
+        let mut result = TileRustValue::new_structured_type(results[0], return_type, None);
+        result.tensor_origin = tensor_value.tensor_origin;
+        Ok(Some(result))
+    }
+
+    fn compile_make_strided_view(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        if call_expr.args.len() != 3 {
+            return self.jit_error_result(
+                &call_expr.span(),
+                &format!(
+                    "make_strided_view expects 3 arguments, got {}",
+                    call_expr.args.len()
+                ),
+            );
+        }
+        let Some(tensor_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[0],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "failed to compile strided_view tensor argument",
+            );
+        };
+        let Some(tensor_view_value) = tensor_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "strided_view tensor must be an SSA value",
+            );
+        };
+        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value.ty.tile_ir_ty.clone()
+        else {
+            return self.jit_error_result(
+                &call_expr.args[0].span(),
+                "strided_view source must be a tensor view",
+            );
+        };
+
+        let Some(shape_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[1],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &call_expr.args[1].span(),
+                "failed to compile strided_view tile shape",
+            );
+        };
+        let tile_shape = match &shape_value.ty.type_instance {
+            TypeInstance::StructuredType(instance) => instance.shape.clone(),
+            _ => get_cga_from_type(&shape_value.ty.rust_ty, generic_args).ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[1].span(),
+                    "strided_view tile shape must be static",
+                )
+            })?,
+        };
+        // TRAVERSAL_STRIDES and DIM_MAP are not inferable from the function
+        // arguments; read them from the return-type annotation on the let binding
+        // (angle-bracket args 2 and 3:
+        // StridedView<E, TILE_SHAPE, TRAVERSAL_STRIDES, DIM_MAP>).
+        let Some(return_ty) = return_type else {
+            return self.jit_error_result(
+                &call_expr.span(),
+                "make_strided_view: add a return type annotation to specify TRAVERSAL_STRIDES and \
+                DIM_MAP (e.g. `let sv: StridedView<f32, {[16,16]}, {[2,1]}, {[0,1]}> = ...`)",
+            );
+        };
+        let traversal_strides = self.return_type_cga_generic_arg(
+            &return_ty,
+            generic_args,
+            2,
+            "make_strided_view",
+            "TRAVERSAL_STRIDES",
+        )?;
+        let dim_map = self.return_type_cga_generic_arg(
+            &return_ty,
+            generic_args,
+            3,
+            "make_strided_view",
+            "DIM_MAP",
+        )?;
+
+        let element_type = tensor_value
+            .ty
+            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call_expr.args[0].span(),
+                    "failed to determine strided_view element type",
+                )
+            })?;
+        let shape_expr = format!(
+            "{{[{}]}}",
+            tile_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let strides_expr = format!(
+            "{{[{}]}}",
+            traversal_strides
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let dim_map_expr = format!(
+            "{{[{}]}}",
+            dim_map
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rust_ty: Type = syn::parse2(
+            format!("StridedView<{element_type}, {shape_expr}, {strides_expr}, {dim_map_expr}>")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let type_instance = generic_args.instantiate_type(&rust_ty, self.modules.primitives())?;
+        let return_type = TileRustType {
+            cuda_tile_ty_str: None,
+            tile_ir_ty: Some(TileIrType::StridedView(StridedViewType {
+                tile_shape: tile_shape.clone(),
+                traversal_strides,
+                tensor_view: tensor_view_ty,
+                dim_map,
+                padding_value: None,
+            })),
+            cuda_tile_name: Some("!cuda_tile.strided_view".to_string()),
+            params: vec![],
+            rust_ty,
+            type_instance,
+            kind: Kind::StructuredType,
+        };
+
+        let result_ir_ty = super::_type::convert_type(&return_type).ok_or_else(|| {
+            self.jit_error(
+                &call_expr.span(),
+                "failed to convert strided_view return type",
+            )
+        })?;
+        let (op_id, results) =
+            OpBuilder::new(Opcode::MakeStridedView, self.ir_location(&call_expr.span()))
+                .operand(tensor_view_value)
+                .result(result_ir_ty)
+                .build(module);
+        append_op(module, block_id, op_id);
+        let mut result = TileRustValue::new_structured_type(results[0], return_type, None);
+        result.tensor_origin = tensor_value.tensor_origin;
+        Ok(Some(result))
+    }
+
+    fn compile_load_gather_scatter_view_tko(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        fn_item: &ItemFn,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        let return_type_outer = match return_type {
+            Some(rt) => rt,
+            None => {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    "unable to infer call; add a return type annotation",
+                )
+            }
+        };
+        let Type::Tuple(tuple_type) = &return_type_outer.rust_ty else {
+            return self.jit_error_result(
+                &call_expr.span(),
+                "expected a tuple return type for load_gather_scatter_view_tko",
+            );
+        };
+        let tile_elem_ty = self
+            .compile_type(&tuple_type.elems[0], generic_args, &HashMap::new())?
+            .unwrap();
+        let token_elem_ty = self
+            .compile_type(&tuple_type.elems[1], generic_args, &HashMap::new())?
+            .unwrap();
+        let tile_result_ir_ty = super::_type::convert_type(&tile_elem_ty)
+            .expect("failed to convert tile result type for load_gather_scatter_view_tko");
+
+        let Some(view_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[0],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(&call_expr.args[0].span(), "unable to compile view");
+        };
+        let Some(cuda_tile_view_value) = view_value.value else {
+            return self.jit_error_result(&call_expr.args[0].span(), "unable to compile view");
+        };
+
+        let Some(sparse_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[1],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self
+                .jit_error_result(&call_expr.args[1].span(), "unable to compile sparse_index");
+        };
+        let Some(cuda_tile_sparse_index) = sparse_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[1].span(),
+                "sparse_index must be an SSA value",
+            );
+        };
+
+        let Some(dense_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[2],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self
+                .jit_error_result(&call_expr.args[2].span(), "unable to compile dense_index");
+        };
+        let Some(cuda_tile_dense_index) = dense_value.value else {
+            return self.jit_error_result(
+                &call_expr.args[2].span(),
+                "dense_index must be an SSA value",
+            );
+        };
+
+        let Some(token_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[3],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(&call_expr.args[3].span(), "unable to compile token");
+        };
+        let Some(cuda_tile_token) = token_value.value else {
+            return self.jit_error_result(&call_expr.args[3].span(), "token must be an SSA value");
+        };
+
+        let fn_params = get_sig_param_names(&fn_item.sig);
+        let (memory_ordering_value, memory_scope_value, memory_ordering) = self
+            .read_view_ordering_scope(
+                &fn_params,
+                call_expr,
+                "load_gather_scatter_view_tko",
+                true,
+            )?;
+
+        let all_operands = vec![
+            cuda_tile_view_value,
+            cuda_tile_sparse_index,
+            cuda_tile_dense_index,
+            cuda_tile_token,
+        ];
+        let operand_segments: Vec<i64> = vec![1, 2, 1];
+
+        let mut op_builder =
+            OpBuilder::new(Opcode::LoadViewTko, self.ir_location(&call_expr.span()))
+                .result(tile_result_ir_ty)
+                .result(TileIrType::Token)
+                .operands(all_operands.iter().copied())
+                .attr(
+                    "memory_ordering_semantics",
+                    Attribute::i32(memory_ordering_value),
+                )
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(
+                        operand_segments
+                            .iter()
+                            .map(|&x| Attribute::i32(x))
+                            .collect(),
+                    ),
+                );
+        if memory_ordering != "Weak" {
+            op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+        }
+        let (op_id, results) = op_builder.build(module);
+        append_op(module, block_id, op_id);
+        let mut values = vec![];
+        values.push(TileRustValue::new_structured_type(
+            results[0],
+            tile_elem_ty,
+            None,
+        ));
+        values.push(TileRustValue::new_primitive(
+            results[1],
+            token_elem_ty,
+            None,
+        ));
+        Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
+    }
+
+    fn compile_load_strided_view_tko(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call_expr: &ExprCall,
+        fn_item: &ItemFn,
+        generic_args: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        let return_type_outer = match return_type {
+            Some(rt) => rt,
+            None => {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    "unable to infer call; add a return type annotation",
+                )
+            }
+        };
+        let Type::Tuple(tuple_type) = &return_type_outer.rust_ty else {
+            return self.jit_error_result(
+                &call_expr.span(),
+                "expected a tuple return type for load_strided_view_tko",
+            );
+        };
+        let tile_elem_ty = self
+            .compile_type(&tuple_type.elems[0], generic_args, &HashMap::new())?
+            .unwrap();
+        let token_elem_ty = self
+            .compile_type(&tuple_type.elems[1], generic_args, &HashMap::new())?
+            .unwrap();
+        let tile_result_ir_ty = super::_type::convert_type(&tile_elem_ty)
+            .expect("failed to convert tile result type for load_strided_view_tko");
+
+        let Some(view_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[0],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(&call_expr.args[0].span(), "unable to compile view");
+        };
+        let Some(cuda_tile_view_value) = view_value.value else {
+            return self.jit_error_result(&call_expr.args[0].span(), "unable to compile view");
+        };
+
+        let index_arg = &call_expr.args[1];
+        let index_arg_str = index_arg.to_token_stream().to_string();
+        let index_value = self
+            .compile_expression(module, block_id, index_arg, generic_args, ctx, None)?
+            .unwrap();
+        if index_value.values.is_none() {
+            return self.jit_error_result(&call_expr.args[1].span(), "expected values for index");
+        }
+        let mut index_value_elems = Vec::new();
+        for value in index_value.values.unwrap().into_iter() {
+            if value.value.is_none() {
+                return self.jit_error_result(
+                    &call_expr.args[1].span(),
+                    &format!("unexpected nested array {index_arg_str}"),
+                );
+            }
+            index_value_elems.push(value);
+        }
+        let index_values: Vec<Value> = index_value_elems
+            .iter()
+            .map(|v| v.value.expect("validated index value"))
+            .collect();
+
+        let Some(token_value) = self.compile_expression(
+            module,
+            block_id,
+            &call_expr.args[2],
+            generic_args,
+            ctx,
+            None,
+        )?
+        else {
+            return self.jit_error_result(&call_expr.args[2].span(), "unable to compile token");
+        };
+        let Some(cuda_tile_token) = token_value.value else {
+            return self.jit_error_result(&call_expr.args[2].span(), "token must be an SSA value");
+        };
+
+        let fn_params = get_sig_param_names(&fn_item.sig);
+        let (memory_ordering_value, memory_scope_value, memory_ordering) =
+            self.read_view_ordering_scope(&fn_params, call_expr, "load_strided_view_tko", true)?;
+
+        let mut all_operands = vec![cuda_tile_view_value];
+        all_operands.extend_from_slice(&index_values);
+        all_operands.push(cuda_tile_token);
+        let operand_segments: Vec<i64> = vec![1, index_values.len() as i64, 1];
+
+        let mut op_builder =
+            OpBuilder::new(Opcode::LoadViewTko, self.ir_location(&call_expr.span()))
+                .result(tile_result_ir_ty)
+                .result(TileIrType::Token)
+                .operands(all_operands.iter().copied())
+                .attr(
+                    "memory_ordering_semantics",
+                    Attribute::i32(memory_ordering_value),
+                )
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(
+                        operand_segments
+                            .iter()
+                            .map(|&x| Attribute::i32(x))
+                            .collect(),
+                    ),
+                );
+        if memory_ordering != "Weak" {
+            op_builder = op_builder.attr("memory_scope", Attribute::i32(memory_scope_value));
+        }
+        let (op_id, results) = op_builder.build(module);
+        append_op(module, block_id, op_id);
+        let mut values = vec![];
+        values.push(TileRustValue::new_structured_type(
+            results[0],
+            tile_elem_ty,
+            None,
+        ));
+        values.push(TileRustValue::new_primitive(
+            results[1],
+            token_elem_ty,
+            None,
+        ));
+        Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 }
 

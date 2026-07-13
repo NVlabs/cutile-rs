@@ -74,7 +74,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .ok_or_else(|| self.jit_error(span, "failed to compile i32 type"))
     }
 
-    fn array_i32_type(
+    pub(crate) fn array_i32_type(
         &self,
         rank: usize,
         generic_vars: &GenericVars,
@@ -83,6 +83,56 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let rust_ty = syn::parse_str::<syn::Type>(&format!("[i32; {rank}]")).unwrap();
         self.compile_type(&rust_ty, generic_vars, &HashMap::new())?
             .ok_or_else(|| self.jit_error(span, "failed to compile i32 array type"))
+    }
+
+    /// Static per-axis geometry of a partition-view value: tile extents,
+    /// tensor extents (-1 where dynamic), and the dim-map remap.
+    pub(crate) fn partition_static_geometry(
+        &self,
+        partition: &TileRustValue,
+        span: &proc_macro2::Span,
+    ) -> Result<(Vec<i32>, Vec<i32>, Vec<i32>), JITError> {
+        let Some(TypeParam::Tile(tile)) = partition.ty.params.first() else {
+            return Err(self.jit_error(span, "partition type is missing its Tile parameter"));
+        };
+        let Some(TypeInstance::StructuredType(tile_inst)) = tile.type_instance.as_ref() else {
+            return Err(self.jit_error(span, "the Tile parameter must be instantiated"));
+        };
+        let static_tile = tile_inst.shape.clone();
+        let tensor = partition
+            .ty
+            .params
+            .iter()
+            .find_map(|p| match p {
+                TypeParam::TensorView(tv) => Some(tv),
+                _ => None,
+            })
+            .ok_or_else(|| self.jit_error(span, "partition type is missing a TensorView param"))?;
+        let Some(TypeInstance::StructuredType(tensor_inst)) = tensor.type_instance.as_ref() else {
+            return Err(self.jit_error(
+                span,
+                "expected a structured type instance for the tensor_view parameter",
+            ));
+        };
+        let static_shape = tensor_inst.shape.clone();
+        let dim_map = match partition.ty.params.iter().find_map(|p| match p {
+            TypeParam::DimMap(dm) => Some(dm),
+            _ => None,
+        }) {
+            Some(dim_map) => {
+                let Some(TypeInstance::StructuredType(dim_map_inst)) =
+                    dim_map.type_instance.as_ref()
+                else {
+                    return Err(self.jit_error(
+                        span,
+                        "expected a structured type instance for the dimension map",
+                    ));
+                };
+                dim_map_inst.shape.clone()
+            }
+            None => (0..static_shape.len() as i32).collect(),
+        };
+        Ok((static_tile, static_shape, dim_map))
     }
 
     fn static_shape_from_value(
@@ -906,15 +956,29 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &format!("`coord` expects 1 argument, got {}", call_expr.args.len()),
                     );
                 }
-                let tuple_type = self
-                    .compile_type(
-                        &syn::parse_quote!((i32, i32)),
-                        generic_vars,
-                        &HashMap::new(),
-                    )?
-                    .ok_or_else(|| {
-                        self.jit_error(&call_expr.span(), "failed to synthesize coordinate type")
-                    })?;
+                // The tuple's arity fixes the coordinate rank; the matching
+                // `Coord{rank}` shadow type is resolved below.
+                let tuple_type = match &call_expr.args[0] {
+                    syn::Expr::Tuple(tuple) if tuple.elems.len() >= 2 => {
+                        let tuple_src = format!("({})", vec!["i32"; tuple.elems.len()].join(", "));
+                        let tuple_ty = syn::parse_str::<syn::Type>(&tuple_src).map_err(|_| {
+                            self.jit_error(
+                                &call_expr.span(),
+                                "failed to synthesize coordinate type",
+                            )
+                        })?;
+                        Some(
+                            self.compile_type(&tuple_ty, generic_vars, &HashMap::new())?
+                                .ok_or_else(|| {
+                                    self.jit_error(
+                                        &call_expr.span(),
+                                        "failed to synthesize coordinate type",
+                                    )
+                                })?,
+                        )
+                    }
+                    _ => None,
+                };
                 let index = self
                     .compile_expression(
                         module,
@@ -922,7 +986,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         &call_expr.args[0],
                         generic_vars,
                         ctx,
-                        Some(tuple_type),
+                        tuple_type,
                     )?
                     .ok_or_else(|| {
                         self.jit_error(&call_expr.args[0].span(), "failed to compile coordinate")
@@ -930,30 +994,31 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let Some(values) = index.values else {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
-                        "`coord` expects a 2D tuple coordinate",
+                        "`coord` expects a tuple coordinate",
                     );
                 };
-                if values.len() != 2 {
-                    return self.jit_error_result(
-                        &call_expr.args[0].span(),
-                        &format!(
-                            "`coord` expects a 2D tuple coordinate, got rank {}",
-                            values.len()
-                        ),
-                    );
-                }
+                let rank = values.len();
                 let return_type = match return_type {
                     Some(return_type) => return_type,
-                    None => self
-                        .compile_type(&syn::parse_quote!(Coord2), generic_vars, &HashMap::new())?
-                        .ok_or_else(|| {
+                    None => {
+                        let coord_ty = syn::parse_str::<syn::Type>(&format!("Coord{rank}"))
+                            .ok()
+                            .and_then(|ty| {
+                                self.compile_type(&ty, generic_vars, &HashMap::new())
+                                    .ok()
+                                    .flatten()
+                            });
+                        coord_ty.ok_or_else(|| {
                             self.jit_error(
-                                &call_expr.span(),
-                                "unable to infer return type for `coord`",
+                                &call_expr.args[0].span(),
+                                &format!(
+                                    "`coord` does not support rank-{rank} coordinates (no `Coord{rank}` type)"
+                                ),
                             )
-                        })?,
+                        })?
+                    }
                 };
-                let array_ty = self.array_i32_type(2, generic_vars, &call_expr.span())?;
+                let array_ty = self.array_i32_type(rank, generic_vars, &call_expr.span())?;
                 let coords = TileRustValue::new_compound(values, array_ty);
                 let mut fields = BTreeMap::new();
                 fields.insert("coords".to_string(), coords);
@@ -975,13 +1040,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let Some(fields) = coord.fields else {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
-                        "`coord_as_array` expects a compiler-created Coord2",
+                        "`coord_as_array` expects a coordinate created by `coord(...)`",
                     );
                 };
                 let Some(coords) = fields.get("coords").cloned() else {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
-                        "Coord2 is missing coordinate metadata",
+                        "coordinate is missing its metadata",
                     );
                 };
                 Ok(Some(coords))
@@ -1003,14 +1068,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let Some(bound_values) = bounds.values else {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
-                        "`Partition::with_bounds` expects a 2D tuple of dimensions",
+                        "`Partition::with_bounds` expects a tuple of dimensions",
                     );
                 };
-                if bound_values.len() != 2 {
+                let (static_tile, _, _) =
+                    self.partition_static_geometry(&partition, &call_expr.args[0].span())?;
+                if bound_values.len() != static_tile.len() {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
                         &format!(
-                            "`Partition::with_bounds` expects rank-2 bounds, got rank {}",
+                            "`Partition::with_bounds` expects rank-{} bounds for this partition, got rank {}",
+                            static_tile.len(),
                             bound_values.len()
                         ),
                     );
@@ -1074,7 +1142,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 let partition = args.remove(0);
                 let coord = args.remove(0);
-                let Some(bound_axes) = partition.bounded_axes else {
+                let Some(bound_axes) = partition.bounded_axes.as_ref() else {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
                         "bounded partition load requires bounds established by `Partition::with_bounds`",
@@ -1089,13 +1157,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let Some(coords) = fields.get("coords") else {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
-                        "Coord2 is missing coordinate metadata",
+                        "coordinate is missing its metadata",
                     );
                 };
                 let Some(coord_values) = coords.values.as_ref() else {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
-                        "Coord2 coordinates must be a compound value",
+                        "coordinates must be a compound value",
                     );
                 };
                 if coord_values.len() != bound_axes.len() {
@@ -1108,11 +1176,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
+                let (static_tile, static_shape, dim_map) =
+                    self.partition_static_geometry(&partition, &call_expr.args[0].span())?;
                 for (axis, (coord_value, bound_origin)) in
                     coord_values.iter().zip(bound_axes.iter()).enumerate()
                 {
                     match coord_value.index_origin.as_ref() {
-                        Some(index_origin) if index_origin == bound_origin => {}
+                        Some(index_origin) if index_origin == bound_origin => {
+                            self.check_stats
+                                .discharged
+                                .set(self.check_stats.discharged.get() + 1);
+                            continue;
+                        }
                         Some(_) => {
                             return self.jit_error_result(
                                 &call_expr.args[1].span(),
@@ -1121,15 +1196,39 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 ),
                             );
                         }
-                        None => {
+                        None => {}
+                    }
+                    // Constant rung: a coordinate with known constant bounds
+                    // checks statically against a statically-known axis grid,
+                    // mirroring the constant/static rung of
+                    // `check_partition_access`.
+                    let static_tile_dim = static_tile[axis];
+                    let static_shape_dim = static_shape[dim_map[axis] as usize];
+                    if let (Some(bounds), true) =
+                        (coord_value.bounds.clone(), static_shape_dim != -1)
+                    {
+                        let num_partitions = (static_shape_dim as i64 + static_tile_dim as i64 - 1)
+                            / static_tile_dim as i64;
+                        if !(0 <= bounds.start && bounds.end < num_partitions) {
                             return self.jit_error_result(
                                 &call_expr.args[1].span(),
                                 &format!(
-                                    "bounded partition coordinate axis {axis} must come from iterating the matching dimension"
+                                    "bounded partition coordinate axis {axis}: constant range [{}, {}] is not within the {num_partitions}-tile grid",
+                                    bounds.start, bounds.end
                                 ),
                             );
                         }
+                        self.check_stats
+                            .discharged
+                            .set(self.check_stats.discharged.get() + 1);
+                        continue;
                     }
+                    return self.jit_error_result(
+                        &call_expr.args[1].span(),
+                        &format!(
+                            "bounded partition coordinate axis {axis} must come from iterating the matching dimension or be a constant within the axis's static tile grid"
+                        ),
+                    );
                 }
                 Ok(None)
             }
@@ -1343,13 +1442,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         "expected a direct value for mapped partition index validation",
                     )
                 })?;
-                let Some(origin_value) = index.partition_origin else {
+                let Some(origin_values) = &index.partition_origins else {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
                         "MappedPartitionMut::store requires an index produced by this partition's iter_indices() iterator",
                     );
                 };
-                if origin_value != view_value {
+                if !origin_values.contains(&view_value) {
                     return self.jit_error_result(
                         &call_expr.args[1].span(),
                         "MappedPartitionMut::store index was produced by a different mapped partition",
@@ -1448,327 +1547,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let tile_id = args.remove(0);
                 let num_bid_m = args.remove(0);
                 let num_bid_n = args.remove(0);
-                let (mut bid_m, mut bid_n) = if swizzle_m_value == 1 && swizzle_n_value == 1 {
-                    let bid_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_id.clone(),
-                        num_bid_n.clone(),
-                        &TileBinaryOp::Div,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let bid_n = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_id.clone(),
-                        num_bid_n.clone(),
-                        &TileBinaryOp::Rem,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    (bid_m, bid_n)
-                } else if swizzle_n_value == 1 {
-                    let swizzle_m =
-                        self.compile_constant(module, block_id, generic_vars, swizzle_m_value)?;
-                    let num_bid_in_m_band = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        swizzle_m.clone(),
-                        num_bid_n.clone(),
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let group_m_id = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_id.clone(),
-                        num_bid_in_m_band.clone(),
-                        &TileBinaryOp::Div,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let first_bid_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        group_m_id.clone(),
-                        swizzle_m.clone(),
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let remaining_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        num_bid_m.clone(),
-                        first_bid_m.clone(),
-                        &TileBinaryOp::Sub,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let actual_group_size_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        remaining_m,
-                        swizzle_m,
-                        &TileBinaryOp::Min,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let m_band_start = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        group_m_id,
-                        num_bid_in_m_band,
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let tile_in_m_band = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_id.clone(),
-                        m_band_start,
-                        &TileBinaryOp::Sub,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let tile_in_group_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_in_m_band.clone(),
-                        actual_group_size_m.clone(),
-                        &TileBinaryOp::Rem,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let bid_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        first_bid_m,
-                        tile_in_group_m,
-                        &TileBinaryOp::Add,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let bid_n = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_in_m_band,
-                        actual_group_size_m,
-                        &TileBinaryOp::Div,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    (bid_m, bid_n)
-                } else {
-                    let swizzle_m =
-                        self.compile_constant(module, block_id, generic_vars, swizzle_m_value)?;
-                    let swizzle_n =
-                        self.compile_constant(module, block_id, generic_vars, swizzle_n_value)?;
-                    let num_bid_in_m_band = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        swizzle_m.clone(),
-                        num_bid_n.clone(),
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let group_m_id = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_id.clone(),
-                        num_bid_in_m_band.clone(),
-                        &TileBinaryOp::Div,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let first_bid_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        group_m_id.clone(),
-                        swizzle_m.clone(),
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let remaining_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        num_bid_m.clone(),
-                        first_bid_m.clone(),
-                        &TileBinaryOp::Sub,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let actual_group_size_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        remaining_m,
-                        swizzle_m,
-                        &TileBinaryOp::Min,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let m_band_start = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        group_m_id,
-                        num_bid_in_m_band,
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let tile_in_m_band = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_id.clone(),
-                        m_band_start,
-                        &TileBinaryOp::Sub,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let n_group_capacity = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        actual_group_size_m.clone(),
-                        swizzle_n.clone(),
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let group_n_id = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_in_m_band.clone(),
-                        n_group_capacity.clone(),
-                        &TileBinaryOp::Div,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let first_bid_n = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        group_n_id,
-                        swizzle_n,
-                        &TileBinaryOp::Mul,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let tile_in_n_group = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_in_m_band,
-                        n_group_capacity,
-                        &TileBinaryOp::Rem,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let tile_in_group_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_in_n_group.clone(),
-                        actual_group_size_m.clone(),
-                        &TileBinaryOp::Rem,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let bid_m = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        first_bid_m,
-                        tile_in_group_m,
-                        &TileBinaryOp::Add,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let tile_in_group_n = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        tile_in_n_group,
-                        actual_group_size_m,
-                        &TileBinaryOp::Div,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    let bid_n = self.compile_binary_op_from_values(
-                        module,
-                        block_id,
-                        first_bid_n,
-                        tile_in_group_n,
-                        &TileBinaryOp::Add,
-                        generic_vars,
-                        ctx,
-                        None,
-                        &call_expr.span(),
-                    )?;
-                    (bid_m, bid_n)
-                };
-
-                if let Some(bounds) = num_bid_m.bounds {
-                    if bounds.is_exact() && bounds.start > 0 {
-                        bid_m.bounds = Some(Bounds::new(0, bounds.start - 1));
-                    }
-                }
-                if let Some(bounds) = num_bid_n.bounds {
-                    if bounds.is_exact() && bounds.start > 0 {
-                        bid_n.bounds = Some(Bounds::new(0, bounds.start - 1));
-                    }
-                }
+                let (bid_m, bid_n) = self.emit_swizzle_2d(
+                    module,
+                    block_id,
+                    &tile_id,
+                    &num_bid_m,
+                    &num_bid_n,
+                    swizzle_m_value,
+                    swizzle_n_value,
+                    generic_vars,
+                    ctx,
+                    &call_expr.span(),
+                )?;
 
                 let return_type = return_type.ok_or_else(|| {
                     self.jit_error(
@@ -2775,6 +2565,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     i,
                     static_tile_dim,
                 ) {
+                    self.check_stats
+                        .discharged
+                        .set(self.check_stats.discharged.get() + 1);
                     continue;
                 }
             }
@@ -2788,6 +2581,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             ) = (index_value.index_origin.as_ref(), partition_view_value)
             {
                 if *view == partition_view_value && *axis == i && *tile_dim == static_tile_dim {
+                    self.check_stats
+                        .discharged
+                        .set(self.check_stats.discharged.get() + 1);
                     continue;
                 }
             }
@@ -2805,19 +2601,33 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
+                self.check_stats
+                    .discharged
+                    .set(self.check_stats.discharged.get() + 1);
                 continue;
             }
             // In the rest of the cases, we need to generate a dynamic bounds check.
-            let tile_dim_value =
-                self.compile_constant(module, block_id, generic_vars, static_tile_dim)?;
-            let index_value = if let Some(bounds) = index_value.bounds {
-                let index_upper_bound = bounds.end;
-                self.compile_constant(module, block_id, generic_vars, index_upper_bound as i32)?
-            } else {
-                index_value
-            };
-            let shape_dim_value = if is_static_shape_dim {
-                self.compile_constant(module, block_id, generic_vars, static_shape_dim)?
+            //
+            // Hoisting: when the check sits directly in a loop body and the
+            // index is loop-invariant (or the unit-step induction variable,
+            // substituted with `upper - 1`), the whole chain is emitted in
+            // the loop's preheader instead of the hot body, wrapped in an
+            // `upper <= lower || in_bounds` guard so an empty loop — whose
+            // accesses never execute — cannot trap spuriously. Assert
+            // semantics are otherwise unchanged: the same violation traps,
+            // before the loop instead of at the offending iteration.
+            enum HoistIndex {
+                Const(i32),
+                Invariant,
+                /// `scale * induction + offset`; the strongest instance
+                /// substitutes the loop bound (identity is scale 1, offset 0).
+                InductionAffine {
+                    scale: i64,
+                    offset: i64,
+                },
+            }
+            let dynamic_shape_value = if is_static_shape_dim {
+                None
             } else {
                 let dynamic_shape_index = static_shape
                     .iter()
@@ -2831,23 +2641,223 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "internal: dynamic partition dimension was not found in tensor shape metadata",
                         )
                     })?;
-                dynamic_shape.get(dynamic_shape_index).cloned().ok_or_else(|| {
+                Some(dynamic_shape.get(dynamic_shape_index).cloned().ok_or_else(|| {
                     self.jit_error(
                         &call_expr.span(),
                         &format!(
                             "internal: tensor shape metadata is missing dynamic dimension {dynamic_shape_index}"
                         ),
                     )
-                })?
+                })?)
+            };
+            // Classify against the innermost loop, then walk outward to the
+            // maximal position the check's operands dominate. `no_hoist_why`
+            // records the innermost-classification failure for diagnostics.
+            let mut no_hoist_why: Option<&'static str> = None;
+            let hoist = 'classify: {
+                if crate::cuda_tile_runtime_utils::check_hoisting_disabled() {
+                    no_hoist_why = Some("hoisting disabled via CUTILE_DISABLE_CHECK_HOISTING");
+                    break 'classify None;
+                }
+                let frames = &ctx.loop_frames;
+                let Some(innermost) = frames.last() else {
+                    break 'classify None;
+                };
+                if block_id != innermost.body_block {
+                    no_hoist_why = Some("check sits inside a conditional block");
+                    break 'classify None;
+                }
+                // Values the emitted check will reference; each must dominate
+                // the target preheader (index() below the target watermark).
+                let mut operand_deps: Vec<cutile_ir::ir::Value> = vec![];
+                if let Some(shape_value) = &dynamic_shape_value {
+                    let Some(value) = shape_value.value else {
+                        no_hoist_why = Some("dynamic shape operand has no direct value");
+                        break 'classify None;
+                    };
+                    operand_deps.push(value);
+                }
+                let kind = if let Some(bounds) = index_value.bounds {
+                    HoistIndex::Const(bounds.end as i32)
+                } else {
+                    let Some(value) = index_value.value else {
+                        no_hoist_why = Some("index has no direct value");
+                        break 'classify None;
+                    };
+                    let affine = if innermost.induction_values.contains(&value) {
+                        Some((1i64, 0i64))
+                    } else {
+                        index_value
+                            .affine
+                            .filter(|form| innermost.induction_values.contains(&form.var))
+                            .map(|form| (form.scale, form.offset))
+                    };
+                    if let Some((scale, offset)) = affine {
+                        if !innermost.unit_step {
+                            no_hoist_why =
+                                Some("index depends on a non-unit-step induction variable");
+                            break 'classify None;
+                        }
+                        if scale == 0 {
+                            no_hoist_why = Some("degenerate affine index");
+                            break 'classify None;
+                        }
+                        // The substituted instance references the loop bound.
+                        operand_deps.push(if scale > 0 {
+                            innermost.upper
+                        } else {
+                            innermost.lower
+                        });
+                        HoistIndex::InductionAffine { scale, offset }
+                    } else if value.index() < innermost.value_watermark {
+                        operand_deps.push(value);
+                        HoistIndex::Invariant
+                    } else {
+                        no_hoist_why = Some("index is computed inside the loop body");
+                        break 'classify None;
+                    }
+                };
+                // Walk outward: cross a loop only when it is directly nested
+                // (its preheader is the enclosing body), statically non-empty
+                // (its accesses execute on every enclosing iteration), and
+                // every operand dominates the enclosing preheader.
+                let mut target = frames.len() - 1;
+                while target > 0 {
+                    let inner = &frames[target];
+                    let outer = &frames[target - 1];
+                    let contiguous = inner.preheader_block == outer.body_block;
+                    let deps_dominate = operand_deps
+                        .iter()
+                        .all(|value| value.index() < outer.value_watermark);
+                    if contiguous && inner.known_non_empty && deps_dominate {
+                        target -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                Some((frames[target].clone(), kind))
+            };
+            let (check_block, guard_bounds, hoist_kind) = match &hoist {
+                Some((frame, kind)) => (
+                    frame.preheader_block,
+                    // Vacuous-trip guard, elided when static bounds prove the
+                    // target loop runs at least once.
+                    (!frame.known_non_empty).then_some((frame.lower, frame.upper)),
+                    Some(kind),
+                ),
+                None => (block_id, None, None),
+            };
+            if hoist.is_some() {
+                self.check_stats
+                    .hoisted
+                    .set(self.check_stats.hoisted.get() + 1);
+            } else {
+                self.check_stats
+                    .in_place
+                    .set(self.check_stats.in_place.get() + 1);
+                if let Some(why) = no_hoist_why {
+                    if crate::cuda_tile_runtime_utils::jit_hoist_log_enabled() {
+                        eprintln!(
+                            "[cutile::jit] bounds check for dim {i} stays in the loop body: {why}"
+                        );
+                    }
+                }
+            }
+            let tile_dim_value =
+                self.compile_constant(module, check_block, generic_vars, static_tile_dim)?;
+            let index_value = match hoist_kind {
+                Some(HoistIndex::InductionAffine { scale, offset }) => {
+                    let (scale, offset) = (*scale, *offset);
+                    let frame = &hoist.as_ref().expect("hoisted check has a frame").0;
+                    // Strongest instance of `scale * j + offset` over
+                    // [lower, upper): at upper - 1 for positive scale, at
+                    // lower for negative. Identity (1, 0) emits exactly the
+                    // pre-affine op sequence.
+                    let mut instance = if scale > 0 {
+                        let upper_value =
+                            TileRustValue::new_primitive(frame.upper, index_value.ty.clone(), None);
+                        let one = self.compile_constant(module, check_block, generic_vars, 1)?;
+                        self.compile_binary_op_from_values(
+                            module,
+                            check_block,
+                            upper_value,
+                            one,
+                            &TileBinaryOp::Sub,
+                            generic_vars,
+                            ctx,
+                            None,
+                            &call_expr.span(),
+                        )?
+                    } else {
+                        TileRustValue::new_primitive(frame.lower, index_value.ty.clone(), None)
+                    };
+                    if scale != 1 {
+                        let scale_value =
+                            self.compile_constant(module, check_block, generic_vars, scale as i32)?;
+                        instance = self.compile_binary_op_from_values(
+                            module,
+                            check_block,
+                            instance,
+                            scale_value,
+                            &TileBinaryOp::Mul,
+                            generic_vars,
+                            ctx,
+                            None,
+                            &call_expr.span(),
+                        )?;
+                    }
+                    if offset != 0 {
+                        let offset_value = self.compile_constant(
+                            module,
+                            check_block,
+                            generic_vars,
+                            offset as i32,
+                        )?;
+                        instance = self.compile_binary_op_from_values(
+                            module,
+                            check_block,
+                            instance,
+                            offset_value,
+                            &TileBinaryOp::Add,
+                            generic_vars,
+                            ctx,
+                            None,
+                            &call_expr.span(),
+                        )?;
+                    }
+                    instance
+                }
+                Some(HoistIndex::Const(end)) => {
+                    self.compile_constant(module, check_block, generic_vars, *end)?
+                }
+                Some(HoistIndex::Invariant) | None => {
+                    if let Some(bounds) = index_value.bounds {
+                        let index_upper_bound = bounds.end;
+                        self.compile_constant(
+                            module,
+                            check_block,
+                            generic_vars,
+                            index_upper_bound as i32,
+                        )?
+                    } else {
+                        index_value
+                    }
+                }
+            };
+            let shape_dim_value = match dynamic_shape_value {
+                Some(shape_value) => shape_value,
+                None => {
+                    self.compile_constant(module, check_block, generic_vars, static_shape_dim)?
+                }
             };
             // Compute ceil_div(shape, tile) as (shape + tile - 1) / tile
             // using floor division. This avoids positive_inf rounding which
             // can be misoptimized when the dividend carries assume hints.
             let tile_minus_one =
-                self.compile_constant(module, block_id, generic_vars, static_tile_dim - 1)?;
+                self.compile_constant(module, check_block, generic_vars, static_tile_dim - 1)?;
             let shape_plus_tile_minus_one = self.compile_binary_op_from_values(
                 module,
-                block_id,
+                check_block,
                 shape_dim_value.clone(),
                 tile_minus_one,
                 &TileBinaryOp::Add,
@@ -2858,7 +2868,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             )?;
             let div_result_value = self.compile_binary_op_from_values(
                 module,
-                block_id,
+                check_block,
                 shape_plus_tile_minus_one,
                 tile_dim_value,
                 &TileBinaryOp::Div,
@@ -2869,7 +2879,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             )?;
             let ineq_result_value = self.compile_binary_op_from_values(
                 module,
-                block_id,
+                check_block,
                 index_value,
                 div_result_value,
                 &TileBinaryOp::Lt,
@@ -2878,7 +2888,48 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 None,
                 &call_expr.span(),
             )?;
-            let result_value = ineq_result_value.value.ok_or_else(|| {
+            // Hoisted checks are guarded against vacuous loops: when
+            // `upper <= lower` the body never runs, so no access exists to
+            // be out of bounds.
+            let checked_value = if let Some((lower, upper)) = guard_bounds {
+                let index_ty = ineq_result_value.ty.clone();
+                let upper_value = TileRustValue::new_primitive(
+                    upper,
+                    self.scalar_i32_type(&call_expr.span())?,
+                    None,
+                );
+                let lower_value = TileRustValue::new_primitive(
+                    lower,
+                    self.scalar_i32_type(&call_expr.span())?,
+                    None,
+                );
+                let vacuous = self.compile_binary_op_from_values(
+                    module,
+                    check_block,
+                    upper_value,
+                    lower_value,
+                    &TileBinaryOp::Le,
+                    generic_vars,
+                    ctx,
+                    None,
+                    &call_expr.span(),
+                )?;
+                let _ = index_ty;
+                self.compile_binary_op_from_values(
+                    module,
+                    check_block,
+                    vacuous,
+                    ineq_result_value,
+                    &TileBinaryOp::BitOr,
+                    generic_vars,
+                    ctx,
+                    None,
+                    &call_expr.span(),
+                )?
+            } else {
+                ineq_result_value
+            };
+            let result_value = checked_value.value.ok_or_else(|| {
                 self.jit_error(
                     &call_expr.span(),
                     "failed to compile a binary expression operand",
@@ -2897,8 +2948,509 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .attr("message", cutile_ir::ir::Attribute::String(message))
                     .operand(result_value)
                     .build(module);
-            append_op(module, block_id, assert_op_id);
+            append_op(module, check_block, assert_op_id);
         }
         return Ok(None);
+    }
+
+    /// Emits the flat-tile-id → `(bid_m, bid_n)` schedule math for one 2-D
+    /// (sub-)grid: linear traversal for a `[1, 1]` map, grouped-M bands for
+    /// `[GM, 1]`, and grouped-MN for `[GM, GN]`. Shared by the
+    /// `swizzle_partition_index_2d` intrinsic and the rank-N `iter_indices()`
+    /// loop lowering (which applies it to the trailing two axes).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_swizzle_2d(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        tile_id: &TileRustValue,
+        num_bid_m: &TileRustValue,
+        num_bid_n: &TileRustValue,
+        swizzle_m_value: i32,
+        swizzle_n_value: i32,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        span: &proc_macro2::Span,
+    ) -> Result<(TileRustValue, TileRustValue), JITError> {
+        let tile_id = tile_id.clone();
+        let num_bid_m = num_bid_m.clone();
+        let num_bid_n = num_bid_n.clone();
+        let (mut bid_m, mut bid_n) = if swizzle_m_value == 1 && swizzle_n_value == 1 {
+            let bid_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                num_bid_n.clone(),
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let bid_n = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                num_bid_n.clone(),
+                &TileBinaryOp::Rem,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            (bid_m, bid_n)
+        } else if swizzle_n_value == 1 {
+            let swizzle_m =
+                self.compile_constant(module, block_id, generic_vars, swizzle_m_value)?;
+            let num_bid_in_m_band = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                swizzle_m.clone(),
+                num_bid_n.clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let group_m_id = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                num_bid_in_m_band.clone(),
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let first_bid_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                group_m_id.clone(),
+                swizzle_m.clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let remaining_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                num_bid_m.clone(),
+                first_bid_m.clone(),
+                &TileBinaryOp::Sub,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let actual_group_size_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                remaining_m,
+                swizzle_m,
+                &TileBinaryOp::Min,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let m_band_start = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                group_m_id,
+                num_bid_in_m_band,
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let tile_in_m_band = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                m_band_start,
+                &TileBinaryOp::Sub,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let tile_in_group_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_in_m_band.clone(),
+                actual_group_size_m.clone(),
+                &TileBinaryOp::Rem,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let bid_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                first_bid_m,
+                tile_in_group_m,
+                &TileBinaryOp::Add,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let bid_n = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_in_m_band,
+                actual_group_size_m,
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            (bid_m, bid_n)
+        } else {
+            let swizzle_m =
+                self.compile_constant(module, block_id, generic_vars, swizzle_m_value)?;
+            let swizzle_n =
+                self.compile_constant(module, block_id, generic_vars, swizzle_n_value)?;
+            let num_bid_in_m_band = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                swizzle_m.clone(),
+                num_bid_n.clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let group_m_id = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                num_bid_in_m_band.clone(),
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let first_bid_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                group_m_id.clone(),
+                swizzle_m.clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let remaining_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                num_bid_m.clone(),
+                first_bid_m.clone(),
+                &TileBinaryOp::Sub,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let actual_group_size_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                remaining_m,
+                swizzle_m,
+                &TileBinaryOp::Min,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let m_band_start = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                group_m_id,
+                num_bid_in_m_band,
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let tile_in_m_band = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                m_band_start,
+                &TileBinaryOp::Sub,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let n_group_capacity = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                actual_group_size_m.clone(),
+                swizzle_n.clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let group_n_id = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_in_m_band.clone(),
+                n_group_capacity.clone(),
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let first_bid_n = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                group_n_id,
+                swizzle_n,
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let tile_in_n_group = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_in_m_band,
+                n_group_capacity,
+                &TileBinaryOp::Rem,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let tile_in_group_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_in_n_group.clone(),
+                actual_group_size_m.clone(),
+                &TileBinaryOp::Rem,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let bid_m = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                first_bid_m,
+                tile_in_group_m,
+                &TileBinaryOp::Add,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let tile_in_group_n = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_in_n_group,
+                actual_group_size_m,
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let bid_n = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                first_bid_n,
+                tile_in_group_n,
+                &TileBinaryOp::Add,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            (bid_m, bid_n)
+        };
+
+        if let Some(bounds) = num_bid_m.bounds {
+            if bounds.is_exact() && bounds.start > 0 {
+                bid_m.bounds = Some(Bounds::new(0, bounds.start - 1));
+            }
+        }
+        if let Some(bounds) = num_bid_n.bounds {
+            if bounds.is_exact() && bounds.start > 0 {
+                bid_n.bounds = Some(Bounds::new(0, bounds.start - 1));
+            }
+        }
+        Ok((bid_m, bid_n))
+    }
+
+    /// Emits the rank-N flat-tile-id → per-axis block-id schedule for
+    /// `iter_indices()`. Leading axes traverse linearly (their map dims must
+    /// be 1) via row-major decomposition; the trailing two axes reuse
+    /// [`Self::emit_swizzle_2d`]. Rank-1 is a direct linear traversal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_mapped_partition_schedule(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        tile_id: &TileRustValue,
+        num_bids: &[TileRustValue],
+        map_shape: &[i32],
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        span: &proc_macro2::Span,
+    ) -> Result<Vec<TileRustValue>, JITError> {
+        let rank = map_shape.len();
+        debug_assert_eq!(rank, num_bids.len());
+        for (axis, &dim) in map_shape.iter().enumerate().take(rank.saturating_sub(2)) {
+            if dim != 1 {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "mapped partition schedules group only the trailing two axes: leading map axis {axis} must be 1, got {dim}"
+                    ),
+                );
+            }
+        }
+        let exact_axis_bounds = |num_bid: &TileRustValue| {
+            num_bid.bounds.and_then(|bounds| {
+                if bounds.is_exact() && bounds.start > 0 {
+                    Some(Bounds::new(0, bounds.start - 1))
+                } else {
+                    None
+                }
+            })
+        };
+        if rank == 1 {
+            if map_shape[0] != 1 {
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "rank-1 mapped partition maps must be [1], got [{}]",
+                        map_shape[0]
+                    ),
+                );
+            }
+            let mut bid = tile_id.clone();
+            bid.bounds = exact_axis_bounds(&num_bids[0]);
+            return Ok(vec![bid]);
+        }
+
+        let m_axis = rank - 2;
+        let n_axis = rank - 1;
+        let mut bids: Vec<TileRustValue> = Vec::with_capacity(rank);
+        let mut inner_tile_id = tile_id.clone();
+        if rank > 2 {
+            let inner_total = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                num_bids[m_axis].clone(),
+                num_bids[n_axis].clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            let mut lead = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                inner_total.clone(),
+                &TileBinaryOp::Div,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            inner_tile_id = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                tile_id.clone(),
+                inner_total,
+                &TileBinaryOp::Rem,
+                generic_vars,
+                ctx,
+                None,
+                span,
+            )?;
+            // Row-major decomposition of the leading flat id: the last leading
+            // axis varies fastest.
+            for axis in 0..rank - 2 {
+                let mut bid = if axis + 1 < rank - 2 {
+                    let mut stride = num_bids[axis + 1].clone();
+                    for num_bid in &num_bids[axis + 2..rank - 2] {
+                        stride = self.compile_binary_op_from_values(
+                            module,
+                            block_id,
+                            stride,
+                            num_bid.clone(),
+                            &TileBinaryOp::Mul,
+                            generic_vars,
+                            ctx,
+                            None,
+                            span,
+                        )?;
+                    }
+                    let bid = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        lead.clone(),
+                        stride.clone(),
+                        &TileBinaryOp::Div,
+                        generic_vars,
+                        ctx,
+                        None,
+                        span,
+                    )?;
+                    lead = self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        lead,
+                        stride,
+                        &TileBinaryOp::Rem,
+                        generic_vars,
+                        ctx,
+                        None,
+                        span,
+                    )?;
+                    bid
+                } else {
+                    lead.clone()
+                };
+                bid.bounds = exact_axis_bounds(&num_bids[axis]);
+                bids.push(bid);
+            }
+        }
+        let (bid_m, bid_n) = self.emit_swizzle_2d(
+            module,
+            block_id,
+            &inner_tile_id,
+            &num_bids[m_axis],
+            &num_bids[n_axis],
+            map_shape[m_axis],
+            map_shape[n_axis],
+            generic_vars,
+            ctx,
+            span,
+        )?;
+        bids.push(bid_m);
+        bids.push(bid_n);
+        Ok(bids)
     }
 }

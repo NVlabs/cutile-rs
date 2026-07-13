@@ -87,6 +87,13 @@ impl Module {
         id
     }
 
+    /// Number of values allocated so far. Usable as a dominance watermark:
+    /// a value with `index() < num_values()` taken at some program point was
+    /// allocated before that point.
+    pub fn num_values(&self) -> usize {
+        self.values.len()
+    }
+
     pub fn value_data(&self, v: Value) -> &ValueData {
         &self.values[v.0 as usize]
     }

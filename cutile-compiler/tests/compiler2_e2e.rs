@@ -131,7 +131,7 @@ fn test_empty_kernel_tileiras() {
     );
 
     // Run through tileiras.
-    let cubin_path = compile_tile_ir_module(&module, &gpu_name).unwrap();
+    let cubin_path = compile_tile_ir_module(&module, &gpu_name);
     println!("cubin: {cubin_path}");
     assert!(
         std::path::Path::new(&cubin_path).exists(),
@@ -170,7 +170,7 @@ fn assert_tileiras_accepts(module: &Module) {
         cutile_ir::decode_bytecode(&bytecode).unwrap()
     );
 
-    let cubin_path = compile_tile_ir_module(module, &gpu_name).unwrap();
+    let cubin_path = compile_tile_ir_module(module, &gpu_name);
     assert!(
         std::path::Path::new(&cubin_path).exists(),
         "cubin file should exist"
