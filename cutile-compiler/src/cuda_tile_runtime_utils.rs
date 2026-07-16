@@ -555,7 +555,7 @@ pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Ve
             tileiras.display(),
         )));
     }
-    crate::jit_store::record_backend_compile();
+    crate::jit_cache::record_backend_compile();
     Ok(cubin)
 }
 
@@ -570,18 +570,18 @@ pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Ve
 pub enum Stage2Source {
     Tileiras,
     DiskCache {
-        store: Arc<dyn crate::jit_store::JitStore>,
+        store: Arc<dyn crate::jit_cache::JitStore>,
         key: String,
     },
 }
 
 /// Compiles Tile IR bytecode to a cubin, consulting the disk cache when one is
-/// installed (see [`crate::jit_store::enable`]).
+/// installed (see [`crate::jit_cache::enable`]).
 ///
 /// The lookup sits exactly between bytecode serialization and the `tileiras`
 /// spawn: `bytecode` plus `gpu_name`, `opt_level` and the resolved `tileiras`
 /// are the subprocess's complete input, so the content-addressed key derived
-/// from them (see [`crate::jit_store::l2_key`]) is correct by construction.
+/// from them (see [`crate::jit_cache::l2_key`]) is correct by construction.
 ///
 /// Store I/O failures are soft: counted in `stats().io_errors`, logged, and
 /// the compile proceeds as if no cache were installed.
@@ -591,11 +591,11 @@ pub fn compile_bytecode_cached(
     gpu_name: &str,
     opt_level: u8,
 ) -> Result<(Vec<u8>, Stage2Source), JITError> {
-    use crate::jit_store::{self, EntryParams};
+    use crate::jit_cache::{self, EntryParams};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::Ordering;
 
-    let Some(store) = jit_store::installed_store() else {
+    let Some(store) = jit_cache::installed_store() else {
         return run_tileiras(bytecode, gpu_name, opt_level).map(|c| (c, Stage2Source::Tileiras));
     };
 
@@ -603,7 +603,7 @@ pub fn compile_bytecode_cached(
     // not a fresh re-resolution — so the key's version field can never disagree
     // with the bytes it sits next to (see #7).
     let tileiras_fp = tileiras_fingerprint();
-    let key = jit_store::l2_key(bytecode, bc_version, gpu_name, opt_level, tileiras_fp);
+    let key = jit_cache::l2_key(bytecode, bc_version, gpu_name, opt_level, tileiras_fp);
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,
@@ -613,8 +613,8 @@ pub fn compile_bytecode_cached(
 
     match store.get(&key) {
         Ok(Some(entry)) => {
-            if let Some(cubin) = jit_store::decode_entry(&entry, &params) {
-                jit_store::STATS.hits.fetch_add(1, Ordering::Relaxed);
+            if let Some(cubin) = jit_cache::decode_entry(&entry, &params) {
+                jit_cache::STATS.hits.fetch_add(1, Ordering::Relaxed);
                 // Hand the store and key back so a driver rejection recovers
                 // against this exact entry (see `recompile_after_disk_rejection`).
                 return Ok((cubin, Stage2Source::DiskCache { store, key }));
@@ -622,40 +622,40 @@ pub fn compile_bytecode_cached(
             // Key matched but the entry does not validate against this request:
             // a torn write, tampering, or a hash collision. Drop it and recompile
             // rather than ever serving it.
-            crate::jit_store::cache_log(format_args!(
+            crate::jit_cache::cache_log(format_args!(
                 "disk cache entry {key} failed validation; deleting and recompiling"
             ));
             if let Err(e) = store.delete(&key) {
-                jit_store::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
-                crate::jit_store::cache_log(format_args!(
+                jit_cache::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
+                crate::jit_cache::cache_log(format_args!(
                     "failed to delete invalid entry {key}: {e}"
                 ));
             }
         }
         Ok(None) => {}
         Err(e) => {
-            jit_store::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
-            crate::jit_store::cache_log(format_args!("disk cache read for {key} failed: {e}"));
+            jit_cache::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
+            crate::jit_cache::cache_log(format_args!("disk cache read for {key} failed: {e}"));
         }
     }
 
-    jit_store::STATS.misses.fetch_add(1, Ordering::Relaxed);
+    jit_cache::STATS.misses.fetch_add(1, Ordering::Relaxed);
     let cubin = run_tileiras(bytecode, gpu_name, opt_level)?;
 
-    match jit_store::encode_entry(&params, &cubin) {
+    match jit_cache::encode_entry(&params, &cubin) {
         Some(entry) => match store.put(&key, &entry) {
             Ok(()) => {
-                jit_store::STATS.puts.fetch_add(1, Ordering::Relaxed);
-                jit_store::STATS
+                jit_cache::STATS.puts.fetch_add(1, Ordering::Relaxed);
+                jit_cache::STATS
                     .bytes_written
                     .fetch_add(entry.len() as u64, Ordering::Relaxed);
             }
             Err(e) => {
-                jit_store::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
-                crate::jit_store::cache_log(format_args!("disk cache write for {key} failed: {e}"));
+                jit_cache::STATS.io_errors.fetch_add(1, Ordering::Relaxed);
+                crate::jit_cache::cache_log(format_args!("disk cache write for {key} failed: {e}"));
             }
         },
-        None => crate::jit_store::cache_log(format_args!(
+        None => crate::jit_cache::cache_log(format_args!(
             "not caching {key}: gpu name or tileiras fingerprint exceeds the entry format's u16 length field"
         )),
     }
@@ -674,7 +674,7 @@ pub fn compile_bytecode_cached(
 /// would fail permanently. `store` and `key` come from the [`Stage2Source::DiskCache`]
 /// that produced the bad cubin, so this evicts exactly that entry.
 pub fn recompile_after_disk_rejection(
-    store: &dyn crate::jit_store::JitStore,
+    store: &dyn crate::jit_cache::JitStore,
     key: &str,
     bytecode: &[u8],
     gpu_name: &str,
@@ -683,10 +683,10 @@ pub fn recompile_after_disk_rejection(
     use std::sync::atomic::Ordering;
 
     if let Err(e) = store.delete(key) {
-        crate::jit_store::STATS
+        crate::jit_cache::STATS
             .io_errors
             .fetch_add(1, Ordering::Relaxed);
-        crate::jit_store::cache_log(format_args!("failed to evict entry {key}: {e}"));
+        crate::jit_cache::cache_log(format_args!("failed to evict entry {key}: {e}"));
     }
     run_tileiras(bytecode, gpu_name, opt_level)
 }
@@ -701,7 +701,8 @@ pub fn compile_tile_ir_module(
     gpu_name: &str,
 ) -> Result<Vec<u8>, JITError> {
     let (bytecode, bc_version) = serialize_tile_ir_bytecode(module)?;
-    compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL).map(|(cubin, _)| cubin)
+    compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL)
+        .map(|(cubin, _)| cubin)
 }
 
 fn tileiras_launch_error(
@@ -1099,13 +1100,13 @@ mod tests {
         let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
 
         let store_dir = temp_dir.join("store");
-        crate::jit_store::enable(std::sync::Arc::new(
-            crate::jit_store::FileSystemJitStore::new(&store_dir).unwrap(),
+        crate::jit_cache::enable(std::sync::Arc::new(
+            crate::jit_cache::FileSystemJitStore::new(&store_dir).unwrap(),
         ));
 
         let module = empty_kernel_module();
-        let backend_before = crate::jit_store::jit_backend_compile_count();
-        let hits_before = crate::jit_store::jit_disk_hit_count();
+        let backend_before = crate::jit_cache::jit_backend_compile_count();
+        let hits_before = crate::jit_cache::jit_disk_hit_count();
 
         let first =
             compile_tile_ir_module(&module, "sm_120").expect("first compile (miss) should succeed");
@@ -1116,17 +1117,17 @@ mod tests {
         let other_arch = compile_tile_ir_module(&module, "sm_100")
             .expect("different-arch compile should succeed");
 
-        crate::jit_store::disable();
+        crate::jit_cache::disable();
 
         assert_eq!(first, second, "hit must return the exact bytes stored");
         assert_eq!(first, other_arch, "fake tileiras writes constant bytes");
         assert_eq!(
-            crate::jit_store::jit_backend_compile_count() - backend_before,
+            crate::jit_cache::jit_backend_compile_count() - backend_before,
             2,
             "exactly the two misses spawn tileiras"
         );
         assert_eq!(
-            crate::jit_store::jit_disk_hit_count() - hits_before,
+            crate::jit_cache::jit_disk_hit_count() - hits_before,
             1,
             "exactly the repeat compile hits the disk"
         );

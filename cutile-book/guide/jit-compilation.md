@@ -228,7 +228,7 @@ Cache I/O can never fail a launch: every read, write, or eviction error is count
 
 The eviction policy is LRU by file mtime with a high/low watermark pair (defaults: collect above capacity, delete oldest entries down to 80%). Multiple processes can share one cache directory; writes are atomic and eviction is coordinated through a lock file.
 
-See `cutile-examples/examples/jit_disk_cache.rs`; run it twice to watch the second process hit the disk.
+See `cutile-examples/examples/jit_disk_cache.rs`; run it twice to watch the second process hit the disk. For implementing a custom backend (an object store, a database), see `cutile-examples/examples/jit_custom_store.rs`.
 
 ## Compile-Only API
 

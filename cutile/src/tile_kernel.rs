@@ -13,8 +13,8 @@ use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
     compile_bytecode_cached, env_flag_enabled, get_compiler_version, get_gpu_name,
-    recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint,
-    Stage2Source, DEFAULT_OPT_LEVEL,
+    recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint, Stage2Source,
+    DEFAULT_OPT_LEVEL,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;

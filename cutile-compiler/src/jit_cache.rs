@@ -61,8 +61,15 @@ pub trait JitStore: Send + Sync + 'static {
     /// Stores a value, replacing any existing one for the key.
     fn put(&self, key: &str, value: &[u8]) -> io::Result<()>;
 
-    /// Returns whether the key is present, without reading the value.
-    fn contains(&self, key: &str) -> io::Result<bool>;
+    /// Returns whether the key is present.
+    ///
+    /// The compile pipeline never calls this; it exists for warmup-style
+    /// tooling. The default reads the value and drops it, so implementations
+    /// only need to override when they have a cheaper existence check (as
+    /// `FileSystemJitStore` does with a `stat`).
+    fn contains(&self, key: &str) -> io::Result<bool> {
+        Ok(self.get(key)?.is_some())
+    }
 
     /// Removes the key. Absent keys are not an error.
     fn delete(&self, key: &str) -> io::Result<()>;
@@ -97,7 +104,7 @@ pub trait JitStore: Send + Sync + 'static {
 /// per-process byte counter sums only its own process's writes, which for any
 /// realistic workload never reach the threshold, leaving the cap unenforced.
 /// Cross-process
-/// mutual exclusion uses a non-blocking exclusive lock on `<root>/.gc.lock`
+/// mutual exclusion uses a non-blocking exclusive lock on `<root>/.eviction.lock`
 /// (`File::try_lock`, flock semantics): losing the race means another process
 /// is already collecting, and this one just returns. Concurrent collection
 /// would be correct anyway — a lost `delete` race reads as `NotFound` and is
@@ -127,7 +134,7 @@ pub const DEFAULT_CAPACITY_BYTES: u64 = 2 << 30;
 /// Lock file for cross-process eviction mutual exclusion, directly under the
 /// store root. Never evicted itself (eviction only scans the shard
 /// subdirectories).
-pub const GC_LOCK_FILE_NAME: &str = ".gc.lock";
+pub const EVICTION_LOCK_FILE_NAME: &str = ".eviction.lock";
 
 /// Temp files this much older than "now" are leftovers of a crashed process
 /// and are removed during eviction scans. Generous on purpose: a live `put`
@@ -145,7 +152,7 @@ impl FileSystemJitStoreBuilder {
     /// total exceeds `capacity × high`, delete oldest-first down to
     /// `capacity × low`. Defaults `1.0` / `0.8`. The gap prevents a store
     /// hovering at capacity from scanning on every write.
-    pub fn gc_watermarks(mut self, high: f64, low: f64) -> Self {
+    pub fn eviction_watermarks(mut self, high: f64, low: f64) -> Self {
         self.high_watermark = high;
         self.low_watermark = low;
         self
@@ -160,7 +167,7 @@ impl FileSystemJitStoreBuilder {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "gc watermarks need 0 < low <= high, got high={} low={}",
+                    "eviction watermarks need 0 < low <= high, got high={} low={}",
                     self.high_watermark, self.low_watermark
                 ),
             ));
@@ -178,6 +185,28 @@ impl FileSystemJitStoreBuilder {
 /// Monotonic per-process counter for temp file names, so two threads in one
 /// process writing the same key use distinct temp paths.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Uniform `u64` from a v4 uuid, for the eviction trigger's weighted coin flip.
+///
+/// Not a verbatim read of the first 8 bytes: a v4 uuid fixes 6 of its 128 bits
+/// — the version nibble in byte 6 (always `0100`) and the two variant bits in
+/// byte 8 — so `u64::from_le_bytes(&bytes[..8])` carries the version nibble at
+/// bits 52–55 and every draw has bit 54 set, i.e. `draw >= 2^54`. The trigger
+/// fires when `draw / 2^64 < len / threshold`; a floor of `2^-10` on the left
+/// side means an entry under `threshold / 1024` — 128 KiB at the default
+/// capacity, which is every real cubin — could *never* fire it, and a workload
+/// of small kernels would grow the cache without bound.
+///
+/// XOR-folding the two halves fixes that: each fixed bit lands on an
+/// independent uniformly random bit from the other half (byte 6 on byte 14,
+/// byte 8 on byte 0), and the XOR of independent uniform bits is uniform, so
+/// all 64 result bits are uniform. `eviction_draw_has_no_fixed_bits` pins this down.
+fn eviction_draw(nonce: &uuid::Uuid) -> u64 {
+    let b = nonce.as_bytes();
+    let lo = u64::from_le_bytes(b[..8].try_into().expect("uuid is 16 bytes"));
+    let hi = u64::from_le_bytes(b[8..].try_into().expect("uuid is 16 bytes"));
+    lo ^ hi
+}
 
 impl FileSystemJitStore {
     /// Opens a store rooted at `dir` with the default capacity.
@@ -204,13 +233,22 @@ impl FileSystemJitStore {
     /// existed with looser permissions), so another user cannot plant entries.
     /// Constructing the store does not enable anything; pass it to [`enable`].
     pub fn default_location() -> io::Result<Self> {
-        let store = Self::new(default_cache_dir()?.join("cutile").join("kernels"))?;
+        let root = default_cache_dir()?.join("cutile").join("kernels");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o700))?;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            // Created `0700` from the first syscall — creating with default
+            // permissions and chmod-ing after would leave a window in which
+            // another user could enter the directory or plant an entry.
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&root)?;
+            // A pre-existing directory skips the branch above (recursive
+            // create is a no-op), so tighten it explicitly.
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
         }
-        Ok(store)
+        Self::new(root)
     }
 
     /// Root directory of this store.
@@ -237,14 +275,14 @@ impl FileSystemJitStore {
     /// Evicts oldest entries until total size is below the low watermark.
     /// Every failure in here is soft: counted, logged,
     /// swallowed — eviction must never fail a `put`, let alone a launch.
-    fn collect_garbage(&self) {
+    fn evict(&self) {
         // Cross-process mutual exclusion. flock-style: released when
         // `lock_file` drops, including on panic or process death.
-        let lock_file = match std::fs::File::create(self.root.join(GC_LOCK_FILE_NAME)) {
+        let lock_file = match std::fs::File::create(self.root.join(EVICTION_LOCK_FILE_NAME)) {
             Ok(f) => f,
             Err(e) => {
                 STATS.io_errors.fetch_add(1, Ordering::Relaxed);
-                cache_log(format_args!("gc: cannot open lock file: {e}"));
+                cache_log(format_args!("evict: cannot open lock file: {e}"));
                 return;
             }
         };
@@ -254,7 +292,7 @@ impl FileSystemJitStore {
             Err(std::fs::TryLockError::WouldBlock) => return,
             Err(std::fs::TryLockError::Error(e)) => {
                 STATS.io_errors.fetch_add(1, Ordering::Relaxed);
-                cache_log(format_args!("gc: lock failed: {e}"));
+                cache_log(format_args!("evict: lock failed: {e}"));
                 return;
             }
         }
@@ -329,13 +367,13 @@ impl FileSystemJitStore {
             }
         }
         cache_log(format_args!(
-            "gc: deleted {deleted} entries, {total} bytes remain (capacity {})",
+            "evict: deleted {deleted} entries, {total} bytes remain (capacity {})",
             self.capacity_bytes
         ));
     }
 }
 
-/// Logs a soft cache failure (and gc summaries) when `CUTILE_JIT_LOG` is on.
+/// Logs a soft cache failure (and eviction summaries) when `CUTILE_JIT_LOG` is on.
 /// The cache never escalates its own I/O problems beyond this line.
 pub(crate) fn cache_log(msg: std::fmt::Arguments<'_>) {
     use std::sync::OnceLock;
@@ -373,7 +411,7 @@ impl JitStore for FileSystemJitStore {
 
         // An entry larger than the low watermark can never be retained:
         // eviction deletes down to `capacity × low_watermark`, so this value
-        // alone would exceed that target and GC would delete it (last, after
+        // alone would exceed that target and eviction would delete it (last, after
         // wiping every other entry). Decline it rather than storing it and
         // thrashing the whole cache on every write. `capacity_bytes == 0` means
         // unbounded — store anything.
@@ -407,7 +445,7 @@ impl JitStore for FileSystemJitStore {
         ));
         // Remove the temp file on either failure: a failed write (e.g. ENOSPC)
         // otherwise leaves a partial temp behind, and the only reaper is a
-        // *successful* put's GC trigger — which never fires while writes keep
+        // *successful* put's eviction trigger — which never fires while writes keep
         // failing, so the leak would grow unbounded.
         std::fs::write(&temp_path, value).inspect_err(|_| {
             let _ = std::fs::remove_file(&temp_path);
@@ -433,14 +471,10 @@ impl JitStore for FileSystemJitStore {
         if self.capacity_bytes > 0 {
             let threshold = u128::from((self.capacity_bytes / 16).max(1));
             let len = value.len() as u128;
-            let draw = u128::from(u64::from_le_bytes(
-                nonce.as_bytes()[..8]
-                    .try_into()
-                    .expect("uuid is 16 bytes, 8 taken"),
-            ));
+            let draw = u128::from(eviction_draw(&nonce));
             // draw / 2^64 < len / threshold, in exact integer arithmetic.
             if draw * threshold < len << 64 {
-                self.collect_garbage();
+                self.evict();
             }
         }
         Ok(())
@@ -781,6 +815,31 @@ pub fn decode_entry(bytes: &[u8], params: &EntryParams<'_>) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use cutile_ir::bytecode::BytecodeVersion;
+
+    /// Every bit of the eviction draw must take both values across draws. A v4
+    /// uuid fixes its version nibble (byte 6) and variant bits (byte 8), so a
+    /// verbatim read of the first 8 bytes pins bit 54 to 1 — a `2^54` floor on
+    /// the draw that silences the trigger for every entry under
+    /// `threshold/1024` (128 KiB at the default capacity: all real cubins).
+    /// 1024 draws make a stuck bit escape detection with probability
+    /// `128 · 2^-1024`: never.
+    #[test]
+    fn eviction_draw_has_no_fixed_bits() {
+        let mut seen_one = 0u64;
+        let mut seen_zero = 0u64;
+        for _ in 0..1024 {
+            let draw = eviction_draw(&uuid::Uuid::new_v4());
+            seen_one |= draw;
+            seen_zero |= !draw;
+        }
+        assert_eq!(seen_one, u64::MAX, "bits never 1: {:#066b}", !seen_one);
+        assert_eq!(
+            seen_zero,
+            u64::MAX,
+            "bits never 0 (bit 54 stuck was the uuid version-nibble bug): {:#066b}",
+            !seen_zero
+        );
+    }
 
     const V: BytecodeVersion = BytecodeVersion {
         major: 13,

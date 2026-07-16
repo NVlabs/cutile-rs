@@ -7,10 +7,10 @@
 //! behavior, write atomicity, and the process-global enable/disable switch.
 //!
 //! Key derivation and the entry codec are covered by unit tests in
-//! `src/jit_store.rs`; this file exercises the parts that touch the
+//! `src/jit_cache.rs`; this file exercises the parts that touch the
 //! filesystem and global state.
 
-use cutile_compiler::jit_store::{disable, enable, is_enabled, FileSystemJitStore, JitStore};
+use cutile_compiler::jit_cache::{disable, enable, is_enabled, FileSystemJitStore, JitStore};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +28,7 @@ impl TestDir {
     fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "cutile_jit_store_test_{}_{}",
+            "cutile_jit_cache_test_{}_{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
@@ -197,9 +197,9 @@ fn enable_disable_is_repeatable() {
         fn put(&self, _: &str, _: &[u8]) -> io::Result<()> {
             Ok(())
         }
-        fn contains(&self, _: &str) -> io::Result<bool> {
-            Ok(false)
-        }
+        // `contains` deliberately not implemented: the trait's get-based
+        // default covers it, which is the "minimal custom backend" surface
+        // the trait promises.
         fn delete(&self, _: &str) -> io::Result<()> {
             Ok(())
         }
@@ -221,7 +221,7 @@ fn enable_disable_is_repeatable() {
 
 // ── Eviction ────────────────────────────────────────────────────────────────
 
-use cutile_compiler::jit_store::GC_LOCK_FILE_NAME;
+use cutile_compiler::jit_cache::EVICTION_LOCK_FILE_NAME;
 use std::time::{Duration, SystemTime};
 
 fn entry_path(root: &std::path::Path, k: &str) -> PathBuf {
@@ -304,7 +304,7 @@ fn lru_evicts_oldest_entries_first() {
 
 /// The capacity bound must hold when every process is short-lived — which is
 /// the deployment this cache exists for (#181): a process serves one request,
-/// compiles a handful of kernels, exits. Each writes far less than the GC
+/// compiles a handful of kernels, exits. Each writes far less than the eviction
 /// threshold, so a trigger that sums only the current process's writes would
 /// never fire in any of them and the cache would grow without bound. Every
 /// iteration here opens a fresh store (a fresh "process") and puts once.
@@ -316,7 +316,7 @@ fn lru_evicts_oldest_entries_first() {
 fn capacity_holds_across_short_lived_processes() {
     let dir = TestDir::new();
     const ENTRY_BYTES: usize = 200;
-    const CAPACITY: u64 = 8192; // GC threshold = capacity/16 = 512 bytes
+    const CAPACITY: u64 = 8192; // eviction threshold = capacity/16 = 512 bytes
     const PUTS: u8 = 200; // 40_000 bytes written in total, ~5× capacity
 
     for tag in 0..PUTS {
@@ -340,7 +340,7 @@ fn capacity_holds_across_short_lived_processes() {
 }
 
 /// An entry larger than the low watermark is declined, not stored: otherwise
-/// its own put would trigger a GC that deletes every other entry and then the
+/// its own put would trigger an eviction that deletes every other entry and then the
 /// oversized entry itself, wiping the whole cache on every write.
 #[test]
 fn oversized_entry_is_declined_and_preserves_cache() {
@@ -403,11 +403,11 @@ fn get_refreshes_entry_mtime() {
     );
 }
 
-/// While another process holds `.gc.lock`, a triggered collection returns
+/// While another process holds `.eviction.lock`, a triggered collection returns
 /// without deleting anything; once the lock is free, the next trigger
-/// collects. Deterministic version of "two concurrent GCs, only one runs".
+/// collects. Deterministic version of "two concurrent evictions, only one runs".
 #[test]
-fn gc_skips_while_lock_is_held() {
+fn eviction_skips_while_lock_is_held() {
     let dir = TestDir::new();
 
     let seed = FileSystemJitStore::builder(&dir.0)
@@ -429,7 +429,7 @@ fn gc_skips_while_lock_is_held() {
         .unwrap();
 
     // Simulate another process mid-collection.
-    let lock = std::fs::File::create(dir.0.join(GC_LOCK_FILE_NAME)).unwrap();
+    let lock = std::fs::File::create(dir.0.join(EVICTION_LOCK_FILE_NAME)).unwrap();
     lock.try_lock().unwrap();
 
     // 512 ≥ capacity/16 = 256: triggers a collection attempt, which must skip.
@@ -452,7 +452,7 @@ fn gc_skips_while_lock_is_held() {
 /// Collection scans also remove temp files old enough to be leftovers of a
 /// crashed process — and only those; an in-flight temp (fresh mtime) stays.
 #[test]
-fn gc_removes_stale_temp_files_only() {
+fn eviction_removes_stale_temp_files_only() {
     let dir = TestDir::new();
     let store = FileSystemJitStore::builder(&dir.0)
         .capacity_bytes(1_000_000)
@@ -481,7 +481,7 @@ fn builder_rejects_invalid_watermarks() {
     let dir = TestDir::new();
     for (high, low) in [(0.5, 0.8), (1.0, 0.0), (1.0, -0.1), (f64::NAN, 0.8)] {
         let err = FileSystemJitStore::builder(&dir.0)
-            .gc_watermarks(high, low)
+            .eviction_watermarks(high, low)
             .open()
             .unwrap_err();
         assert_eq!(
