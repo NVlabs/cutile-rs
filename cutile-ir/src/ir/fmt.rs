@@ -714,6 +714,16 @@ impl<'a> ModulePrinter<'a> {
                         write!(out, "{}", format_type(ty)).unwrap();
                     }
                 }
+                // `print_tko` carries a token result (v13.2+).
+                if !op.result_types.is_empty() {
+                    write!(out, " -> ").unwrap();
+                    for (i, ty) in op.result_types.iter().enumerate() {
+                        if i > 0 {
+                            write!(out, ", ").unwrap();
+                        }
+                        write!(out, "{}", format_type(ty)).unwrap();
+                    }
+                }
                 writeln!(out).unwrap();
             }
 
@@ -2633,16 +2643,20 @@ fn print_dense_elements_array(shape: &[i64], sc: ScalarType, data: &[u8], out: &
         } else {
             shape[0] as usize
         };
-        // Check if all elements are the same (splat).
+        // Splat prints as a bare scalar; an explicit list is bracketed (`[1, 2]`).
         if count > 1 && is_splat(sc, data, count) {
             write!(out, "{}", decode_scalar(sc, data, 0)).unwrap();
-        } else {
+        } else if count > 1 {
+            write!(out, "[").unwrap();
             for i in 0..count {
                 if i > 0 {
                     write!(out, ", ").unwrap();
                 }
                 write!(out, "{}", decode_scalar(sc, data, i * bw)).unwrap();
             }
+            write!(out, "]").unwrap();
+        } else {
+            write!(out, "{}", decode_scalar(sc, data, 0)).unwrap();
         }
     } else {
         // Multi-dimensional: recurse.

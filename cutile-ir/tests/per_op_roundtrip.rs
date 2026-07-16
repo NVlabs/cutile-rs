@@ -56,6 +56,17 @@ fn assert_roundtrip(module: &Module) {
         decoded.contains("TileIR bytecode v13."),
         "missing header in decoded output"
     );
+
+    // Full structural decode: bytecode -> ir::Module -> re-encode must be
+    // byte-identical (these modules use Location::Unknown, so no debug section).
+    let m = cutile_ir::bytecode::decoder::decode_module(&bytecode)
+        .unwrap_or_else(|e| panic!("decode_module failed: {e}"));
+    let reencoded =
+        cutile_ir::write_bytecode(&m).unwrap_or_else(|e| panic!("re-encode failed: {e}"));
+    assert_eq!(
+        bytecode, reencoded,
+        "decode_module round-trip is not byte-identical"
+    );
 }
 
 // Common types used across tests.
@@ -177,7 +188,8 @@ fn roundtrip_simple_unary_ops() {
         Opcode::Log,
         Opcode::Log2,
         Opcode::NegF,
-        Opcode::Pow,
+        // Pow is binary ($source, $exponent — see ir/fmt.rs); covered by a
+        // 2-operand test below, not here with the unary ops.
         Opcode::Sin,
         Opcode::SinH,
         Opcode::Tan,
@@ -194,6 +206,19 @@ fn roundtrip_simple_unary_ops() {
         });
         assert_roundtrip(&module);
     }
+}
+
+#[test]
+fn roundtrip_pow_binary() {
+    let module = build_kernel("pow", &[tile_f32(), tile_f32()], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::Pow, Location::Unknown)
+            .operand(args[0])
+            .operand(args[1])
+            .result(tile_f32())
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -604,11 +629,12 @@ fn roundtrip_absi() {
 
 #[test]
 fn roundtrip_negi_with_overflow() {
+    // overflow 0 (NONE) is elided on decode, so use a non-default value here.
     let module = build_kernel("negi", &[tile_i32()], |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::NegI, Location::Unknown)
             .operand(args[0])
             .result(tile_i32())
-            .attr("overflow", Attribute::i32(0))
+            .attr("overflow", Attribute::i32(1))
             .build(m);
         append_op(m, b, op);
     });
@@ -1391,7 +1417,10 @@ fn roundtrip_reduce() {
             .operand(args[0])
             .result(scalar_f32())
             .attr("dim", Attribute::i32(0))
-            .attr("identities", Attribute::String("0.0".into()))
+            .attr(
+                "identities",
+                Attribute::Array(vec![Attribute::float(0.0, ScalarType::F32)]),
+            )
             .region(region)
             .build(m);
         append_op(m, b, op);
@@ -1419,7 +1448,10 @@ fn roundtrip_scan_forward() {
             .result(tile_f32())
             .attr("dim", Attribute::i32(0))
             .attr("reverse", Attribute::i32(0))
-            .attr("identities", Attribute::String("0.0".into()))
+            .attr(
+                "identities",
+                Attribute::Array(vec![Attribute::float(0.0, ScalarType::F32)]),
+            )
             .region(region)
             .build(m);
         append_op(m, b, op);
@@ -1447,7 +1479,10 @@ fn roundtrip_scan_reverse() {
             .result(tile_f32())
             .attr("dim", Attribute::i32(0))
             .attr("reverse", Attribute::i32(1))
-            .attr("identities", Attribute::String("0.0".into()))
+            .attr(
+                "identities",
+                Attribute::Array(vec![Attribute::float(0.0, ScalarType::F32)]),
+            )
             .region(region)
             .build(m);
         append_op(m, b, op);
