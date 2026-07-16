@@ -55,3 +55,6 @@ mod warmup;
 
 #[path = "gpu/warmup_bench.rs"]
 mod warmup_bench;
+
+#[path = "gpu/future_drop.rs"]
+mod future_drop;
