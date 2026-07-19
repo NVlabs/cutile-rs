@@ -281,7 +281,8 @@ pub fn init_device_contexts(
     DEVICE_CONTEXTS.with(|ctx| match ctx.devices.take() {
         ContextState::Uninitialized => {
             ctx.default_device.set(default_device_id);
-            ctx.devices.set(ContextState::Available(HashMap::with_capacity(num_devices)));
+            ctx.devices
+                .set(ContextState::Available(HashMap::with_capacity(num_devices)));
             Ok(())
         }
         ContextState::Available(map) => {

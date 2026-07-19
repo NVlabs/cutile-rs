@@ -15,7 +15,9 @@
 //!   - Wrapping a custom kernel in a `DeviceOp` struct for a safe call-site
 //!   - Chaining tile and custom kernels on the same stream with `and_then`
 
-use cuda_async::device_context::{load_module_from_ptx, pool_for_stream, with_default_device_policy};
+use cuda_async::device_context::{
+    load_module_from_ptx, pool_for_stream, with_default_device_policy,
+};
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::DeviceOp;
 use cuda_async::device_operation::ExecutionContext;

@@ -12,7 +12,7 @@
 //! starts clean.
 
 use cuda_async::device_context::{
-    clear_device_pool, clear_device_poison, get_device_pool, global_policy, init_device_contexts,
+    clear_device_poison, clear_device_pool, get_device_pool, global_policy, init_device_contexts,
     is_device_poisoned, pool_for_stream, reset_device, set_device_pool, with_device,
     with_global_device_context, with_global_device_context_mut,
 };

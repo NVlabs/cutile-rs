@@ -134,7 +134,6 @@
 use crate::kernels::conversion::convert_apply;
 use crate::kernels::creation::{arange_apply, eye_apply, full_apply, linspace as linspace_kernel};
 use crate::tensor::{IntoPartition, Reshape, Storage, Tensor, Unpartition};
-use cuda_async::device_buffer::DeviceBuffer;
 use cuda_async::device_context::{pool_for_stream, with_default_device_policy};
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
