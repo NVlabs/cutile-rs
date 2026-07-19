@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 description = "NVIDIA CUDA bindings."
 readme = "README.md"
-license-file = "../LICENSE-NVIDIA"
+license.workspace = true
 repository.workspace = true
 
 [lib]

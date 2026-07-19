@@ -17,7 +17,7 @@
 //! let artifacts = KernelCompiler::new(my_module::__module_ast_self, "my_module", "add")
 //!     .generics(vec!["32".into()])
 //!     .strides(&[("c", &[1])])
-//!     .target("sm_80")
+//!     .target("sm_120")
 //!     .compile()?;
 //!
 //! println!("{}", artifacts.ir_text());
@@ -71,7 +71,7 @@ impl CompileArtifacts {
 /// let artifacts = KernelCompiler::new(my_module::__module_ast_self, "my_module", "tile_math")
 ///     .generics(vec!["32".into()])
 ///     .strides(&[("output", &[1])])
-///     .target("sm_80")
+///     .target("sm_120")
 ///     .compile()?;
 /// ```
 pub struct KernelCompiler<F: Fn() -> crate::ast::Module> {
@@ -98,7 +98,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             module_ast_fn,
             module_name: module_name.to_string(),
             function_name: function_name.to_string(),
-            gpu_name: "sm_80".to_string(),
+            gpu_name: "sm_120".to_string(),
             generics: Vec::new(),
             stride_args: Vec::new(),
             spec_args: Vec::new(),
@@ -108,8 +108,8 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         }
     }
 
-    /// Sets the target GPU architecture (e.g. `"sm_80"`, `"sm_100"`).
-    /// Defaults to `"sm_80"`.
+    /// Sets the target GPU architecture (e.g. `"sm_80"`, `"sm_120"`).
+    /// Defaults to `"sm_120"`.
     pub fn target(mut self, gpu_name: &str) -> Self {
         self.gpu_name = gpu_name.to_string();
         self
@@ -178,7 +178,6 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             .iter()
             .map(|(name, s)| (name.as_str(), s))
             .collect();
-
         let scalar_hint_refs: Vec<(&str, &DivHint)> = self
             .scalar_hints
             .iter()

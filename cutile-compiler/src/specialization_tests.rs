@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #[cfg(test)]
 mod tests {
     use crate::specialization::*;
@@ -211,5 +216,73 @@ mod tests {
         set.insert(a.clone());
         assert!(set.contains(&b));
         assert!(!set.contains(&c));
+    }
+
+    /// Meta-tensor key parity: `from_ptr` clamps alignment to 16 and every real
+    /// allocation is >=16-aligned, so `api::meta`'s sentinel-16 `base_ptr_div`
+    /// matches theirs — otherwise `.compile()` warmup would miss the real launch.
+    #[test]
+    fn meta_sentinel_matches_real_aligned_ptr() {
+        let meta = DivHint::from_ptr(16);
+        assert_eq!(
+            meta,
+            DivHint {
+                divisor: 16,
+                max: 16
+            }
+        );
+
+        // Representative real device addresses, all >=256-aligned (cudaMalloc's
+        // minimum), including 64-bit values that truncate and/or go negative
+        // under `as i32`, and the fully-aligned case whose low 32 bits are zero.
+        for &addr in &[
+            256u64,
+            4096,
+            0x10_0000,
+            0x7f00_1234_0000,
+            0x7fff_ffff_ff00,
+            u64::from(u32::MAX) + 1,
+        ] {
+            assert_eq!(
+                DivHint::from_ptr(addr),
+                meta,
+                "real >=16-aligned ptr {addr:#x} must yield the same base_ptr_div \
+                 as the meta sentinel (16); cache-key parity broken",
+            );
+        }
+    }
+
+    /// The full spec (not just `base_ptr_div`) is byte-identical for meta vs real
+    /// of the same layout — every other field is pure shape/stride metadata.
+    #[test]
+    fn meta_spec_equals_real_spec_for_same_layout() {
+        let shape = [256, 4];
+        let strides = [4, 1];
+        let meta_spec = compute_spec(16, &shape, &strides, 4);
+        let real_spec = compute_spec(0x7f00_1234_0000, &shape, &strides, 4);
+        assert_eq!(
+            meta_spec, real_spec,
+            "meta and real specs must be byte-identical for the same layout",
+        );
+    }
+
+    /// Slicing offsets the sentinel (16) instead of a real base. `base_ptr_div`
+    /// depends only on the low 4 bits, and both 16 and a >=256-aligned real base
+    /// have those bits zero — so `+offset` matches for every offset, letting
+    /// `.compile()` warm slicing kernels.
+    #[test]
+    fn sliced_meta_spec_matches_real_across_offsets() {
+        let shape = [8];
+        let strides = [1];
+        let sentinel: u64 = 16;
+        let real_base: u64 = 0x7f00_1234_0000; // 256-aligned, like cudaMalloc
+        for offset in [0u64, 2, 4, 8, 12, 16, 24, 32, 48, 64, 128, 4096] {
+            let meta = compute_spec(sentinel + offset, &shape, &strides, 4);
+            let real = compute_spec(real_base + offset, &shape, &strides, 4);
+            assert_eq!(
+                meta, real,
+                "offset {offset}: sliced meta spec must equal the real spec",
+            );
+        }
     }
 }

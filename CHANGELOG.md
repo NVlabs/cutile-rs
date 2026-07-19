@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-16
+
+This release collects the changes since `0.1.0` and focuses on low-precision
+inference support while also publishing the reproducibility artifacts for the
+cuTile Rust paper, *Fearless Concurrency on the GPU*.
+
+### Highlights
+
+- Added CUDA 13.3-oriented low-precision inference support, including NVFP4
+  pack/unpack support, block-scaled matrix multiply support, and runnable NVFP4
+  and MXFP8 linear-tile examples.
+- Added `cutile-kernels`, a reusable kernel crate organized by function for
+  inference workloads. It includes attention, normalization, positional
+  encoding, KV-cache update, embedding, argmax, and pointwise kernels, with
+  experimental low-level and benchmark-oriented kernels for fused transformer
+  paths, KVBM layout conversion, and grouped GEMM/MoE work.
+- Added compile-only coverage and smoke tests for reusable kernels, and moved
+  test-only examples into the test suite so `cutile-examples` stays focused on
+  user-facing examples.
+- Added paper reproducibility artifacts under `cutile-benchmarks/paper/`,
+  including benchmark harnesses, committed result files, machine notes, and
+  plotting scripts.
+- Updated the root README with the paper link, citation information, paper
+  artifacts, related projects, and the current cuTile Rust execution/lowering
+  model.
+
+### Paper Results
+
+- On NVIDIA B200, cuTile Rust reaches 7 TB/s for element-wise operations and
+  2 PFlop/s for GEMM, about 91% of peak memory bandwidth and 92% of dense `f16`
+  peak, respectively.
+- Safe Rust persistent GEMM reaches 2.07 PFlop/s at `M=N=K=8192`, within 0.3%
+  of the corresponding low-level Tile IR variant, showing safety without
+  measurable runtime overhead.
+- Grout, a Qwen3 inference engine built with cuTile Rust in collaboration with
+  Hugging Face, reaches 171 tokens/s for Qwen3-4B on NVIDIA GeForce RTX 5090
+  and 82 tokens/s for Qwen3-32B on B200 in batch-1 decode, showing competitive
+  state-of-the-art performance on memory-bound inference tasks as measured by
+  the HBM roofline analysis.
+
+### Changed
+
+- Split CPU and GPU test entry points so compile-only tests do not require a
+  GPU, while GPU tests actually execute GPU work.
+- Updated compile-only testing to use `KernelCompiler` and default to `sm_120`
+  where a local GPU architecture is not required.
+- Reorganized and refreshed the book and examples around the current
+  host/device API, CUDA graphs, JIT compilation, performance guidance, and
+  low-precision inference, with support for versioned book builds.
+
+## [0.1.1] - 2026-06-01
+
+This patch release added the first CUDA 13.3 low-precision Tile IR support and
+refreshed the book publishing flow.
+
+### Added
+
+- Added NVFP4 support in CUDA dtype handling, Tile IR formatting, bytecode
+  encoding/decoding, compiler intrinsic lowering, and the public device DSL.
+- Added CUDA 13.3 bytecode, per-op round-trip, and tensor/matrix operation
+  tests covering the new low-precision Tile IR surface.
+- Added runnable NVFP4 and MXFP8 examples, plus a new book tutorial for NVFP4
+  inference.
+- Added scripts and documentation for building and publishing versioned book
+  releases.
+
+### Changed
+
+- Updated compiler lowering, specialization handling, and Tile IR type support
+  for CUDA 13.3 low-precision operations.
+- Updated examples, book references, and architecture notes to describe the
+  current lowering path and low-precision inference APIs.
+- Bumped the workspace package versions to `0.1.1`.
+
 ## [0.1.0] - 2026-05-16
 
 This is the first cuTile Rust beta release with stable host-side and
@@ -35,8 +109,8 @@ unless a correctness issue requires otherwise.
 - Added CUDA runtime ergonomics: dynamically loaded CUDA bindings, configurable
   `tileiras` binary override, custom memory pools, memory accounting, and JIT
   timing support.
-- Updated the book, README, examples, and internal release/docs material to
-  describe the stable host/device APIs and current interop story.
+- Updated the book, README, and examples to describe the stable host/device
+  APIs and current interop story.
 
 ### Fixed
 

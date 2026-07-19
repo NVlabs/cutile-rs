@@ -972,7 +972,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             .compile_type(target_ty, self.generic_vars, &HashMap::new())
         {
             Ok(ty) => Ok(ty),
-            Err(err) if is_surface_only_scalar_type(target_ty) => Ok(None),
+            Err(_) if is_surface_only_scalar_type(target_ty) => Ok(None),
             Err(err) => Err(err),
         }
     }

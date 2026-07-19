@@ -12,9 +12,9 @@
 //! starts clean.
 
 use cuda_async::device_context::{
-    clear_device_pool, clear_device_poison, contains_cuda_function, get_device_pool, global_policy,
-    init_device_contexts, is_device_poisoned, pool_for_stream, reset_device, set_device_pool,
-    with_device, with_global_device_context, with_global_device_context_mut, FunctionKey,
+    clear_device_pool, clear_device_poison, get_device_pool, global_policy, init_device_contexts,
+    is_device_poisoned, pool_for_stream, reset_device, set_device_pool, with_device,
+    with_global_device_context, with_global_device_context_mut,
 };
 use cuda_async::device_operation::{value, DeviceOp};
 use cuda_async::prelude::*;
@@ -503,12 +503,10 @@ fn panic_recovery_restores_context_state() {
     });
 }
 
-#[derive(Hash)]
-struct TestKey(u64);
-impl FunctionKey for TestKey {}
-
+// The kernel cache is process-global and never reads the per-thread device
+// context, so it has no poison to propagate; only pool lookups do.
 #[test]
-fn pool_and_cache_lookups_propagate_poison_error() {
+fn pool_lookups_propagate_poison_error() {
     on_fresh_thread(|| {
         init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
         let stream = global_policy(0)
@@ -529,15 +527,6 @@ fn pool_and_cache_lookups_propagate_poison_error() {
                 Err(cuda_async::error::DeviceError::Context { device_id: 0, .. })
             ),
             "pool_for_stream must propagate the poison error, got: {pool_res:?}"
-        );
-
-        let cache_res = contains_cuda_function(0, &TestKey(42));
-        assert!(
-            matches!(
-                cache_res,
-                Err(cuda_async::error::DeviceError::Context { device_id: 0, .. })
-            ),
-            "contains_cuda_function must propagate the poison error, got: {cache_res:?}"
         );
     });
 }

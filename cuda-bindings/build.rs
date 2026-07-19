@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: LicenseRef-NVIDIA-SOFTWARE-LICENSE
+// SPDX-License-Identifier: Apache-2.0
 
-use std::{env, error::Error, fs, path::Path, process::exit};
+use std::{
+    env,
+    error::Error,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::exit,
+};
 
 use bindgen::CodegenConfig;
 use proc_macro2::TokenStream;
@@ -10,6 +17,10 @@ use syn::{
     Expr, Fields, File, GenericArgument, Item, ItemStruct, PathArguments, ReturnType, Type,
     TypeBareFn,
 };
+
+const MIN_CUDA_VERSION: u32 = 13020;
+const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
+const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
 
 struct ApiSpec {
     virtual_header: &'static str,
@@ -57,10 +68,12 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rerun-if-env-changed=CUDA_TOOLKIT_PATH");
+    println!("cargo:rerun-if-env-changed={CUDA_TOOLKIT_PATH_ENV}");
+    println!("cargo:rerun-if-env-changed={SETUP_DIAGNOSTICS_ENV}");
 
-    let cuda_toolkit =
-        env::var("CUDA_TOOLKIT_PATH").expect("CUDA_TOOLKIT_PATH is required but not set");
+    let cuda_toolkit = resolve_cuda_toolkit()?;
+    let cuda_toolkit = cuda_toolkit.to_string_lossy().into_owned();
+    println!("cargo:rustc-env=CUTILE_RESOLVED_CUDA_TOOLKIT_PATH={cuda_toolkit}");
     let out_dir = env::var("OUT_DIR")?;
     let out_dir = Path::new(&out_dir);
 
@@ -70,6 +83,147 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn resolve_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
+    match env::var_os(CUDA_TOOLKIT_PATH_ENV) {
+        Some(value) if value.is_empty() => Err(format!(
+            "{CUDA_TOOLKIT_PATH_ENV} is set to an empty string. Set it to a CUDA 13.2+ toolkit directory."
+        )
+        .into()),
+        Some(value) => resolve_explicit_cuda_toolkit(value),
+        None => find_default_cuda_toolkit(),
+    }
+}
+
+fn resolve_explicit_cuda_toolkit(value: OsString) -> Result<PathBuf, Box<dyn Error>> {
+    let cuda_toolkit = PathBuf::from(value);
+    let version = validate_cuda_toolkit(&cuda_toolkit).map_err(|error| {
+        format!(
+            "{CUDA_TOOLKIT_PATH_ENV}={} is invalid: {error}",
+            cuda_toolkit.display()
+        )
+    })?;
+    emit_setup_diagnostic(format_args!(
+        "using {CUDA_TOOLKIT_PATH_ENV}={} (CUDA {})",
+        cuda_toolkit.display(),
+        format_cuda_version(version)
+    ));
+    Ok(cuda_toolkit)
+}
+
+fn find_default_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
+    let mut rejected = Vec::new();
+    for cuda_toolkit in default_cuda_toolkit_candidates() {
+        match validate_cuda_toolkit(cuda_toolkit) {
+            Ok(version) => {
+                emit_setup_diagnostic(format_args!(
+                    "{CUDA_TOOLKIT_PATH_ENV} is unset; using discovered CUDA toolkit {} (CUDA {})",
+                    cuda_toolkit.display(),
+                    format_cuda_version(version)
+                ));
+                return Ok(cuda_toolkit.to_path_buf());
+            }
+            Err(error) => {
+                emit_setup_diagnostic(format_args!(
+                    "{CUDA_TOOLKIT_PATH_ENV} is unset; skipping {}: {error}",
+                    cuda_toolkit.display()
+                ));
+                rejected.push(format!("  - {}: {error}", cuda_toolkit.display()));
+            }
+        }
+    }
+
+    Err(format!(
+        "{CUDA_TOOLKIT_PATH_ENV} is not set, and no CUDA 13.2+ toolkit was found in default locations:\n{}\nSet {CUDA_TOOLKIT_PATH_ENV} to a CUDA 13.2+ toolkit directory.",
+        rejected.join("\n")
+    )
+    .into())
+}
+
+fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
+    static CANDIDATES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    CANDIDATES.get_or_init(|| {
+        #[cfg(windows)]
+        let candidates = [
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3",
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2",
+        ];
+        #[cfg(not(windows))]
+        let candidates = [
+            "/usr/local/cuda-13.3",
+            "/usr/local/cuda-13.2",
+            "/usr/local/cuda-13",
+            "/usr/local/cuda",
+        ];
+
+        candidates.into_iter().map(PathBuf::from).collect()
+    })
+}
+
+fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<u32, String> {
+    if !cuda_toolkit.is_dir() {
+        return Err(format!("{} is not a directory", cuda_toolkit.display()));
+    }
+
+    let cuda_h = cuda_toolkit.join("include").join("cuda.h");
+    if !cuda_h.is_file() {
+        return Err(format!(
+            "{} does not contain include/cuda.h",
+            cuda_toolkit.display(),
+        ));
+    }
+
+    let version = cuda_version_from_header(&cuda_h).map_err(|error| error.to_string())?;
+    if version < MIN_CUDA_VERSION {
+        return Err(format!(
+            "CUDA toolkit {} is too old. cuTile requires CUDA 13.2+ and recommends CUDA 13.3",
+            format_cuda_version(version)
+        ));
+    }
+
+    Ok(version)
+}
+
+fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, Box<dyn Error>> {
+    let source = fs::read_to_string(cuda_h)?;
+    source
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some("#define"), Some("CUDA_VERSION"), Some(version)) => version.parse().ok(),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH to a CUDA 13.2+ toolkit directory.",
+                cuda_h.display()
+            )
+            .into()
+        })
+}
+
+fn format_cuda_version(version: u32) -> String {
+    format!("{}.{}", version / 1000, (version % 1000) / 10)
+}
+
+fn setup_diagnostics_enabled() -> bool {
+    env::var(SETUP_DIAGNOSTICS_ENV)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn emit_setup_diagnostic(args: std::fmt::Arguments<'_>) {
+    if setup_diagnostics_enabled() {
+        println!("cargo:warning={args}");
+    }
 }
 
 fn generate_type_bindings(cuda_toolkit: &str, out_dir: &Path) -> Result<(), Box<dyn Error>> {

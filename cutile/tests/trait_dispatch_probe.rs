@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 //! Probe for the trait-dispatch emission pattern used by `cutile-macro`.
 //!
 //! Validates that the "single rank-polymorphic trait + per-rank impls + free-fn

@@ -3,15 +3,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Thread-local GPU device state, kernel cache, and scheduling policy management.
+//! GPU device state, global kernel cache, and scheduling policy management.
+//!
+//! ## Architecture
+//!
+//! - **Global (process-wide)**: [`Device`] per device and compiled kernel cache are shared
+//!   across all threads via [`OnceLock`] and [`DashMap`]. This allows compilation results from
+//!   one thread (e.g. warmup) to be visible to all worker threads.
+//!
+//! - **Per-thread**: Scheduling policy and deallocator stream remain thread-local, since
+//!   different threads may want different stream assignments.
+//!
+//! - **Compilation dedup**: When multiple threads need the same kernel, only one compiles it
+//!   while the rest wait, via `DashMap<Key, Arc<OnceLock<CompiledKernel>>>`.
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{Device, Function, MemPool, Module, Stream};
+use dashmap::DashMap;
+use once_cell::sync::OnceCell;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The GPU device used when no explicit device is specified. Device 0 is the first GPU.
 pub const DEFAULT_DEVICE_ID: usize = 0;
@@ -28,6 +42,7 @@ pub const DEFAULT_NUM_DEVICES: usize = 1;
 pub const DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE: usize = 4;
 
 pub trait FunctionKey: Hash {
+    /// Fast hash for in-memory cache lookup (uses `DefaultHasher`).
     fn get_hash_string(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
@@ -66,21 +81,85 @@ pub struct Validator {
     pub params: Vec<ValidParamType>,
 }
 
-type DeviceFunctions = HashMap<String, (Arc<Module>, Arc<Function>)>;
-type DeviceFunctionValidators = HashMap<String, Arc<Validator>>;
+// ── Global Device (process-wide, per-device singleton) ─────────────────────
 
-/// Per-device state: GPU device, scheduling policy, and compiled kernel cache.
+/// Global per-device handles. Shared across all threads so that
+/// `Module`/`Function` loaded against a device can be used from any thread.
+static DEVICES: OnceLock<Mutex<HashMap<usize, Arc<Device>>>> = OnceLock::new();
+
+fn devices() -> &'static Mutex<HashMap<usize, Arc<Device>>> {
+    DEVICES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Get or create the global [`Device`] for a device ordinal.
 ///
-/// Each GPU device has one `AsyncDeviceContext` stored in a thread-local map. It holds:
+/// The first call for a given `device_id` creates the device handle; subsequent
+/// calls return the same `Arc<Device>`.
+fn get_or_init_device(device_id: usize) -> Result<Arc<Device>, DeviceError> {
+    let mut devices = devices()
+        .lock()
+        .map_err(|_| device_error(device_id, "device map lock poisoned"))?;
+    if let Some(device) = devices.get(&device_id) {
+        return Ok(Arc::clone(device));
+    }
+    let device = Device::new(device_id)?;
+    devices.insert(device_id, Arc::clone(&device));
+    Ok(device)
+}
+
+// ── Global kernel cache (process-wide, cross-thread) ────────────────────────
+
+/// A compiled kernel: module, function handle, and parameter validator.
+#[derive(Debug)]
+pub struct CompiledKernel {
+    pub module: Arc<Module>,
+    pub function: Arc<Function>,
+    pub validator: Arc<Validator>,
+}
+
+/// Global kernel cache. `DashMap` for cross-thread sharing; inner `OnceLock` for
+/// single-flight compilation dedup (if multiple threads need the same kernel,
+/// only one compiles while the rest wait). Uses `once_cell::sync::OnceCell`
+/// for stable fallible initialization (`get_or_try_init`).
 ///
-/// - A [`Device`] for driver API calls.
-/// - A [`SchedulingPolicy`] that decides which stream each operation runs on.
-/// - A cache of already-compiled kernel functions (keyed by [`FunctionKey::get_hash_string()`]).
+/// Grows unbounded: no cap or LRU (cutile-python caps at 2 GB with LRU
+/// eviction). Eviction is deferred to the disk-cache follow-up.
+static KERNEL_CACHE: OnceLock<DashMap<String, Arc<OnceCell<CompiledKernel>>>> = OnceLock::new();
+
+pub fn get_kernel_cache() -> &'static DashMap<String, Arc<OnceCell<CompiledKernel>>> {
+    KERNEL_CACHE.get_or_init(DashMap::new)
+}
+
+/// Get (or create) the single-flight compilation slot for `key_str`.
 ///
-/// The context is lazily initialized on first use with the default round-robin policy
-/// ([`DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE`] = 4 streams). To customize, call
-/// [`init_device_contexts`] before any GPU work.
-// TODO (hme): None of this needs to be compiled per thread.
+/// The returned `OnceCell` lets the caller `get_or_try_init` the compile
+/// exactly once across threads. The DashMap shard lock is released before
+/// this returns, so the slow compile never holds it.
+///
+/// Hits take the read path (shard read lock, no allocation); only a miss falls
+/// back to `entry()` (write lock + owned key).
+pub fn kernel_cache_slot(key_str: &str) -> Arc<OnceCell<CompiledKernel>> {
+    let cache = get_kernel_cache();
+    if let Some(existing) = cache.get(key_str) {
+        return Arc::clone(existing.value());
+    }
+    // `get` returned None holding no lock, so the write path is deadlock-free;
+    // `or_insert_with` still resolves a concurrent insert into one slot per key.
+    Arc::clone(
+        cache
+            .entry(key_str.to_string())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .value(),
+    )
+}
+
+// ── Per-thread device state ──────────────────────────────────────────────────
+
+/// Per-thread, per-device state: scheduling policy, deallocator stream, and
+/// optional memory pool.
+///
+/// The CUDA context and kernel cache are global (see above). This struct only
+/// holds thread-local state.
 pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
     device_id: usize,
@@ -88,13 +167,9 @@ pub struct AsyncDeviceContext {
     /// via [`clear_device_poison`] or [`reset_device`]. Per-device because a
     /// callback's `&mut AsyncDeviceContext` can only damage this one entry.
     poisoned: bool,
-    // TODO: (hme): This will hurt perf due to contention. This should at least be static (OnceLock?).
-    device: Arc<Device>,
     deallocator_stream: Arc<Stream>,
     policy: Arc<dyn SchedulingPolicy>,
     pool: Option<Arc<MemPool>>,
-    functions: DeviceFunctions,
-    validators: DeviceFunctionValidators,
 }
 
 /// Lifecycle state of the per-thread device context map. `Borrowed` makes
@@ -237,17 +312,14 @@ pub fn new_device_context(
     device_id: usize,
     policy: Arc<dyn SchedulingPolicy>,
 ) -> Result<AsyncDeviceContext, DeviceError> {
-    let device = Device::new(device_id)?;
+    let device = get_or_init_device(device_id)?;
     let deallocator_stream = device.new_stream()?;
     Ok(AsyncDeviceContext {
         device_id,
         poisoned: false,
-        device,
         deallocator_stream,
         policy,
         pool: None,
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     })
 }
 
@@ -279,18 +351,15 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let device = Device::new(device_id)?;
+    let device = get_or_init_device(device_id)?;
     let policy = StreamPoolRoundRobin::new(&device, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
     let deallocator_stream = device.new_stream()?;
     let device_context = AsyncDeviceContext {
         device_id,
         poisoned: false,
-        device,
         deallocator_stream,
         policy: Arc::new(policy),
         pool: None,
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     };
     let pred = hashmap.insert(device_id, device_context).is_none();
     device_assert(device_id, pred, "Device is already initialized.")
@@ -352,8 +421,8 @@ pub fn reset_device(device_id: usize) -> Result<(), DeviceError> {
 /// Run `f` with shared access to `device_id`'s context.
 ///
 /// Nested access is unsupported: re-borrowing the per-thread map from
-/// within `f` — directly or transitively (`pool_for_stream`,
-/// `contains_cuda_function`, the recovery fns) — panics on `Borrowed`.
+/// within `f` — directly or transitively (`pool_for_stream`, the recovery
+/// fns) — panics on `Borrowed`.
 /// Intentional and guaranteed; see [`borrow_devices`].
 ///
 /// Returns `Err(DeviceError::Context)` if `device_id` is poisoned; recover
@@ -454,7 +523,8 @@ pub fn with_device<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&Arc<Device>) -> R,
 {
-    with_global_device_context(device_id, |device_context| f(&device_context.device))
+    let device = get_or_init_device(device_id)?;
+    Ok(f(&device))
 }
 
 // Default device policy.
@@ -580,76 +650,14 @@ pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Modul
     })?
 }
 
-/// Store a compiled kernel in the per-device cache so that future calls with the same
-/// [`FunctionKey`] can skip compilation.
-pub fn insert_cuda_function(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-    value: (Arc<Module>, Arc<Function>),
-) -> Result<(), DeviceError> {
-    with_global_device_context_mut(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let res = device_context.functions.insert(key.clone(), value);
-        device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
-    })?
-}
-
 /// Check whether a kernel with the given key has already been compiled and cached.
-///
-/// Propagates context errors (poisoned device, etc.) instead of downgrading
-/// them to `false` — masking the poison would trigger a redundant recompile.
-pub fn contains_cuda_function(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-) -> Result<bool, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        device_context.functions.contains_key(&key)
-    })
-}
-
-/// Retrieve a previously compiled kernel from the cache.
-///
-/// # Panics
-///
-/// Panics if no function with the given key exists. Use [`contains_cuda_function`] to
-/// check first, or rely on the compilation pipeline which always inserts before retrieving.
-pub fn get_cuda_function(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-) -> Result<Arc<Function>, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let entry = device_context
-            .functions
-            .get(&key)
-            .ok_or(device_error(device_id, "Failed to get cuda function."))?;
-        Ok(entry.1.clone())
-    })?
-}
-
-pub fn insert_function_validator(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-    value: Arc<Validator>,
-) -> Result<(), DeviceError> {
-    with_global_device_context_mut(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let res = device_context.validators.insert(key.clone(), value);
-        device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
-    })?
-}
-
-pub fn get_function_validator(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-) -> Result<Arc<Validator>, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let entry = device_context
-            .validators
-            .get(&key)
-            .ok_or(device_error(device_id, "Failed to get function validator."))?;
-        Ok(entry.clone())
-    })?
+pub fn contains_cuda_function(func_key: &impl FunctionKey) -> bool {
+    let key = func_key.get_hash_string();
+    let cache = get_kernel_cache();
+    if let Some(slot) = cache.get(&key) {
+        let lock: &OnceCell<CompiledKernel> = slot.value().as_ref();
+        lock.get().is_some()
+    } else {
+        false
+    }
 }

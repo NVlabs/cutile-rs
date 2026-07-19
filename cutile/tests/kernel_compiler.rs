@@ -30,7 +30,7 @@ fn kernel_compiler_emits_ir_and_bytecode() {
         )
         .generics(vec!["32".into()])
         .strides(&[("output", &[1])])
-        .target("sm_80")
+        .target("sm_120")
         .compile()
         .expect("compile-only kernel compilation failed");
 
