@@ -11,6 +11,7 @@
 //! Each test runs on a fresh thread so that thread-local `DEVICE_CONTEXTS`
 //! starts clean.
 
+use cuda_async::device_buffer::DeviceBuffer;
 use cuda_async::device_context::{
     clear_device_poison, clear_device_pool, get_device_pool, global_policy, init_device_contexts,
     is_device_poisoned, pool_for_stream, reset_device, set_device_pool, with_device,
@@ -531,6 +532,114 @@ fn pool_lookups_propagate_poison_error() {
     });
 }
 
+// Freeing memory must keep working on a poisoned device: buffers are
+// dropped during the very unwind that sets the poison, so a poison Err
+// (and the panic it used to cause inside `Drop`) would abort the process.
+#[test]
+fn buffer_drop_on_poisoned_device_frees_without_panicking() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
+        let stream = global_policy(0)
+            .expect("setup: global_policy")
+            .next_stream()
+            .expect("setup: next_stream");
+        let dptr = unsafe { cuda_core::malloc_async(256, &stream) };
+        let buffer = unsafe { DeviceBuffer::from_raw_parts(dptr, 256, 0) };
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_global_device_context_mut(0, |_ctx| panic!("poison"));
+        }));
+        assert!(panicked.is_err(), "setup: expected inner panic");
+        assert!(is_device_poisoned(0).expect("query failed"));
+
+        // Frees via the deallocator stream; poison stays set for regular
+        // access until cleared.
+        drop(buffer);
+        assert!(is_device_poisoned(0).expect("query failed"));
+    });
+}
+
+#[test]
+fn buffer_dropped_during_poisoning_unwind_does_not_abort() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
+        let stream = global_policy(0)
+            .expect("setup: global_policy")
+            .next_stream()
+            .expect("setup: next_stream");
+        let dptr = unsafe { cuda_core::malloc_async(256, &stream) };
+        let buffer = unsafe { DeviceBuffer::from_raw_parts(dptr, 256, 0) };
+
+        // `buffer` lives inside the panicking closure: its Drop runs while the
+        // callback panic is unwinding, after the ContextGuard has already
+        // poisoned device 0. A panic from that Drop would be a double panic —
+        // SIGABRT, uncatchable, killing the whole test binary.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = buffer;
+            let _ = with_global_device_context_mut(0, |_ctx| panic!("poison"));
+        }));
+        assert!(
+            panicked.is_err(),
+            "expected the callback panic to propagate"
+        );
+        assert!(is_device_poisoned(0).expect("query failed"));
+    });
+}
+
+// Dropping a buffer inside a `with_*` callback re-borrows the thread-local
+// map from `Drop`. That must neither panic (the re-entry rule would fire
+// inside a destructor) nor leak: the free is deferred and flushed when the
+// callback's borrow ends.
+#[test]
+fn buffer_dropped_inside_callback_defers_the_free() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
+        let stream = global_policy(0)
+            .expect("setup: global_policy")
+            .next_stream()
+            .expect("setup: next_stream");
+        let dptr = unsafe { cuda_core::malloc_async(256, &stream) };
+        let buffer = unsafe { DeviceBuffer::from_raw_parts(dptr, 256, 0) };
+
+        with_global_device_context(0, move |_ctx| {
+            drop(buffer); // re-entrant Drop: deferred, not a panic
+        })
+        .expect("callback failed");
+
+        // The deferred free was flushed on exit; the map is intact.
+        with_global_device_context(0, |_ctx| ())
+            .expect("context must be usable after a deferred free");
+    });
+}
+
+// Combined case: the buffer drops inside a `_mut` callback that then
+// panics. The deferred free must be flushed by the same guard Drop that
+// poisons the device, without a second panic.
+#[test]
+fn buffer_dropped_inside_panicking_mut_callback_is_freed_not_aborted() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("setup: init_device_contexts (requires GPU)");
+        let stream = global_policy(0)
+            .expect("setup: global_policy")
+            .next_stream()
+            .expect("setup: next_stream");
+        let dptr = unsafe { cuda_core::malloc_async(256, &stream) };
+        let buffer = unsafe { DeviceBuffer::from_raw_parts(dptr, 256, 0) };
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _ = with_global_device_context_mut(0, move |_ctx| {
+                let _held = buffer; // dropped during the callback's unwind
+                panic!("poison");
+            });
+        }));
+        assert!(
+            panicked.is_err(),
+            "expected the callback panic to propagate"
+        );
+        assert!(is_device_poisoned(0).expect("query failed"));
+    });
+}
+
 #[test]
 fn clear_device_poison_recovers_existing_context() {
     on_fresh_thread(|| {
@@ -599,6 +708,19 @@ fn successful_mut_callback_does_not_poison() {
             !is_device_poisoned(0).expect("query failed"),
             "successful _mut callback must leave the device unpoisoned"
         );
+    });
+}
+
+// The poison query/recovery fns are documented as pure no-ops on an
+// uninitialized thread: they must not lazily initialize the context map
+// (this test intentionally skips init_device_contexts and needs no GPU).
+#[test]
+fn poison_queries_on_uninitialized_thread_are_pure_no_ops() {
+    on_fresh_thread(|| {
+        assert!(!is_device_poisoned(0).expect("query must succeed uninitialized"));
+        clear_device_poison(0).expect("clear must be a no-op uninitialized");
+        reset_device(0).expect("reset must be a no-op uninitialized");
+        assert!(!is_device_poisoned(0).expect("query must still succeed"));
     });
 }
 

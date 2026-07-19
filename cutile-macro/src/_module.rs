@@ -843,15 +843,16 @@ pub fn kernel_launcher(
             // JIT-compiles and caches this specialization without launching.
             pub fn compile(mut self) -> Result<(), DeviceError> {
                 self._compile_only = true;
-                let stream = with_default_device_policy(|policy| policy.next_stream())??;
-                let ctx = ExecutionContext::new(stream);
+                let (stream, pool) = default_stream_and_pool()?;
+                let ctx = ExecutionContext::new(stream).with_pool(pool);
                 unsafe { self.execute(&ctx)?; }
                 Ok(())
             }
 
             pub fn compile_on(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
                 self._compile_only = true;
-                let ctx = ExecutionContext::new(stream.clone());
+                let pool = pool_for_stream(stream)?;
+                let ctx = ExecutionContext::new(stream.clone()).with_pool(pool);
                 unsafe { self.execute(&ctx)?; }
                 Ok(())
             }
@@ -884,15 +885,7 @@ pub fn kernel_launcher(
             type Output = Result<#returned_args_type, DeviceError>;
             type IntoFuture = DeviceFuture<#returned_args_type, #launcher_ident #struct_args>;
             fn into_future(self) -> Self::IntoFuture {
-                let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-                    Ok(Ok(stream)) => stream,
-                    Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-                };
-                let pool = match pool_for_stream(&stream) {
-                    Ok(pool) => pool,
-                    Err(e) => return DeviceFuture::failed(e),
-                };
-                DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+                future_on_default_stream(self)
             }
         }
 

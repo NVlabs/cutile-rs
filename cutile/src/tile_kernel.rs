@@ -913,15 +913,7 @@ where
     type Output = Result<Partition<I>, DeviceError>;
     type IntoFuture = DeviceFuture<Partition<I>, DeviceOperationPartition<RANK, I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -979,15 +971,7 @@ where
     type Output = Result<I, DeviceError>;
     type IntoFuture = DeviceFuture<I, UnwrapPartition<I, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -1056,15 +1040,7 @@ where
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, TensorToHostVec<T, DI>>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 

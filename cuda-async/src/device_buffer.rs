@@ -5,8 +5,7 @@
 
 //! Owned and borrowed wrappers around CUDA device pointers.
 
-use crate::device_context::with_deallocator_stream;
-use cuda_core::free_async;
+use crate::device_context::free_on_deallocator_stream;
 use cuda_core::sys::CUdeviceptr;
 use std::marker::PhantomData;
 
@@ -56,15 +55,19 @@ impl Drop for DeviceBuffer {
     fn drop(&mut self) {
         unsafe {
             // Safety: The CUDA driver is guaranteed to complete any queued async operations.
-            with_deallocator_stream(self.device_id, |stream| {
-                free_async(self.cudptr, stream);
-            })
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Failed to free device pointer on device_id={}",
+            //
+            // Never panic here: buffers are dropped during unwinding (e.g. while
+            // a panicking `_mut` callback is poisoning its device context), and
+            // a panic inside `Drop` during unwinding aborts the process. On an
+            // unrecoverable context error, leaking the allocation is the lesser
+            // evil. Drops that happen inside a `with_*` callback are deferred
+            // by `free_on_deallocator_stream` instead of panicking on re-entry.
+            if let Err(e) = free_on_deallocator_stream(self.device_id, self.cudptr) {
+                eprintln!(
+                    "cuda-async: leaking device pointer on device_id={}: {e:?}",
                     self.device_id
-                )
-            })
+                );
+            }
         }
     }
 }

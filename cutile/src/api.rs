@@ -134,10 +134,10 @@
 use crate::kernels::conversion::convert_apply;
 use crate::kernels::creation::{arange_apply, eye_apply, full_apply, linspace as linspace_kernel};
 use crate::tensor::{IntoPartition, Reshape, Storage, Tensor, Unpartition};
-use cuda_async::device_context::{pool_for_stream, with_default_device_policy};
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
-    value, with_context, DeviceOp, ExecutionContext, Unzippable1, Unzippable2,
+    future_on_default_stream, value, with_context, DeviceOp, ExecutionContext, Unzippable1,
+    Unzippable2,
 };
 use cuda_async::error::DeviceError;
 use cuda_core::curand::{RandNormal, RandUniform, RNG};
@@ -186,15 +186,7 @@ impl<T: DType> IntoFuture for CopyDeviceToDevice<T> {
     type Output = Result<Tensor<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Tensor<T>, CopyDeviceToDevice<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -302,15 +294,7 @@ impl IntoFuture for Memcpy {
     type Output = Result<(), DeviceError>;
     type IntoFuture = DeviceFuture<(), Memcpy>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -346,15 +330,7 @@ impl<T: DType> IntoFuture for CopyDeviceToHostVec<T> {
     type Output = Result<Vec<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Vec<T>, CopyDeviceToHostVec<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -411,15 +387,7 @@ impl<T: DType> IntoFuture for CopyHostVecToDevice<T> {
     type Output = Result<Tensor<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Tensor<T>, CopyHostVecToDevice<T>>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -761,15 +729,7 @@ impl<T: DType, DI: DeviceOp<Output = Tensor<T>>> IntoFuture for ReshapeOp<Tensor
     type Output = Result<Tensor<T>, DeviceError>;
     type IntoFuture = DeviceFuture<Tensor<T>, Self>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 
@@ -792,15 +752,7 @@ impl<T: DType + Send, DI: DeviceOp<Output = Arc<Tensor<T>>>> IntoFuture
     type Output = Result<Arc<Tensor<T>>, DeviceError>;
     type IntoFuture = DeviceFuture<Arc<Tensor<T>>, Self>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        DeviceFuture::scheduled(self, ExecutionContext::new(stream).with_pool(pool))
+        future_on_default_stream(self)
     }
 }
 

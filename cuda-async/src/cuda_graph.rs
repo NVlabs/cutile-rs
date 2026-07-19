@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::device_context::{pool_for_stream, with_default_device_policy};
+use crate::device_context::pool_for_stream;
 use crate::device_future::DeviceFuture;
-use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
+use crate::device_operation::{future_on_default_stream, DeviceOp, ExecutionContext, GraphNode};
 use crate::error::DeviceError;
 use cuda_core::{sys, IntoResult, Stream};
 use std::future::IntoFuture;
@@ -217,18 +217,7 @@ impl IntoFuture for GraphLaunch {
     type Output = Result<(), DeviceError>;
     type IntoFuture = DeviceFuture<(), GraphLaunch>;
     fn into_future(self) -> Self::IntoFuture {
-        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
-        };
-        let pool = match pool_for_stream(&stream) {
-            Ok(pool) => pool,
-            Err(e) => return DeviceFuture::failed(e),
-        };
-        let mut f = DeviceFuture::new();
-        f.device_operation = Some(self);
-        f.execution_context = Some(ExecutionContext::new(stream).with_pool(pool));
-        f
+        future_on_default_stream(self)
     }
 }
 
