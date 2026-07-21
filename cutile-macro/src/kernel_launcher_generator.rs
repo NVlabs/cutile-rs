@@ -198,39 +198,6 @@ impl RequiredGenerics {
     }
 }
 
-/// Joins a vector of strings into a nested cons-cell tuple structure.
-///
-/// Converts a list of values into a right-associated nested tuple structure
-/// used by async combinators. For example, `["a", "b", "c"]` becomes `"(a, (b, c))"`.
-///
-/// ## Parameters
-///
-/// - `vals`: Vector of string representations of values to join
-///
-/// ## Returns
-///
-/// A string representing the nested tuple structure
-///
-/// ## Examples
-///
-/// - `[]` → `"()"`
-/// - `["a"]` → `"a"`
-/// - `["a", "b"]` → `"(a, b)"`
-/// - `["a", "b", "c"]` → `"(a, (b, c))"`
-pub fn join_as_cons_tuple(vals: &[String]) -> String {
-    if vals.is_empty() {
-        return "()".to_string();
-    }
-    if vals.len() == 1 {
-        return vals[0].clone();
-    };
-    let mut cons = vals.last().expect("Impossible").clone();
-    for i in (0..vals.len() - 1).rev() {
-        cons = format!("({}, {})", vals[i], cons);
-    }
-    cons
-}
-
 /// Wraps an expression in a `value()` call if needed for device-operation combinators.
 ///
 /// Helper function used when building launcher code. If `wrap_as_val` is true,
@@ -276,22 +243,25 @@ pub fn zip_cons(inputs: &[String], var_name: &str, wrap_as_val: bool) -> ExprBlo
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
-    if inputs.is_empty() {
-        return zip_block;
+    match inputs {
+        [] => zip_block,
+        [inputs @ .., last] => inputs.iter().rfold(
+            {
+                zip_block.block.stmts.push(parse_stmt(format!(
+                    "let {var_name} = {};",
+                    zippable(last, wrap_as_val)
+                )));
+                zip_block
+            },
+            |mut zip_block, input| {
+                zip_block.block.stmts.push(parse_stmt(format!(
+                    "let {var_name} = zip!({}, {var_name});",
+                    zippable(input, wrap_as_val)
+                )));
+                zip_block
+            },
+        ),
     }
-    let mut i = inputs.len() - 1;
-    zip_block.block.stmts.push(parse_stmt(format!(
-        "let {var_name} = {};",
-        zippable(&inputs[i], wrap_as_val)
-    )));
-    while i != 0 {
-        i -= 1;
-        zip_block.block.stmts.push(parse_stmt(format!(
-            "let {var_name} = zip!({}, {var_name});",
-            zippable(&inputs[i], wrap_as_val)
-        )));
-    }
-    zip_block
 }
 
 /// Generates launcher code to zip inputs, then flatten them into a flat tuple.
@@ -323,35 +293,50 @@ pub fn zip_and_then_flatten(inputs: &[String], var_name: &str, wrap_as_val: bool
     let mut zip_block = syn::parse2::<ExprBlock>(quote! {{
     }})
     .unwrap();
-    if inputs.is_empty() {
-        zip_block
-            .block
-            .stmts
-            .push(parse_stmt(format!("let {var_name} = value(());")));
-        return zip_block;
+    match inputs {
+        [] => {
+            zip_block
+                .block
+                .stmts
+                .push(parse_stmt(format!("let {var_name} = value(());")));
+            zip_block
+        }
+        whole @ [inputs @ .., last] => {
+            let mut zip_block = inputs.iter().rfold(
+                {
+                    zip_block.block.stmts.push(parse_stmt(format!(
+                        "let {var_name} = {};",
+                        zippable(last, wrap_as_val)
+                    )));
+                    zip_block
+                },
+                |mut zip_block, input| {
+                    zip_block.block.stmts.push(parse_stmt(format!(
+                        "let {var_name} = zip!({}, {var_name});",
+                        zippable(input, wrap_as_val)
+                    )));
+                    zip_block
+                },
+            );
+            zip_block.block.stmts.push(parse_stmt(format!(
+                r#"
+                    let {var_name} = {var_name}.then(|{}| {{
+                        value({})
+                    }});
+                "#,
+                // Converts whole inputs into a right-associated nested tuple
+                // - `[]` → `"()"`, impossible in this arm
+                // - `["a"]` → `"a"`
+                // - `["a", "b"]` → `"(a, b)"`
+                // - `["a", "b", "c"]` → `"(a, (b, c))"`
+                inputs
+                    .iter()
+                    .rfold(last.to_string(), |acc, input| format!("({input}, {acc})",)),
+                to_tuple_string(whole)
+            )));
+            zip_block
+        }
     }
-    let mut i = inputs.len() - 1;
-    zip_block.block.stmts.push(parse_stmt(format!(
-        "let {var_name} = {};",
-        zippable(&inputs[i], wrap_as_val)
-    )));
-    while i != 0 {
-        i -= 1;
-        zip_block.block.stmts.push(parse_stmt(format!(
-            "let {var_name} = zip!({}, {var_name});",
-            zippable(&inputs[i], wrap_as_val)
-        )));
-    }
-    zip_block.block.stmts.push(parse_stmt(format!(
-        r#"
-            let {var_name} = {var_name}.then(|{}| {{
-                value({})
-            }});
-        "#,
-        join_as_cons_tuple(inputs),
-        to_tuple_string(inputs)
-    )));
-    zip_block
 }
 
 /// Generates a type alias name for a kernel argument.
@@ -422,19 +407,17 @@ pub fn generate_launcher_arg_types(
 ///
 /// ## Returns
 ///
-/// A string like `"(arg1, arg2, arg3,)"` with trailing comma
+/// A string like `"(arg1, arg2, arg3, )"` with trailing comma
 ///
 /// ## Example
 ///
-/// `["x", "y", "z"]` → `"(x, y, z,)"`
+/// `["x", "y", "z"]` → `"(x, y, z, )"`
 pub fn to_tuple_string(args: &[String]) -> String {
-    format!(
-        "({})",
-        args.iter()
-            .map(|s| format!("{s},"))
-            .collect::<Vec<String>>()
-            .join("")
-    )
+    ["("]
+        .into_iter()
+        .chain(args.iter().flat_map(|i| [i.as_str(), ", "]))
+        .chain([")"])
+        .collect()
 }
 
 /// Generates the complete launcher code for a GPU kernel.
