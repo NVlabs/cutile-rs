@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
+use cutile::cuda_core::f8e8m0fnu;
 use cutile::{api::*, tensor::*, tile_kernel::*};
 use cutile_compiler::compiler::utils::CompileOptions;
 use half::bf16;
@@ -79,6 +80,18 @@ mod type_conversion_ops_module {
         output.store(y);
     }
 
+    #[cutile::entry(optimization_hints = (
+        sm_120 = (num_worker_warps_per_cta = 4,),
+    ))]
+    fn f32_to_e8m0_positive_inf_kernel<const S: [i32; 1]>(
+        output: &mut Tensor<f8e8m0fnu, S>,
+        input: &Tensor<f32, { [-1] }>,
+    ) {
+        let x: Tile<f32, S> = load_tile_like(input, output);
+        let y: Tile<f8e8m0fnu, S> = ftof(x, rounding::PositiveInf);
+        output.store(y);
+    }
+
     #[cutile::entry()]
     fn unannotated_load_tile_like_kernel<const S: [i32; 1]>(
         output: &mut Tensor<f32, S>,
@@ -118,6 +131,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 use type_conversion_ops_module::bf16_conversion_kernel;
 use type_conversion_ops_module::bf16_to_f32_conversion_kernel;
 use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
+use type_conversion_ops_module::f32_to_e8m0_positive_inf_kernel;
 
 #[test]
 fn compile_conversion_ops() -> () {
@@ -299,6 +313,26 @@ fn compile_explicit_conversion_ops() -> () {
 }
 
 #[test]
+fn compile_f32_to_e8m0_positive_inf() -> () {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir(
+            "f32_to_e8m0_positive_inf_kernel",
+            &[128.to_string()],
+            &[("output", &[1]), ("input", &[1])],
+        );
+
+        assert!(
+            module_op_str.contains("rounding<positive_inf>"),
+            "Expected positive-infinity rounding in F32-to-E8M0 conversion.\nMLIR:\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("f8e8m0fnu"),
+            "Expected E8M0 output type.\nMLIR:\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
 fn execute_bf16_f32_roundtrip() -> () {
     common::with_test_stack(|| {
         let input_host = Arc::new(vec![
@@ -385,5 +419,37 @@ fn execute_f32_to_bf16_conversion() -> () {
             result_host, expected,
             "Expected f32->bf16 conversion output to match host-side bf16::from_f32"
         );
+    });
+}
+
+#[test]
+fn execute_f32_to_e8m0_positive_inf() -> () {
+    common::with_test_stack(|| {
+        let input_host = Arc::new(vec![0.5f32, 0.75, 1.0, 1.25, 2.0, 3.0, 4.0, 5.0]);
+        let input: Tensor<f32> = copy_host_vec_to_device(&input_host)
+            .sync()
+            .expect("Failed.");
+        let input = Arc::new(input);
+        let output: Tensor<f8e8m0fnu> = zeros(&[input_host.len()]).sync().expect("Failed.");
+
+        let (result, _) = f32_to_e8m0_positive_inf_kernel(output.partition([4]), input)
+            .compile_options(CompileOptions::default().num_worker_warps_per_cta(8))
+            .sync()
+            .expect("Failed.");
+
+        let result_host: Vec<f8e8m0fnu> =
+            result.unpartition().to_host_vec().sync().expect("Failed.");
+        let expected = vec![
+            f8e8m0fnu(0x7e),
+            f8e8m0fnu(0x7f),
+            f8e8m0fnu(0x7f),
+            f8e8m0fnu(0x80),
+            f8e8m0fnu(0x80),
+            f8e8m0fnu(0x81),
+            f8e8m0fnu(0x81),
+            f8e8m0fnu(0x82),
+        ];
+
+        assert_eq!(result_host, expected);
     });
 }

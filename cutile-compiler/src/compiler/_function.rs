@@ -576,7 +576,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     ) -> Result<Vec<TileRustValue>, JITError> {
         let mut result = vec![];
         for arg in args {
-            let expected = if matches!(arg, syn::Expr::Lit(_) | syn::Expr::Unary(_)) {
+            let is_none = matches!(
+                arg,
+                syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == "None")
+            );
+            let expected = if matches!(arg, syn::Expr::Lit(_) | syn::Expr::Unary(_)) || is_none {
                 self.typeck_expr_tile_type(arg, generic_args, &HashMap::new())?
             } else {
                 None

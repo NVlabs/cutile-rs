@@ -646,7 +646,15 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 if path.path.segments.len() == 1 {
                     let name = get_ident_from_path_expr(path).to_string();
                     if name == "None" {
-                        expected.filter(|ty| option_payload_syn_type(&ty.rust_ty).is_some())
+                        if let Some(option_ty) = explicit_none_option_syn_type(path) {
+                            self.compiler.compile_type(
+                                &option_ty,
+                                self.generic_vars,
+                                &HashMap::new(),
+                            )?
+                        } else {
+                            expected.filter(|ty| option_payload_syn_type(&ty.rust_ty).is_some())
+                        }
                     } else if let Some(term) = self.local_terms.get(&name).cloned() {
                         let term = if let Some(expected) = expected.clone() {
                             self.unify_with_known(term, expected)?
@@ -3473,6 +3481,28 @@ fn option_payload_syn_type(ty: &Type) -> Option<Type> {
     Some(payload_ty)
 }
 
+fn explicit_none_option_syn_type(path: &syn::ExprPath) -> Option<Type> {
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if segment.ident != "None" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    let mut payload_types = args.args.iter().filter_map(|arg| match arg {
+        GenericArgument::Type(ty) => Some(ty.clone()),
+        _ => None,
+    });
+    let payload_ty = payload_types.next()?;
+    if payload_types.next().is_some() {
+        return None;
+    }
+    Some(syn::parse_quote!(Option<#payload_ty>))
+}
+
 fn repeat_length_value(len: &Expr, generic_vars: &GenericVars) -> Option<usize> {
     match len {
         Expr::Lit(lit) => match &lit.lit {
@@ -4192,6 +4222,10 @@ fn type_is_resolvable(
                 return false;
             };
             let ident = segment.ident.to_string();
+            if ident == "Option" {
+                return option_payload_syn_type(ty)
+                    .is_some_and(|payload| type_is_resolvable(compiler, &payload, generic_vars));
+            }
             match &segment.arguments {
                 PathArguments::None => {
                     generic_vars.var_type(&ident).is_some()
@@ -4251,6 +4285,10 @@ fn type_is_fully_known(
                 return false;
             };
             let ident = segment.ident.to_string();
+            if ident == "Option" {
+                return option_payload_syn_type(ty)
+                    .is_some_and(|payload| type_is_fully_known(compiler, &payload, generic_vars));
+            }
             if generic_vars.var_type(&ident).is_some() {
                 return generic_vars.inst_types.contains_key(&ident)
                     || generic_vars.inst_i32.contains_key(&ident)

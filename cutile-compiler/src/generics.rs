@@ -1995,6 +1995,18 @@ impl GenericArgInference {
     }
 
     pub fn infer_type(&self, ty: &syn::Type, _generic_vars: &GenericVars) -> syn::Type {
+        self.infer_type_inner(ty)
+    }
+
+    fn infer_type_inner(&self, ty: &syn::Type) -> syn::Type {
+        if let syn::Type::Tuple(tuple) = ty {
+            let mut result = tuple.clone();
+            for element in &mut result.elems {
+                *element = self.infer_type_inner(element);
+            }
+            return syn::Type::Tuple(result);
+        }
+
         let arg_map = &self.param2arg;
         // println!("Infer generic args for {} using \n {arg_map:#?}", ty.to_token_stream().to_string());
         let Some(mut result_args) = maybe_generic_args(&ty) else {

@@ -150,10 +150,6 @@ pub mod tma {
     impl Mode for Disabled {}
 }
 
-/// Latency hint (Tile IR `optimization_hints.latency`). Single value applied
-/// across SM archs; per-arch dictionary form is deferred.
-pub struct Latency<const CYCLES: u32>;
-
 /// Integer-overflow behavior. Mirrors Tile IR `IntegerOverflow`.
 pub mod overflow {
     pub trait Mode {}
@@ -273,10 +269,15 @@ pub mod core {
     pub use super::scope;
     pub use super::signedness;
     pub use super::tma;
-    pub use super::Latency;
     pub use half::{bf16, f16};
     use std::marker::PhantomData;
     use std::ops;
+
+    /// Latency hint (Tile IR `optimization_hints.latency`). Single value applied
+    /// across SM archs; per-arch dictionary form is deferred. Defined inside
+    /// `core` (not re-exported) so the DSL name resolver indexes it for
+    /// single-segment paths like `Latency::<4>` in kernel bodies.
+    pub struct Latency<const CYCLES: u32>;
 
     // ========================================================================
     // TYPES — Tile IR §5
@@ -2700,6 +2701,116 @@ pub mod core {
     // HIGH-LEVEL HELPERS
     // ========================================================================
     // Convenience wrappers built on the primitives above. Not Tile IR ops.
+
+    #[cuda_tile::variadic_op(N = 6)]
+    fn raw_offset_pointers<B: ElementType, I: ElementType, const S: [i32; N]>(
+        base: *mut B,
+        offsets: Tile<I, S>,
+    ) -> PointerTile<*mut B, S> {
+        let ones_shape: Shape<{ [1; N] }> = Shape::<{ [1; N] }> { dims: &[1i32; N] };
+        let base: PointerTile<*mut B, { [] }> = pointer_to_tile(base);
+        let base: PointerTile<*mut B, { [1; N] }> = reshape_ptr(base, ones_shape);
+        let base: PointerTile<*mut B, S> = broadcast_ptr(base, offsets.shape());
+        addptr_tile(base, offsets)
+    }
+
+    /// Load values from `base + offsets`, with offsets measured in elements of `B`.
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn load_offset<
+        B: ElementType,
+        I: ElementType,
+        const S: [i32; N],
+        O: ordering::LoadMode,
+        Sc: scope::Mode,
+        const CYCLES: u32,
+    >(
+        base: *mut B,
+        offsets: Tile<I, S>,
+        memory_ordering: O,
+        memory_scope: Option<Sc>,
+        mask: Option<Tile<bool, S>>,
+        padding_value: Option<B>,
+        token: Option<Token>,
+        latency: Latency<CYCLES>,
+    ) -> Tile<B, S> {
+        let (values, _result_token): (Tile<B, S>, Token) = load_ptr_tko(
+            raw_offset_pointers(base, offsets),
+            memory_ordering,
+            memory_scope,
+            mask,
+            padding_value,
+            token,
+            latency,
+        );
+        values
+    }
+
+    /// Load values after reinterpreting each offset address as `E`.
+    ///
+    /// The address calculation uses `B`-sized units and the pointer cast is
+    /// applied afterward. A `*mut u8` base therefore provides byte-addressed
+    /// access to packed values and independently placed metadata.
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn load_offset_as<
+        B: ElementType,
+        E: ElementType,
+        I: ElementType,
+        const S: [i32; N],
+        O: ordering::LoadMode,
+        Sc: scope::Mode,
+        const CYCLES: u32,
+    >(
+        base: *mut B,
+        offsets: Tile<I, S>,
+        memory_ordering: O,
+        memory_scope: Option<Sc>,
+        mask: Option<Tile<bool, S>>,
+        padding_value: Option<E>,
+        token: Option<Token>,
+        latency: Latency<CYCLES>,
+    ) -> Tile<E, S> {
+        let pointers: PointerTile<*mut B, S> = raw_offset_pointers(base, offsets);
+        let (values, _result_token): (Tile<E, S>, Token) = load_ptr_tko(
+            ptr_to_ptr(pointers),
+            memory_ordering,
+            memory_scope,
+            mask,
+            padding_value,
+            token,
+            latency,
+        );
+        values
+    }
+
+    /// Store values to `base + offsets`, with offsets measured in elements of `B`.
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn store_offset<
+        B: ElementType,
+        I: ElementType,
+        const S: [i32; N],
+        O: ordering::StoreMode,
+        Sc: scope::Mode,
+        const CYCLES: u32,
+    >(
+        base: *mut B,
+        offsets: Tile<I, S>,
+        value: Tile<B, S>,
+        memory_ordering: O,
+        memory_scope: Option<Sc>,
+        mask: Option<Tile<bool, S>>,
+        token: Option<Token>,
+        latency: Latency<CYCLES>,
+    ) -> Token {
+        store_ptr_tko(
+            raw_offset_pointers(base, offsets),
+            value,
+            memory_ordering,
+            memory_scope,
+            mask,
+            token,
+            latency,
+        )
+    }
 
     /// Broadcast a scalar to a tile of the given shape.
     // `trait_name = "BroadcastScalarFn"` avoids colliding with the user
