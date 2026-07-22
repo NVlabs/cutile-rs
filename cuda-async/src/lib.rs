@@ -13,7 +13,13 @@ pub mod device_future;
 pub mod device_operation;
 pub mod error;
 pub mod launch;
+#[cfg(any(feature = "reactor", test))]
+mod loom_compat;
 pub mod prelude;
+#[cfg(feature = "reactor")]
+mod reactor;
 pub mod scheduling_policies;
+#[cfg(any(feature = "reactor", test))]
+mod slot_table;
 
 pub use futures;

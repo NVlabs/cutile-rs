@@ -56,6 +56,21 @@ iters_for() {
   fi
 }
 
+# Optional GPU clock lock to remove clock-variance noise from the sweep.
+# Off by default (setting clocks is privileged and affects the whole GPU).
+# Enable with LOCK_CLOCKS=1 (needs permission, e.g. run under sudo, or
+# `nvidia-smi -acp UNRESTRICTED`); pin frequency with LOCK_CLOCKS_MHZ.
+if [ "${LOCK_CLOCKS:-0}" = "1" ]; then
+  LOCK_CLOCKS_MHZ="${LOCK_CLOCKS_MHZ:-$(nvidia-smi -q -d SUPPORTED_CLOCKS 2>/dev/null \
+    | awk '/Graphics/{print $3; exit}')}"
+  echo "=== locking GPU graphics clock to ${LOCK_CLOCKS_MHZ} MHz ==="
+  if nvidia-smi --lock-gpu-clocks="${LOCK_CLOCKS_MHZ}" 2>/dev/null; then
+    trap 'echo "=== resetting GPU clocks ==="; nvidia-smi --reset-gpu-clocks >/dev/null 2>&1' EXIT
+  else
+    echo "!! could not lock clocks (need permission); continuing unlocked" >&2
+  fi
+fi
+
 echo
 echo "=== sweeping (taskset -c $PIN_CPU), W in: $W_VALUES, N=$N_OPS, samples=$SAMPLES ==="
 for mode in sync async; do

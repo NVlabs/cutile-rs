@@ -48,6 +48,15 @@ impl Drop for Device {
         if !self.owned {
             return;
         }
+        let _guard = teardown_lock();
+        // Streams hold an Arc<Device>, so by the time the last device handle
+        // for this ordinal drops, every pooled handle is idle; the context
+        // release below reclaims them. Discard so a later re-retain cannot
+        // pop a handle from a torn-down context.
+        stream_pool()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.ordinal);
         let _ = self.bind_to_thread();
         let ctx = std::mem::replace(&mut self.cu_ctx, std::ptr::null_mut());
         if !ctx.is_null() {
@@ -160,7 +169,15 @@ impl Device {
     /// Creates a new non-blocking CUDA stream on this device.
     pub fn new_stream(self: &Arc<Self>) -> Result<Arc<Stream>, DriverError> {
         self.bind_to_thread()?;
-        let cu_stream = stream::create(stream::StreamKind::NonBlocking)?;
+        let pooled = stream_pool()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(&self.ordinal)
+            .and_then(Vec::pop);
+        let cu_stream = match pooled {
+            Some(handle) => handle as cuda_bindings::CUstream,
+            None => stream::create(stream::StreamKind::NonBlocking)?,
+        };
         Ok(Arc::new(Stream {
             cu_stream,
             device: self.clone(),
@@ -363,6 +380,32 @@ pub struct Stream {
     owned: bool,
 }
 
+/// Per-device pool of idle stream handles (all created `NonBlocking` by
+/// [`Device::new_stream`]). `cuStreamDestroy` racing concurrent driver
+/// activity from other threads segfaults inside libcuda (reproducible in
+/// parallel test runs; a leak-streams experiment ran 10/10 clean where
+/// destroy-paths crashed ~half the runs), so owned streams are never
+/// destroyed: drops return the handle here, `new_stream` reuses it, and the
+/// last `Device` drop for an ordinal discards the pooled handles — the
+/// primary-context release reclaims them.
+fn stream_pool() -> &'static std::sync::Mutex<std::collections::HashMap<usize, Vec<usize>>> {
+    static POOL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<usize, Vec<usize>>>,
+    > = std::sync::OnceLock::new();
+    POOL.get_or_init(Default::default)
+}
+
+/// Serializes destructive driver teardown (stream destroy, module unload,
+/// context release). Concurrent teardown racing other threads' driver calls
+/// segfaults inside libcuda (observed: cuStreamDestroy_v2 during parallel
+/// test runs); teardown is cold, so one process-wide lock is cheap.
+pub(crate) fn teardown_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
 
@@ -373,7 +416,15 @@ impl Drop for Stream {
         }
         let _ = self.device.bind_to_thread();
         if !self.cu_stream.is_null() {
-            let _ = unsafe { stream::destroy(self.cu_stream) };
+            // Never destroyed (see `stream_pool`): drain, then return the
+            // handle for reuse by the next `new_stream` on this device.
+            let _ = unsafe { stream::synchronize(self.cu_stream) };
+            stream_pool()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .entry(self.device.ordinal)
+                .or_default()
+                .push(self.cu_stream as usize);
         }
     }
 }
@@ -416,6 +467,16 @@ impl Stream {
     /// the calling thread.
     pub unsafe fn synchronize(&self) -> Result<(), DriverError> {
         stream::synchronize(self.cu_stream)
+    }
+
+    /// Queries stream completion without blocking: `Ok(true)` when all prior
+    /// work has completed, `Ok(false)` when work is still in flight.
+    ///
+    /// # Safety
+    /// The caller must ensure the parent device's context is current on
+    /// the calling thread.
+    pub unsafe fn query(&self) -> Result<bool, DriverError> {
+        stream::query(self.cu_stream)
     }
 
     /// Enqueues a host-side callback to execute after all prior stream work completes.
@@ -483,6 +544,7 @@ impl Drop for Module {
         if !self.owned {
             return;
         }
+        let _guard = teardown_lock();
         let _ = self.device.bind_to_thread();
         let _ = unsafe { module::unload(self.cu_module) };
     }

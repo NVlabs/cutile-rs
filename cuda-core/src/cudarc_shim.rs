@@ -241,6 +241,23 @@ pub(crate) mod stream {
         cuda_bindings::cuStreamSynchronize(stream).result()
     }
 
+    /// Queries stream completion without blocking: `Ok(true)` when all prior
+    /// work has completed, `Ok(false)` when work is still in flight
+    /// (`CUDA_ERROR_NOT_READY`).
+    ///
+    /// # Safety
+    /// `stream` must be a valid stream handle.
+    pub unsafe fn query(stream: cuda_bindings::CUstream) -> Result<bool, DriverError> {
+        match cuda_bindings::cuStreamQuery(stream) {
+            cuda_bindings::cudaError_enum_CUDA_SUCCESS => Ok(true),
+            cuda_bindings::cudaError_enum_CUDA_ERROR_NOT_READY => Ok(false),
+            code => {
+                code.result()?;
+                unreachable!("non-error CUresult handled above")
+            }
+        }
+    }
+
     /// Destroys a CUDA stream.
     ///
     /// # Safety
