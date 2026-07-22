@@ -670,8 +670,18 @@ where
 
 // Value
 
+/// Wraps an immediate value as a completed device op.
+///
+/// `Value<T>` is `Send` exactly when `T` is — the compiler derives it, and
+/// nothing here may override that with a manual `unsafe impl Send` (one did
+/// exist, and made `Value<Rc<_>>` sendable from safe code). The doctest below
+/// fails to compile only while that stays true:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<cuda_async::device_operation::Value<std::rc::Rc<u8>>>();
+/// ```
 pub struct Value<T>(T);
-unsafe impl<T> Send for Value<T> {}
 
 impl<T> Value<T> {
     pub fn new(value: T) -> Self {
@@ -719,25 +729,20 @@ impl From<f32> for Value<f32> {
 
 // Empty (closure)
 
-pub struct Empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> {
+pub struct Empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send> {
     closure: F,
 }
 
-pub fn empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO>(closure: F) -> Empty<O, DO, F> {
+pub fn empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send>(
+    closure: F,
+) -> Empty<O, DO, F> {
     Empty { closure }
-}
-
-unsafe impl<O: Send, DO, F> Send for Empty<O, DO, F>
-where
-    DO: DeviceOp<Output = O>,
-    F: FnOnce() -> DO,
-{
 }
 
 impl<O: Send, DO, F> DeviceOp for Empty<O, DO, F>
 where
     DO: DeviceOp<Output = O>,
-    F: FnOnce() -> DO,
+    F: FnOnce() -> DO + Send,
 {
     type Output = O;
 
@@ -750,7 +755,7 @@ where
     }
 }
 
-impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> IntoFuture for Empty<O, DO, F> {
+impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send> IntoFuture for Empty<O, DO, F> {
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, Empty<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
@@ -1476,3 +1481,19 @@ impl<T: Send + 'static> From<Vec<BoxedDeviceOp<T>>> for DeviceOpVec<T> {
 }
 
 // New names — old names kept as re-exports for backwards compatibility.
+
+#[cfg(test)]
+mod send_bounds {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    /// `DeviceOp: Send` and `DeviceFuture: Send` are public API promises —
+    /// they are what let a launch be awaited on a multi-threaded executor.
+    /// These are compile-time checks; the function body running is incidental.
+    #[test]
+    fn ops_and_futures_are_send() {
+        assert_send::<Value<std::sync::Arc<u8>>>();
+        assert_send::<crate::device_future::DeviceFuture<i32, Value<i32>>>();
+    }
+}
