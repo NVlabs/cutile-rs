@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Execution-mode overhead benchmark — paper §5.2.
 //
 // Measures host-visible latency for an N-kernel pipeline under the sync,

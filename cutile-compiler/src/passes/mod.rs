@@ -7,19 +7,34 @@
 //!
 //! Passes transform or annotate the syn AST in a defined order before IR
 //! emission. Each pass reads the previous pass's output and produces a
-//! progressively more resolved form.
+//! progressively more resolved form. Name resolution runs once per module;
+//! the remaining passes run per `#[entry]` function body just before it is
+//! lowered to `cutile-ir`.
 //!
 //! ```text
 //! Raw syn AST (from proc macro)
 //!     ↓
-//! [Pass 1: Name Resolution]  — build symbol table, resolve imports
+//! [Name Resolution]         — rustc-style DefId/Res/Namespace symbol table;
+//!                             resolve imports and paths           (per module)
 //!     ↓
-//! [Pass 2: Type Inference]   — (future) every expression typed
+//! [Proof Analysis]          — collect `#[entry(preconditions = ...)]` facts
+//!                             for IR emission to query
 //!     ↓
-//! [Pass 3: Instantiation]    — (future) no generics remain
+//! [Node IDs]                — assign stable ids to semantic expressions so
+//!                             type-check side tables can refer back to them
 //!     ↓
-//! [IR Emission]              — translation to cutile-ir
+//! [Type Inference]          — DSL-narrow inference: expression types,
+//!                             method/impl selection, dispatch-wrapper calls
+//!     ↓
+//! [Typed Dispatch Lowering] — rewrite trait-dispatch wrapper calls
+//!                             (`f(a, b)` → `a.method(b)`) from typeck results
+//!     ↓
+//! [IR Emission]             — translation to cutile-ir (compiler/compile_*)
 //! ```
+//!
+//! Type inference and dispatch lowering are DSL-narrow and compiler1-compatible
+//! rather than a full Rust type checker; generic instantiation is handled in
+//! [`crate::generics`], not as a pass here.
 
 pub mod name_resolution;
 pub mod node_ids;

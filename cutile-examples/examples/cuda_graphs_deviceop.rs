@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * CUDA graphs example — safe device-operation combinators.
  *
  * Demonstrates how to use the DeviceOp combinator API (zip!, then,

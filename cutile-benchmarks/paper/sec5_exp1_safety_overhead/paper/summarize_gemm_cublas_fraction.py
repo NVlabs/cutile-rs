@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Summarize cuTile GEMM throughput as a fraction of cuBLASLt.
 
 The denominator is the cuBLASLt result at the matching M=N=K size.

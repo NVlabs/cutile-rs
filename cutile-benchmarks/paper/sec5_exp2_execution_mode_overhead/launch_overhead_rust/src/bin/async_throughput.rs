@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // §5.2 Part B — async/sync throughput under configurable host work.
 //
 // Measures iteration rate of a pipeline consisting of (a) a graph-replayed

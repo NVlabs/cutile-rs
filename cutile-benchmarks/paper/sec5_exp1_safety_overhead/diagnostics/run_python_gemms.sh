@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Run Python-side GEMM benchmarks: cuTile Python, cuBLASLt, and the
 # matching-size cuTile/cuBLAS fraction summary. Swizzle is an explicit
 # diagnostic target because it has not been the fastest path on RTX 5090.

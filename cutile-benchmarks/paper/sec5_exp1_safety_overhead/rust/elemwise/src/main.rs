@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Element-wise add benchmark for cuTile Rust -- paper §5.1 (companion
 // to rust/gemm/). Measures z = x + y for f16 tensors across three
 // bounds-check configurations:

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Run the paper-facing §5.1 B200 throughput benchmark bundle.
 #
 # JIT timing and exploratory sweeps are intentionally separated under

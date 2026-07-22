@@ -151,19 +151,31 @@ pub struct BytecodeVersion {
 }
 
 impl BytecodeVersion {
+    pub const V13_1: Self = Self {
+        major: 13,
+        minor: 1,
+        tag: 0,
+    };
+    pub const V13_2: Self = Self {
+        major: 13,
+        minor: 2,
+        tag: 0,
+    };
     pub const V13_3: Self = Self {
         major: 13,
         minor: 3,
         tag: 0,
     };
 
+    /// Newest version this writer can emit.
     pub const CURRENT: Self = Self::V13_3;
 
-    pub const MIN_SUPPORTED: Self = Self {
-        major: 13,
-        minor: 1,
-        tag: 0,
-    };
+    /// Oldest version this writer can emit.
+    pub const MIN_SUPPORTED: Self = Self::V13_1;
+
+    /// All emittable versions, oldest to newest. Used to probe the installed
+    /// `tileiras` for the newest bytecode version it accepts.
+    pub const SUPPORTED: [Self; 3] = [Self::V13_1, Self::V13_2, Self::V13_3];
 }
 
 impl std::fmt::Display for BytecodeVersion {

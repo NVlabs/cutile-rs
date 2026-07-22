@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Sweeps the bimodal-GEMMs work-distribution experiment with
 # per-task host work W (Option A merge of 6b + 6c). For each
 # W value, runs serial, threaded (S=PIN_S), async-T=1 (S=PIN_S),

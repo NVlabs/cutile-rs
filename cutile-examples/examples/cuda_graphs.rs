@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * CUDA graphs example — scoped capture with borrowed buffers.
  *
  * Demonstrates scope(...).graph(stream), which captures a CUDA graph

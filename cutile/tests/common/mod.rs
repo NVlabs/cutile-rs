@@ -2,12 +2,31 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-/// Common test utilities and constants shared across all test modules.
+//! Common test utilities and constants shared across all test modules.
+
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use cutile::compile_api::KernelCompiler;
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::error::JITError;
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
+
+/// Process-wide lock serializing tests that assert on global kernel-cache
+/// state (presence of a key) or the global JIT compile counter.
+///
+/// The in-memory kernel cache and `cutile::tile_kernel::jit_compile_count()`
+/// are process-global. A test that measures "did this call compile or hit the
+/// cache" must hold this lock for the whole measured window so no other test's
+/// concurrent compile can move the counter between snapshots. All cache-state
+/// tests (in `warmup.rs` and `warmup_bench.rs`) share this single lock.
+#[allow(dead_code)]
+pub fn cache_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Stack size for test threads.
 ///
