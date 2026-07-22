@@ -15,7 +15,7 @@ path = "src/bin/async_throughput.rs"
 
 [dependencies]
 cuda-core = "0.2.0"
-cuda-async = "0.2.0"
+cuda-async = { version = "0.2.0", features = ["reactor"] }
 cutile = "0.2.0"
 cutile-macro = "0.2.0"
 cutile-compiler = "0.2.0"
@@ -26,3 +26,13 @@ opt-level = 3
 lto = "thin"
 
 [workspace]
+
+[patch.crates-io]
+cuda-async = { path = "/home/elibol/dev/cutile-rs/cuda-async" }
+cuda-core = { path = "/home/elibol/dev/cutile-rs/cuda-core" }
+cuda-bindings = { path = "/home/elibol/dev/cutile-rs/cuda-bindings" }
+cutile = { path = "/home/elibol/dev/cutile-rs/cutile" }
+cutile-macro = { path = "/home/elibol/dev/cutile-rs/cutile-macro" }
+cutile-compiler = { path = "/home/elibol/dev/cutile-rs/cutile-compiler" }
+cutile-ir = { path = "/home/elibol/dev/cutile-rs/cutile-ir" }
+

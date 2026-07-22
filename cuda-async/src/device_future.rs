@@ -110,6 +110,15 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
             .ok_or(DeviceError::Internal(
                 "Cannot execute future without setting stream on which to execute.".to_string(),
             ))?;
+        #[cfg(feature = "reactor")]
+        {
+            // Flag-write reactor path; fall back to the host-function hop if
+            // the slot pool is exhausted or stream mem-ops are unavailable.
+            let stream = ctx.get_cuda_stream().cu_stream();
+            if crate::reactor::register(stream, waker_state.clone()).is_ok() {
+                return Ok(());
+            }
+        }
         ctx.get_cuda_stream().launch_host_function(move || {
             waker_state.signal();
         })?;
@@ -182,6 +191,55 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                     self.state = DeviceFutureState::Complete;
                     return Poll::Ready(Err(e));
                 }
+                // Inline fast path: bounded spin on cuStreamQuery before any
+                // completion registration. Microsecond-scale waits are too
+                // short for a waker round trip (reactor/host-fn -> waker ->
+                // scheduler -> re-poll); spinning at the wait site resolves
+                // short pipelines at sync-like latency. Budget-bounded so
+                // long pipelines fall through to the reactor/callback path.
+                // A query error falls through likewise and surfaces there.
+                // Default 20 us ≈ Q3 of measured decode-step kernel durations.
+                // `CUDA_ASYNC_SPIN_BUDGET_US=0` forces every pipeline through
+                // the completion-notification path (used by correctness tests
+                // so the reactor is actually exercised).
+                fn inline_spin_budget_us() -> u64 {
+                    static BUDGET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+                    *BUDGET.get_or_init(|| {
+                        std::env::var("CUDA_ASYNC_SPIN_BUDGET_US")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(20)
+                    })
+                }
+                let already_complete = 'spin: {
+                    if inline_spin_budget_us() == 0 {
+                        break 'spin false;
+                    }
+                    let Some(ctx) = self.execution_context.as_ref() else {
+                        break 'spin false;
+                    };
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_micros(inline_spin_budget_us());
+                    loop {
+                        match unsafe { ctx.get_cuda_stream().query() } {
+                            Ok(true) => break 'spin true,
+                            Ok(false) => {}
+                            Err(_) => break 'spin false,
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            break 'spin false;
+                        }
+                        std::hint::spin_loop();
+                    }
+                };
+                if already_complete {
+                    crate::device_operation::release_execution_lock();
+                    self.state = DeviceFutureState::Complete;
+                    return Poll::Ready(Ok(self
+                        .result
+                        .take()
+                        .expect("Expected future result to be Some.")));
+                }
                 // Add the callback. We only want to do this once.
                 if let Err(e) = unsafe { self.register_callback(waker_state.clone()) } {
                     crate::device_operation::release_execution_lock();
@@ -233,5 +291,66 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                 unreachable!();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod callback_state_tests {
+    //! Host-only contract tests for [`StreamCallbackState`], the shared state
+    //! a completion signal (host callback or reactor flag) fires against.
+    //! Patterned on tokio's `sync/tests/atomic_waker.rs`; no GPU required.
+
+    use super::StreamCallbackState;
+    use futures::task::{waker, ArcWake};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingWaker(AtomicUsize);
+    impl ArcWake for CountingWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// tokio `wake_without_register`: signaling with no registered waker is a
+    /// no-op, not a panic. This is the exact property our cancellation story
+    /// leans on — a future dropped mid-flight leaves the reactor to fire
+    /// `signal()` against state with no live waker, and that must be benign.
+    #[test]
+    fn signal_without_registered_waker_is_a_noop() {
+        let state = StreamCallbackState::new();
+        state.signal(); // must not panic
+        assert!(state.complete.load(Ordering::Relaxed));
+        state.signal(); // idempotent: second signal is also benign
+        assert!(state.complete.load(Ordering::Relaxed));
+    }
+
+    /// A registered waker is woken exactly once by a single signal, and the
+    /// completion flag is observable afterward (the `Executing` poll arm
+    /// reads it).
+    #[test]
+    fn signal_wakes_registered_waker_and_sets_complete() {
+        let state = StreamCallbackState::new();
+        let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        state.waker.register(&waker(counter.clone()));
+        assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+        state.signal();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert!(state.complete.load(Ordering::Relaxed));
+    }
+
+    /// Re-registering a second waker before completion means only the latest
+    /// is woken — the AtomicWaker contract the `Executing` arm depends on when
+    /// a task is re-polled with a fresh context.
+    #[test]
+    fn signal_wakes_only_the_latest_registered_waker() {
+        let state = StreamCallbackState::new();
+        let first = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let second = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        state.waker.register(&waker(first.clone()));
+        state.waker.register(&waker(second.clone()));
+        state.signal();
+        assert_eq!(first.0.load(Ordering::SeqCst), 0, "stale waker was woken");
+        assert_eq!(second.0.load(Ordering::SeqCst), 1);
     }
 }

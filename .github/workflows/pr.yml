@@ -83,3 +83,66 @@ jobs:
         run: |
           source "${HOME}/.cargo/env"
           ./scripts/run_cpu_tests.sh
+
+  # Model-checks / sanitizers for the cuda-async completion reactor's lock-free
+  # slot protocol. CPU-only, no GPU: loom explores the interleavings and weak-
+  # memory outcomes, miri checks the UnsafeCell/pointer UB, ThreadSanitizer
+  # samples races on the full-scale std-thread stress. All opt-in tooling —
+  # never part of the default build.
+  reactor-verification:
+    runs-on: linux-amd64-cpu16
+    container:
+      image: nvidia/cuda:13.3.0-devel-ubuntu24.04
+      # ThreadSanitizer must disable ASLR; the default container seccomp blocks
+      # the personality() call it uses, so relax it for this job.
+      options: --security-opt seccomp=unconfined
+      env:
+        DEBIAN_FRONTEND: noninteractive
+    env:
+      CUDA_TOOLKIT_PATH: /usr/local/cuda
+    timeout-minutes: 30
+    steps:
+      - name: Install basic dependencies
+        run: |
+          apt update
+          apt install -y --no-install-recommends build-essential curl \
+            ca-certificates git cmake pkg-config libclang-dev zlib1g-dev \
+            libzstd-dev
+
+      - name: Clone repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      # miri, -Zbuild-std, and -Zsanitizer are nightly-only, so this job needs
+      # nightly even though the rest of the repo builds on stable. Pinned to a
+      # settled nightly (not `nightly`/latest) for reproducibility and because
+      # miri is not always built for the newest nightly. Bump as needed.
+      - name: Install Rust (pinned nightly + miri + rust-src)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+            --default-toolchain nightly-2026-04-03
+          source "${HOME}/.cargo/env"
+          rustup component add miri rust-src
+
+      - name: loom model check (interleavings + weak memory)
+        run: |
+          source "${HOME}/.cargo/env"
+          RUSTFLAGS="--cfg loom" cargo test -p cuda-async --lib loom_
+
+      - name: miri (UnsafeCell / pointer UB)
+        run: |
+          source "${HOME}/.cargo/env"
+          cargo miri test -p cuda-async --lib slot_table
+
+      - name: ThreadSanitizer (sampled data races, full-scale stress)
+        run: |
+          source "${HOME}/.cargo/env"
+          # setarch -R pre-disables ASLR so TSan doesn't need to re-exec itself
+          # (which the container blocks); this sidesteps the high mmap-entropy
+          # incompatibility on newer kernels.
+          RUSTFLAGS="-Zsanitizer=thread" \
+            setarch "$(uname -m)" -R \
+            cargo test -p cuda-async --lib slot_table \
+            -Zbuild-std --target x86_64-unknown-linux-gnu

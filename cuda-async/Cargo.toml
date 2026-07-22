@@ -11,9 +11,22 @@ description = "Safe Async CUDA support via Async Rust."
 
 [dependencies]
 cuda-core = { workspace = true }
+cuda-bindings = { workspace = true }
 half = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 once_cell = { workspace = true }
+
+[features]
+# Flag-write completion reactor replacing host-function callbacks.
+reactor = []
+
+# `loom` model-checks the slot_table completion protocol; test-only, pulled in
+# solely under `--cfg loom` (e.g. `RUSTFLAGS="--cfg loom" cargo test`).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
