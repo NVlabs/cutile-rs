@@ -3,54 +3,71 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Borrows external CUDA handles into cutile via `Device::borrow_raw` and
-//! `Stream::borrow_raw`.
+//! Run cutile kernels over device memory a foreign framework (cudarc, torch,
+//! ...) already owns — no copy, no ownership transfer.
 //!
-//! The example is structured around a simulated third-party library
-//! (`foreign_cuda` below) that exposes its own `CUcontext` / `CUdevice` /
-//! `CUstream` typedefs. These are nominally distinct from
-//! `cuda_bindings`' typedefs — even though the underlying C ABI is
-//! identical — which is exactly the situation a real cudarc, bindgen, or
-//! hand-rolled-FFI caller finds themselves in.
+//! `foreign::Buffer` stands in for the framework's allocation: it owns the
+//! memory and frees it on drop. It implements [`DeviceAllocation`] once (the
+//! single `unsafe` assertion), after which `Tensor::from_foreign` is a **safe**
+//! call. The tensor holds an `Arc` to the buffer as a liveness token, so the
+//! memory provably outlives every cutile use — even after the framework drops
+//! its own handle.
 //!
-//! `borrow_raw` sidesteps the mismatch by taking `*mut c_void` + `c_int`,
-//! so the caller casts foreign pointer typedefs to primitives once at the
-//! boundary and keeps cutile binding-agnostic.
-//!
-//! The example demonstrates three properties:
-//!   1. A `ForeignHandles` bundle typed against foreign typedefs can be
-//!      turned into a cutile `Device`/`Stream` with only `as` casts.
-//!   2. A borrowed `Stream` drives a cutile kernel via `sync_on`.
-//!   3. Dropping the borrowed wrappers does NOT destroy the underlying
-//!      handles — the `source_*` handles still work afterward.
+//! A real cudarc `CudaSlice` (or a torch storage) is wrapped the same way: a
+//! few-line `unsafe impl DeviceAllocation` that returns its device pointer,
+//! byte length, and ordinal.
 
-use core::ffi::{c_int, c_void};
-use cuda_core::{Device, Stream};
+use cuda_async::device_buffer::DeviceAllocation;
+use cuda_core::sys::CUdeviceptr;
+use cuda_core::{free_async, malloc_async, memcpy_dtoh_async, memcpy_htod_async, Device, Stream};
 use cutile::error::Error;
 use cutile::prelude::*;
+use std::sync::Arc;
 
-/// Stand-in for a third-party CUDA bindings crate (cudarc, a newer
-/// bindgen run of `cuda.h`, etc.). The opaque structs and typedefs are
-/// intentionally distinct from `cuda_bindings::*` to prove that
-/// `borrow_raw` doesn't require our binding-crate's typedefs at the
-/// call site.
-#[allow(non_camel_case_types)]
-mod foreign_cuda {
-    use core::ffi::c_int;
+/// A foreign framework's device allocation: owns the memory, frees it on drop.
+mod foreign {
+    use super::*;
 
-    pub enum CUctx_st {}
-    pub enum CUstream_st {}
+    pub struct Buffer {
+        dptr: CUdeviceptr,
+        len_bytes: usize,
+        device_id: usize,
+        stream: Arc<Stream>,
+    }
 
-    pub type CUcontext = *mut CUctx_st;
-    pub type CUdevice = c_int;
-    pub type CUstream = *mut CUstream_st;
+    impl Buffer {
+        pub fn alloc(elems: usize, stream: &Arc<Stream>) -> Arc<Self> {
+            let len_bytes = elems * std::mem::size_of::<f32>();
+            let dptr = unsafe { malloc_async(len_bytes, stream) };
+            Arc::new(Self {
+                dptr,
+                len_bytes,
+                device_id: stream.device().ordinal(),
+                stream: stream.clone(),
+            })
+        }
+    }
 
-    /// What the third-party framework hands to its embedders.
-    pub struct ForeignHandles {
-        pub cu_ctx: CUcontext,
-        pub cu_device: CUdevice,
-        pub cu_stream: CUstream,
-        pub ordinal: usize,
+    impl Drop for Buffer {
+        fn drop(&mut self) {
+            // The framework frees its own memory when its last handle drops.
+            unsafe { free_async(self.dptr, &self.stream) };
+            println!("  [foreign] freed {:#x}", self.dptr);
+        }
+    }
+
+    // SAFETY: `dptr` is a live `len_bytes` device allocation on `device_id` for
+    // this buffer's whole lifetime (it is freed only in `Drop`).
+    unsafe impl DeviceAllocation for Buffer {
+        fn device_ptr(&self) -> CUdeviceptr {
+            self.dptr
+        }
+        fn len_bytes(&self) -> usize {
+            self.len_bytes
+        }
+        fn device_id(&self) -> usize {
+            self.device_id
+        }
     }
 }
 
@@ -74,47 +91,52 @@ fn main() -> Result<(), Error> {
     const N: usize = 1024;
     const TILE: usize = 128;
 
-    let source_device = Device::new(0)?;
-    let source_stream = source_device.new_stream()?;
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
 
-    // Pretend these came from a third-party framework. Pointer-to-pointer
-    // and int-to-int casts are zero-cost; the types are nominally
-    // different but ABI-identical.
-    let foreign = foreign_cuda::ForeignHandles {
-        cu_ctx: source_device.cu_ctx() as foreign_cuda::CUcontext,
-        cu_device: source_device.cu_device() as foreign_cuda::CUdevice,
-        cu_stream: source_stream.cu_stream() as foreign_cuda::CUstream,
-        ordinal: source_device.ordinal(),
-    };
+    // The framework allocates and owns three buffers, and fills the inputs.
+    let x = foreign::Buffer::alloc(N, &stream);
+    let y = foreign::Buffer::alloc(N, &stream);
+    let z = foreign::Buffer::alloc(N, &stream);
+    let ones = [1.0f32; N];
+    unsafe {
+        memcpy_htod_async(x.device_ptr(), ones.as_ptr(), N, &stream);
+        memcpy_htod_async(y.device_ptr(), ones.as_ptr(), N, &stream);
+    }
 
-    // TODO (hme): document safety — the foreign handles are derived from
-    // `source_*` above, which outlive the borrowed wrappers.
-    let borrowed_device = unsafe {
-        Device::borrow_raw(
-            foreign.cu_ctx as *mut c_void,
-            foreign.cu_device as c_int,
-            foreign.ordinal,
-        )
-    };
-    let borrowed_stream =
-        unsafe { Stream::borrow_raw(foreign.cu_stream as *mut c_void, &borrowed_device) };
+    // cutile borrows the foreign memory — safe, no copy. Each tensor holds an
+    // Arc to its buffer.
+    let shape = vec![N as i32];
+    let tx = Tensor::<f32>::from_foreign(x.clone(), shape.clone(), vec![1]);
+    let ty = Tensor::<f32>::from_foreign(y.clone(), shape.clone(), vec![1]);
+    let tz = Tensor::<f32>::from_foreign(z.clone(), shape.clone(), vec![1]);
 
-    let x = api::ones::<f32>(&[N]).sync_on(&borrowed_stream)?;
-    let y = api::ones::<f32>(&[N]).sync_on(&borrowed_stream)?;
-    let z = api::zeros::<f32>(&[N]).sync_on(&borrowed_stream)?;
+    // The framework drops its OWN handle to z. The memory is not freed: cutile's
+    // tensor still holds the buffer alive. (Keep z's address — a copyable u64 —
+    // to read the result back afterward.)
+    let z_dptr = z.device_ptr();
+    drop(z);
+    println!("foreign dropped its z handle; memory still alive (cutile holds it)");
 
-    let (z, _x, _y) = tile_add::add(z.partition([TILE]), x, y).sync_on(&borrowed_stream)?;
-    let z = z.unpartition();
-    let host = z.to_host_vec().sync_on(&borrowed_stream)?;
+    // cutile runs the kernel over the borrowed memory.
+    let (tz, _tx, _ty) = tile_add::add(tz.partition([TILE]), tx, ty).sync_on(&stream)?;
+
+    // Read the result back out of the (still-live) foreign z buffer.
+    let mut host = [0.0f32; N];
+    unsafe {
+        memcpy_dtoh_async(host.as_mut_ptr(), z_dptr, N, &stream);
+        stream.synchronize()?;
+    }
     assert!(host.iter().all(|v| *v == 2.0));
+    println!("kernel ran over foreign z; result correct");
 
-    drop(borrowed_stream);
-    drop(borrowed_device);
+    // Dropping cutile's tensors releases the last references — only now does the
+    // framework's buffer free (see the "[foreign] freed" lines).
+    drop((tz, _tx, _ty));
+    drop((x, y));
 
-    let probe = api::zeros::<f32>(&[4]).sync_on(&source_stream)?;
-    let probe_host = probe.to_host_vec().sync_on(&source_stream)?;
-    assert_eq!(probe_host, vec![0.0; 4]);
-
-    println!("cudarc_interop: borrowed stream ran kernel; source handles still alive.");
+    println!(
+        "cudarc_interop: borrowed foreign memory, ran kernel, foreign owner freed exactly once."
+    );
     Ok(())
 }

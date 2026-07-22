@@ -27,17 +27,64 @@ pub struct LaunchConfig {
     pub shared_mem_bytes: u32,
 }
 
+/// Anything that owns an external CUDA resource. A borrowed handle can hold an
+/// `Arc<dyn ForeignOwner>` as a *liveness token*: while the handle (and anything
+/// derived from it) is alive, the token's refcount is nonzero, so the external
+/// owner cannot be dropped — and the resource it backs cannot be destroyed —
+/// out from under cutile. Blanket-implemented, so any `Arc<T>` erases to
+/// `Arc<dyn ForeignOwner>`.
+pub trait ForeignOwner: Send + Sync + 'static {}
+impl<T: Send + Sync + 'static> ForeignOwner for T {}
+
+/// Optional liveness token held by a borrowed handle (see [`ForeignOwner`]).
+///
+/// Compares equal regardless of contents (the token is an ownership detail, not
+/// part of a handle's identity) and prints opaquely, so the handle types keep
+/// their `Debug`/`PartialEq`/`Eq` derives.
+#[derive(Clone, Default)]
+pub struct KeepAlive(Option<Arc<dyn ForeignOwner>>);
+
+impl KeepAlive {
+    /// A token holding nothing (owned or raw-borrowed handles).
+    pub fn none() -> Self {
+        Self(None)
+    }
+    /// A token keeping `owner` alive for the handle's lifetime.
+    pub fn owner(owner: Arc<dyn ForeignOwner>) -> Self {
+        Self(Some(owner))
+    }
+}
+
+impl std::fmt::Debug for KeepAlive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "KeepAlive(owner)"
+        } else {
+            "KeepAlive(none)"
+        })
+    }
+}
+
+impl PartialEq for KeepAlive {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for KeepAlive {}
+
 /// A GPU device handle wrapping a CUDA primary context.
 ///
-/// Can be either **owned** (created via [`Device::new`], releases the
-/// primary context on drop) or **borrowed** (created via
-/// [`Device::borrow_raw`], does NOT release on drop).
+/// Can be **owned** (created via [`Device::new`], releases the primary context
+/// on drop), **borrowed** (created via [`Device::borrow_raw`], does NOT release
+/// on drop), or **foreign** (created via [`Device::borrow_with_owner`], holds a
+/// liveness token so the external owner outlives it).
 #[derive(Debug)]
 pub struct Device {
     pub(crate) cu_device: cuda_bindings::CUdevice,
     pub(crate) cu_ctx: cuda_bindings::CUcontext,
     pub(crate) ordinal: usize,
     owned: bool,
+    _keep_alive: KeepAlive,
 }
 
 unsafe impl Send for Device {}
@@ -76,6 +123,7 @@ impl Device {
             cu_ctx,
             ordinal,
             owned: true,
+            _keep_alive: KeepAlive::none(),
         });
         device.bind_to_thread()?;
         Ok(device)
@@ -101,6 +149,37 @@ impl Device {
             cu_ctx: cu_ctx as cuda_bindings::CUcontext,
             ordinal,
             owned: false,
+            _keep_alive: KeepAlive::none(),
+        })
+    }
+
+    /// Wraps externally-owned CUDA handles, holding `owner` alive for the
+    /// returned device's lifetime.
+    ///
+    /// Same as [`borrow_raw`](Self::borrow_raw), but the liveness obligation is
+    /// discharged by construction: `owner` is whatever owns the context (a
+    /// cudarc device, a torch context handle, ...), and holding it here
+    /// guarantees the handles stay valid as long as this `Device` — or anything
+    /// derived from it — lives. Only the point-in-time validity of the handles
+    /// remains a caller assertion.
+    ///
+    /// # Safety
+    /// The caller must ensure, *at construction*, that:
+    /// - `cu_ctx` points to a valid retained `CUcontext` for `cu_device`, and
+    /// - dropping `owner` would release those handles (i.e. `owner` really is
+    ///   what keeps them alive).
+    pub unsafe fn borrow_with_owner(
+        cu_ctx: *mut c_void,
+        cu_device: c_int,
+        ordinal: usize,
+        owner: Arc<dyn ForeignOwner>,
+    ) -> Arc<Self> {
+        Arc::new(Device {
+            cu_device: cu_device as cuda_bindings::CUdevice,
+            cu_ctx: cu_ctx as cuda_bindings::CUcontext,
+            ordinal,
+            owned: false,
+            _keep_alive: KeepAlive::owner(owner),
         })
     }
 
@@ -165,6 +244,7 @@ impl Device {
             cu_stream,
             device: self.clone(),
             owned: true,
+            _keep_alive: KeepAlive::none(),
         }))
     }
 
@@ -353,14 +433,16 @@ pub struct PoolMemStats {
 
 /// A CUDA stream handle.
 ///
-/// Can be either **owned** (created via [`Device::new_stream`], destroyed
-/// on drop) or **borrowed** (created via [`Stream::borrow_raw`], does
-/// NOT destroy on drop).
+/// Can be **owned** (created via [`Device::new_stream`], destroyed on drop),
+/// **borrowed** (created via [`Stream::borrow_raw`], does NOT destroy on drop),
+/// or **foreign** (created via [`Stream::borrow_with_owner`], holds a liveness
+/// token so the external owner outlives it).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stream {
     pub(crate) cu_stream: cuda_bindings::CUstream,
     pub(crate) device: Arc<Device>,
     owned: bool,
+    _keep_alive: KeepAlive,
 }
 
 unsafe impl Send for Stream {}
@@ -396,6 +478,33 @@ impl Stream {
             cu_stream: cu_stream as cuda_bindings::CUstream,
             device: device.clone(),
             owned: false,
+            _keep_alive: KeepAlive::none(),
+        })
+    }
+
+    /// Wraps an externally-owned CUDA stream, holding `owner` alive for the
+    /// returned stream's lifetime.
+    ///
+    /// Same as [`borrow_raw`](Self::borrow_raw), but the liveness obligation is
+    /// discharged by construction: holding `owner` (whatever owns the stream)
+    /// guarantees `cu_stream` stays valid as long as this `Stream` — or anything
+    /// derived from it — lives. Only the point-in-time validity of `cu_stream`
+    /// remains a caller assertion.
+    ///
+    /// # Safety
+    /// The caller must ensure, *at construction*, that `cu_stream` points to a
+    /// valid CUDA stream on `device`, and that dropping `owner` would destroy
+    /// that stream (i.e. `owner` really is what keeps it alive).
+    pub unsafe fn borrow_with_owner(
+        cu_stream: *mut c_void,
+        device: &Arc<Device>,
+        owner: Arc<dyn ForeignOwner>,
+    ) -> Arc<Self> {
+        Arc::new(Stream {
+            cu_stream: cu_stream as cuda_bindings::CUstream,
+            device: device.clone(),
+            owned: false,
+            _keep_alive: KeepAlive::owner(owner),
         })
     }
 
