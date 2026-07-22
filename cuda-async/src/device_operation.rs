@@ -670,6 +670,17 @@ where
 
 // Value
 
+/// Wraps an immediate value as a completed device op.
+///
+/// `Value<T>` is `Send` exactly when `T` is — the compiler derives it, and
+/// nothing here may override that with a manual `unsafe impl Send` (one did
+/// exist, and made `Value<Rc<_>>` sendable from safe code). The doctest below
+/// fails to compile only while that stays true:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<cuda_async::device_operation::Value<std::rc::Rc<u8>>>();
+/// ```
 pub struct Value<T>(T);
 
 impl<T> Value<T> {
@@ -1470,3 +1481,19 @@ impl<T: Send + 'static> From<Vec<BoxedDeviceOp<T>>> for DeviceOpVec<T> {
 }
 
 // New names — old names kept as re-exports for backwards compatibility.
+
+#[cfg(test)]
+mod send_bounds {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    /// `DeviceOp: Send` and `DeviceFuture: Send` are public API promises —
+    /// they are what let a launch be awaited on a multi-threaded executor.
+    /// These are compile-time checks; the function body running is incidental.
+    #[test]
+    fn ops_and_futures_are_send() {
+        assert_send::<Value<std::sync::Arc<u8>>>();
+        assert_send::<crate::device_future::DeviceFuture<i32, Value<i32>>>();
+    }
+}
