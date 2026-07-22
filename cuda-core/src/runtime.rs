@@ -423,16 +423,23 @@ impl Stream {
     /// # Safety
     /// The caller must ensure the parent device's context is current on
     /// the calling thread.
-    pub unsafe fn launch_host_function<F: FnOnce() + Send>(
+    pub unsafe fn launch_host_function<F: FnOnce() + Send + 'static>(
         &self,
         host_func: F,
     ) -> Result<(), DriverError> {
         let boxed_host_func = Box::new(host_func);
-        stream::launch_host_function(
+        let raw_host_func = Box::into_raw(boxed_host_func);
+        match stream::launch_host_function(
             self.cu_stream,
             Self::callback_wrapper::<F>,
-            Box::into_raw(boxed_host_func) as *mut c_void,
-        )
+            raw_host_func as *mut c_void,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                drop(Box::from_raw(raw_host_func));
+                Err(error)
+            }
+        }
     }
 
     unsafe extern "C" fn callback_wrapper<F: FnOnce() + Send>(callback: *mut c_void) {
