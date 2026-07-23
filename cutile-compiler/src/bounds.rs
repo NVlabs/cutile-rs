@@ -270,8 +270,16 @@ impl Rem for Bounds<i64> {
         // unsigned_abs, not saturating_abs: |i64::MIN| - 1 == i64::MAX must
         // not be shrunk by saturation (i64::MAX % i64::MIN == i64::MAX, which
         // an m of i64::MAX - 1 would wrongly exclude). The divisor excludes
-        // zero, so max unsigned_abs >= 1 and `- 1` cannot underflow.
-        let m = (b.start.unsigned_abs().max(b.end.unsigned_abs()) - 1) as i64;
+        // zero per the contract above, so max unsigned_abs >= 1; the
+        // saturating_sub only matters on contract violation (b = [0, 0]) in
+        // release builds, where plain `- 1` would wrap to u64::MAX and yield
+        // an inverted interval — saturating keeps the result a valid (if
+        // meaningless) interval instead of poisoning downstream analysis.
+        let m = (b
+            .start
+            .unsigned_abs()
+            .max(b.end.unsigned_abs())
+            .saturating_sub(1)) as i64;
         let start = if a.start >= 0 { 0 } else { a.start.max(-m) };
         let end = if a.end <= 0 { 0 } else { a.end.min(m) };
         Bounds::new(start, end)

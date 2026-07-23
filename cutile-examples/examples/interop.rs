@@ -15,8 +15,9 @@
 //!   - Wrapping a custom kernel in a `DeviceOp` struct for a safe call-site
 //!   - Chaining tile and custom kernels on the same stream with `and_then`
 
-use cuda_async::device_context::{load_module_from_ptx, with_default_device_policy};
+use cuda_async::device_context::load_module_from_ptx;
 use cuda_async::device_future::DeviceFuture;
+use cuda_async::device_operation::future_on_default_stream;
 use cuda_async::device_operation::DeviceOp;
 use cuda_async::device_operation::ExecutionContext;
 use cuda_async::error::DeviceError;
@@ -155,13 +156,7 @@ impl IntoFuture for ScaleKernel {
     type Output = Result<(Arc<Tensor<f32>>, Tensor<f32>), DeviceError>;
     type IntoFuture = DeviceFuture<(Arc<Tensor<f32>>, Tensor<f32>), ScaleKernel>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) | Err(e) => DeviceFuture::failed(e),
-        }
+        future_on_default_stream(self)
     }
 }
 

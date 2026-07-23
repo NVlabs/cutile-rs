@@ -19,10 +19,10 @@
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
-use cuda_core::{Device, Function, MemPool, Module, Stream};
+use cuda_core::{free_async, Device, Function, MemPool, Module, Stream};
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -163,23 +163,120 @@ pub fn kernel_cache_slot(key_str: &str) -> Arc<OnceCell<CompiledKernel>> {
 pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
     device_id: usize,
+    /// Set to `true` when a `_mut` callback on this device panicked. Cleared
+    /// via [`clear_device_poison`] or [`reset_device`]. Per-device because a
+    /// callback's `&mut AsyncDeviceContext` can only damage this one entry.
+    poisoned: bool,
     deallocator_stream: Arc<Stream>,
     policy: Arc<dyn SchedulingPolicy>,
     pool: Option<Arc<MemPool>>,
 }
 
+/// Lifecycle state of the per-thread device context map. `Borrowed` makes
+/// re-entry observable so it can panic instead of silently rebuilding the
+/// map (the original cause of #133). Poison lives on individual
+/// [`AsyncDeviceContext`] entries, not here.
+#[derive(Default)]
+enum ContextState {
+    #[default]
+    Uninitialized,
+    Available(HashMap<usize, AsyncDeviceContext>),
+    Borrowed,
+}
+
 pub struct AsyncDeviceContexts {
     default_device: Cell<usize>,
-    devices: Cell<Option<HashMap<usize, AsyncDeviceContext>>>,
+    devices: Cell<ContextState>,
 }
 
 // Manage a statically accessible device context, and their associated streams.
 thread_local!(static DEVICE_CONTEXTS: AsyncDeviceContexts = const {
     AsyncDeviceContexts {
         default_device: Cell::new(DEFAULT_DEVICE_ID),
-        devices: Cell::new(None),
+        devices: Cell::new(ContextState::Uninitialized),
     }
 });
+
+// Frees deferred by `free_on_deallocator_stream` because the map was
+// `Borrowed` when a `DeviceBuffer` dropped (i.e. inside a `with_*`
+// callback). Flushed by `ContextGuard`'s `Drop` when the borrow ends.
+thread_local!(static PENDING_FREES: RefCell<Vec<(usize, cuda_core::sys::CUdeviceptr)>> =
+    const { RefCell::new(Vec::new()) });
+
+/// RAII handle on the borrowed map. Drop always restores it to `Available`;
+/// if `poison_device_on_panic = Some(id)` and the thread is unwinding, that
+/// one device's `poisoned` flag is set on the way out.
+struct ContextGuard<'a> {
+    cell: &'a Cell<ContextState>,
+    map: HashMap<usize, AsyncDeviceContext>,
+    poison_device_on_panic: Option<usize>,
+}
+
+impl Drop for ContextGuard<'_> {
+    fn drop(&mut self) {
+        let mut map = std::mem::take(&mut self.map);
+        if std::thread::panicking() {
+            if let Some(device_id) = self.poison_device_on_panic {
+                if let Some(ctx) = map.get_mut(&device_id) {
+                    ctx.poisoned = true;
+                }
+            }
+        }
+        // Flush frees deferred while this borrow was active (buffers dropped
+        // inside the callback). Must not panic: this Drop also runs during
+        // unwinding.
+        PENDING_FREES.with(|q| {
+            for (device_id, dptr) in q.borrow_mut().drain(..) {
+                match map.get(&device_id) {
+                    // Safety: the deallocator stream is created at context
+                    // init and stays valid for the context's lifetime.
+                    Some(ctx) => unsafe { free_async(dptr, &ctx.deallocator_stream) },
+                    None => eprintln!(
+                        "cuda-async: leaking device pointer on device_id={device_id}: \
+                         no context for this device on the dropping thread",
+                    ),
+                }
+            }
+        });
+        self.cell.set(ContextState::Available(map));
+    }
+}
+
+/// Take the device map out of the cell (`Available → Borrowed`), lazy-init
+/// if needed. Panics on re-entry — `_mut` callers must arm
+/// `poison_device_on_panic` themselves after picking a device.
+fn borrow_devices(ctx: &AsyncDeviceContexts) -> Result<ContextGuard<'_>, DeviceError> {
+    let map = match ctx.devices.take() {
+        ContextState::Available(map) => map,
+        ContextState::Uninitialized => {
+            init_device_contexts_default()?;
+            match ctx.devices.take() {
+                ContextState::Available(map) => map,
+                _ => {
+                    return Err(device_error(
+                        get_default_device(),
+                        "Failed to initialize context",
+                    ));
+                }
+            }
+        }
+        ContextState::Borrowed => {
+            // Restore Borrowed so any unwinding observer sees the right state.
+            ctx.devices.set(ContextState::Borrowed);
+            panic!(
+                "re-entrant access to device context: every with_*, \
+                 is_device_poisoned, clear_device_poison and reset_device \
+                 borrows the same thread-local map",
+            );
+        }
+    };
+    ctx.devices.set(ContextState::Borrowed);
+    Ok(ContextGuard {
+        cell: &ctx.devices,
+        map,
+        poison_device_on_panic: None,
+    })
+}
 
 /// Returns the current thread's default GPU device ID.
 ///
@@ -203,19 +300,25 @@ pub fn init_device_contexts(
     default_device_id: usize,
     num_devices: usize,
 ) -> Result<(), DeviceError> {
-    DEVICE_CONTEXTS.with(|ctx| {
-        device_assert(
-            default_device_id,
-            ctx.devices.replace(None).is_none(),
-            "Context already initialized.",
-        )
-    })?;
-    let devices = HashMap::with_capacity(num_devices);
-    DEVICE_CONTEXTS.with(|ctx| {
-        ctx.default_device.set(default_device_id);
-        ctx.devices.set(Some(devices));
-    });
-    Ok(())
+    DEVICE_CONTEXTS.with(|ctx| match ctx.devices.take() {
+        ContextState::Uninitialized => {
+            ctx.default_device.set(default_device_id);
+            ctx.devices
+                .set(ContextState::Available(HashMap::with_capacity(num_devices)));
+            Ok(())
+        }
+        ContextState::Available(map) => {
+            ctx.devices.set(ContextState::Available(map));
+            device_assert(default_device_id, false, "Context already initialized.")
+        }
+        ContextState::Borrowed => {
+            ctx.devices.set(ContextState::Borrowed);
+            panic!(
+                "init_device_contexts called while the device context is \
+                 currently borrowed by a callback",
+            );
+        }
+    })
 }
 
 pub fn init_device_contexts_default() -> Result<(), DeviceError> {
@@ -236,6 +339,7 @@ pub fn new_device_context(
     let deallocator_stream = device.new_stream()?;
     Ok(AsyncDeviceContext {
         device_id,
+        poisoned: false,
         deallocator_stream,
         policy,
         pool: None,
@@ -275,6 +379,7 @@ pub fn init_with_default_policy(
     let deallocator_stream = device.new_stream()?;
     let device_context = AsyncDeviceContext {
         device_id,
+        poisoned: false,
         deallocator_stream,
         policy: Arc::new(policy),
         pool: None,
@@ -283,56 +388,160 @@ pub fn init_with_default_policy(
     device_assert(device_id, pred, "Device is already initialized.")
 }
 
+/// True if this thread's context map has never been initialized. Peeks the
+/// state and restores it; never triggers lazy init (unlike
+/// [`borrow_devices`]), so the poison query/recovery fns stay side-effect
+/// free on uninitialized threads.
+fn contexts_uninitialized(ctx: &AsyncDeviceContexts) -> bool {
+    match ctx.devices.take() {
+        // `take()` already left `Uninitialized` (the Default) behind.
+        ContextState::Uninitialized => true,
+        other => {
+            ctx.devices.set(other);
+            false
+        }
+    }
+}
+
+/// Returns whether `device_id` is poisoned. `Ok(false)` if the device — or
+/// the whole per-thread context map — isn't initialized yet; never triggers
+/// lazy initialization.
+///
+/// # Panics
+///
+/// Panics if called from inside a `with_global_device_context*` callback —
+/// it borrows the same thread-local map. (Inside a callback the device
+/// cannot be poisoned anyway: the outer call would have returned `Err` first.)
+pub fn is_device_poisoned(device_id: usize) -> Result<bool, DeviceError> {
+    DEVICE_CONTEXTS.with(|ctx| {
+        if contexts_uninitialized(ctx) {
+            return Ok(false);
+        }
+        let guard = borrow_devices(ctx)?;
+        Ok(guard
+            .map
+            .get(&device_id)
+            .map(|c| c.poisoned)
+            .unwrap_or(false))
+    })
+}
+
+/// Clear the poison flag, keeping the existing context (pool, kernel cache,
+/// etc.). For a clean rebuild instead, use [`reset_device`]. No-op if the
+/// device wasn't poisoned or isn't present; never triggers lazy
+/// initialization.
+///
+/// # Panics
+///
+/// Panics if called from inside a `with_global_device_context*` callback —
+/// it borrows the same thread-local map. Call it after the outer call returns.
+pub fn clear_device_poison(device_id: usize) -> Result<(), DeviceError> {
+    DEVICE_CONTEXTS.with(|ctx| {
+        if contexts_uninitialized(ctx) {
+            return Ok(());
+        }
+        let mut guard = borrow_devices(ctx)?;
+        if let Some(c) = guard.map.get_mut(&device_id) {
+            c.poisoned = false;
+        }
+        Ok(())
+    })
+}
+
+/// Drop the entire context entry; the next access lazily rebuilds it with
+/// the default policy. Discards pool, kernel cache, and validator state.
+/// No-op if the device isn't present; never triggers lazy initialization.
+///
+/// # Panics
+///
+/// Panics if called from inside a `with_global_device_context*` callback —
+/// it borrows the same thread-local map. Call it after the outer call returns.
+pub fn reset_device(device_id: usize) -> Result<(), DeviceError> {
+    DEVICE_CONTEXTS.with(|ctx| {
+        if contexts_uninitialized(ctx) {
+            return Ok(());
+        }
+        let mut guard = borrow_devices(ctx)?;
+        guard.map.remove(&device_id);
+        Ok(())
+    })
+}
+
+/// Run `f` with shared access to `device_id`'s context.
+///
+/// Nested access is unsupported: re-borrowing the per-thread map from
+/// within `f` — directly or transitively (`pool_for_stream`, the recovery
+/// fns) — panics on `Borrowed`.
+/// Intentional and guaranteed; see [`borrow_devices`]. The one exemption is
+/// dropping a `DeviceBuffer` inside `f`: its free is deferred via
+/// [`free_on_deallocator_stream`] and flushed when `f` returns.
+///
+/// Returns `Err(DeviceError::Context)` if `device_id` is poisoned; recover
+/// via [`clear_device_poison`] / [`reset_device`].
 pub fn with_global_device_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&AsyncDeviceContext) -> R,
 {
     DEVICE_CONTEXTS.with(|ctx| {
-        let mut hashmap = match ctx.devices.take() {
-            Some(hashmap) => hashmap,
-            None => {
-                init_device_contexts_default()?;
-                ctx.devices
-                    .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
-            }
-        };
-        if !hashmap.contains_key(&device_id) {
-            init_with_default_policy(&mut hashmap, device_id)?;
+        let mut guard = borrow_devices(ctx)?;
+        if !guard.map.contains_key(&device_id) {
+            init_with_default_policy(&mut guard.map, device_id)?;
         }
-        let device_context = hashmap
+        let device_context = guard
+            .map
             .get(&device_id)
             .ok_or(device_error(device_id, "Failed to get context"))?;
-        let r = f(device_context);
-        ctx.devices.replace(Some(hashmap));
-        Ok(r)
+        if device_context.poisoned {
+            return Err(poisoned_error(device_id));
+        }
+        Ok(f(device_context))
     })
 }
 
+/// Run `f` with exclusive access to `device_id`'s context. Same no-nesting
+/// contract as [`with_global_device_context`].
+///
+/// If `f` panics, only `device_id` is poisoned (the guard restores the map
+/// to `Available`, so other devices stay usable); access returns
+/// `Err(DeviceError::Context)` until [`clear_device_poison`] /
+/// [`reset_device`].
 pub fn with_global_device_context_mut<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&mut AsyncDeviceContext) -> R,
 {
     DEVICE_CONTEXTS.with(|ctx| {
-        let mut hashmap = match ctx.devices.take() {
-            Some(hashmap) => hashmap,
-            None => {
-                init_device_contexts_default()?;
-                ctx.devices
-                    .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
-            }
-        };
-        if !hashmap.contains_key(&device_id) {
-            init_with_default_policy(&mut hashmap, device_id)?;
+        let mut guard = borrow_devices(ctx)?;
+        if !guard.map.contains_key(&device_id) {
+            init_with_default_policy(&mut guard.map, device_id)?;
         }
-        let device_context = hashmap
+        if guard
+            .map
+            .get(&device_id)
+            .ok_or(device_error(device_id, "Failed to get context"))?
+            .poisoned
+        {
+            return Err(poisoned_error(device_id));
+        }
+        // Arm before handing out &mut; disarm on clean return so the guard's
+        // Drop only poisons when the callback panicked.
+        guard.poison_device_on_panic = Some(device_id);
+        let device_context = guard
+            .map
             .get_mut(&device_id)
-            .ok_or(device_error(device_id, "Failed to get context"))?;
-        let r = f(device_context);
-        ctx.devices.replace(Some(hashmap));
-        Ok(r)
+            .expect("device entry checked above");
+        let result = f(device_context);
+        guard.poison_device_on_panic = None;
+        Ok(result)
     })
+}
+
+fn poisoned_error(device_id: usize) -> DeviceError {
+    device_error(
+        device_id,
+        "device context is poisoned: a previous mutable callback panicked. \
+         Call clear_device_poison(id) to resume using the existing context, \
+         or reset_device(id) to drop and rebuild it.",
+    )
 }
 
 /// Run a closure with a reference to the scheduling policy for `device_id`.
@@ -351,13 +560,60 @@ pub fn global_policy(device_id: usize) -> Result<Arc<dyn SchedulingPolicy>, Devi
     with_global_device_context(device_id, |device_context| device_context.policy.clone())
 }
 
+/// Run `f` with `device_id`'s deallocator stream. Same no-nesting contract
+/// as [`with_global_device_context`], but succeeds even when the device is
+/// poisoned — deallocation must never be blocked by poison (see below).
 pub unsafe fn with_deallocator_stream<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&Arc<Stream>) -> R,
 {
-    with_global_device_context(device_id, |device_context| {
-        f(&device_context.deallocator_stream)
+    // Deliberately skips the poison check (unlike `with_global_device_context`):
+    // this runs from `DeviceBuffer::drop`, and buffers are dropped while the
+    // panic that poisons the device is still unwinding. Refusing here would
+    // fail those frees during that unwind. The deallocator stream is created
+    // at context init and cannot be damaged by a panicking `_mut` callback.
+    DEVICE_CONTEXTS.with(|ctx| {
+        let mut guard = borrow_devices(ctx)?;
+        if !guard.map.contains_key(&device_id) {
+            init_with_default_policy(&mut guard.map, device_id)?;
+        }
+        let device_context = guard
+            .map
+            .get(&device_id)
+            .ok_or(device_error(device_id, "Failed to get context"))?;
+        Ok(f(&device_context.deallocator_stream))
     })
+}
+
+/// Free `dptr` on `device_id`'s deallocator stream. Unlike the `with_*`
+/// accessors this is safe to call while the per-thread map is borrowed
+/// (i.e. from a `Drop` that runs inside a `with_*` callback): the free is
+/// then queued and flushed when the borrow ends, instead of panicking on
+/// re-entry. Also skips the poison check, like [`with_deallocator_stream`].
+///
+/// # Safety
+///
+/// `dptr` must be a valid device allocation on `device_id` that is not
+/// freed elsewhere.
+pub unsafe fn free_on_deallocator_stream(
+    device_id: usize,
+    dptr: cuda_core::sys::CUdeviceptr,
+) -> Result<(), DeviceError> {
+    let deferred = DEVICE_CONTEXTS.with(|ctx| match ctx.devices.take() {
+        ContextState::Borrowed => {
+            ctx.devices.set(ContextState::Borrowed);
+            PENDING_FREES.with(|q| q.borrow_mut().push((device_id, dptr)));
+            true
+        }
+        other => {
+            ctx.devices.set(other);
+            false
+        }
+    });
+    if deferred {
+        return Ok(());
+    }
+    with_deallocator_stream(device_id, |stream| free_async(dptr, stream))
 }
 
 /// Run a closure with a reference to the [`Device`] for `device_id`.
@@ -451,12 +707,13 @@ pub fn get_device_pool(device_id: usize) -> Result<Option<Arc<MemPool>>, DeviceE
     with_global_device_context(device_id, |device_context| device_context.pool.clone())
 }
 
-/// Resolve the custom memory pool associated with the device that owns `stream`.
+/// Custom pool registered for `stream`'s device, if any.
 ///
-/// Errors from the device-context lookup are downgraded to `None`; this is the
-/// single choke-point for that decision so callers don't each re-derive it.
-pub fn pool_for_stream(stream: &Arc<Stream>) -> Option<Arc<MemPool>> {
-    get_device_pool(stream.device().ordinal()).ok().flatten()
+/// Propagates context errors (poison etc.) rather than downgrading to
+/// `None`. Re-borrows the per-thread map — not callable from inside a
+/// `with_global_device_context*` callback.
+pub fn pool_for_stream(stream: &Arc<Stream>) -> Result<Option<Arc<MemPool>>, DeviceError> {
+    get_device_pool(stream.device().ordinal())
 }
 
 /// Run a closure with the scheduling policy of the current thread's default device.
@@ -471,6 +728,23 @@ where
 {
     let default_device = get_default_device();
     with_global_device_context(default_device, |device_context| f(&device_context.policy))
+}
+
+/// The next stream of the current thread's default device, together with
+/// that device's registered pool, resolved in a single borrow of the
+/// per-thread context map.
+///
+/// This is the scheduling-time entry point for the `.await` / `.schedule()`
+/// paths: one borrow instead of a policy borrow followed by
+/// [`pool_for_stream`], and the stream/pool pair is read consistently with
+/// respect to [`set_device_pool`]. Same no-nesting contract as
+/// [`with_global_device_context`]; propagates poison as `Err`.
+pub fn default_stream_and_pool() -> Result<(Arc<Stream>, Option<Arc<MemPool>>), DeviceError> {
+    let default_device = get_default_device();
+    with_global_device_context(default_device, |device_context| {
+        let stream = device_context.policy.next_stream()?;
+        Ok((stream, device_context.pool.clone()))
+    })?
 }
 
 // Kernel operations — compile, cache, and retrieve GPU kernels.
