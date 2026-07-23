@@ -533,6 +533,7 @@ pub fn generate_kernel_launcher(
     let mut spec_ref_exprs: Vec<String> = vec![];
     let mut scalar_hint_exprs: Vec<String> = vec![];
     let mut scalar_hint_value_exprs: Vec<String> = vec![];
+    let mut scalar_hint_names: Vec<String> = vec![];
     let mut builder_statements = vec![];
     let mut launch_grid_expr_strs = vec![];
     let mut validator_statements = vec![];
@@ -599,6 +600,7 @@ pub fn generate_kernel_launcher(
                     scalar_hint_value_exprs.push(format!(
                         "{tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_value({var_name} as i32)"
                     ));
+                    scalar_hint_names.push(format!("{var_name:?}"));
                 }
                 param_element_types.push(None);
             }
@@ -639,6 +641,7 @@ pub fn generate_kernel_launcher(
                 scalar_hint_value_exprs.push(format!(
                     "{tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr())"
                 ));
+                scalar_hint_names.push(format!("{var_name:?}"));
                 // The specialization's pointee type must be the `DevicePointer<T>`
                 // element type: a user `.generics(..)` list can widen `T`, and the
                 // kernel would then index the buffer with the wider element size.
@@ -918,13 +921,26 @@ pub fn generate_kernel_launcher(
 
     // Emit scalar_hints (populated for integer scalar and raw pointer params).
     let scalar_hints_stmt = parse_stmt(format!(
-        "let scalar_hints: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::DivHint)> = vec![{}];",
+        "let mut scalar_hints: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
     ));
-    specialization_method
-        .block
-        .stmts
-        .push(scalar_hints_stmt.clone());
+    specialization_method.block.stmts.push(scalar_hints_stmt);
+    // Scalar specialization overrides replace or extend the inferred hints.
+    specialization_method.block.stmts.push(parse_stmt(
+        r#"
+        for (name, hint) in self._scalar_hint_overrides.drain(..) {
+            if let Some((_, inferred)) = scalar_hints
+                .iter_mut()
+                .find(|entry| entry.0 == name)
+            {
+                *inferred = hint;
+            } else {
+                scalar_hints.push((name, hint));
+            }
+        }
+        "#
+        .to_string(),
+    ));
 
     // Launch-site probe: on the steady state the launcher skips key
     // construction, toolchain fingerprinting, hashing, and the global cache
@@ -938,10 +954,32 @@ pub fn generate_kernel_launcher(
         spec_ref_exprs.join(",")
     )));
     launcher_method.block.stmts.push(parse_stmt(format!(
-        "let __hint_vals: [{tile_rust_crate_root}::cutile_compiler::specialization::DivHint; {}] = [{}];",
+        "let mut __hint_vals: [{tile_rust_crate_root}::cutile_compiler::specialization::DivHint; {}] = [{}];",
         scalar_hint_value_exprs.len(),
         scalar_hint_value_exprs.join(",")
     )));
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let __hint_names: [&str; {}] = [{}];",
+        scalar_hint_names.len(),
+        scalar_hint_names.join(",")
+    )));
+    // Scalar specialization overrides replace inferred hints in place, so the
+    // probe key reflects them. An override for a parameter without an inferred
+    // hint is not part of the key, so such a launch bypasses the launch site.
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let mut __hint_extra: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::DivHint)> = Vec::new();"
+    )));
+    launcher_method.block.stmts.push(parse_stmt(
+        r#"
+        for (name, hint) in self._scalar_hint_overrides.drain(..) {
+            match __hint_names.iter().position(|n| *n == name) {
+                Some(i) => __hint_vals[i] = hint,
+                None => __hint_extra.push((name, hint)),
+            }
+        }
+        "#
+        .to_string(),
+    ));
     launcher_method.block.stmts.push(parse_stmt(format!(
         "static __SITE: {tile_rust_crate_root}::tile_kernel::LaunchSite = {tile_rust_crate_root}::tile_kernel::LaunchSite::new();"
     )));
@@ -952,7 +990,7 @@ pub fn generate_kernel_launcher(
         "let __compile_options = std::mem::take(&mut self._compile_options);".to_string(),
     ));
     launcher_method.block.stmts.push(parse_stmt(
-        "let __site_hit = __SITE.get(ctx.get_device_id(), &function_generics, &__specs,          &__hint_vals, __const_grid, &__compile_options);"
+        "let __site_hit = if __hint_extra.is_empty() { __SITE.get(ctx.get_device_id(), &function_generics, &__specs, &__hint_vals, __const_grid, &__compile_options) } else { None };"
             .to_string(),
     ));
     launcher_method.block.stmts.push(parse_stmt(format!(
@@ -961,7 +999,10 @@ pub fn generate_kernel_launcher(
         }} else {{
             let stride_args: Vec<(String, Vec<i32>)> = vec![{strides}];
             let spec_args: Vec<(String, {root}::cutile_compiler::specialization::SpecializationBits)> = vec![{specs}];
-            let scalar_hints: Vec<(String, {root}::cutile_compiler::specialization::DivHint)> = vec![{hints}];
+            let __site_cacheable = __hint_extra.is_empty();
+            let mut scalar_hints: Vec<(String, {root}::cutile_compiler::specialization::DivHint)> =
+                __hint_names.iter().map(|n| n.to_string()).zip(__hint_vals).collect();
+            scalar_hints.extend(__hint_extra);
             let __generics_snapshot = function_generics.clone();
             let __specs_snapshot: Vec<{root}::cutile_compiler::specialization::SpecializationBits> =
                 spec_args.iter().map(|(_, s)| s.clone()).collect();
@@ -975,21 +1016,22 @@ pub fn generate_kernel_launcher(
                 __compile_options,
                 _SOURCE_HASH,
             )?;
-            __SITE.store({root}::tile_kernel::SiteResolution::new(
-                ctx.get_device_id(),
-                __generics_snapshot,
-                __specs_snapshot,
-                __hints_snapshot,
-                __const_grid,
-                __options_snapshot,
-                function.clone(),
-                validator.clone(),
-            ));
+            if __site_cacheable {{
+                __SITE.store({root}::tile_kernel::SiteResolution::new(
+                    ctx.get_device_id(),
+                    __generics_snapshot,
+                    __specs_snapshot,
+                    __hints_snapshot,
+                    __const_grid,
+                    __options_snapshot,
+                    function.clone(),
+                    validator.clone(),
+                ));
+            }}
             (function, validator)
         }};",
         strides = stride_args.join(","),
         specs = spec_args.join(","),
-        hints = scalar_hint_exprs.join(","),
         root = tile_rust_crate_root,
     )));
 
