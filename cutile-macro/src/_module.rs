@@ -830,6 +830,10 @@ pub fn kernel_launcher(
             _grid: (u32, u32, u32),
             input: Option<DI>,
             function_generics: Option<Vec<String>>,
+            _scalar_hint_overrides: Vec<(
+                String,
+                cutile_compiler::specialization::DivHint,
+            )>,
             _phantom: std::marker::PhantomData<( #(#ki_phantom_types,)* )>,
             _compile_options: CompileOptions,
             // When true, `execute` skips its launch block (set by `.compile()`).
@@ -843,6 +847,7 @@ pub fn kernel_launcher(
                     _grid: (0, 0, 0),
                     input: Some(input),
                     function_generics: None,
+                    _scalar_hint_overrides: Vec::new(),
                     _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
                     _compile_only: false,
@@ -914,6 +919,14 @@ pub fn kernel_launcher(
             }
             fn generics(mut self, generics: Vec<String>) -> Self {
                 self.function_generics = Some(generics);
+                self
+            }
+            fn scalar_hint(
+                mut self,
+                name: impl Into<String>,
+                hint: cutile_compiler::specialization::DivHint,
+            ) -> Self {
+                self._scalar_hint_overrides.push((name.into(), hint));
                 self
             }
             fn compile_options(mut self, options: CompileOptions) -> Self {

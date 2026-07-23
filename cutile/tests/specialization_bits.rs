@@ -435,7 +435,57 @@ fn raw_pointer_launch_scalar_div_hint_covers_powers_of_two_through_16() {
     });
 }
 
+#[test]
+fn raw_pointer_launch_scalar_hint_override_replaces_inferred_hint() {
+    common::with_test_stack(|| {
+        // n=12 would infer div_by<4>; the override to div_by<8> must win.
+        let mlir = launch_raw_ptr_scalar_kernel_with_overrides(
+            12,
+            &[("_n", dh(8))],
+            CompileOptions::default().occupancy(3),
+        );
+        assert!(
+            mlir.contains("assume div_by<8>"),
+            "Expected scalar hint override to emit div_by<8>.\nMLIR:\n{mlir}"
+        );
+        assert!(
+            !mlir.contains("assume div_by<4>"),
+            "Inferred div_by<4> must be replaced by the override.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn raw_pointer_launch_scalar_hint_default_override_removes_inferred_hint() {
+    common::with_test_stack(|| {
+        // A default DivHint (divisor 1) disables specialization for a truly
+        // dynamic scalar: only the raw pointer assume remains.
+        let mlir = launch_raw_ptr_scalar_kernel_with_overrides(
+            12,
+            &[("_n", DivHint::default())],
+            CompileOptions::default().occupancy(3),
+        );
+        assert!(
+            mlir.contains("assume div_by<16>"),
+            "Expected the raw pointer hint to still emit div_by<16>.\nMLIR:\n{mlir}"
+        );
+        assert_eq!(
+            mlir.matches("assume div_by<").count(),
+            1,
+            "Expected only the raw pointer assume once the scalar hint is overridden to default.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
 fn launch_raw_ptr_scalar_kernel_and_read_mlir(n: i32, options: CompileOptions) -> String {
+    launch_raw_ptr_scalar_kernel_with_overrides(n, &[], options)
+}
+
+fn launch_raw_ptr_scalar_kernel_with_overrides(
+    n: i32,
+    overrides: &[(&str, DivHint)],
+    options: CompileOptions,
+) -> String {
     let _lock = RAW_PTR_DUMP_LOCK.lock().expect("lock raw pointer dump dir");
     let dump_dir = Path::new(RAW_PTR_SCALAR_DUMP_DIR);
     let _ = std::fs::remove_dir_all(dump_dir);
@@ -446,11 +496,13 @@ fn launch_raw_ptr_scalar_kernel_and_read_mlir(n: i32, options: CompileOptions) -
         .expect("alloc backing tensor");
     let ptr = backing.device_pointer();
 
-    unsafe { raw_ptr_scalar_kernel(ptr, n) }
+    let launcher = unsafe { raw_ptr_scalar_kernel(ptr, n) }
         .grid((1, 1, 1))
-        .compile_options(options)
-        .sync()
-        .expect("raw pointer scalar kernel launch");
+        .compile_options(options);
+    let launcher = overrides.iter().fold(launcher, |launcher, (name, hint)| {
+        launcher.scalar_hint(*name, *hint)
+    });
+    launcher.sync().expect("raw pointer scalar kernel launch");
 
     let mut mlir = String::new();
     for entry in std::fs::read_dir(dump_dir).expect("read MLIR dump dir") {
