@@ -35,6 +35,9 @@ mod global_counter;
 #[path = "gpu/inter_module.rs"]
 mod inter_module;
 
+#[path = "gpu/jit_disk_cache.rs"]
+mod jit_disk_cache;
+
 #[path = "gpu/tensor_slicing.rs"]
 mod tensor_slicing;
 

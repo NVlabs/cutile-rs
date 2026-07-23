@@ -198,6 +198,38 @@ The fields mean:
 
 Values outside this pattern are ordinary launch or data inputs. Tensor contents, floating-point scalar values, and runtime grid values passed with `.grid(...)` do not create cache entries by themselves.
 
+## Persistent Disk Cache
+
+The kernel cache above lives in process memory and dies with the process. cuTile can additionally persist compiled cubins to disk, so a fresh process skips the `tileiras` backend for kernels any earlier process already compiled.
+
+Disk persistence is **off by default, and no environment variable can turn it on**. A program opts in explicitly:
+
+```rust
+// ~/.cache/cutile/kernels ($XDG_CACHE_HOME respected), 2 GiB LRU cap:
+cutile::jit_cache::enable_default()?;
+
+// or a custom location and capacity:
+use cutile::jit_cache::FileSystemJitStore;
+let store = FileSystemJitStore::builder("/data/kernel-cache")
+    .capacity_bytes(512 << 20)
+    .open()?;
+cutile::jit_cache::enable(std::sync::Arc::new(store));
+```
+
+`cutile::jit_cache::disable()` stops all disk reads and writes; kernels already in the in-memory cache are unaffected. The `JitStore` trait behind `enable` is a plain byte-oriented get/put interface, so a custom backend (an object store, a network cache) can replace the filesystem implementation.
+
+A disk hit skips only the `tileiras` subprocess — the compiler frontend still runs on every in-memory miss, because launching needs its parameter-validation output, not just the cubin. The cache key is a SHA-256 over the serialized Tile IR bytecode together with the target architecture, the optimization level, and the resolved `tileiras` binary's `--version` output. The bytecode inlines every dependency module, so anything that changes the generated cubin changes the key; upgrading the CUDA toolkit changes the fingerprint and old entries simply stop matching. Stored entries carry a checksummed header that is re-validated field by field on every hit — a torn write, a hand-planted file, or a hash collision reads as a miss and recompiles.
+
+Cache I/O can never fail a launch: every read, write, or eviction error is counted and the compile proceeds as if no cache were installed. Observability:
+
+- `cutile::jit_cache::stats()` — hits, misses, entries written, bytes written, soft I/O errors.
+- `cutile::jit_cache::jit_backend_compile_count()` / `jit_disk_hit_count()` — with `jit_compile_count()`, these satisfy `compiles == backend + disk_hits` absent failures.
+- `CUTILE_JIT_TIMING=1` — the per-kernel timing line includes `stage2_source=disk|tileiras`.
+
+The eviction policy is LRU by file mtime with a high/low watermark pair (defaults: collect above capacity, delete oldest entries down to 80%). Multiple processes can share one cache directory; writes are atomic and eviction is coordinated through a lock file.
+
+See `cutile-examples/examples/jit_disk_cache.rs`; run it twice to watch the second process hit the disk. For implementing a custom backend (an object store, a database), see `cutile-examples/examples/jit_custom_store.rs`.
+
 ## Compile-Only API
 
 Most users compile kernels by launching a generated `#[cutile::entry]` launcher. cuTile also exposes `cutile::compile_api::KernelCompiler` for pre-compilation and other compile-only workflows that need Tile IR text or bytecode without launching a kernel.

@@ -15,6 +15,7 @@ pub mod cuda_tile_runtime_utils;
 pub mod error;
 pub mod generics;
 pub mod hints;
+pub mod jit_cache;
 mod kernel_entry_generator;
 pub mod kernel_naming;
 pub mod registry;
