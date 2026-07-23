@@ -1604,7 +1604,7 @@ pub mod core {
 
     /// Element-wise integer divide. `Zero` rounding = truncation;
     /// `PositiveInf` = ceiling div; `NegativeInf` = floor div (signed only).
-    #[cuda_tile::op(name = "cuda_tile.divi", params = ["lhs", "rhs"], static_params = ["rounding={Zero: , NearestEven: rounding=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding=#cuda_tile.rounding<negative_inf>, Approx: rounding=#cuda_tile.rounding<approx>, Full: rounding=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::op(name = "cuda_tile.divi", params = ["lhs", "rhs"], static_params = ["rounding={Zero: rounding=#cuda_tile.rounding<zero>, NearestEven: rounding=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding=#cuda_tile.rounding<negative_inf>, Approx: rounding=#cuda_tile.rounding<approx>, Full: rounding=#cuda_tile.rounding<full>}"], named_attributes = ["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn divi<E: ElementType, const S: [i32; N], R: rounding::Mode>(
         lhs: Tile<E, S>,
@@ -1615,7 +1615,7 @@ pub mod core {
     }
 
     /// Element-wise integer remainder. Result sign matches dividend.
-    #[cuda_tile::op(name = "cuda_tile.remi", params = ["lhs", "rhs"])]
+    #[cuda_tile::op(name = "cuda_tile.remi", params = ["lhs", "rhs"], named_attributes = ["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn remi<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
