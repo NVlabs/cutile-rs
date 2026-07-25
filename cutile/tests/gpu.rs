@@ -49,9 +49,3 @@ mod book_snippets;
 
 #[path = "gpu/tensor_permute.rs"]
 mod tensor_permute;
-
-#[path = "gpu/warmup.rs"]
-mod warmup;
-
-#[path = "gpu/warmup_bench.rs"]
-mod warmup_bench;

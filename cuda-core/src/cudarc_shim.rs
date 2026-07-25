@@ -241,6 +241,23 @@ pub(crate) mod stream {
         cuda_bindings::cuStreamSynchronize(stream).result()
     }
 
+    /// Queries stream completion without blocking: `Ok(true)` when all prior
+    /// work has completed, `Ok(false)` when work is still in flight
+    /// (`CUDA_ERROR_NOT_READY`).
+    ///
+    /// # Safety
+    /// `stream` must be a valid stream handle.
+    pub unsafe fn query(stream: cuda_bindings::CUstream) -> Result<bool, DriverError> {
+        match cuda_bindings::cuStreamQuery(stream) {
+            cuda_bindings::cudaError_enum_CUDA_SUCCESS => Ok(true),
+            cuda_bindings::cudaError_enum_CUDA_ERROR_NOT_READY => Ok(false),
+            code => {
+                code.result()?;
+                unreachable!("non-error CUresult handled above")
+            }
+        }
+    }
+
     /// Destroys a CUDA stream.
     ///
     /// # Safety
@@ -284,6 +301,23 @@ pub(crate) mod stream {
         arg: *mut c_void,
     ) -> Result<(), DriverError> {
         cuda_bindings::cuLaunchHostFunc(stream, Some(func), arg).result()
+    }
+
+    /// Enqueues a host function on the stream with an explicit sync mode.
+    ///
+    /// `sync_mode` is `CU_HOST_TASK_BLOCKING` or `CU_HOST_TASK_SPINWAIT`;
+    /// spin-wait keeps the driver's host-task thread hot for lower callback
+    /// latency at the cost of a busy core.
+    ///
+    /// # Safety
+    /// `func` and `arg` must remain valid until the callback executes.
+    pub unsafe fn launch_host_function_v2(
+        stream: cuda_bindings::CUstream,
+        func: unsafe extern "C" fn(*mut ::core::ffi::c_void),
+        arg: *mut c_void,
+        sync_mode: ::core::ffi::c_uint,
+    ) -> Result<(), DriverError> {
+        cuda_bindings::cuLaunchHostFunc_v2(stream, Some(func), arg, sync_mode).result()
     }
 
     /// Begins stream capture for graph construction.
