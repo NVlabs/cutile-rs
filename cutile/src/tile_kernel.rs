@@ -910,6 +910,8 @@ where
     fn const_grid(self, grid: (u32, u32, u32)) -> Self;
     /// Sets the runtime launch grid dimensions.
     fn grid(self, grid: (u32, u32, u32)) -> Self;
+    /// Sets composable CUDA extended-launch attributes.
+    fn launch_attributes(self, attributes: cuda_core::LaunchAttributes) -> Self;
     /// Sets the runtime compile options (occupancy, num_cta_in_cga).
     fn compile_options(self, options: CompileOptions) -> Self;
     /// Infers the launch grid from partitioned tensor inputs, or uses the explicit grid.

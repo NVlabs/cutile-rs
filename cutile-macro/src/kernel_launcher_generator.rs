@@ -945,7 +945,8 @@ pub fn generate_kernel_launcher(
                     grid_dim: launch_grid,
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0
-                });
+                })
+                .set_launch_attributes(self._launch_attributes);
             kernel_launch.execute(ctx)?;
         }})
         .unwrap()

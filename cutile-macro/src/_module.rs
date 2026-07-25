@@ -394,7 +394,7 @@ fn module_inner(
                 use #tile_rust_crate_root::tile_kernel::{*};
                 use #tile_rust_crate_root::cuda_async::error::{*};
                 use #tile_rust_crate_root::cuda_async::scheduling_policies::SchedulingPolicy;
-                use #tile_rust_crate_root::cuda_core::{Device, Function, Module, Stream, DriverError, LaunchConfig};
+                use #tile_rust_crate_root::cuda_core::{Device, Function, Module, Stream, DriverError, LaunchAttributes, LaunchConfig};
                 // use #tile_rust_crate_root::cutile_compiler::cuda_tile::ModuleOperation;
                 // use #tile_rust_crate_root::cutile_compiler::compiler::{CUDATileModules, CUDATileFunctionCompiler};
                 // Module asts and generated type data.
@@ -832,6 +832,7 @@ pub fn kernel_launcher(
             function_generics: Option<Vec<String>>,
             _phantom: std::marker::PhantomData<( #(#ki_phantom_types,)* )>,
             _compile_options: CompileOptions,
+            _launch_attributes: LaunchAttributes,
             // When true, `execute` skips its launch block (set by `.compile()`).
             _compile_only: bool,
         }
@@ -845,6 +846,7 @@ pub fn kernel_launcher(
                     function_generics: None,
                     _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
+                    _launch_attributes: LaunchAttributes::default(),
                     _compile_only: false,
                 }
             }
@@ -911,6 +913,10 @@ pub fn kernel_launcher(
             }
             fn get_launch_grid(&self) -> (u32, u32, u32) {
                 self._grid
+            }
+            fn launch_attributes(mut self, attributes: LaunchAttributes) -> Self {
+                self._launch_attributes = attributes;
+                self
             }
             fn generics(mut self, generics: Vec<String>) -> Self {
                 self.function_generics = Some(generics);
