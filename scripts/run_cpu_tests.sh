@@ -27,7 +27,7 @@ run_step \
 
 run_step \
     "cutile-compiler JIT disk store tests" \
-    cargo test -p cutile-compiler --test jit_store
+    cargo test -p cutile-compiler --test jit_cache
 
 run_step \
     "cutile library tests" \
