@@ -292,7 +292,7 @@ fn disk_cache_recompiles_after_driver_rejection() {
             .unpartition()
             .to_host_vec()
             .sync()
-            .expect("real launch after driver rejection should succeed");    
+            .expect("real launch after driver rejection should succeed");
 
         jit_cache::disable();
 

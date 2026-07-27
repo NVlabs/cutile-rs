@@ -16,10 +16,10 @@
 //!   backend compiles).
 //!
 //! Disk persistence is off by default and has no environment-variable switch;
-//! it starts only when the program calls `jit_cache::enable*`. Real programs
-//! usually want [`jit_cache::enable_default`], which uses
-//! `~/.cache/cutile/kernels` with a 2 GiB LRU cap; this example uses a
-//! directory under the system temp dir so it is easy to find and delete.
+//! it starts only when the program calls `jit_cache::enable*`. This example
+//! uses [`FileSystemJitStore::default_location`], which resolves to
+//! `$XDG_CACHE_HOME/cutile/kernels` or `~/.cache/cutile/kernels` on Unix,
+//! created with strict per-user permissions. Delete that directory to start cold again.
 //!
 //! `CUTILE_JIT_TIMING=1` prints per-stage timings including
 //! `stage2_source=disk|tileiras`.
@@ -47,13 +47,9 @@ mod disk_cache_example_module {
 }
 
 fn main() {
-    // A fixed location, so the next run of this example finds what this run
-    // stored. Delete the directory to start cold again.
-    let cache_dir = std::env::temp_dir().join("cutile-jit-disk-cache-example");
-    println!("cache directory: {}", cache_dir.display());
-    jit_cache::enable(Arc::new(
-        FileSystemJitStore::new(&cache_dir).expect("open cache directory"),
-    ));
+    let store = FileSystemJitStore::default_location().expect("open default cache directory");
+    println!("cache directory: {}", store.root().display());
+    jit_cache::enable(Arc::new(store));
 
     let x: Arc<Tensor<f32>> = ones(&[1024]).sync().expect("ones").into();
     let y: Arc<Tensor<f32>> = ones(&[1024]).sync().expect("ones").into();
