@@ -419,6 +419,7 @@ dependencies = [
  "anyhow",
  "cuda-bindings",
  "cuda-core",
+ "dashmap",
  "futures",
  "half",
  "loom",

@@ -189,8 +189,9 @@ pub fn tileiras_binary() -> PathBuf {
 /// The fingerprint is the `--version` stdout. It carries the build number
 /// (`Build local.local.37905922_`), and unlike `(size, mtime)` it survives a
 /// reinstall of the same toolkit, so the cache stays warm. Measured cost on
-/// CUDA 13.3: under 5 ms, `maxrss` 21.4 MB. Cached per process, and the key path
-/// runs on cache hits too, so this must stay cheap.
+/// CUDA 13.3: under 5 ms, `maxrss` 21.4 MB. The path resolution and `--version`
+/// are both cached per process (the former by env value, the latter by path),
+/// and the key path runs on cache hits too, so this must stay cheap.
 ///
 /// Note it does not distinguish two binaries that report the same version, such
 /// as a locally patched one.
@@ -259,11 +260,32 @@ fn stat_fingerprint(tileiras: &Path) -> String {
 
 /// Resolves `tileiras` together with the CUDA toolkit root (when applicable),
 /// using the active `CUTILE_TILEIRAS_PATH` / `CUDA_TOOLKIT_PATH` environment.
+///
+/// Cached by the environment values that drive resolution: steady-state launches
+/// only re-read the two env vars, and the expensive toolkit/`cuda.h` lookup is
+/// recomputed only when one of those values changes. This mirrors
+/// [`cached_bytecode_version`] and [`fingerprint_of`].
 fn tileiras_and_toolkit() -> (PathBuf, Option<PathBuf>) {
-    resolve_tileiras_binary(
-        env::var_os(TILEIRAS_PATH_ENV),
-        env::var_os(CUDA_TOOLKIT_PATH_ENV),
-    )
+    let tileiras_env = env::var_os(TILEIRAS_PATH_ENV).filter(|v| !v.as_os_str().is_empty());
+    let toolkit_env = env::var_os(CUDA_TOOLKIT_PATH_ENV).filter(|v| !v.as_os_str().is_empty());
+    cached_tileiras_and_toolkit(tileiras_env, toolkit_env)
+}
+
+fn cached_tileiras_and_toolkit(
+    tileiras_env: Option<OsString>,
+    toolkit_env: Option<OsString>,
+) -> (PathBuf, Option<PathBuf>) {
+    static CACHE: OnceLock<
+        Mutex<HashMap<(Option<OsString>, Option<OsString>), (PathBuf, Option<PathBuf>)>>,
+    > = OnceLock::new();
+    let key = (tileiras_env, toolkit_env);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(result) = cache.lock().unwrap().get(&key) {
+        return result.clone();
+    }
+    let result = resolve_tileiras_binary(key.0.clone(), key.1.clone());
+    cache.lock().unwrap().insert(key, result.clone());
+    result
 }
 
 // =========================================================================
@@ -1130,6 +1152,148 @@ mod tests {
             crate::jit_cache::jit_disk_hit_count() - hits_before,
             1,
             "exactly the repeat compile hits the disk"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// A corrupted disk entry is detected, deleted, and replaced by a fresh
+    /// compile. This is the end-to-end coverage for the delete-on-mismatch path
+    /// described in PR #193: a torn write or tampered file must not be served.
+    #[test]
+    #[cfg(unix)]
+    fn disk_cache_deletes_invalid_entry_and_recompiles() {
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = env::temp_dir().join(format!("cutile_jit_cache_corrupt_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let fake_tileiras = temp_dir.join("tileiras");
+        write_fake_tileiras(&fake_tileiras);
+        let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
+
+        let store_dir = temp_dir.join("store");
+        crate::jit_cache::enable(std::sync::Arc::new(
+            crate::jit_cache::FileSystemJitStore::new(&store_dir).unwrap(),
+        ));
+
+        let module = empty_kernel_module();
+        let (bytecode, bc_version) =
+            serialize_tile_ir_bytecode(&module).expect("serialize should succeed");
+        let gpu_name = "sm_120";
+        let tileiras_fp = tileiras_fingerprint();
+        let key = crate::jit_cache::l2_key(
+            &bytecode,
+            bc_version,
+            gpu_name,
+            DEFAULT_OPT_LEVEL,
+            tileiras_fp,
+        );
+
+        // Plant a garbage entry at the exact path the store would use.
+        let shard_dir = store_dir.join(&key[..2]);
+        fs::create_dir_all(&shard_dir).unwrap();
+        let entry_path = shard_dir.join(format!("{key}.cubin"));
+        fs::write(&entry_path, b"not a valid cache entry").unwrap();
+
+        let backend_before = crate::jit_cache::jit_backend_compile_count();
+        let hits_before = crate::jit_cache::jit_disk_hit_count();
+
+        let result = compile_tile_ir_module(&module, gpu_name)
+            .expect("recompile after corruption should succeed");
+
+        // The corrupted entry should now be a valid hit.
+        let cached = compile_tile_ir_module(&module, gpu_name)
+            .expect("second call after repair should succeed");
+
+        crate::jit_cache::disable();
+
+        assert_eq!(
+            result, cached,
+            "repair must store the same bytes tileiras produced"
+        );
+        assert_eq!(
+            crate::jit_cache::jit_backend_compile_count() - backend_before,
+            1,
+            "exactly one recompile after deleting the corrupted entry"
+        );
+        assert_eq!(
+            crate::jit_cache::jit_disk_hit_count() - hits_before,
+            1,
+            "the repaired entry is served on the next call"
+        );
+        assert_ne!(
+            fs::read(&entry_path).unwrap_or_default(),
+            b"not a valid cache entry"[..],
+            "the corrupted entry file must have been replaced"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// `recompile_after_disk_rejection` deletes the bad entry and recompiles
+    /// with `tileiras` directly, bypassing the cache so a still-present bad entry
+    /// cannot be re-served. This pins the bypass behavior that the GPU driver
+    /// rejection path relies on.
+    #[test]
+    #[cfg(unix)]
+    fn recompile_after_disk_rejection_deletes_and_bypasses() {
+        use crate::jit_cache::JitStore;
+
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = env::temp_dir().join(format!("cutile_jit_reject_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let fake_tileiras = temp_dir.join("tileiras");
+        write_fake_tileiras(&fake_tileiras);
+        let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
+
+        let store_dir = temp_dir.join("store");
+        let store: std::sync::Arc<dyn JitStore> =
+            std::sync::Arc::new(crate::jit_cache::FileSystemJitStore::new(&store_dir).unwrap());
+        crate::jit_cache::enable(store.clone());
+
+        let module = empty_kernel_module();
+        let (bytecode, bc_version) =
+            serialize_tile_ir_bytecode(&module).expect("serialize should succeed");
+        let gpu_name = "sm_120";
+        let tileiras_fp = tileiras_fingerprint();
+        let key = crate::jit_cache::l2_key(
+            &bytecode,
+            bc_version,
+            gpu_name,
+            DEFAULT_OPT_LEVEL,
+            tileiras_fp,
+        );
+
+        let first = compile_tile_ir_module(&module, gpu_name)
+            .expect("first compile should populate the store");
+        assert!(
+            store.contains(&key).expect("contains should not error"),
+            "store should contain the freshly compiled entry"
+        );
+
+        let backend_before = crate::jit_cache::jit_backend_compile_count();
+
+        let repaired = recompile_after_disk_rejection(
+            store.as_ref(),
+            &key,
+            &bytecode,
+            gpu_name,
+            DEFAULT_OPT_LEVEL,
+        )
+        .expect("recompile_after_disk_rejection should succeed");
+
+        crate::jit_cache::disable();
+
+        assert_eq!(repaired, first, "recompile should produce the same cubin");
+        assert_eq!(
+            crate::jit_cache::jit_backend_compile_count() - backend_before,
+            1,
+            "recompile_after_disk_rejection must spawn tileiras exactly once"
+        );
+        assert!(
+            store.get(&key).expect("get should not error").is_none(),
+            "the rejected entry must be deleted from the store"
         );
 
         let _ = fs::remove_dir_all(&temp_dir);

@@ -14,9 +14,10 @@
 //! L1 miss reaches the disk layer.
 
 use crate::common;
-use cutile::api::{ones, zeros};
+use cutile::api::{copy_host_vec_to_device, meta, ones, zeros};
 use cutile::jit_cache::{self, jit_backend_compile_count, jit_disk_hit_count, FileSystemJitStore};
 use cutile::prelude::*;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -193,6 +194,119 @@ fn disk_cache_degrades_softly_on_io_errors() {
         assert!(
             jit_cache::stats().io_errors > io_errors_before,
             "the broken store must surface as counted soft errors"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+/// Corrupts the cubin payload of a cache entry while keeping the header valid.
+/// The header's `payload_sha256` is recomputed so `decode_entry` passes and the
+/// driver is the one that rejects the bytes.
+fn corrupt_entry_payload(path: &Path) {
+    let mut bytes = std::fs::read(path).expect("read cached cubin");
+    assert_eq!(
+        &bytes[0..12],
+        b"CUTILECUBIN\0",
+        "unexpected cache entry magic"
+    );
+
+    let gpu_len = u16::from_le_bytes(bytes[80..82].try_into().unwrap()) as usize;
+    let fp_len = u16::from_le_bytes(bytes[82..84].try_into().unwrap()) as usize;
+    let payload_len = u64::from_le_bytes(bytes[88..96].try_into().unwrap()) as usize;
+    let payload_start = 96 + gpu_len + fp_len;
+
+    assert_eq!(
+        bytes.len(),
+        payload_start + payload_len,
+        "cache entry size does not match header"
+    );
+
+    // Flip a byte in the cubin payload; this keeps the header valid but makes
+    // the cubin invalid (e.g., corrupt ELF magic), so cuModuleLoadData rejects it.
+    bytes[payload_start] ^= 0xFF;
+
+    // Recompute the payload checksum so the header still validates.
+    let new_digest = Sha256::digest(&bytes[payload_start..payload_start + payload_len]);
+    bytes[16..48].copy_from_slice(&new_digest);
+
+    std::fs::write(path, bytes).expect("write corrupted cubin");
+}
+
+/// A disk-served cubin that passes the header check but is rejected by the
+/// driver must be evicted and recompiled once, then succeed. Uses `meta` tensors
+/// to warm only the `add` kernel, and `copy_host_vec_to_device` to avoid
+/// bringing in unrelated `ones`/`zeros` JIT compiles that would pollute counters.
+#[test]
+fn disk_cache_recompiles_after_driver_rejection() {
+    common::with_test_stack(|| {
+        let _guard = common::cache_test_lock();
+        let dir = fresh_dir("driver_reject");
+        enable_at(&dir);
+
+        // Use a tile size unique to this test so no other test pollutes L1/disk.
+        let tile = 16;
+
+        // Warm the disk cache with a zero-allocation meta compile of just `add`.
+        let z_meta = meta::<f32>(&[256]).partition([tile]);
+        let x_meta = meta::<f32>(&[256]);
+        let y_meta = meta::<f32>(&[256]);
+        jit_disk_cache_test_module::add(z_meta, x_meta, y_meta)
+            .compile()
+            .expect("meta compile should write the add kernel to disk");
+
+        // The store should contain exactly one cubin from the meta compile.
+        let mut files = vec![];
+        for shard in std::fs::read_dir(&dir).unwrap() {
+            let shard = shard.unwrap().path();
+            for entry in std::fs::read_dir(&shard).unwrap() {
+                files.push(entry.unwrap().path());
+            }
+        }
+        assert_eq!(
+            files.len(),
+            1,
+            "expected one cached cubin from meta compile"
+        );
+
+        // Corrupt the payload while keeping the header valid.
+        corrupt_entry_payload(&files[0]);
+
+        // Clear the in-memory cache so the real launch must consult the disk store.
+        cutile::tile_kernel::get_kernel_cache().clear();
+
+        let backend_before = jit_backend_compile_count();
+        let hits_before = jit_disk_hit_count();
+
+        // Real launch: the cached cubin passes header checks but is rejected by
+        // the driver, so the library evicts the entry and recompiles once.
+        let x_vec = Arc::new(vec![1.0f32; 256]);
+        let y_vec = Arc::new(vec![1.0f32; 256]);
+        let z_vec = Arc::new(vec![0.0f32; 256]);
+        let x = Arc::new(copy_host_vec_to_device(&x_vec).sync().expect("copy x"));
+        let y = Arc::new(copy_host_vec_to_device(&y_vec).sync().expect("copy y"));
+        let z = copy_host_vec_to_device(&z_vec).sync().expect("copy z");
+        let z_host = jit_disk_cache_test_module::add(z.partition([tile]), x, y)
+            .unzip()
+            .0
+            .unpartition()
+            .to_host_vec()
+            .sync()
+            .expect("real launch after driver rejection should succeed");    
+
+        jit_cache::disable();
+
+        assert!(z_host.iter().all(|&v| (v - 2.0f32).abs() < 1e-6));
+
+        assert_eq!(
+            jit_disk_hit_count() - hits_before,
+            1,
+            "the corrupted entry must be read from disk once"
+        );
+        assert_eq!(
+            jit_backend_compile_count() - backend_before,
+            1,
+            "driver rejection must trigger exactly one tileiras recompile"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
