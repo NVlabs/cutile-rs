@@ -7,6 +7,7 @@ use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
 use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
 use crate::error::DeviceError;
+use crate::graph_topology::Topology;
 use cuda_core::{sys, IntoResult, Stream};
 use std::future::IntoFuture;
 use std::mem::MaybeUninit;
@@ -185,6 +186,28 @@ impl<T: Send> CudaGraph<T> {
     /// Returns a reference to the stream this graph was captured on.
     pub fn stream(&self) -> &Arc<Stream> {
         &self.stream
+    }
+
+    /// Returns a read-only view of what capture actually recorded.
+    ///
+    /// Stream capture records whatever the driver observed, which is not
+    /// always what you intended: a stray host-to-device copy inside the
+    /// captured region becomes a memcpy node, and work you expected to run in
+    /// parallel can end up serialized. [`Topology`] answers those questions
+    /// without exposing the underlying graph handle.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let topology = graph.topology();
+    /// println!("{} nodes, {} roots", topology.node_count()?, topology.root_node_count()?);
+    /// assert!(!topology.has_host_nodes()?, "capture recorded a host callback");
+    /// topology.write_dot("graph.dot", true)?;
+    /// ```
+    pub fn topology(&self) -> Topology<'_> {
+        // SAFETY: `self.cu_graph` is live for as long as `self` is borrowed;
+        // `Drop` is the only thing that destroys it.
+        unsafe { Topology::from_raw(self.cu_graph) }
     }
 }
 

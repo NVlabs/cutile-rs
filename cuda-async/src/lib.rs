@@ -12,6 +12,7 @@ pub mod device_context;
 pub mod device_future;
 pub mod device_operation;
 pub mod error;
+pub mod graph_topology;
 pub mod launch;
 mod loom_compat;
 pub mod prelude;
