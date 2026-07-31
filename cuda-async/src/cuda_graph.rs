@@ -194,8 +194,13 @@ impl<T: Send> CudaGraph<T> {
     /// `cuGraphDebugDotPrint` to dump the captured DAG, or
     /// `cuGraphAddChildGraphNode` to nest this graph inside a larger one.
     ///
-    /// The handle stays valid until this `CudaGraph` is dropped, which
-    /// destroys it. Do not call `cuGraphDestroy` on the returned handle.
+    /// # Handle validity
+    ///
+    /// `CUgraph` is a raw pointer, so the returned handle is `Copy` and is
+    /// *not* bounded by the `&self` borrow. It dangles once this `CudaGraph`
+    /// is dropped, which calls `cuGraphDestroy`. Callers must not let the
+    /// handle outlive the wrapper, and must not destroy it themselves; the
+    /// `Drop` impl would then destroy it a second time.
     pub fn cu_graph(&self) -> sys::CUgraph {
         self.cu_graph
     }
@@ -207,8 +212,20 @@ impl<T: Send> CudaGraph<T> {
     /// `cuGraphExecKernelNodeSetParams` for per-node parameter updates that
     /// [`update`](CudaGraph::update) does not express.
     ///
-    /// The handle stays valid until this `CudaGraph` is dropped, which
-    /// destroys it. Do not call `cuGraphExecDestroy` on the returned handle.
+    /// # Handle validity
+    ///
+    /// `CUgraphExec` is a raw pointer, so the returned handle is `Copy` and is
+    /// *not* bounded by the `&self` borrow. It dangles once this `CudaGraph`
+    /// is dropped, which calls `cuGraphExecDestroy`. Callers must not let the
+    /// handle outlive the wrapper, and must not destroy it themselves; the
+    /// `Drop` impl would then destroy it a second time.
+    ///
+    /// # Concurrent replay
+    ///
+    /// Updating an executable while a replay of it is in flight is undefined
+    /// behaviour. [`launch`](CudaGraph::launch) copies this handle into the
+    /// returned op, so a pending or executing launch aliases it. Synchronize
+    /// the stream before calling any `cuGraphExec*` setter.
     pub fn cu_graph_exec(&self) -> sys::CUgraphExec {
         self.cu_graph_exec
     }
