@@ -186,6 +186,32 @@ impl<T: Send> CudaGraph<T> {
     pub fn stream(&self) -> &Arc<Stream> {
         &self.stream
     }
+
+    /// Returns the raw `CUgraph` handle for the captured topology.
+    ///
+    /// This is the immutable capture result, not the executable. Use it with
+    /// driver APIs that read or embed a graph's structure, such as
+    /// `cuGraphDebugDotPrint` to dump the captured DAG, or
+    /// `cuGraphAddChildGraphNode` to nest this graph inside a larger one.
+    ///
+    /// The handle stays valid until this `CudaGraph` is dropped, which
+    /// destroys it. Do not call `cuGraphDestroy` on the returned handle.
+    pub fn cu_graph(&self) -> sys::CUgraph {
+        self.cu_graph
+    }
+
+    /// Returns the raw `CUgraphExec` handle for the instantiated graph.
+    ///
+    /// This is the executable [`launch`](CudaGraph::launch) replays. Use it
+    /// with driver APIs that retune an instantiated graph in place, such as
+    /// `cuGraphExecKernelNodeSetParams` for per-node parameter updates that
+    /// [`update`](CudaGraph::update) does not express.
+    ///
+    /// The handle stays valid until this `CudaGraph` is dropped, which
+    /// destroys it. Do not call `cuGraphExecDestroy` on the returned handle.
+    pub fn cu_graph_exec(&self) -> sys::CUgraphExec {
+        self.cu_graph_exec
+    }
 }
 
 /// A [`DeviceOp`] that replays a captured CUDA graph.
