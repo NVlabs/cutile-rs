@@ -36,6 +36,7 @@
 //   --warmup                         run one warmup pass before timing
 //   --csv <path>                     default results_bimodal.csv
 
+use cuda_async::device_context::pool_for_stream;
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{DeviceOp, ExecutionContext};
 use cuda_core::sys::CUctx_flags_enum_CU_CTX_SCHED_SPIN;
@@ -455,7 +456,8 @@ fn run_async_samples(
                             gemm(z_part, buf.x.clone(), buf.y.clone(), buf.k)
                                 .generics(buf.generics.clone())
                         };
-                        let ctx = ExecutionContext::new(stream);
+                        let pool = pool_for_stream(&stream).expect("pool lookup");
+                        let ctx = ExecutionContext::new(stream).with_pool(pool);
                         let fut = DeviceFuture::scheduled(op, ctx);
                         let (z_back, _, _, _) = fut.await.expect("gemm");
                         buf.z = Some(z_back);

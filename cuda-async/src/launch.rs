@@ -5,9 +5,8 @@
 
 //! CUDA kernel launch builder with argument marshalling.
 
-use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
-use crate::device_operation::{DeviceOp, ExecutionContext};
+use crate::device_operation::{future_on_default_stream, DeviceOp, ExecutionContext};
 use crate::error::DeviceError;
 use anyhow::{Context, Result};
 use cuda_core::sys::CUdeviceptr;
@@ -152,16 +151,6 @@ impl IntoFuture for AsyncKernelLaunch {
     type Output = Result<(), DeviceError>;
     type IntoFuture = DeviceFuture<(), AsyncKernelLaunch>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        future_on_default_stream(self)
     }
 }

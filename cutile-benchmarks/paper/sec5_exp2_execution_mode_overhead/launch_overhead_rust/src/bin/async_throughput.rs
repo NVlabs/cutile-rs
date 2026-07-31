@@ -35,6 +35,7 @@
 //   --csv   <path>              default results_part_b.csv
 
 use cuda_async::cuda_graph::CudaGraph;
+use cuda_async::device_context::pool_for_stream;
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{BoxedDeviceOp, DeviceOp, ExecutionContext};
 use cuda_core::{Device, Stream};
@@ -240,7 +241,8 @@ fn bench_async(
     rt.block_on(async move {
         macro_rules! one_iter {
             () => {{
-                let ctx = ExecutionContext::new(stream_clone.clone());
+                let pool = pool_for_stream(&stream_clone).expect("pool lookup");
+                let ctx = ExecutionContext::new(stream_clone.clone()).with_pool(pool);
                 let fut = DeviceFuture::scheduled(graph.launch(), ctx);
                 let (gpu_res, _) = tokio::join!(fut, async {
                     spin_us(w_us);

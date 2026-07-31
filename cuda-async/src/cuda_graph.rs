@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use crate::device_context::with_default_device_policy;
+use crate::device_context::pool_for_stream;
 use crate::device_future::DeviceFuture;
-use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
+use crate::device_operation::{future_on_default_stream, DeviceOp, ExecutionContext, GraphNode};
 use crate::error::DeviceError;
 use cuda_core::{sys, IntoResult, Stream};
 use std::future::IntoFuture;
@@ -65,13 +65,17 @@ impl<T: Send> CudaGraph<T> {
         let device = stream.device().clone();
         device.bind_to_thread()?;
 
+        // Resolve the pool before entering capture mode so a context error
+        // can't leave the stream mid-capture.
+        let pool = pool_for_stream(&stream)?;
+        let exec_ctx = ExecutionContext::new(stream.clone()).with_pool(pool);
+
         // Begin capture.
         unsafe {
             stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
         }
 
         // Execute the operation on the capture stream.
-        let exec_ctx = ExecutionContext::new(stream.clone());
         let op_result = unsafe { op.execute(&exec_ctx) };
 
         // End capture — must happen regardless of op success.
@@ -159,7 +163,8 @@ impl<T: Send> CudaGraph<T> {
     /// graph.launch().sync_on(&stream)?;
     /// ```
     pub fn update<O: Send>(&self, op: impl DeviceOp<Output = O>) -> Result<O, DeviceError> {
-        let ctx = ExecutionContext::new(self.stream.clone());
+        let pool = pool_for_stream(&self.stream)?;
+        let ctx = ExecutionContext::new(self.stream.clone()).with_pool(pool);
         unsafe { op.execute(&ctx) }
     }
 
@@ -212,17 +217,7 @@ impl IntoFuture for GraphLaunch {
     type Output = Result<(), DeviceError>;
     type IntoFuture = DeviceFuture<(), GraphLaunch>;
     fn into_future(self) -> Self::IntoFuture {
-        match with_default_device_policy(|policy| {
-            let stream = policy.next_stream()?;
-            let mut f = DeviceFuture::new();
-            f.device_operation = Some(self);
-            f.execution_context = Some(ExecutionContext::new(stream));
-            Ok(f)
-        }) {
-            Ok(Ok(future)) => future,
-            Ok(Err(e)) => DeviceFuture::failed(e),
-            Err(e) => DeviceFuture::failed(e),
-        }
+        future_on_default_stream(self)
     }
 }
 
@@ -422,13 +417,17 @@ impl CudaGraph<()> {
         let device = stream.device().clone();
         device.bind_to_thread()?;
 
+        // Resolve the pool before entering capture mode so a context error
+        // can't leave the stream mid-capture.
+        let pool = pool_for_stream(&stream)?;
+
         // Begin capture.
         unsafe {
             stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
         }
 
         let scope = Scope {
-            ctx: ExecutionContext::new(stream.clone()),
+            ctx: ExecutionContext::new(stream.clone()).with_pool(pool),
             _not_send: std::marker::PhantomData,
         };
 
