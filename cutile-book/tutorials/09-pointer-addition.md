@@ -83,6 +83,12 @@ async fn async_main() -> Result<(), cutile::error::Error> {
     }
     Ok(())
 }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    async_main().await?;
+    Ok(())
+}
 ```
 
 **Output:**
