@@ -181,7 +181,7 @@ pub(crate) mod ctx {
 
     /// Sets flags on the current context.
     pub fn set_flags(flags: cuda_bindings::CUctx_flags) -> Result<(), DriverError> {
-        unsafe { cuda_bindings::cuCtxSetFlags(flags).result() }
+        unsafe { cuda_bindings::cuCtxSetFlags(flags as u32).result() }
     }
 
     /// Blocks until all work in the current context is complete.
@@ -228,7 +228,7 @@ pub(crate) mod stream {
     pub fn create(kind: StreamKind) -> Result<cuda_bindings::CUstream, DriverError> {
         let mut stream = MaybeUninit::uninit();
         unsafe {
-            cuda_bindings::cuStreamCreate(stream.as_mut_ptr(), kind.flags()).result()?;
+            cuda_bindings::cuStreamCreate(stream.as_mut_ptr(), kind.flags() as u32).result()?;
             Ok(stream.assume_init())
         }
     }
@@ -275,7 +275,7 @@ pub(crate) mod stream {
         event: cuda_bindings::CUevent,
         flags: cuda_bindings::CUevent_wait_flags,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuStreamWaitEvent(stream, event, flags).result()
+        cuda_bindings::cuStreamWaitEvent(stream, event, flags as u32).result()
     }
 
     /// Attaches memory to a stream for managed memory visibility.
@@ -288,7 +288,7 @@ pub(crate) mod stream {
         num_bytes: usize,
         flags: cuda_bindings::CUmemAttach_flags,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuStreamAttachMemAsync(stream, dptr, num_bytes, flags).result()
+        cuda_bindings::cuStreamAttachMemAsync(stream, dptr, num_bytes, flags as u32).result()
     }
 
     /// Enqueues a host function callback on the stream.
@@ -433,7 +433,7 @@ pub(crate) mod event {
     ) -> Result<cuda_bindings::CUevent, DriverError> {
         let mut event = MaybeUninit::uninit();
         unsafe {
-            cuda_bindings::cuEventCreate(event.as_mut_ptr(), flags).result()?;
+            cuda_bindings::cuEventCreate(event.as_mut_ptr(), flags as u32).result()?;
             Ok(event.assume_init())
         }
     }
@@ -630,7 +630,7 @@ pub(crate) mod memory {
         flags: sys::CUmemAttach_flags,
     ) -> Result<sys::CUdeviceptr, DriverError> {
         let mut dev_ptr = MaybeUninit::uninit();
-        sys::cuMemAllocManaged(dev_ptr.as_mut_ptr(), num_bytes, flags).result()?;
+        sys::cuMemAllocManaged(dev_ptr.as_mut_ptr(), num_bytes, flags as u32).result()?;
         Ok(dev_ptr.assume_init())
     }
 
