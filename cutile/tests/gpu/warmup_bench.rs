@@ -12,7 +12,7 @@
 //! All tests hold [`common::cache_test_lock`] to prevent concurrent tests from
 //! moving the counter during the measured window.
 //!
-//! Run with `CUTILE_JIT_LOG=1 cargo test --test gpu warmup_bench -- --nocapture`
+//! Run with `CUTILE_JIT_LOG=1 cargo test -p cutile --test warmup_suite warmup_bench -- --nocapture`
 //! to see per-compile vs cache-hit logs.
 
 use crate::common;
@@ -290,7 +290,7 @@ fn report(label: &str, samples: &[std::time::Duration]) {
 ///   (C) `get_gpu_name()` alone — cached `OnceLock` lookup + `String` clone.
 ///
 /// Run with:
-///   cargo test --test gpu warmup_bench::cache_hit_path_cost -- --nocapture
+///   cargo test -p cutile --test warmup_suite warmup_bench::cache_hit_path_cost -- --nocapture
 #[test]
 fn cache_hit_path_cost() {
     common::with_test_stack(|| {
@@ -364,27 +364,27 @@ fn cache_hit_path_cost() {
     });
 }
 
-/// (B) under concurrency: runs the full hit-path key build (including
-/// `get_gpu_name()`) across thread counts. `get_gpu_name()` is now lock-free on
-/// the hot path, so any slowdown with thread count comes from the key build
-/// itself, not from a lock.
+/// (B) under concurrency: runs the full hit-path key build across thread
+/// counts. `get_gpu_name()` is lock-free on the hot path, while cached
+/// `tileiras` resolution and fingerprint lookups use short-lived mutexes. This
+/// measures their aggregate contention together with the rest of key building.
 ///
 ///   threads=1 per-call ties back to (B) (~5.5µs).
-///   Flat per-call as threads grow => the path is not serialized by a lock.
+///   Flat per-call as threads grow => no material contention in the full path.
 ///
 /// Run with:
-///   cargo test --test gpu warmup_bench::hit_path_contention -- --nocapture
+///   cargo test -p cutile --test warmup_suite warmup_bench::hit_path_contention -- --nocapture
 #[test]
 fn hit_path_contention() {
     common::with_test_stack(|| {
         let _guard = common::cache_test_lock();
 
-        // Prime get_gpu_name's cache so workers hit the lock-free cached path,
-        // not the driver.
-        let _ = get_gpu_name(get_default_device());
-
         let generics = std::sync::Arc::new(vec!["f32".to_string(), "128".to_string()]);
         let spec_args = std::sync::Arc::new(vector_add_spec_args(256, 128));
+
+        // Prime the complete path so workers measure steady-state key building,
+        // not one-time GPU queries, tileiras resolution, or `--version` probing.
+        drop(bench_key((*generics).clone(), (*spec_args).clone()));
 
         const CALLS_PER_THREAD: usize = 20_000;
         println!("\n=== hit-path (build key) contention ===");
@@ -423,7 +423,7 @@ fn hit_path_contention() {
         }
         println!(
             "Read as: threads=1 ties back to (B); flat per-call as threads grow \
-             => no lock inside the path is serializing it.\n"
+             => no material contention in the full key path.\n"
         );
     });
 }

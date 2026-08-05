@@ -40,6 +40,10 @@ run_step \
     cargo test -p cutile --test specialization_bits raw_pointer_launch
 
 run_step \
+    "cutile GPU warmup and disk-cache tests" \
+    cargo test -p cutile --test warmup_suite
+
+run_step \
     "cutile GPU aggregate tests" \
     cargo test -p cutile --test gpu
 
