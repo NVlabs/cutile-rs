@@ -147,6 +147,17 @@ fn disk_cache_cross_process_hit() {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr),
             );
+            if role == "writer" {
+                assert!(
+                    std::fs::read_dir(&dir)
+                        .expect("read writer cache directory")
+                        .next()
+                        .transpose()
+                        .expect("read writer cache entry")
+                        .is_some(),
+                    "writer process succeeded without populating the cache; the child test filter may have matched zero tests"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&dir);
