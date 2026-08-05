@@ -224,30 +224,20 @@ impl FileSystemJitStore {
     }
 
     /// Opens a store at the conventional per-user cache location:
-    /// `$XDG_CACHE_HOME/cutile/kernels` or `~/.cache/cutile/kernels` on Unix,
-    /// `%LOCALAPPDATA%\cutile\kernels` on Windows. Errors when none of those
+    /// `$XDG_CACHE_HOME/cutile/kernels` or `~/.cache/cutile/kernels` on Unix.
+    /// Errors when none of those
     /// variables resolve rather than using a shared temp directory — the cache
     /// holds executable device code and must stay per-user.
     ///
-    /// On Unix the root is forced to `0700` (tightened even if it already
-    /// existed with looser permissions), so another user cannot plant entries.
-    /// Constructing the store does not enable anything; pass it to [`enable`].
+    /// On Unix a new root is created as `0700`. A pre-existing root writable by
+    /// group or others is rejected because tightening its permissions cannot
+    /// make its existing contents trustworthy; otherwise it is tightened to
+    /// `0700`. Constructing the store does not enable anything; pass it to
+    /// [`enable`].
     pub fn default_location() -> io::Result<Self> {
         let root = default_cache_dir()?.join("cutile").join("kernels");
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-            // Created `0700` from the first syscall — creating with default
-            // permissions and chmod-ing after would leave a window in which
-            // another user could enter the directory or plant an entry.
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&root)?;
-            // A pre-existing directory skips the branch above (recursive
-            // create is a no-op), so tighten it explicitly.
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
-        }
+        prepare_default_cache_root(&root)?;
         Self::new(root)
     }
 
@@ -516,6 +506,66 @@ impl JitStore for FileSystemJitStore {
     }
 }
 
+/// Creates a new default cache root privately, or validates an existing one
+/// before trusting any entries it contains.
+#[cfg(unix)]
+fn prepare_default_cache_root(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let parent = root.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("default JIT cache path has no parent: {}", root.display()),
+        )
+    })?;
+
+    // Create missing parents privately, then create the final root separately
+    // so `AlreadyExists` tells us atomically whether its contents predate us.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+
+    match std::fs::DirBuilder::new().mode(0o700).create(root) {
+        Ok(()) => {
+            // A restrictive umask may remove owner bits; make the final mode
+            // exactly 0700. No other user could enter the newly-created root
+            // before this point.
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(root)?;
+            if !metadata.file_type().is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "refusing to use default JIT cache path {} because it is not a directory; delete it and retry",
+                        root.display()
+                    ),
+                ));
+            }
+
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to use pre-existing JIT cache directory {} with mode {:04o} because it is writable by group or others; delete it and retry",
+                        root.display(),
+                        mode & 0o777,
+                    ),
+                ));
+            }
+
+            // Read/execute access alone cannot plant entries, so an existing
+            // 0755/0750 root is safe to tighten while retaining its contents.
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn default_cache_dir() -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -714,9 +764,9 @@ fn hex(bytes: &[u8]) -> String {
 // ── Entry codec ─────────────────────────────────────────────────────────────
 //
 // A stored value is not a bare cubin; it carries a header so that a hit is
-// re-validated field by field. A SHA-256 collision, a torn write, or a file
-// planted by hand all fail validation and degrade to a recompile — the cache
-// can serve a stale answer to no one.
+// re-validated field by field. Torn, corrupted, or request-mismatched entries
+// fail validation and degrade to a recompile. This is an integrity check, not
+// an authenticity check; see the security contract on `JitStore` above.
 //
 //   offset  size  field
 //   0       12    magic            b"CUTILECUBIN\0"
@@ -815,6 +865,88 @@ pub fn decode_entry(bytes: &[u8], params: &EntryParams<'_>) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use cutile_ir::bytecode::BytecodeVersion;
+
+    #[cfg(unix)]
+    struct DefaultRootTestDir(PathBuf);
+
+    #[cfg(unix)]
+    impl DefaultRootTestDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "cutile_default_cache_{label}_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4(),
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn cache_root(&self) -> PathBuf {
+            self.0.join("cutile").join("kernels")
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DefaultRootTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_cache_root_is_created_private() {
+        let dir = DefaultRootTestDir::new("new");
+        let root = dir.cache_root();
+
+        prepare_default_cache_root(&root).unwrap();
+
+        assert_eq!(unix_mode(&root), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_cache_root_tightens_safe_existing_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = DefaultRootTestDir::new("tighten");
+        let root = dir.cache_root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("trusted-entry"), b"keep").unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        prepare_default_cache_root(&root).unwrap();
+
+        assert_eq!(unix_mode(&root), 0o700);
+        assert_eq!(std::fs::read(root.join("trusted-entry")).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_cache_root_rejects_existing_writable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for mode in [0o770, 0o702] {
+            let dir = DefaultRootTestDir::new(&format!("reject_{mode:o}"));
+            let root = dir.cache_root();
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("untrusted-entry"), b"do not trust").unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
+
+            let err = prepare_default_cache_root(&root).unwrap_err();
+
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert!(err.to_string().contains("delete it and retry"));
+            assert_eq!(unix_mode(&root), mode);
+            assert!(root.join("untrusted-entry").exists());
+        }
+    }
 
     /// Every bit of the eviction draw must take both values across draws. A v4
     /// uuid fixes its version nibble (byte 6) and variant bits (byte 8), so a

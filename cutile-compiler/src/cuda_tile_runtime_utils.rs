@@ -642,8 +642,8 @@ pub fn compile_bytecode_cached(
                 return Ok((cubin, Stage2Source::DiskCache { store, key }));
             }
             // Key matched but the entry does not validate against this request:
-            // a torn write, tampering, or a hash collision. Drop it and recompile
-            // rather than ever serving it.
+            // an incomplete write, accidental corruption, a request mismatch,
+            // or a key collision. Drop it and recompile rather than serving it.
             crate::jit_cache::cache_log(format_args!(
                 "disk cache entry {key} failed validation; deleting and recompiling"
             ));
@@ -685,8 +685,8 @@ pub fn compile_bytecode_cached(
     Ok((cubin, Stage2Source::Tileiras))
 }
 
-/// Recovery for a disk-served cubin the driver rejected (a torn write the
-/// checksum missed, driver/toolkit skew, …).
+/// Recovery for a structurally valid disk-served cubin that the driver
+/// nevertheless rejected (invalid image, driver/toolkit skew, …).
 ///
 /// Deletes the offending entry from the store it came from (best-effort) and
 /// compiles with `tileiras` **directly, without consulting the cache**. The
@@ -1157,9 +1157,10 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
-    /// A corrupted disk entry is detected, deleted, and replaced by a fresh
+    /// A malformed disk entry is detected, deleted, and replaced by a fresh
     /// compile. This is the end-to-end coverage for the delete-on-mismatch path
-    /// described in PR #193: a torn write or tampered file must not be served.
+    /// described in PR #193: an incomplete or validation-mismatched entry must
+    /// not be served.
     #[test]
     #[cfg(unix)]
     fn disk_cache_deletes_invalid_entry_and_recompiles() {
