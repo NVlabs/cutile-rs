@@ -121,13 +121,14 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
         fn host_task_sync_mode() -> Option<::core::ffi::c_uint> {
             static MODE: std::sync::OnceLock<Option<::core::ffi::c_uint>> =
                 std::sync::OnceLock::new();
+            // CUDA driver flag bindings have platform-dependent integer types, so FFI calls cast them as `_`.
             *MODE.get_or_init(
                 || match std::env::var("CUDA_ASYNC_HOST_SYNC").ok()?.as_str() {
                     "spin" | "spinwait" => {
-                        Some(cuda_bindings::CUhostTaskSyncMode_enum_CU_HOST_TASK_SPINWAIT)
+                        Some(cuda_bindings::CUhostTaskSyncMode_enum_CU_HOST_TASK_SPINWAIT as _)
                     }
                     "block" | "blocking" => {
-                        Some(cuda_bindings::CUhostTaskSyncMode_enum_CU_HOST_TASK_BLOCKING)
+                        Some(cuda_bindings::CUhostTaskSyncMode_enum_CU_HOST_TASK_BLOCKING as _)
                     }
                     _ => None,
                 },
