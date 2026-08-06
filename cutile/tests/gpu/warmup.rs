@@ -14,7 +14,7 @@ use cutile::tile_kernel::{
     contains_cuda_function, get_default_device, jit_compile_count, TileFunctionKey, TileKernel,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
-    get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+    get_compiler_version, get_gpu_name, tileiras_fingerprint,
 };
 use std::sync::Arc;
 
@@ -94,7 +94,7 @@ fn different_keys_parallel_compile() {
         let device_id = get_default_device();
         let gpu_name = get_gpu_name(device_id);
         let cv = get_compiler_version();
-        let tv = get_cuda_toolkit_version();
+        let tv = tileiras_fingerprint();
         let key_8 = TileFunctionKey::builder("warmup_test_module", "vector_add")
             .generics(vec!["f32".into(), "128".into()])
             .stride_args(vector_add_stride_args())
@@ -107,7 +107,7 @@ fn different_keys_parallel_compile() {
             .device_id(device_id)
             .gpu_name(gpu_name.clone())
             .compiler_version(cv.clone())
-            .cuda_toolkit_version(tv.clone())
+            .tileiras_fingerprint(tv)
             .build();
         let key_32 = TileFunctionKey::builder("warmup_test_module", "vector_add")
             .generics(vec!["f32".into(), "256".into()])
@@ -121,7 +121,7 @@ fn different_keys_parallel_compile() {
             .device_id(device_id)
             .gpu_name(gpu_name)
             .compiler_version(cv)
-            .cuda_toolkit_version(tv)
+            .tileiras_fingerprint(tv)
             .build();
         assert!(contains_cuda_function(&key_8));
         assert!(contains_cuda_function(&key_32));

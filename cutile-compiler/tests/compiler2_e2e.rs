@@ -131,15 +131,9 @@ fn test_empty_kernel_tileiras() {
     );
 
     // Run through tileiras.
-    let cubin_path = compile_tile_ir_module(&module, &gpu_name).unwrap();
-    println!("cubin: {cubin_path}");
-    assert!(
-        std::path::Path::new(&cubin_path).exists(),
-        "cubin file should exist"
-    );
-
-    // Clean up.
-    let _ = std::fs::remove_file(&cubin_path);
+    let cubin = compile_tile_ir_module(&module, &gpu_name).unwrap();
+    println!("cubin: {} bytes", cubin.len());
+    assert!(!cubin.is_empty(), "cubin image should be non-empty");
 }
 
 // =========================================================================
@@ -170,12 +164,8 @@ fn assert_tileiras_accepts(module: &Module) {
         cutile_ir::decode_bytecode(&bytecode).unwrap()
     );
 
-    let cubin_path = compile_tile_ir_module(module, &gpu_name).unwrap();
-    assert!(
-        std::path::Path::new(&cubin_path).exists(),
-        "cubin file should exist"
-    );
-    let _ = std::fs::remove_file(&cubin_path);
+    let cubin = compile_tile_ir_module(module, &gpu_name).unwrap();
+    assert!(!cubin.is_empty(), "cubin image should be non-empty");
     println!("tileiras accepted ✓");
 }
 

@@ -190,6 +190,9 @@ pub use cuda_core;
 pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
 pub use cutile_compiler::compile_api;
+/// Opt-in persistent on-disk cubin cache. Off by default; enable
+/// explicitly via [`jit_cache::enable_default`] or [`jit_cache::enable`].
+pub use cutile_compiler::jit_cache;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;

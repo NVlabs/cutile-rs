@@ -3,25 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! GPU device state, global kernel cache, and scheduling policy management.
+//! GPU device state and scheduling policy management.
 //!
 //! ## Architecture
 //!
-//! - **Global (process-wide)**: [`Device`] per device and compiled kernel cache are shared
-//!   across all threads via [`OnceLock`] and [`DashMap`]. This allows compilation results from
-//!   one thread (e.g. warmup) to be visible to all worker threads.
+//! - **Global (process-wide)**: one [`Device`] per device id, shared across all threads
+//!   via [`OnceLock`].
 //!
 //! - **Per-thread**: Scheduling policy and deallocator stream remain thread-local, since
 //!   different threads may want different stream assignments.
 //!
-//! - **Compilation dedup**: When multiple threads need the same kernel, only one compiles it
-//!   while the rest wait, via `DashMap<Key, Arc<OnceLock<CompiledKernel>>>`.
+//! The compiled-kernel cache and its single-flight dedup live in `cutile::tile_kernel`,
+//! since they key on a type from `cutile-compiler`.
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{Device, Function, MemPool, Module, Stream};
-use dashmap::DashMap;
-use once_cell::sync::OnceCell;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -42,8 +39,14 @@ pub const DEFAULT_NUM_DEVICES: usize = 1;
 pub const DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE: usize = 4;
 
 pub trait FunctionKey: Hash {
-    /// Fast hash for in-memory cache lookup (uses `DefaultHasher`).
-    fn get_hash_string(&self) -> String {
+    /// Short human-readable digest of the key, for log lines and dump filenames.
+    ///
+    /// **Not an identity.** It is a 64-bit `DefaultHasher` output, so distinct
+    /// keys collide at a rate that matters once a process caches enough kernels,
+    /// and `DefaultHasher`'s algorithm is unspecified across Rust releases.
+    /// Caches key on the whole `Hash + Eq` value; nothing may key on this string
+    /// or persist it.
+    fn display_hash(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         let hash_value: u64 = hasher.finish();
@@ -107,9 +110,13 @@ fn get_or_init_device(device_id: usize) -> Result<Arc<Device>, DeviceError> {
     Ok(device)
 }
 
-// ── Global kernel cache (process-wide, cross-thread) ────────────────────────
+// ── Compiled kernels ────────────────────────────────────────────────────────
 
 /// A compiled kernel: module, function handle, and parameter validator.
+///
+/// The cache that holds these lives in `cutile::tile_kernel`, keyed on
+/// `TileFunctionKey` directly. It cannot live here: that key names types from
+/// `cutile-compiler`, which sits downstream of this crate.
 #[derive(Debug)]
 pub struct CompiledKernel {
     pub module: Arc<Module>,
@@ -117,49 +124,13 @@ pub struct CompiledKernel {
     pub validator: Arc<Validator>,
 }
 
-/// Global kernel cache. `DashMap` for cross-thread sharing; inner `OnceLock` for
-/// single-flight compilation dedup (if multiple threads need the same kernel,
-/// only one compiles while the rest wait). Uses `once_cell::sync::OnceCell`
-/// for stable fallible initialization (`get_or_try_init`).
-///
-/// Grows unbounded: no cap or LRU (cutile-python caps at 2 GB with LRU
-/// eviction). Eviction is deferred to the disk-cache follow-up.
-static KERNEL_CACHE: OnceLock<DashMap<String, Arc<OnceCell<CompiledKernel>>>> = OnceLock::new();
-
-pub fn get_kernel_cache() -> &'static DashMap<String, Arc<OnceCell<CompiledKernel>>> {
-    KERNEL_CACHE.get_or_init(DashMap::new)
-}
-
-/// Get (or create) the single-flight compilation slot for `key_str`.
-///
-/// The returned `OnceCell` lets the caller `get_or_try_init` the compile
-/// exactly once across threads. The DashMap shard lock is released before
-/// this returns, so the slow compile never holds it.
-///
-/// Hits take the read path (shard read lock, no allocation); only a miss falls
-/// back to `entry()` (write lock + owned key).
-pub fn kernel_cache_slot(key_str: &str) -> Arc<OnceCell<CompiledKernel>> {
-    let cache = get_kernel_cache();
-    if let Some(existing) = cache.get(key_str) {
-        return Arc::clone(existing.value());
-    }
-    // `get` returned None holding no lock, so the write path is deadlock-free;
-    // `or_insert_with` still resolves a concurrent insert into one slot per key.
-    Arc::clone(
-        cache
-            .entry(key_str.to_string())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .value(),
-    )
-}
-
 // ── Per-thread device state ──────────────────────────────────────────────────
 
 /// Per-thread, per-device state: scheduling policy, deallocator stream, and
 /// optional memory pool.
 ///
-/// The CUDA context and kernel cache are global (see above). This struct only
-/// holds thread-local state.
+/// The CUDA context is global (see above). This struct only holds thread-local
+/// state.
 pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
     device_id: usize,
@@ -483,22 +454,20 @@ pub fn load_module_from_file(filename: &str, device_id: usize) -> Result<Arc<Mod
     })?
 }
 
+/// Load a compiled CUDA module from an in-memory **cubin** image. Not for PTX
+/// (see [`cuda_core::Device::load_module_from_bytes`]); use
+/// [`load_module_from_ptx`] for that.
+pub fn load_module_from_bytes(image: &[u8], device_id: usize) -> Result<Arc<Module>, DeviceError> {
+    with_device(device_id, |device| {
+        let module = device.load_module_from_bytes(image)?;
+        Ok(module)
+    })?
+}
+
 /// JIT-compile a PTX string into a CUDA module for the given device.
 pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Module>, DeviceError> {
     with_device(device_id, |device| {
         let module = device.load_module_from_ptx_src(ptx_src)?;
         Ok(module)
     })?
-}
-
-/// Check whether a kernel with the given key has already been compiled and cached.
-pub fn contains_cuda_function(func_key: &impl FunctionKey) -> bool {
-    let key = func_key.get_hash_string();
-    let cache = get_kernel_cache();
-    if let Some(slot) = cache.get(&key) {
-        let lock: &OnceCell<CompiledKernel> = slot.value().as_ref();
-        lock.get().is_some()
-    } else {
-        false
-    }
 }
