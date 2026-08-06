@@ -52,8 +52,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 /// writes and hash collisions), **not** an authenticity check: anyone who can
 /// write the backing storage can plant a valid entry wrapping a malicious cubin.
 /// Back a `JitStore` only with storage writable solely by this user, or
-/// otherwise trusted. `FileSystemJitStore::default_location` uses a per-user
-/// `0700` directory for exactly this reason.
+/// otherwise trusted. On Unix, `FileSystemJitStore::default_location` creates
+/// and validates a per-user `0700` directory. On Windows, it places the cache
+/// under `%LOCALAPPDATA%` and relies on that location's default ACLs.
 pub trait JitStore: Send + Sync + 'static {
     /// Returns the stored value, or `None` when the key is absent.
     fn get(&self, key: &str) -> io::Result<Option<Vec<u8>>>;
@@ -224,16 +225,16 @@ impl FileSystemJitStore {
     }
 
     /// Opens a store at the conventional per-user cache location:
-    /// `$XDG_CACHE_HOME/cutile/kernels` or `~/.cache/cutile/kernels` on Unix.
-    /// Errors when none of those
+    /// `$XDG_CACHE_HOME/cutile/kernels` or `~/.cache/cutile/kernels` on Unix,
+    /// and `%LOCALAPPDATA%\cutile\kernels` on Windows. Errors when none of those
     /// variables resolve rather than using a shared temp directory — the cache
     /// holds executable device code and must stay per-user.
     ///
-    /// On Unix a new root is created as `0700`. A pre-existing root writable by
-    /// group or others is rejected because tightening its permissions cannot
-    /// make its existing contents trustworthy; otherwise it is tightened to
-    /// `0700`. Constructing the store does not enable anything; pass it to
-    /// [`enable`].
+    /// On Unix a new root is created as `0700`. A pre-existing root with any
+    /// group or other permissions is rejected because tightening its permissions
+    /// cannot make its existing contents trustworthy; otherwise it is tightened
+    /// to `0700`. On Windows, the cache inherits `%LOCALAPPDATA%`'s default ACLs.
+    /// Constructing the store does not enable anything; pass it to [`enable`].
     pub fn default_location() -> io::Result<Self> {
         let root = default_cache_dir()?.join("cutile").join("kernels");
         #[cfg(unix)]
@@ -547,19 +548,20 @@ fn prepare_default_cache_root(root: &Path) -> io::Result<()> {
             }
 
             let mode = metadata.permissions().mode();
-            if mode & 0o022 != 0 {
+            if mode & 0o077 != 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
-                        "refusing to use pre-existing JIT cache directory {} with mode {:04o} because it is writable by group or others; delete it and retry",
+                        "refusing to use pre-existing JIT cache directory {} with mode {:04o} because it grants permissions to group or others; delete it and retry",
                         root.display(),
                         mode & 0o777,
                     ),
                 ));
             }
 
-            // Read/execute access alone cannot plant entries, so an existing
-            // 0755/0750 root is safe to tighten while retaining its contents.
+            // Retain contents only when the root was already private.
+            // Merely removing group/other access now cannot make interior objects
+            // trustworthy or revoke file descriptors opened beforehand.
             std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
         }
         Err(e) => Err(e),
@@ -912,14 +914,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn default_cache_root_tightens_safe_existing_directory() {
+    fn default_cache_root_retains_private_existing_directory() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = DefaultRootTestDir::new("tighten");
+        let dir = DefaultRootTestDir::new("retain_private");
         let root = dir.cache_root();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("trusted-entry"), b"keep").unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         prepare_default_cache_root(&root).unwrap();
 
@@ -929,10 +931,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn default_cache_root_rejects_existing_writable_directory() {
+    fn default_cache_root_rejects_existing_non_private_directory() {
         use std::os::unix::fs::PermissionsExt;
 
-        for mode in [0o770, 0o702] {
+        for mode in [0o755, 0o750, 0o770, 0o702] {
             let dir = DefaultRootTestDir::new(&format!("reject_{mode:o}"));
             let root = dir.cache_root();
             std::fs::create_dir_all(&root).unwrap();
