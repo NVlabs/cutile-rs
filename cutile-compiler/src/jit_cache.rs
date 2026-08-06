@@ -9,10 +9,11 @@
 //! The cache sits between bytecode serialization and the `tileiras` subprocess
 //! (see `compile_bytecode_cached` in `cuda_tile_runtime_utils`). It is
 //! **content-addressed**: the key is a SHA-256 over the serialized Tile IR
-//! bytecode plus the remaining `tileiras` inputs (target, opt level, and the
+//! bytecode plus the remaining cache-key inputs (target, opt level, and the
 //! `tileiras` binary's fingerprint). The bytecode already inlines every
-//! dependency module, so any change that affects the cubin changes the key by
-//! construction — no list of "inputs that matter" to maintain.
+//! dependency module, so changes represented in the serialized compiler input
+//! change the key. Different `tileiras` binaries with the same fingerprint are
+//! not distinguished.
 //!
 //! Disk persistence is **off by default and has no environment-variable
 //! switch**. Callers opt in explicitly:
@@ -113,7 +114,7 @@ pub trait JitStore: Send + Sync + 'static {
 #[derive(Debug)]
 pub struct FileSystemJitStore {
     root: PathBuf,
-    /// Maximum total size in bytes; `0` disables eviction entirely.
+    /// Soft total-size target in bytes; `0` disables eviction entirely.
     capacity_bytes: u64,
     /// Eviction triggers when total size exceeds `capacity × high_watermark` …
     high_watermark: f64,
@@ -129,7 +130,7 @@ pub struct FileSystemJitStoreBuilder {
     low_watermark: f64,
 }
 
-/// Default capacity: 2 GiB. Matches cutile-python's disk cache cap.
+/// Default capacity target: 2 GiB. Matches cutile-python's 2 GiB setting.
 pub const DEFAULT_CAPACITY_BYTES: u64 = 2 << 30;
 
 /// Lock file for cross-process eviction mutual exclusion, directly under the
@@ -143,7 +144,7 @@ pub const EVICTION_LOCK_FILE_NAME: &str = ".eviction.lock";
 const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 impl FileSystemJitStoreBuilder {
-    /// Maximum total size in bytes; `0` means unbounded (no eviction).
+    /// Soft total-size target in bytes; `0` means unbounded (no eviction).
     pub fn capacity_bytes(mut self, capacity_bytes: u64) -> Self {
         self.capacity_bytes = capacity_bytes;
         self
@@ -612,12 +613,12 @@ pub fn enable(store: Arc<dyn JitStore>) {
 }
 
 /// Enables a [`FileSystemJitStore`] at the default location with the default
-/// 2 GiB capacity. See [`FileSystemJitStore::default_location`].
+/// 2 GiB soft capacity target. See [`FileSystemJitStore::default_location`].
 ///
-/// Errors instead of falling back to a shared temp directory when no per-user
-/// cache directory resolves (`HOME`/`XDG_CACHE_HOME` on Unix, `LOCALAPPDATA` on
-/// Windows), so the cache is never placed where another local user could plant
-/// executable cubins.
+/// Errors instead of automatically falling back to a shared temp directory when
+/// no per-user cache directory resolves (`HOME`/`XDG_CACHE_HOME` on Unix,
+/// `LOCALAPPDATA` on Windows), so executable cubins are never automatically
+/// placed in a shared temporary location.
 pub fn enable_default() -> io::Result<()> {
     enable(Arc::new(FileSystemJitStore::default_location()?));
     Ok(())
@@ -724,10 +725,10 @@ const DOMAIN: &[u8] = b"cutile-jit-cubin-v1\0";
 ///
 /// The key deliberately contains no `module_name`, no generics, and no
 /// `source_hash`: the serialized bytecode already inlines every dependency
-/// module, so it *is* the whole compiler-side input — anything that changes
-/// the cubin changes `bc` and therefore the key, by construction. The three
-/// remaining fields (`gpu_name`, `opt_level`, the `tileiras` fingerprint) are
-/// exactly the other inputs `run_tileiras` passes to the subprocess.
+/// module and represents those compiler-side inputs. Changes represented in
+/// `bc` therefore change the key. The remaining fields record the target
+/// (`gpu_name`), `opt_level`, and compiler identity (the `tileiras`
+/// fingerprint).
 pub fn l2_key(
     bc: &[u8],
     bc_version: cutile_ir::bytecode::BytecodeVersion,
