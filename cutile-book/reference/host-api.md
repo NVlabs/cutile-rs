@@ -241,10 +241,13 @@ use cutile::tile_kernel::CompileOptions;
 let opts = CompileOptions::default()
     .occupancy(4)
     .num_cta_in_cga(2)
-    .max_divisibility(16);
+    .max_divisibility(16)
+    .num_worker_warps_per_cta(4); // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
 
 let result = my_kernel(args).compile_options(opts).grid(grid).await?;
 ```
+
+`num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]`.
 
 Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
 
@@ -255,7 +258,7 @@ methods:
 |---|---|
 | `.grid((x, y, z))` | Set an explicit runtime launch grid instead of inferring it from partitioned tensor inputs. |
 | `.const_grid((x, y, z))` | Set a compile-time constant grid, enabling grid-dependent optimizations. |
-| `.compile_options(opts)` | Override occupancy, cluster/CTA, and divisibility hints for this compilation. |
+| `.compile_options(opts)` | Override occupancy, cluster/CTA, worker-warp, and divisibility hints for this compilation. |
 | `.generics(values)` | Bind type and const generic arguments manually when they cannot be inferred. |
 
 The JIT compiler invokes `tileiras` through normal `PATH` lookup by default.

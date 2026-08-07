@@ -111,6 +111,7 @@ Entry-level optimization hints are written on the `#[cutile::entry]` attribute:
             num_cta_in_cga = 2,
             occupancy = 2,
             max_divisibility = 16,
+            num_worker_warps_per_cta = 4, // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
         ),
         sm_90 = (
             num_cta_in_cga = 1,
@@ -127,12 +128,15 @@ use cutile::tile_kernel::CompileOptions;
 
 let opts = CompileOptions::default()
     .occupancy(4)
-    .num_cta_in_cga(2);
+    .num_cta_in_cga(2)
+    .num_worker_warps_per_cta(4); // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
 
 let _ = optimized_kernel(args)
     .compile_options(opts)
     .sync_on(&stream)?;
 ```
+
+`num_worker_warps_per_cta` requires bytecode version 13.3 or newer. It must be a power of two in the inclusive range `[1, 32]` (`1`, `2`, `4`, `8`, `16`, or `32`).
 
 Different `CompileOptions` values produce separate JIT cache entries.
 

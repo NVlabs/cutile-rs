@@ -123,9 +123,21 @@ mod opt_hints_module {
     }
 
     #[cutile::entry(optimization_hints = (
-        sm_120 = (occupancy = 4, num_cta_in_cga = 2),
+        sm_120 = (
+            occupancy = 4,
+            num_cta_in_cga = 2,
+            num_worker_warps_per_cta = 4,
+        ),
     ))]
     fn entry_hints_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = constant(1.0f32, output.shape());
+        output.store(tile);
+    }
+
+    #[cutile::entry(optimization_hints = (
+        sm_120 = (num_worker_warps_per_cta = 1,),
+    ))]
+    fn worker_warps_value_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let tile: Tile<f32, S> = constant(1.0f32, output.shape());
         output.store(tile);
     }
@@ -267,13 +279,20 @@ fn entry_level_occupancy_hints_in_mlir() {
             mlir.contains("num_cta_in_cga = 2"),
             "Expected num_cta_in_cga=2 in entry optimization_hints.\nMLIR:\n{mlir}"
         );
+        assert!(
+            mlir.contains("num_worker_warps_per_cta = 4"),
+            "Expected num_worker_warps_per_cta=4 in entry optimization_hints.\nMLIR:\n{mlir}"
+        );
     });
 }
 
 #[test]
 fn compile_options_override_entry_hints() {
     common::with_test_stack(|| {
-        let options = CompileOptions::default().occupancy(8).num_cta_in_cga(4);
+        let options = CompileOptions::default()
+            .occupancy(8)
+            .num_cta_in_cga(4)
+            .num_worker_warps_per_cta(8);
         let mlir = compile_kernel("entry_hints_kernel", &[("output", &[1])], &options);
         println!("{mlir}");
         assert!(
@@ -284,6 +303,29 @@ fn compile_options_override_entry_hints() {
             mlir.contains("num_cta_in_cga = 4"),
             "Expected runtime num_cta_in_cga=4 to override entry-level num_cta_in_cga=2.\nMLIR:\n{mlir}"
         );
+        assert!(
+            mlir.contains("num_worker_warps_per_cta = 8"),
+            "Expected runtime num_worker_warps_per_cta=8 to override entry-level value 4.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn worker_warps_values_are_forwarded_to_backend() {
+    common::with_test_stack(|| {
+        let entry_mlir = compile_kernel(
+            "worker_warps_value_kernel",
+            &[("output", &[1])],
+            &CompileOptions::default(),
+        );
+        assert!(entry_mlir.contains("num_worker_warps_per_cta = 1"));
+
+        let options_mlir = compile_kernel(
+            "entry_hints_kernel",
+            &[("output", &[1])],
+            &CompileOptions::default().num_worker_warps_per_cta(32),
+        );
+        assert!(options_mlir.contains("num_worker_warps_per_cta = 32"));
     });
 }
 

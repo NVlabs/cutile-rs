@@ -35,6 +35,12 @@ pub fn build_entry_optimization_hints(hints: &OptimizationHints) -> Option<Attri
                 Attribute::Integer(occ as i64, Type::Scalar(ScalarType::I32)),
             ));
         }
+        if let Some(num_worker_warps) = sm_hints.num_worker_warps_per_cta {
+            arch_hints.push((
+                "num_worker_warps_per_cta".to_string(),
+                Attribute::Integer(num_worker_warps as i64, Type::Scalar(ScalarType::I32)),
+            ));
+        }
         if !arch_hints.is_empty() {
             entries.push((arch.clone(), arch_hints));
         }

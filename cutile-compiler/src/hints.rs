@@ -22,6 +22,7 @@ pub struct SMHints {
     pub num_cta_in_cga: Option<i32>,
     pub occupancy: Option<i32>,
     pub max_divisibility: Option<i32>,
+    pub num_worker_warps_per_cta: Option<i32>,
 }
 
 impl SMHints {
@@ -31,6 +32,7 @@ impl SMHints {
             num_cta_in_cga: None,
             occupancy: None,
             max_divisibility: None,
+            num_worker_warps_per_cta: None,
         }
     }
 
@@ -60,6 +62,15 @@ impl SMHints {
         self.max_divisibility = Some(get_int_hint(hint)?);
         Ok(())
     }
+
+    pub fn set_num_worker_warps_per_cta(&mut self, hint: &Expr) -> Result<(), JITError> {
+        if self.num_worker_warps_per_cta.is_some() {
+            return SourceLocation::unknown()
+                .jit_error_result("num_worker_warps_per_cta hint has already been set");
+        }
+        self.num_worker_warps_per_cta = Some(get_int_hint(hint)?);
+        Ok(())
+    }
 }
 
 fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
@@ -86,6 +97,7 @@ pub struct CompileOptions {
     pub occupancy: Option<i32>,
     pub num_cta_in_cga: Option<i32>,
     pub max_divisibility: Option<i32>,
+    pub num_worker_warps_per_cta: Option<i32>,
 }
 
 impl CompileOptions {
@@ -105,6 +117,11 @@ impl CompileOptions {
 
     pub fn max_divisibility(mut self, max_divisibility: i32) -> Self {
         self.max_divisibility = Some(max_divisibility);
+        self
+    }
+
+    pub fn num_worker_warps_per_cta(mut self, num_worker_warps_per_cta: i32) -> Self {
+        self.num_worker_warps_per_cta = Some(num_worker_warps_per_cta);
         self
     }
 }
@@ -172,6 +189,9 @@ impl OptimizationHints {
                             "num_cta_in_cga" => sm_hints_result.set_num_cta_in_cga(&hints)?,
                             "occupancy" => sm_hints_result.set_occupancy(&hints)?,
                             "max_divisibility" => sm_hints_result.set_max_divisibility(&hints)?,
+                            "num_worker_warps_per_cta" => {
+                                sm_hints_result.set_num_worker_warps_per_cta(&hints)?
+                            }
                             "allow_tma" | "latency" => {
                                 return SourceLocation::unknown().jit_error_result(&format!(
                                     "'{key}' is a per-op hint and cannot be set at the entry level. \
@@ -209,6 +229,7 @@ impl OptimizationHints {
         if options.occupancy.is_none()
             && options.num_cta_in_cga.is_none()
             && options.max_divisibility.is_none()
+            && options.num_worker_warps_per_cta.is_none()
         {
             return;
         }
@@ -228,6 +249,9 @@ impl OptimizationHints {
         }
         if let Some(max_divisibility) = options.max_divisibility {
             sm_hints.max_divisibility = Some(max_divisibility);
+        }
+        if let Some(num_worker_warps_per_cta) = options.num_worker_warps_per_cta {
+            sm_hints.num_worker_warps_per_cta = Some(num_worker_warps_per_cta);
         }
     }
 }
