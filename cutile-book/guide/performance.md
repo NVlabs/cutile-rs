@@ -129,7 +129,7 @@ Optimization hints guide code generation for a target architecture:
             num_cta_in_cga = 2,
             occupancy = 2,
             max_divisibility = 16,
-            num_worker_warps_per_cta = 4, // Requires bytecode version 13.3 or newer.
+            num_worker_warps_per_cta = 4, // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
         ),
         sm_90 = (num_cta_in_cga = 1),
     )
@@ -137,7 +137,7 @@ Optimization hints guide code generation for a target architecture:
 fn kernel<const S: [i32; 2]>(...) { ... }
 ```
 
-Runtime `CompileOptions` can override entry-level hints for autotuning. `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
+Runtime `CompileOptions` can override entry-level hints for autotuning. `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. `num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]` and requires bytecode version 13.3 or newer. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
 
 ## Common Pitfalls
 

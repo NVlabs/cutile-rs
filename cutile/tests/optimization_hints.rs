@@ -135,7 +135,7 @@ mod opt_hints_module {
     }
 
     #[cutile::entry(optimization_hints = (
-        sm_120 = (num_worker_warps_per_cta = 3,),
+        sm_120 = (num_worker_warps_per_cta = 1,),
     ))]
     fn worker_warps_value_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let tile: Tile<f32, S> = constant(1.0f32, output.shape());
@@ -318,14 +318,14 @@ fn worker_warps_values_are_forwarded_to_backend() {
             &[("output", &[1])],
             &CompileOptions::default(),
         );
-        assert!(entry_mlir.contains("num_worker_warps_per_cta = 3"));
+        assert!(entry_mlir.contains("num_worker_warps_per_cta = 1"));
 
         let options_mlir = compile_kernel(
             "entry_hints_kernel",
             &[("output", &[1])],
-            &CompileOptions::default().num_worker_warps_per_cta(64),
+            &CompileOptions::default().num_worker_warps_per_cta(32),
         );
-        assert!(options_mlir.contains("num_worker_warps_per_cta = 64"));
+        assert!(options_mlir.contains("num_worker_warps_per_cta = 32"));
     });
 }
 
