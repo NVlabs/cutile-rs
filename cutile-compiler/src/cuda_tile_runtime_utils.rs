@@ -510,6 +510,37 @@ pub fn serialize_tile_ir_bytecode(
     Ok((bytes, bytecode_version))
 }
 
+/// Derives the L2 cache key for bytecode using the currently resolved
+/// `tileiras` toolchain.
+///
+/// The returned fingerprint is the exact value used in the key, so callers that
+/// also validate or encode a cache entry cannot accidentally re-resolve a
+/// different toolchain between key derivation and entry construction.
+pub(crate) fn current_l2_key_for_bytecode(
+    bytecode: &[u8],
+    bytecode_version: BytecodeVersion,
+    gpu_name: &str,
+    opt_level: u8,
+) -> (String, &'static str) {
+    let tileiras_fp = tileiras_fingerprint();
+    let key =
+        crate::jit_cache::l2_key(bytecode, bytecode_version, gpu_name, opt_level, tileiras_fp);
+    (key, tileiras_fp)
+}
+
+/// Runs the canonical JIT bytecode serializer and returns the L2 cache key that
+/// the current toolchain would use for `module` and `gpu_name`.
+///
+/// This runs the compiler-side verifiers and serialization, but it does not
+/// consult a [`crate::jit_cache::JitStore`] or compile a cubin with `tileiras`.
+pub(crate) fn current_l2_key_for_module(
+    module: &cutile_ir::Module,
+    gpu_name: &str,
+) -> Result<String, JITError> {
+    let (bytecode, bytecode_version) = serialize_tile_ir_bytecode(module)?;
+    Ok(current_l2_key_for_bytecode(&bytecode, bytecode_version, gpu_name, DEFAULT_OPT_LEVEL).0)
+}
+
 /// Compiles Tile IR bytecode to a cubin image by spawning `tileiras`.
 ///
 /// `bytecode`, `gpu_name` and `opt_level`, plus the `tileiras` binary itself, are
@@ -624,8 +655,7 @@ pub fn compile_bytecode_cached(
     // `bc_version` is the version the caller actually serialized into `bytecode`,
     // not a fresh re-resolution — so the key's version field can never disagree
     // with the bytes it sits next to (see #7).
-    let tileiras_fp = tileiras_fingerprint();
-    let key = jit_cache::l2_key(bytecode, bc_version, gpu_name, opt_level, tileiras_fp);
+    let (key, tileiras_fp) = current_l2_key_for_bytecode(bytecode, bc_version, gpu_name, opt_level);
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,

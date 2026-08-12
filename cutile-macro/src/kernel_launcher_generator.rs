@@ -500,6 +500,13 @@ pub fn generate_kernel_launcher(
         unsafe fn execute(mut self, ctx: &ExecutionContext) -> Result<<Self as DeviceOp>::Output, DeviceError> {}
     })
     .unwrap();
+    let mut specialization_method = syn::parse2::<ImplItemFn>(quote! {
+        unsafe fn _resolve_l1_specialization(
+            mut self,
+            ctx: &ExecutionContext,
+        ) -> Result<L1Specialization<ModuleAstFn>, DeviceError> {}
+    })
+    .unwrap();
 
     // Generate launcher signature.
     let param_names = get_sig_param_names(&item.sig);
@@ -821,12 +828,26 @@ pub fn generate_kernel_launcher(
     .block
     .stmts;
     launcher_method.block.stmts.extend(init_stmts);
-    launcher_method.block.stmts.push(parse_stmt(format!(
+    let specialization_init_stmts = syn::parse2::<ExprBlock>(quote! {{
+        let module_name = #module_name;
+        let function_name = #function_name;
+        let input = self.input.take().unwrap();
+    }})
+    .unwrap()
+    .block
+    .stmts;
+    specialization_method
+        .block
+        .stmts
+        .extend(specialization_init_stmts);
+    let execute_input_stmt = parse_stmt(format!(
         r#"let {param_names_tuple_str}: {stored_args_type_str} = input.execute(ctx)?;"#
-    )));
+    ));
+    launcher_method.block.stmts.push(execute_input_stmt.clone());
+    specialization_method.block.stmts.push(execute_input_stmt);
 
     if !required_generics.names.is_empty() {
-        launcher_method.block.stmts.push(parse_stmt(format!(
+        let generics_stmt = parse_stmt(format!(
             r#"
             let function_generics: Vec<String> = if self.function_generics.is_some() {{
                 self.function_generics.take().unwrap()
@@ -835,27 +856,57 @@ pub fn generate_kernel_launcher(
             }};
             "#,
             required_generics.to_expr_str()
-        )));
-    } else {
-        launcher_method.block.stmts.push(parse_stmt(
-            "let function_generics: Vec<String> = vec![];".to_string(),
         ));
+        launcher_method.block.stmts.push(generics_stmt.clone());
+        specialization_method.block.stmts.push(generics_stmt);
+    } else {
+        let generics_stmt = parse_stmt("let function_generics: Vec<String> = vec![];".to_string());
+        launcher_method.block.stmts.push(generics_stmt.clone());
+        specialization_method.block.stmts.push(generics_stmt);
     }
 
-    launcher_method.block.stmts.push(parse_stmt(format!(
+    let stride_args_stmt = parse_stmt(format!(
         "let stride_args: Vec<(String, Vec<i32>)> =  vec![{}];",
         stride_args.join(",")
-    )));
-    launcher_method.block.stmts.push(parse_stmt(format!(
-        "let spec_args = vec![{}];",
-        spec_args.join(",")
-    )));
+    ));
+    launcher_method.block.stmts.push(stride_args_stmt.clone());
+    specialization_method.block.stmts.push(stride_args_stmt);
+    let spec_args_stmt = parse_stmt(format!("let spec_args = vec![{}];", spec_args.join(",")));
+    launcher_method.block.stmts.push(spec_args_stmt.clone());
+    specialization_method.block.stmts.push(spec_args_stmt);
 
     // Emit scalar_hints (populated for integer scalar and raw pointer params).
-    launcher_method.block.stmts.push(parse_stmt(format!(
+    let scalar_hints_stmt = parse_stmt(format!(
         "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
-    )));
+    ));
+    launcher_method.block.stmts.push(scalar_hints_stmt.clone());
+    specialization_method.block.stmts.push(scalar_hints_stmt);
+
+    let specialization_stmts = syn::parse2::<ExprBlock>(quote! {{
+        let const_grid = if self._const_grid { Some(self._grid) } else { None };
+        let compile_options = std::mem::take(&mut self._compile_options);
+        return Ok(_l1_specialization_from_context(
+            ctx,
+            __module_ast_self as ModuleAstFn,
+            module_name,
+            function_name,
+            function_generics,
+            stride_args,
+            spec_args,
+            scalar_hints,
+            const_grid,
+            compile_options,
+            _SOURCE_HASH,
+        ));
+    }})
+    .unwrap()
+    .block
+    .stmts;
+    specialization_method
+        .block
+        .stmts
+        .extend(specialization_stmts);
 
     let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
@@ -1114,6 +1165,9 @@ pub fn generate_kernel_launcher(
         required_generics,
         (stored_args_type, returned_args_type),
         quote! {
+            impl #struct_generics #launcher_ident #struct_args {
+                #specialization_method
+            }
             impl #struct_generics DeviceOp for #launcher_ident #struct_args {
                 type Output = #returned_args_type_2;
                 #launcher_method

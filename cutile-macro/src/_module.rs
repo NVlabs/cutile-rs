@@ -864,6 +864,36 @@ pub fn kernel_launcher(
                 unsafe { self.execute(&ctx)?; }
                 Ok(())
             }
+
+            pub fn cache_specialization(self) -> Result<L1Specialization<ModuleAstFn>, DeviceError> {
+                let stream = with_default_device_policy(|policy| policy.next_stream())??;
+                self.cache_specialization_on(&stream)
+            }
+
+            pub fn cache_specialization_on(self, stream: &Arc<Stream>) -> Result<L1Specialization<ModuleAstFn>, DeviceError> {
+                let ctx = ExecutionContext::new(stream.clone());
+                unsafe { self._resolve_l1_specialization(&ctx) }
+            }
+
+            pub fn l1_cache_key(self) -> Result<TileFunctionKey, DeviceError> {
+                Ok(self.cache_specialization()?.into_l1_cache_key())
+            }
+
+            pub fn l1_cache_key_on(self, stream: &Arc<Stream>) -> Result<TileFunctionKey, DeviceError> {
+                Ok(self.cache_specialization_on(stream)?.into_l1_cache_key())
+            }
+
+            pub fn l2_cache_key(self) -> Result<String, DeviceError> {
+                self.cache_specialization()?
+                    .l2_cache_key()
+                    .map_err(|error| DeviceError::from(Error::from(error)))
+            }
+
+            pub fn l2_cache_key_on(self, stream: &Arc<Stream>) -> Result<String, DeviceError> {
+                self.cache_specialization_on(stream)?
+                    .l2_cache_key()
+                    .map_err(|error| DeviceError::from(Error::from(error)))
+            }
         }
 
         impl #tile_kernel_impl_type_params TileKernel #tile_kernel_type_args for #launcher_ident #struct_args {

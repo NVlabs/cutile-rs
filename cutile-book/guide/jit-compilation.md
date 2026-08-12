@@ -236,6 +236,101 @@ Concurrent cold-starting processes do not deduplicate compilation across process
 
 See `cutile-examples/examples/jit_disk_cache.rs`; run it twice to watch the second process hit the disk. For implementing a custom backend (an object store, a database), see `cutile-examples/examples/jit_custom_store.rs`.
 
+## Computing Cache Keys
+
+Use a generated launcher to derive the exact keys that a normal launch would use:
+
+| Need | API |
+|---|---|
+| Only the in-memory L1 key | `launcher.l1_cache_key()?` |
+| Only the persistent L2 key | `launcher.l2_cache_key()?` |
+| Both keys for one resolved launch specialization | `launcher.cache_specialization()?` |
+| An L2 key for a compile-only specialization | `KernelCompiler::l2_cache_key()?` |
+
+### Getting One Key Directly
+
+When only one key is needed, call the corresponding launcher helper:
+
+```rust
+let l1_key = my_kernels::copy(
+    cutile::api::meta::<f32>(&[1024]).partition([128]),
+    cutile::api::meta::<f32>(&[1024]),
+)
+.generics(vec!["f32".into(), "128".into()])
+.l1_cache_key()?;
+```
+
+Or derive the L2 key directly:
+
+```rust
+let l2_key = my_kernels::copy(
+    cutile::api::meta::<f32>(&[1024]).partition([128]),
+    cutile::api::meta::<f32>(&[1024]),
+)
+.generics(vec!["f32".into(), "128".into()])
+.l2_cache_key()?;
+```
+
+`l1_cache_key()` returns the complete structured `TileFunctionKey`, not the shortened `display_hash()` debug label. `l2_cache_key()` returns the 64-character lowercase SHA-256 used by the persistent cache.
+
+Each terminal consumes its launcher. If both keys are needed, resolve the launch specialization once instead of constructing the launcher twice.
+
+### Getting Both Keys
+
+`cache_specialization()` materializes the launch inputs and returns an `L1Specialization` containing the complete L1 key and a lazy module AST provider:
+
+```rust
+let specialization = my_kernels::copy(
+    cutile::api::meta::<f32>(&[1024]).partition([128]),
+    cutile::api::meta::<f32>(&[1024]),
+)
+.generics(vec!["f32".into(), "128".into()])
+.cache_specialization()?;
+
+let l1_key = specialization.l1_cache_key().clone();
+let l2_key = specialization.l2_cache_key()?;
+```
+
+`L1Specialization::l1_cache_key()` only borrows an already resolved key, so it returns `&TileFunctionKey` rather than `Result`. `cache_specialization()` may fail while materializing launch inputs, and `l2_cache_key()` may fail while running the compiler frontend or serializing bytecode, so those calls use `?`.
+
+### Matching the Real L2 Lookup
+
+L2 derivation runs the compiler frontend and serializes Tile IR because the persistent key hashes the frontend output. The helper and the real disk-cache lookup share the same bytecode-to-key function:
+
+```text
+launcher.l2_cache_key()
+    ↓
+L1Specialization::l2_cache_key()
+    ↓
+KernelCompiler::l2_cache_key()
+    ├── compiler frontend
+    ├── Tile IR bytecode serialization
+    ▼
+current_l2_key_for_bytecode()
+    ▼
+l2_key(...)
+
+compile_bytecode_cached()
+    ▼
+current_l2_key_for_bytecode()
+    ▼
+l2_key(...)
+```
+
+The bytecode version comes from the serializer. Launcher helpers resolve the target from the launch device; compile-only callers configure it on `KernelCompiler`. The default optimization level and current `tileiras` fingerprint are resolved internally. This makes the helper return the exact L2 key that the JIT would query.
+
+### Work Performed by the Helpers
+
+Both launcher helpers materialize upstream `DeviceOp` inputs to derive strides and specialization hints. An arbitrary upstream operation may perform device work during that step; cache tooling can use `api::meta` inputs to provide tensor metadata without allocating device storage.
+
+After input materialization:
+
+- L1 derivation does not construct the module AST or run the compiler frontend.
+- L2 derivation constructs the AST, runs the frontend, and serializes bytecode.
+- Neither helper reads or writes a `JitStore`, runs the target-kernel `tileiras` backend, loads a CUDA module, or populates the L1 cache.
+
+The `_on` variants (`cache_specialization_on`, `l1_cache_key_on`, and `l2_cache_key_on`) select the device from an explicit stream instead of the default device policy. All of these APIs derive keys only; callers remain responsible for `JitStore::contains`, `delete`, cache seeding, and prewarm orchestration.
+
 ## Compile-Only API
 
 Most users compile kernels by launching a generated `#[cutile::entry]` launcher. cuTile also exposes `cutile::compile_api::KernelCompiler` for pre-compilation and other compile-only workflows that need Tile IR text or bytecode without launching a kernel.
@@ -252,6 +347,18 @@ let artifacts = KernelCompiler::new(my_kernels::__module_ast_self, "my_kernels",
 let ir_text = artifacts.ir_text();
 let bytecode = artifacts.bytecode()?;
 ```
+
+For cache tooling that only needs the persistent key, use the same builder with `l2_cache_key()`:
+
+```rust
+let l2_key = KernelCompiler::new(my_kernels::__module_ast_self, "my_kernels", "tile_math")
+    .generics(vec!["32".into()])
+    .strides(&[("output", &[1])])
+    .target("sm_80")
+    .l2_cache_key()?;
+```
+
+This runs the frontend and the canonical bytecode serializer but does not compile a cubin or access the configured `JitStore`. The target comes from `.target(...)`; the bytecode version, default optimization level, and current `tileiras` fingerprint are selected internally. Advanced tools that intentionally model another toolchain can continue to call the lower-level `jit_cache::l2_key(...)` with explicit inputs.
 
 `KernelCompiler` takes the same specialization information that a launcher normally infers from its arguments: entry-function generics, tensor stride and specialization hints, scalar hints, target architecture, optional constant grid, and compile options. Use it for pre-compilation pipelines, tooling, tests, and CPU-only validation of generated IR or bytecode. The `.target("sm_...")` value supplies the target architecture explicitly because there is no active CUDA device in compile-only mode.
 
