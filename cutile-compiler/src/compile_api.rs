@@ -35,6 +35,7 @@ use crate::specialization::{DivHint, SpecializationBits};
 /// do not require a GPU or CUDA driver.
 pub struct CompileArtifacts {
     module: cutile_ir::Module,
+    gpu_name: String,
 }
 
 impl CompileArtifacts {
@@ -54,9 +55,49 @@ impl CompileArtifacts {
         &self.module
     }
 
+    /// Returns the target GPU architecture these artifacts were compiled for.
+    pub fn gpu_name(&self) -> &str {
+        &self.gpu_name
+    }
+
+    /// Computes the 64-char hex key that a launch of this exact specialization
+    /// resolves to in the persistent disk cache (see `jit_cache`).
+    ///
+    /// The bytecode is serialized with the same version selection as the
+    /// launch path, and the key covers the same inputs (bytecode, target
+    /// architecture, opt level, `tileiras` fingerprint) — so the result
+    /// matches what `jit_cache` looks up and stores at launch time. Use it to
+    /// pre-seed a cache, delete a specific entry, or verify that a persisted
+    /// tuning or deployment artifact still resolves under the current
+    /// toolchain.
+    ///
+    /// Unlike the other methods here, this consults the local toolchain (the
+    /// bytecode-version resolution and `tileiras --version`); it still
+    /// requires no GPU or CUDA driver.
+    pub fn cache_key(&self) -> Result<String, JITError> {
+        let (bytecode, bc_version) =
+            crate::cuda_tile_runtime_utils::serialize_tile_ir_bytecode(&self.module)?;
+        Ok(crate::jit_cache::l2_key(
+            &bytecode,
+            bc_version,
+            &self.gpu_name,
+            crate::cuda_tile_runtime_utils::DEFAULT_OPT_LEVEL,
+            crate::cuda_tile_runtime_utils::tileiras_fingerprint(),
+        ))
+    }
+
     /// Consumes the artifacts and returns the underlying `cutile_ir::Module`.
     pub fn into_module(self) -> cutile_ir::Module {
         self.module
+    }
+
+    /// Test-only constructor: wraps an already-built IR module.
+    #[cfg(test)]
+    pub(crate) fn for_tests(module: cutile_ir::Module, gpu_name: &str) -> Self {
+        Self {
+            module,
+            gpu_name: gpu_name.to_string(),
+        }
     }
 }
 
@@ -184,6 +225,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             .map(|(name, hint)| (name.as_str(), hint))
             .collect();
 
+        let gpu_name = self.gpu_name.clone();
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
             &self.module_name,
@@ -198,6 +240,6 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         )?;
 
         let module = compiler.compile()?;
-        Ok(CompileArtifacts { module })
+        Ok(CompileArtifacts { module, gpu_name })
     }
 }

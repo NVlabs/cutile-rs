@@ -1322,6 +1322,50 @@ mod tests {
         }
     }
 
+    /// `CompileArtifacts::cache_key` must equal the key the launch path
+    /// computes for the same module, and respond to every key input.
+    #[test]
+    #[cfg(unix)]
+    fn compile_artifacts_cache_key_matches_launch_path() {
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = env::temp_dir().join(format!("cutile_cache_key_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let fake_tileiras = temp_dir.join("tileiras");
+        write_fake_tileiras(&fake_tileiras);
+        let _tileiras_env = EnvVarGuard::set(TILEIRAS_PATH_ENV, &fake_tileiras);
+
+        let module = empty_kernel_module();
+        let (bytecode, bc_version) =
+            serialize_tile_ir_bytecode(&module).expect("serialize should succeed");
+        let expected = crate::jit_cache::l2_key(
+            &bytecode,
+            bc_version,
+            "sm_120",
+            DEFAULT_OPT_LEVEL,
+            tileiras_fingerprint(),
+        );
+
+        let artifacts = crate::compile_api::CompileArtifacts::for_tests(module, "sm_120");
+        let key = artifacts.cache_key().expect("cache_key should succeed");
+        assert_eq!(key, expected, "must match the launch path's key derivation");
+        assert_eq!(key.len(), 64);
+        assert_eq!(
+            key,
+            artifacts.cache_key().unwrap(),
+            "key must be deterministic"
+        );
+
+        let other_arch =
+            crate::compile_api::CompileArtifacts::for_tests(artifacts.into_module(), "sm_100");
+        assert_ne!(
+            other_arch.cache_key().unwrap(),
+            expected,
+            "target architecture must change the key"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     fn empty_kernel_module() -> Module {
         let mut module = Module::new("tileiras_override_test");
         let func_type = Type::Func(FuncType {

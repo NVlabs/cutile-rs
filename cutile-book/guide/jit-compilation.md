@@ -234,6 +234,8 @@ The eviction policy is LRU by file mtime with a high/low watermark pair (default
 
 Concurrent cold-starting processes do not deduplicate compilation across process boundaries, so they may all run `tileiras` for the same missing key before their atomic writes converge on one entry. To avoid this one-time compilation stampede, warm the shared cache with a single process before launching parallel workers.
 
+`CompileArtifacts::cache_key` (from the compile-only API below) computes the exact key a launch of that specialization resolves to under the current toolchain — useful for pre-seeding a cache from CI, deleting a specific entry, or verifying that a deployment artifact still matches the workspace it was built from.
+
 See `cutile-examples/examples/jit_disk_cache.rs`; run it twice to watch the second process hit the disk. For implementing a custom backend (an object store, a database), see `cutile-examples/examples/jit_custom_store.rs`.
 
 ## Compile-Only API
@@ -251,6 +253,7 @@ let artifacts = KernelCompiler::new(my_kernels::__module_ast_self, "my_kernels",
 
 let ir_text = artifacts.ir_text();
 let bytecode = artifacts.bytecode()?;
+let key = artifacts.cache_key()?; // 64-hex persistent-cache key (see below)
 ```
 
 `KernelCompiler` takes the same specialization information that a launcher normally infers from its arguments: entry-function generics, tensor stride and specialization hints, scalar hints, target architecture, optional constant grid, and compile options. Use it for pre-compilation pipelines, tooling, tests, and CPU-only validation of generated IR or bytecode. The `.target("sm_...")` value supplies the target architecture explicitly because there is no active CUDA device in compile-only mode.
