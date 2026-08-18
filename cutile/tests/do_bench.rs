@@ -14,7 +14,7 @@ use std::time::Duration;
 fn quick_opts() -> BenchOptions {
     BenchOptions {
         warmup: Duration::from_millis(5),
-        measure: Duration::from_millis(20),
+        rep: Duration::from_millis(20),
         min_reps: 3,
         max_reps: 50,
         clear_l2: true,

@@ -479,14 +479,16 @@ impl Event {
         unsafe { crate::cudarc_shim::event::synchronize(self.cu_event) }
     }
 
-    /// Milliseconds elapsed on the device between `start` and this event.
+    /// Milliseconds elapsed on the device between this event and `end`
+    /// (called on the start event, `torch.cuda.Event` convention:
+    /// `start.elapsed_time(&end)`).
     ///
-    /// Both events must have been recorded, and this (later) event must have
-    /// completed — call [`synchronize`](Self::synchronize) first, or the
-    /// driver reports not-ready.
-    pub fn elapsed_ms_since(&self, start: &Event) -> Result<f32, DriverError> {
+    /// Both events must have been recorded, and `end` must have completed —
+    /// call [`synchronize`](Self::synchronize) on it first, or the driver
+    /// reports not-ready.
+    pub fn elapsed_time(&self, end: &Event) -> Result<f32, DriverError> {
         // Safety: both handles are valid by construction.
-        unsafe { crate::cudarc_shim::event::elapsed(start.cu_event, self.cu_event) }
+        unsafe { crate::cudarc_shim::event::elapsed(self.cu_event, end.cu_event) }
     }
 }
 

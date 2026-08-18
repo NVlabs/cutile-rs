@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Device-event kernel benchmarking, in the spirit of Triton's
-//! `testing.do_bench`.
+//! Device-event kernel benchmarking, API-compatible in spirit and naming
+//! with Triton's `testing.do_bench` (`warmup`/`rep` are the same
+//! millisecond budgets, with the same defaults).
 //!
 //! [`do_bench`] times a closure with CUDA events on a stream: warmup by time
 //! budget (absorbing first-launch JIT), rep count derived from a measurement
@@ -32,10 +33,10 @@ pub struct BenchOptions {
     /// Wall-clock budget for untimed warmup iterations (absorbs JIT and
     /// clock ramp). At least one warmup iteration always runs.
     pub warmup: Duration,
-    /// Wall-clock budget the timed reps should roughly fill; the rep count
-    /// is `measure / estimated_rep_time`, clamped to
+    /// Wall-clock budget the timed reps should roughly fill (Triton's `rep`);
+    /// the timed-rep count is `rep / estimated_rep_time`, clamped to
     /// [`min_reps`](Self::min_reps)..=[`max_reps`](Self::max_reps).
-    pub measure: Duration,
+    pub rep: Duration,
     /// Lower bound on timed reps (medians need at least a few samples).
     pub min_reps: usize,
     /// Upper bound on timed reps.
@@ -49,7 +50,7 @@ impl Default for BenchOptions {
     fn default() -> Self {
         Self {
             warmup: Duration::from_millis(25),
-            measure: Duration::from_millis(100),
+            rep: Duration::from_millis(100),
             min_reps: 5,
             max_reps: 1000,
             clear_l2: true,
@@ -57,13 +58,14 @@ impl Default for BenchOptions {
     }
 }
 
-/// Timings from a [`do_bench`] run, in milliseconds per rep.
+/// Timings from a [`do_bench`] run, in milliseconds per rep (the analogue
+/// of `torch.utils.benchmark`'s `Measurement`).
 #[derive(Debug, Clone)]
-pub struct BenchResult {
+pub struct Measurement {
     times_ms: Vec<f32>,
 }
 
-impl BenchResult {
+impl Measurement {
     /// Number of timed reps.
     pub fn reps(&self) -> usize {
         self.times_ms.len()
@@ -158,7 +160,7 @@ where
     f(stream)?;
     end.record(stream)?;
     end.synchronize()?;
-    Ok(end.elapsed_ms_since(&start)?)
+    Ok(start.elapsed_time(&end)?)
 }
 
 /// Times `f` on `stream` with CUDA events. See the module docs for the
@@ -167,7 +169,7 @@ pub fn do_bench<F>(
     stream: &Arc<Stream>,
     opts: &BenchOptions,
     mut f: F,
-) -> Result<BenchResult, Error>
+) -> Result<Measurement, Error>
 where
     F: FnMut(&Arc<Stream>) -> Result<(), Error>,
 {
@@ -181,7 +183,7 @@ where
 
     // Derive the rep count from one timed estimate.
     let est_ms = time_one(stream, &mut f)?.max(1e-4);
-    let target_ms = opts.measure.as_secs_f64() * 1e3;
+    let target_ms = opts.rep.as_secs_f64() * 1e3;
     let reps = ((target_ms / est_ms as f64).round() as usize).clamp(opts.min_reps, opts.max_reps);
 
     let l2 = opts.clear_l2.then(|| L2Clear::new(stream));
@@ -192,7 +194,7 @@ where
         }
         times_ms.push(time_one(stream, &mut f)?);
     }
-    Ok(BenchResult { times_ms })
+    Ok(Measurement { times_ms })
 }
 
 /// Times two closures in strict A/B/A/B alternation on `stream` — the
@@ -204,7 +206,7 @@ pub fn do_bench_paired<A, B>(
     opts: &BenchOptions,
     mut a: A,
     mut b: B,
-) -> Result<(BenchResult, BenchResult), Error>
+) -> Result<(Measurement, Measurement), Error>
 where
     A: FnMut(&Arc<Stream>) -> Result<(), Error>,
     B: FnMut(&Arc<Stream>) -> Result<(), Error>,
@@ -218,7 +220,7 @@ where
     }
 
     let est_ms = time_one(stream, &mut a)?.max(1e-4);
-    let target_ms = opts.measure.as_secs_f64() * 1e3;
+    let target_ms = opts.rep.as_secs_f64() * 1e3;
     // Each pair runs both arms; halve the budget-derived count per arm.
     let reps =
         (((target_ms / est_ms as f64) / 2.0).round() as usize).clamp(opts.min_reps, opts.max_reps);
@@ -236,8 +238,8 @@ where
         times_b.push(time_one(stream, &mut b)?);
     }
     Ok((
-        BenchResult { times_ms: times_a },
-        BenchResult { times_ms: times_b },
+        Measurement { times_ms: times_a },
+        Measurement { times_ms: times_b },
     ))
 }
 
@@ -245,8 +247,8 @@ where
 mod tests {
     use super::*;
 
-    fn result(times: &[f32]) -> BenchResult {
-        BenchResult {
+    fn result(times: &[f32]) -> Measurement {
+        Measurement {
             times_ms: times.to_vec(),
         }
     }
