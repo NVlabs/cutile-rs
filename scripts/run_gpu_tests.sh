@@ -11,6 +11,7 @@ print_header "Running GPU tests"
 
 for test_target in \
     arange \
+    do_bench \
     dtype_float_ops \
     gpu_execution_ops \
     nested_partition_mut \

@@ -179,6 +179,7 @@ static __CUTILE_REEXPORT_CORE: cutile_compiler::registry::CutileModuleEntry =
         build: _core::core::__module_ast_self,
     };
 pub mod api;
+pub mod bench;
 pub mod kernels;
 pub mod prelude;
 pub mod tensor;

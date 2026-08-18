@@ -153,3 +153,19 @@ Profile before and after each change. [Debugging and Profiling](debugging-and-pr
 ---
 
 Continue to [Interoperability](interoperability.md).
+
+## Measuring Kernels
+
+`cutile::bench` provides device-event timing for kernel measurement and A/B comparison:
+
+```rust
+use cutile::bench::{do_bench, do_bench_paired, BenchOptions};
+
+let r = do_bench(&stream, &BenchOptions::default(), |s| {
+    my_kernel(z.partition([128]), x.clone(), y.clone()).sync_on(s).map(|_| ()).map_err(Into::into)
+})?;
+println!("median {:.3} ms over {} reps", r.median_ms(), r.reps());
+```
+
+Timing uses CUDA events (device timeline, not host clocks), warmup absorbs first-launch JIT, the L2 cache is cleared between reps, and results report medians and quantiles. When comparing two configurations, always use `do_bench_paired` — it alternates the arms rep by rep, so clock and thermal drift cannot masquerade as a difference between them.
+
