@@ -70,11 +70,17 @@ impl Config {
     {
         let params: BTreeMap<String, ParamValue> =
             params.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        // String values are JSON-encoded (quoted + escaped) so ids cannot
+        // alias: `A=1` (int) differs from `A="1"` (string), and a string
+        // containing `,` or `=` cannot imitate additional parameters.
         let id = params
             .iter()
             .map(|(k, v)| match v {
                 ParamValue::Int(i) => format!("{k}={i}"),
-                ParamValue::Str(s) => format!("{k}={s}"),
+                ParamValue::Str(s) => format!(
+                    "{k}={}",
+                    serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+                ),
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -96,6 +102,23 @@ impl Config {
             _ => None,
         }
     }
+}
+
+/// Order-independent fingerprint of a candidate set. The trial log and
+/// artifacts record it so that resume/apply against a *different* search
+/// space is detected instead of silently trusted.
+pub fn space_hash(configs: &[Config]) -> String {
+    // FNV-1a over the sorted ids; stability matters, cryptography does not.
+    let mut ids: Vec<&str> = configs.iter().map(|c| c.id.as_str()).collect();
+    ids.sort_unstable();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for id in ids {
+        for b in id.as_bytes().iter().chain(&[0u8]) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
 }
 
 // ── Trial ───────────────────────────────────────────────────────────────────
@@ -183,7 +206,17 @@ impl GridSampler {
 
 impl Sampler for GridSampler {
     fn search(&mut self, oracle: &mut dyn Oracle) -> Vec<Trial> {
-        let mut trials = std::mem::take(&mut self.known);
+        // Resumed trials count only when (a) their config still exists in the
+        // current space — a removed or renamed candidate's history must not
+        // decide this search — and (b) they actually measured: an Invalid may
+        // have been transient (poisoned context, OOM next door), so it is
+        // retried; genuinely invalid candidates fail again cheaply.
+        let current: std::collections::BTreeSet<&str> =
+            oracle.configs().iter().map(|c| c.id.as_str()).collect();
+        let mut trials: Vec<Trial> = std::mem::take(&mut self.known)
+            .into_iter()
+            .filter(|t| current.contains(t.config_id.as_str()) && t.median_ms().is_some())
+            .collect();
         let visited: std::collections::BTreeSet<String> =
             trials.iter().map(|t| t.config_id.clone()).collect();
         let todo: Vec<usize> = (0..oracle.configs().len())
@@ -202,16 +235,23 @@ impl Sampler for GridSampler {
 /// Selects the winner among trials: the measured candidate with the lowest
 /// median. `None` when nothing measured successfully.
 pub fn best_config<'a>(configs: &'a [Config], trials: &[Trial]) -> Option<&'a Config> {
-    let mut best: Option<(&str, f32)> = None;
+    let mut best: Option<(&'a Config, f32)> = None;
     for t in trials {
-        if let Some(ms) = t.median_ms() {
-            if best.is_none_or(|(_, b)| ms < b) {
-                best = Some((t.config_id.as_str(), ms));
-            }
+        let Some(ms) = t.median_ms() else { continue };
+        if !ms.is_finite() {
+            continue;
+        }
+        // A trial whose config is no longer in the space (a stale resumed
+        // record) must not decide the winner — and must not shadow a valid
+        // one either, so it is skipped rather than looked up and lost.
+        let Some(config) = configs.iter().find(|c| c.id == t.config_id) else {
+            continue;
+        };
+        if best.is_none_or(|(_, b)| ms < b) {
+            best = Some((config, ms));
         }
     }
-    let (id, _) = best?;
-    configs.iter().find(|c| c.id == id)
+    best.map(|(c, _)| c)
 }
 
 // ── Autotuner ───────────────────────────────────────────────────────────────
@@ -230,9 +270,11 @@ pub fn best_config<'a>(configs: &'a [Config], trials: &[Trial]) -> Option<&'a Co
 ///     })?;
 /// ```
 pub struct Autotuner {
-    /// Name for logs and (future) artifact records.
+    /// Name recorded in the trial log header; a resume against a log written
+    /// by a different tuner is refused.
     pub name: String,
     configs: Vec<Config>,
+    prune: Vec<Box<dyn Fn(&Config) -> bool>>,
     budget: Option<Duration>,
     bench: BenchOptions,
     log_path: Option<PathBuf>,
@@ -249,6 +291,7 @@ impl Autotuner {
         Self {
             name: name.to_string(),
             configs: Vec::new(),
+            prune: Vec::new(),
             budget: None,
             bench: BenchOptions::default(),
             log_path: None,
@@ -261,10 +304,11 @@ impl Autotuner {
         self
     }
 
-    /// Filters candidates at space construction (Triton's
-    /// `prune_configs_by`); rejected candidates are never visited.
-    pub fn prune<F: Fn(&Config) -> bool>(mut self, keep: F) -> Self {
-        self.configs.retain(|c| keep(c));
+    /// Filters candidates (Triton's `prune_configs_by`); rejected candidates
+    /// are never visited. Predicates are applied when the search runs, so
+    /// `.prune(..)` and `.configs(..)` compose in either order.
+    pub fn prune(mut self, keep: impl Fn(&Config) -> bool + 'static) -> Self {
+        self.prune.push(Box::new(keep));
         self
     }
 
@@ -296,20 +340,32 @@ impl Autotuner {
     /// monomorphization, builds `CompileOptions`), runs the programmer's
     /// correctness gate, and returns the closure to be timed — or an error,
     /// which records the candidate as [`Outcome::Invalid`] and moves on.
-    pub fn run<S, F>(self, stream: &Arc<Stream>, setup: S) -> Result<TuneOutcome, Error>
+    ///
+    /// After the search, the two best candidates are re-measured
+    /// head-to-head with [`crate::bench::do_bench_paired`] and the winner is
+    /// decided from that contemporaneous comparison — sequential (or resumed)
+    /// medians never pick the winner on their own, since clock and thermal
+    /// drift between measurements can exceed the margin between two good
+    /// configurations.
+    pub fn run<S, F>(mut self, stream: &Arc<Stream>, setup: S) -> Result<TuneOutcome, Error>
     where
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
         F: FnMut(&Arc<Stream>) -> Result<(), Error>,
     {
-        let log = TrialLog::open(self.log_path.as_deref())?;
+        self.apply_prune();
+        let mut log = TrialLog::open(
+            self.log_path.as_deref(),
+            &self.name,
+            &space_hash(&self.configs),
+        )?;
         let sampler = GridSampler::new().resume(log.existing_trials());
-        self.run_sampler(sampler, stream, setup, log)
+        self.run_sampler(sampler, stream, setup, &mut log)
     }
 
     /// Runs the search with an explicit [`Sampler`]. The trial log still
     /// records every trial, but resume semantics are the sampler's concern.
     pub fn run_with<S, F>(
-        self,
+        mut self,
         sampler: impl Sampler,
         stream: &Arc<Stream>,
         setup: S,
@@ -318,8 +374,18 @@ impl Autotuner {
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
         F: FnMut(&Arc<Stream>) -> Result<(), Error>,
     {
-        let log = TrialLog::open(self.log_path.as_deref())?;
-        self.run_sampler(sampler, stream, setup, log)
+        self.apply_prune();
+        let mut log = TrialLog::open(
+            self.log_path.as_deref(),
+            &self.name,
+            &space_hash(&self.configs),
+        )?;
+        self.run_sampler(sampler, stream, setup, &mut log)
+    }
+
+    fn apply_prune(&mut self) {
+        let prune = std::mem::take(&mut self.prune);
+        self.configs.retain(|c| prune.iter().all(|keep| keep(c)));
     }
 
     fn run_sampler<S, F>(
@@ -327,7 +393,7 @@ impl Autotuner {
         mut sampler: impl Sampler,
         stream: &Arc<Stream>,
         setup: S,
-        mut log: TrialLog,
+        log: &mut TrialLog,
     ) -> Result<TuneOutcome, Error>
     where
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
@@ -339,12 +405,73 @@ impl Autotuner {
             setup,
             bench: self.bench.clone(),
             deadline: self.budget.map(|b| Instant::now() + b),
-            log: &mut log,
+            log,
         };
-        let trials = sampler.search(&mut oracle);
-        let best = best_config(&oracle.configs, &trials).cloned();
+        let mut trials = sampler.search(&mut oracle);
+
+        // Paired runoff between the two best. Rationale in run()'s docs.
+        let best = match top_two(&oracle.configs, &trials) {
+            None => None,
+            Some((only, None)) => Some(only.clone()),
+            Some((a, Some(b))) => {
+                let (a, b) = (a.clone(), b.clone());
+                match oracle.runoff(&a, &b) {
+                    Err(e) => {
+                        // A runoff that cannot run leaves the sequential
+                        // medians as the (recorded) decision basis.
+                        trials.push(Trial {
+                            config_id: a.id.clone(),
+                            outcome: Outcome::Invalid {
+                                reason: format!("runoff failed: {e}"),
+                            },
+                        });
+                        Some(a)
+                    }
+                    Ok((ms_a, ms_b)) => {
+                        for (cfg, ms) in [(&a, ms_a), (&b, ms_b)] {
+                            let t = Trial {
+                                config_id: cfg.id.clone(),
+                                outcome: Outcome::Measured {
+                                    median_ms: ms,
+                                    min_ms: ms,
+                                    reps: self.bench.min_reps.max(1),
+                                },
+                            };
+                            oracle.log.append(&t);
+                            trials.push(t);
+                        }
+                        Some(if ms_a <= ms_b { a } else { b })
+                    }
+                }
+            }
+        };
         Ok(TuneOutcome { trials, best })
     }
+}
+
+/// The two best measured candidates present in `configs`, by median.
+fn top_two<'a>(
+    configs: &'a [Config],
+    trials: &[Trial],
+) -> Option<(&'a Config, Option<&'a Config>)> {
+    let mut ranked: Vec<(&Config, f32)> = Vec::new();
+    for t in trials {
+        let Some(ms) = t.median_ms() else { continue };
+        if !ms.is_finite() {
+            continue;
+        }
+        if let Some(c) = configs.iter().find(|c| c.id == t.config_id) {
+            // Keep the best median per config (runoff entries may duplicate).
+            match ranked.iter_mut().find(|(rc, _)| rc.id == c.id) {
+                Some(entry) => entry.1 = entry.1.min(ms),
+                None => ranked.push((c, ms)),
+            }
+        }
+    }
+    ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut it = ranked.into_iter();
+    let first = it.next()?.0;
+    Some((first, it.next().map(|(c, _)| c)))
 }
 
 /// The library-owned oracle: applies a config via the user's setup closure,
@@ -394,7 +521,30 @@ where
     }
 }
 
+impl<S, F> BenchOracle<'_, S>
+where
+    S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
+    F: FnMut(&Arc<Stream>) -> Result<(), Error>,
+{
+    /// Contemporaneous A/B/A/B re-measurement of two finalists; returns
+    /// their paired medians.
+    fn runoff(&mut self, a: &Config, b: &Config) -> Result<(f32, f32), Error> {
+        let mut fa = (self.setup)(&self.stream, a)?;
+        let mut fb = (self.setup)(&self.stream, b)?;
+        let (ma, mb) =
+            crate::bench::do_bench_paired(&self.stream, &self.bench, |s| fa(s), |s| fb(s))?;
+        Ok((ma.median_ms(), mb.median_ms()))
+    }
+}
+
 fn measured(m: &Measurement) -> Outcome {
+    if m.reps() == 0 {
+        // Reachable via BenchOptions { min_reps: 0 } with a zero budget;
+        // median of nothing would panic, and Oracle::measure never panics.
+        return Outcome::Invalid {
+            reason: "no timed reps (check BenchOptions)".into(),
+        };
+    }
     Outcome::Measured {
         median_ms: m.median_ms(),
         min_ms: m.min_ms(),
@@ -404,35 +554,108 @@ fn measured(m: &Measurement) -> Outcome {
 
 // ── Trial log (JSONL) ───────────────────────────────────────────────────────
 
-/// Append-only JSONL record of every trial; parsing it back is what makes
-/// interrupted runs resumable. Best-effort: log I/O failures never abort a
-/// search.
+/// Append-only JSONL record of every trial, headed by an identity record;
+/// parsing it back is what makes interrupted runs resumable.
+///
+/// The first line identifies the tuner and its search space. A log whose
+/// header does not match the running search is REFUSED — resuming kernel B
+/// from kernel A's log (or from a differently-shaped space with coincident
+/// parameter names) silently adopts foreign timings, which is exactly the
+/// under-keyed-persistence failure this module exists to prevent.
+///
+/// Because logging is explicitly requested (`.log(path)`), failures to open
+/// or head the file are hard errors, not silent no-ops. Per-trial append
+/// failures after a successful open are best-effort.
+#[derive(Debug)]
 struct TrialLog {
     file: Option<std::fs::File>,
     existing: Vec<Trial>,
 }
 
+#[derive(Serialize, Deserialize, PartialEq)]
+struct LogHeader {
+    log_schema: u32,
+    tuner: String,
+    space: String,
+}
+
 impl TrialLog {
-    fn open(path: Option<&Path>) -> Result<Self, Error> {
+    fn open(path: Option<&Path>, tuner: &str, space: &str) -> Result<Self, Error> {
         let Some(path) = path else {
             return Ok(Self {
                 file: None,
                 existing: Vec::new(),
             });
         };
-        let existing = match std::fs::read_to_string(path) {
-            Ok(contents) => contents
-                .lines()
-                .filter_map(|l| serde_json::from_str::<Trial>(l).ok())
-                .collect(),
-            Err(_) => Vec::new(),
+        let expected = LogHeader {
+            log_schema: 1,
+            tuner: tuner.to_string(),
+            space: space.to_string(),
         };
-        let file = std::fs::OpenOptions::new()
+        let mut existing = Vec::new();
+        let mut needs_newline = false;
+        match std::fs::read_to_string(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(crate::error::tensor_error(&format!(
+                    "trial log {} is unreadable: {e}",
+                    path.display()
+                )));
+            }
+            Ok(contents) if contents.trim().is_empty() => {}
+            Ok(contents) => {
+                let mut lines = contents.lines();
+                let header: LogHeader = lines
+                    .next()
+                    .and_then(|l| serde_json::from_str(l).ok())
+                    .ok_or_else(|| {
+                        crate::error::tensor_error(&format!(
+                            "trial log {} has no valid header; delete it or point .log() elsewhere",
+                            path.display()
+                        ))
+                    })?;
+                if header != expected {
+                    return Err(crate::error::tensor_error(&format!(
+                        "trial log {} belongs to tuner {:?} (space {}), not {:?} (space {}); delete it or point .log() elsewhere",
+                        path.display(),
+                        header.tuner,
+                        header.space,
+                        expected.tuner,
+                        expected.space,
+                    )));
+                }
+                existing = lines
+                    .filter_map(|l| serde_json::from_str::<Trial>(l).ok())
+                    .collect();
+                // A crash mid-write can leave a torn final line without a
+                // newline; appending directly would corrupt the next record.
+                needs_newline = !contents.ends_with('\n');
+            }
+        }
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .ok();
-        Ok(Self { file, existing })
+            .map_err(|e| {
+                crate::error::tensor_error(&format!(
+                    "trial log {} cannot be opened for append: {e}",
+                    path.display()
+                ))
+            })?;
+        if needs_newline {
+            let _ = writeln!(file);
+        }
+        // Head a fresh (or emptied) log with the identity record.
+        let is_empty = file.metadata().map(|m| m.len() == 0).unwrap_or(false);
+        if is_empty {
+            if let Ok(line) = serde_json::to_string(&expected) {
+                let _ = writeln!(file, "{line}");
+            }
+        }
+        Ok(Self {
+            file: Some(file),
+            existing,
+        })
     }
 
     fn existing_trials(&self) -> Vec<Trial> {
@@ -575,7 +798,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cutile_tune_log_{}", std::process::id()));
         let _ = std::fs::remove_file(&dir);
         {
-            let mut log = TrialLog::open(Some(dir.as_path())).unwrap();
+            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s").unwrap();
             log.append(&Trial {
                 config_id: "BN=64".into(),
                 outcome: Outcome::Measured {
@@ -591,11 +814,143 @@ mod tests {
                 },
             });
         }
-        let log = TrialLog::open(Some(dir.as_path())).unwrap();
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s").unwrap();
         let existing = log.existing_trials();
         assert_eq!(existing.len(), 2);
         assert_eq!(existing[0].median_ms(), Some(1.5));
         assert!(existing[1].median_ms().is_none());
+
+        // Wrong tuner or space: refused loudly, not silently adopted.
+        let err = TrialLog::open(Some(dir.as_path()), "other", "s").unwrap_err();
+        assert!(err.to_string().contains("belongs to tuner"));
+        let err = TrialLog::open(Some(dir.as_path()), "t", "different").unwrap_err();
+        assert!(err.to_string().contains("belongs to tuner"));
+
+        // Torn final line: next append still yields a parseable record.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&dir).unwrap();
+            write!(f, "{{\"config_id\":\"torn").unwrap();
+        }
+        {
+            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s").unwrap();
+            log.append(&Trial {
+                config_id: "BN=256".into(),
+                outcome: Outcome::Measured {
+                    median_ms: 2.0,
+                    min_ms: 2.0,
+                    reps: 3,
+                },
+            });
+        }
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s").unwrap();
+        assert_eq!(
+            log.existing_trials().len(),
+            3,
+            "torn line dropped, new record intact"
+        );
         let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn config_ids_do_not_alias_across_types_or_separators() {
+        let int1 = Config::new([("A", ParamValue::Int(1))]);
+        let str1 = Config::new([("A", ParamValue::Str("1".into()))]);
+        assert_ne!(int1.id, str1.id, "int 1 and string \"1\" must differ");
+        let sneaky = Config::new([("x", ParamValue::Str("1,y=2".into()))]);
+        let honest = Config::new([
+            ("x", ParamValue::Str("1".into())),
+            ("y", ParamValue::Int(2)),
+        ]);
+        assert_ne!(sneaky.id, honest.id, "separator injection must not alias");
+    }
+
+    #[test]
+    fn stale_resumed_trials_neither_win_nor_block_a_winner() {
+        // A resumed trial for a config no longer in the space: dropped, and
+        // the remaining valid winner is still selected (not None).
+        let configs = vec![cfg(64, 4)];
+        let stale = Trial {
+            config_id: "BN=16,SPLITS=2".into(),
+            outcome: Outcome::Measured {
+                median_ms: 0.1,
+                min_ms: 0.1,
+                reps: 3,
+            },
+        };
+        let mut oracle = FakeOracle {
+            configs: configs.clone(),
+            cost: |_| Some(1.0),
+            measured: Vec::new(),
+            budget: None,
+        };
+        let trials = GridSampler::new().resume(vec![stale]).search(&mut oracle);
+        assert_eq!(trials.len(), 1, "stale trial dropped from results");
+        let best = best_config(&configs, &trials).expect("valid winner survives");
+        assert_eq!(best.int("BN"), Some(64));
+    }
+
+    #[test]
+    fn resumed_invalid_trials_are_retried() {
+        let configs = vec![cfg(64, 4)];
+        let invalid = Trial {
+            config_id: configs[0].id.clone(),
+            outcome: Outcome::Invalid {
+                reason: "transient".into(),
+            },
+        };
+        let mut oracle = FakeOracle {
+            configs: configs.clone(),
+            cost: |_| Some(1.0),
+            measured: Vec::new(),
+            budget: None,
+        };
+        let trials = GridSampler::new().resume(vec![invalid]).search(&mut oracle);
+        assert_eq!(oracle.measured.len(), 1, "previously-Invalid retried");
+        assert!(trials.iter().any(|t| t.median_ms() == Some(1.0)));
+    }
+
+    #[test]
+    fn prune_composes_with_configs_in_either_order() {
+        let mk = || vec![cfg(32, 2), cfg(64, 4)];
+        // prune BEFORE configs — must still apply (predicates run at search).
+        let mut a = Autotuner::new("t")
+            .prune(|c| c.int("BN") != Some(32))
+            .configs(mk());
+        a.apply_prune();
+        assert_eq!(a.configs.len(), 1);
+        assert_eq!(a.configs[0].int("BN"), Some(64));
+        // And after, identically.
+        let mut b = Autotuner::new("t")
+            .configs(mk())
+            .prune(|c| c.int("BN") != Some(32));
+        b.apply_prune();
+        assert_eq!(b.configs.len(), 1);
+        assert_eq!(b.configs[0].int("BN"), Some(64));
+    }
+
+    #[test]
+    fn best_config_skips_non_finite_medians() {
+        let configs = vec![cfg(64, 4), cfg(128, 8)];
+        let trials = vec![
+            Trial {
+                config_id: configs[0].id.clone(),
+                outcome: Outcome::Measured {
+                    median_ms: f32::NAN,
+                    min_ms: f32::NAN,
+                    reps: 3,
+                },
+            },
+            Trial {
+                config_id: configs[1].id.clone(),
+                outcome: Outcome::Measured {
+                    median_ms: 2.0,
+                    min_ms: 2.0,
+                    reps: 3,
+                },
+            },
+        ];
+        let best = best_config(&configs, &trials).unwrap();
+        assert_eq!(best.int("BN"), Some(128), "NaN never wins");
     }
 }

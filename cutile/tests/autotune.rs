@@ -9,6 +9,7 @@ use cuda_core::Device;
 use cutile::bench::BenchOptions;
 use cutile::prelude::*;
 use cutile::tune::{Autotuner, Config, Outcome, ParamValue};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn quick_bench() -> BenchOptions {
@@ -37,12 +38,14 @@ fn end_to_end_grid_tune_on_gpu() {
     let log = std::env::temp_dir().join(format!("cutile_autotune_test_{}", std::process::id()));
     let _ = std::fs::remove_file(&log);
 
+    let setup_calls = AtomicUsize::new(0);
     let run = |log_path: &std::path::Path| {
         Autotuner::new("fill_tune")
             .configs(configs.clone())
             .bench(quick_bench())
             .log(log_path)
             .run(&stream, |_, config| {
+                setup_calls.fetch_add(1, Ordering::Relaxed);
                 let n = config.int("N").unwrap() as usize;
                 if n == 0 {
                     return Err(cutile::error::Error::Tensor(cutile::error::TensorError(
@@ -73,7 +76,8 @@ fn end_to_end_grid_tune_on_gpu() {
     };
 
     let outcome = run(&log);
-    assert_eq!(outcome.trials.len(), 3, "all candidates visited");
+    // 3 search trials + 2 paired-runoff trials for the two finalists.
+    assert_eq!(outcome.trials.len(), 5, "search trials plus runoff pair");
     let invalid: Vec<_> = outcome
         .trials
         .iter()
@@ -88,12 +92,17 @@ fn end_to_end_grid_tune_on_gpu() {
         "smaller fill should be faster"
     );
 
-    // Resume: a second run over the same log re-measures nothing.
+    // Resume: measured candidates are not re-searched; the previously
+    // Invalid one is retried (its invalidity may have been transient) and
+    // the two finalists are re-measured in the paired runoff — by design,
+    // the winner decision is always contemporaneous.
+    let calls_before = setup_calls.load(Ordering::Relaxed);
     let resumed = run(&log);
+    let resumed_calls = setup_calls.load(Ordering::Relaxed) - calls_before;
     assert_eq!(
-        resumed.trials.len(),
-        3,
-        "resumed run still reports all trials"
+        resumed_calls, 3,
+        "resume setup calls = 1 invalid retry + 2 runoff finalists"
     );
+    assert!(resumed.best.is_some());
     let _ = std::fs::remove_file(&log);
 }
