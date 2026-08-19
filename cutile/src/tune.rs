@@ -269,12 +269,15 @@ pub fn best_config<'a>(configs: &'a [Config], trials: &[Trial]) -> Option<&'a Co
 ///         ...
 ///     })?;
 /// ```
+/// A candidate-filter predicate (see [`Autotuner::prune`]).
+type PrunePredicate = Box<dyn Fn(&Config) -> bool>;
+
 pub struct Autotuner {
     /// Name recorded in the trial log header; a resume against a log written
     /// by a different tuner is refused.
     pub name: String,
     configs: Vec<Config>,
-    prune: Vec<Box<dyn Fn(&Config) -> bool>>,
+    prune: Vec<PrunePredicate>,
     budget: Option<Duration>,
     bench: BenchOptions,
     log_path: Option<PathBuf>,
