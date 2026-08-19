@@ -10,7 +10,8 @@
 
 use cutile::tile_kernel::DeviceOp;
 use cutile::{api, tensor::*};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 mod common;
 
@@ -115,6 +116,51 @@ use gpu_exec_module::{
     broadcast_add_kernel, cat_kernel, iota_kernel, permute_kernel, reduce_accumulate_kernel,
     reduce_max_kernel, reduce_sum_kernel, scan_prefix_sum_kernel,
 };
+
+#[test]
+fn copy_host_vec_to_device_keeps_source_alive_until_stream_completion() {
+    common::with_test_stack(|| {
+        let device = cuda_core::Device::new(0).expect("device");
+        let stream = device.new_stream().expect("stream");
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        unsafe {
+            stream
+                .launch_host_function(move || {
+                    blocked_tx.send(()).expect("send blocked signal");
+                    release_rx.recv().expect("wait for release signal");
+                })
+                .expect("enqueue stream blocker");
+        }
+
+        let host = Arc::new((0..4096_u32).collect::<Vec<_>>());
+        let weak_host = Arc::downgrade(&host);
+        let tensor = unsafe { api::copy_host_vec_to_device(&host).async_on(&stream) }
+            .expect("copy host vec to device");
+
+        drop(host);
+        blocked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stream blocker did not start");
+        assert!(
+            weak_host.upgrade().is_some(),
+            "host source should stay alive while the stream copy is pending"
+        );
+
+        release_tx.send(()).expect("release stream blocker");
+        unsafe { stream.synchronize() }.expect("stream synchronize");
+        assert!(
+            weak_host.upgrade().is_none(),
+            "host source should be released after stream completion"
+        );
+
+        let host_out: Vec<u32> = tensor.to_host_vec().sync_on(&stream).expect("to_host");
+        assert_eq!(host_out[0], 0);
+        assert_eq!(host_out[123], 123);
+        assert_eq!(host_out[4095], 4095);
+    });
+}
 
 // ---------------------------------------------------------------------------
 // 1. Reduce sum
