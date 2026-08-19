@@ -72,8 +72,8 @@ fn generated_cache_key_helpers_match_runtime_lookups() {
         let backend_before_key = jit_cache::jit_backend_compile_count();
 
         let specialization = make_launcher()
-            .cache_specialization()
-            .expect("generated cache-specialization helper failed");
+            .specialize()
+            .expect("generated specialization helper failed");
         assert_eq!(specialization.l1_cache_key(), &l1_key);
         let l2_key = specialization
             .l2_cache_key()

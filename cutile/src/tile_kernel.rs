@@ -242,17 +242,20 @@ impl FunctionKey for TileFunctionKey {}
 /// A resolved launch-site specialization together with the lazy module AST
 /// provider needed to derive its persistent L2 cache key.
 ///
+/// Creating this value resolves the specialization identity for a launch, but
+/// does not compile or launch the kernel.
+///
 /// The structured [`TileFunctionKey`] is sufficient for an L1 lookup. Deriving
 /// the L2 key additionally runs the compiler frontend because that key hashes
 /// serialized Tile IR bytecode. Keeping the AST as a provider preserves the
 /// L1-hit fast path: [`Self::l1_cache_key`] never builds the AST or runs the
 /// frontend.
-pub struct L1Specialization<F: Fn() -> Module> {
+pub struct Specialization<F: Fn() -> Module> {
     module_ast_fn: F,
     key: TileFunctionKey,
 }
 
-impl<F: Fn() -> Module> L1Specialization<F> {
+impl<F: Fn() -> Module> Specialization<F> {
     /// Returns the complete structured key used by the in-memory kernel cache.
     pub fn l1_cache_key(&self) -> &TileFunctionKey {
         &self.key
@@ -311,10 +314,10 @@ impl<F: Fn() -> Module> L1Specialization<F> {
 /// The generated launcher already derives the specialization metadata from its
 /// materialized arguments. This helper adds the current device and toolchain
 /// identity exactly once and keeps the lazy AST provider alongside the key for
-/// an optional [`L1Specialization::l2_cache_key`] call.
+/// an optional [`Specialization::l2_cache_key`] call.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub fn _l1_specialization_from_context<F: Fn() -> Module>(
+pub fn _specialization_from_context<F: Fn() -> Module>(
     ctx: &ExecutionContext,
     module_ast_fn: F,
     module_name: &str,
@@ -326,7 +329,7 @@ pub fn _l1_specialization_from_context<F: Fn() -> Module>(
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
     source_hash: &str,
-) -> L1Specialization<F> {
+) -> Specialization<F> {
     let device_id = ctx.get_device_id();
     let gpu_name = get_gpu_name(device_id);
     let mut key_builder = TileFunctionKey::builder(module_name, function_name)
@@ -343,7 +346,7 @@ pub fn _l1_specialization_from_context<F: Fn() -> Module>(
     if let Some(grid) = const_grid {
         key_builder = key_builder.grid(grid);
     }
-    L1Specialization {
+    Specialization {
         module_ast_fn,
         key: key_builder.build(),
     }
@@ -668,7 +671,7 @@ pub fn compile_from_context<F: Fn() -> Module>(
     compile_options: CompileOptions,
     source_hash: &str,
 ) -> Result<(Arc<Function>, Arc<Validator>), Error> {
-    let specialization = _l1_specialization_from_context(
+    let specialization = _specialization_from_context(
         ctx,
         kernel_ast,
         module_name,
@@ -1322,7 +1325,7 @@ mod tests {
     #[test]
     fn l1_cache_key_does_not_invoke_ast_provider() {
         let expected = TileFunctionKey::builder("module", "kernel").build();
-        let specialization = L1Specialization {
+        let specialization = Specialization {
             module_ast_fn: unexpected_ast_provider as ModuleAstFn,
             key: expected.clone(),
         };

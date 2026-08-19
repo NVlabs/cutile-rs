@@ -865,32 +865,34 @@ pub fn kernel_launcher(
                 Ok(())
             }
 
-            pub fn cache_specialization(self) -> Result<L1Specialization<ModuleAstFn>, DeviceError> {
+            /// Resolves the specialization identity for this launch without compiling or launching the kernel.
+            pub fn specialize(self) -> Result<Specialization<ModuleAstFn>, DeviceError> {
                 let stream = with_default_device_policy(|policy| policy.next_stream())??;
-                self.cache_specialization_on(&stream)
+                self.specialize_on(&stream)
             }
 
-            pub fn cache_specialization_on(self, stream: &Arc<Stream>) -> Result<L1Specialization<ModuleAstFn>, DeviceError> {
+            /// Resolves the specialization identity for this launch on `stream` without compiling or launching the kernel.
+            pub fn specialize_on(self, stream: &Arc<Stream>) -> Result<Specialization<ModuleAstFn>, DeviceError> {
                 let ctx = ExecutionContext::new(stream.clone());
-                unsafe { self._resolve_l1_specialization(&ctx) }
+                unsafe { self._resolve_specialization(&ctx) }
             }
 
             pub fn l1_cache_key(self) -> Result<TileFunctionKey, DeviceError> {
-                Ok(self.cache_specialization()?.into_l1_cache_key())
+                Ok(self.specialize()?.into_l1_cache_key())
             }
 
             pub fn l1_cache_key_on(self, stream: &Arc<Stream>) -> Result<TileFunctionKey, DeviceError> {
-                Ok(self.cache_specialization_on(stream)?.into_l1_cache_key())
+                Ok(self.specialize_on(stream)?.into_l1_cache_key())
             }
 
             pub fn l2_cache_key(self) -> Result<String, DeviceError> {
-                self.cache_specialization()?
+                self.specialize()?
                     .l2_cache_key()
                     .map_err(|error| DeviceError::from(Error::from(error)))
             }
 
             pub fn l2_cache_key_on(self, stream: &Arc<Stream>) -> Result<String, DeviceError> {
-                self.cache_specialization_on(stream)?
+                self.specialize_on(stream)?
                     .l2_cache_key()
                     .map_err(|error| DeviceError::from(Error::from(error)))
             }

@@ -501,10 +501,10 @@ pub fn generate_kernel_launcher(
     })
     .unwrap();
     let mut specialization_method = syn::parse2::<ImplItemFn>(quote! {
-        unsafe fn _resolve_l1_specialization(
+        unsafe fn _resolve_specialization(
             mut self,
             ctx: &ExecutionContext,
-        ) -> Result<L1Specialization<ModuleAstFn>, DeviceError> {}
+        ) -> Result<Specialization<ModuleAstFn>, DeviceError> {}
     })
     .unwrap();
 
@@ -886,7 +886,7 @@ pub fn generate_kernel_launcher(
     let specialization_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
         let compile_options = std::mem::take(&mut self._compile_options);
-        return Ok(_l1_specialization_from_context(
+        return Ok(_specialization_from_context(
             ctx,
             __module_ast_self as ModuleAstFn,
             module_name,

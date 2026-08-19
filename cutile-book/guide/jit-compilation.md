@@ -244,7 +244,7 @@ Use a generated launcher to derive the exact keys that a normal launch would use
 |---|---|
 | Only the in-memory L1 key | `launcher.l1_cache_key()?` |
 | Only the persistent L2 key | `launcher.l2_cache_key()?` |
-| Both keys for one resolved launch specialization | `launcher.cache_specialization()?` |
+| Both keys for one resolved launch specialization | `launcher.specialize()?` |
 | An L2 key for a compile-only specialization | `KernelCompiler::l2_cache_key()?` |
 
 ### Getting One Key Directly
@@ -277,7 +277,7 @@ Each terminal consumes its launcher. If both keys are needed, resolve the launch
 
 ### Getting Both Keys
 
-`cache_specialization()` materializes the launch inputs and returns an `L1Specialization` containing the complete L1 key and a lazy module AST provider:
+`specialize()` resolves the specialization identity for this launch without compiling or launching the kernel. It materializes the launch inputs and returns a `Specialization` containing the complete L1 key and a lazy module AST provider:
 
 ```rust
 let specialization = my_kernels::copy(
@@ -285,13 +285,13 @@ let specialization = my_kernels::copy(
     cutile::api::meta::<f32>(&[1024]),
 )
 .generics(vec!["f32".into(), "128".into()])
-.cache_specialization()?;
+.specialize()?;
 
 let l1_key = specialization.l1_cache_key().clone();
 let l2_key = specialization.l2_cache_key()?;
 ```
 
-`L1Specialization::l1_cache_key()` only borrows an already resolved key, so it returns `&TileFunctionKey` rather than `Result`. `cache_specialization()` may fail while materializing launch inputs, and `l2_cache_key()` may fail while running the compiler frontend or serializing bytecode, so those calls use `?`.
+`Specialization::l1_cache_key()` only borrows an already resolved key, so it returns `&TileFunctionKey` rather than `Result`. `specialize()` may fail while materializing launch inputs, and `l2_cache_key()` may fail while running the compiler frontend or serializing bytecode, so those calls use `?`.
 
 ### Matching the Real L2 Lookup
 
@@ -300,7 +300,7 @@ L2 derivation runs the compiler frontend and serializes Tile IR because the pers
 ```text
 launcher.l2_cache_key()
     ↓
-L1Specialization::l2_cache_key()
+Specialization::l2_cache_key()
     ↓
 KernelCompiler::l2_cache_key()
     ├── compiler frontend
@@ -329,7 +329,7 @@ After input materialization:
 - L2 derivation constructs the AST, runs the frontend, and serializes bytecode.
 - Neither helper reads or writes a `JitStore`, runs the target-kernel `tileiras` backend, loads a CUDA module, or populates the L1 cache.
 
-The `_on` variants (`cache_specialization_on`, `l1_cache_key_on`, and `l2_cache_key_on`) select the device from an explicit stream instead of the default device policy. All of these APIs derive keys only; callers remain responsible for `JitStore::contains`, `delete`, cache seeding, and prewarm orchestration.
+The `_on` variants (`specialize_on`, `l1_cache_key_on`, and `l2_cache_key_on`) select the device from an explicit stream instead of the default device policy. All of these APIs derive keys only; callers remain responsible for `JitStore::contains`, `delete`, cache seeding, and prewarm orchestration.
 
 ## Compile-Only API
 
