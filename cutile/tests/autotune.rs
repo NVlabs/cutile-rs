@@ -179,12 +179,14 @@ fn artifact_end_to_end_with_real_l2_verification() {
     let winner_key = l2_key_for(best_tile);
 
     let ws = Workspace {
+        kernel: "scale_tune".into(),
         source_hash: tune_test_module::_SOURCE_HASH.to_string(),
         arch: cutile::cutile_compiler::cuda_tile_runtime_utils::get_gpu_name(0),
         tileiras_fingerprint:
             cutile::cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string(),
+        space_hash: Some(cutile::tune::space_hash(&configs)),
     };
-    let mut artifact = Artifact::new("scale_tune", &ws);
+    let mut artifact = Artifact::new(&ws);
     artifact.insert(ArtifactEntry {
         bucket: format!("n={n}"),
         config: best.clone(),

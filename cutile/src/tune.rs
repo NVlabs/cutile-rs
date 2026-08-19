@@ -702,6 +702,13 @@ pub struct Artifact {
     pub machine: String,
     /// Unix seconds at creation (informational).
     pub created_unix_secs: u64,
+    /// Fingerprint of the candidate set the winners were chosen from.
+    #[serde(default)]
+    pub space_hash: Option<String>,
+    /// Free-form revision tag for the correctness gate / objective; drift is
+    /// surfaced as a warning (a stronger gate may invalidate old winners).
+    #[serde(default)]
+    pub gate: Option<String>,
     /// Winners, one per bucket.
     pub entries: Vec<ArtifactEntry>,
 }
@@ -724,18 +731,25 @@ pub struct ArtifactEntry {
 
 /// The provenance the loader checks an artifact against.
 pub struct Workspace {
+    /// Kernel/tuner name the caller is loading FOR. Two kernels in one
+    /// module share a source hash, so this is its own refusal axis.
+    pub kernel: String,
     pub source_hash: String,
     pub arch: String,
     pub tileiras_fingerprint: String,
+    /// Fingerprint of the CURRENT candidate set (see [`space_hash`]); when
+    /// both sides carry one, a mismatch refuses — a winner chosen from a
+    /// different space is not a winner here.
+    pub space_hash: Option<String>,
 }
 
 impl Artifact {
-    /// Starts an artifact for `kernel` with the given provenance; machine
-    /// name and timestamp are captured from the environment.
-    pub fn new(kernel: &str, ws: &Workspace) -> Self {
+    /// Starts an artifact with the given provenance; machine name and
+    /// timestamp are captured from the environment.
+    pub fn new(ws: &Workspace) -> Self {
         Self {
             schema: 1,
-            kernel: kernel.to_string(),
+            kernel: ws.kernel.clone(),
             source_hash: ws.source_hash.clone(),
             cutile_version: env!("CARGO_PKG_VERSION").to_string(),
             tileiras_fingerprint: ws.tileiras_fingerprint.clone(),
@@ -745,6 +759,8 @@ impl Artifact {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            space_hash: ws.space_hash.clone(),
+            gate: None,
             entries: Vec::new(),
         }
     }
@@ -778,15 +794,23 @@ impl Artifact {
             .map_err(|e| crate::error::tensor_error(&format!("artifact parse: {e}")))
     }
 
-    /// Loads and verifies against the running workspace. REFUSES (errors) on:
-    /// schema, `source_hash`, or `arch` mismatch; or, for entries that carry
-    /// an `l2_key`, a recomputed key (from `verify_l2`) that differs — the
-    /// dependency-inclusive check. Returns non-fatal drift (tileiras
-    /// fingerprint, cutile version) as warnings for the caller to surface.
+    /// Loads and verifies against the running workspace.
     ///
-    /// `verify_l2` receives each entry that carries a stored key and returns
-    /// the key the CURRENT workspace derives for that entry's config —
-    /// typically `launcher.specialize()?.l2_cache_key()` or
+    /// REFUSES (errors) on: schema, kernel, arch, or `source_hash` mismatch;
+    /// a `space_hash` mismatch when both sides carry one; duplicate buckets;
+    /// and — when the toolchain fingerprints MATCH — a stored winner
+    /// `l2_key` that differs from the recomputed one (the strong,
+    /// dependency-inclusive check).
+    ///
+    /// WARNS (returned, never silent) on: toolchain-fingerprint drift (the
+    /// stored l2 keys embed the old fingerprint, so recomputation cannot
+    /// match and is skipped — configs remain valid, timings may not); gate
+    /// tag drift; entries without a stored key; and entries whose key the
+    /// verifier declined to recompute (`Ok(None)`).
+    ///
+    /// `verify_l2` receives each keyed entry and returns the key the CURRENT
+    /// workspace derives for its config — typically
+    /// `launcher.specialize()?.l2_cache_key()` or
     /// `KernelCompiler::...l2_cache_key()`.
     pub fn load_verified(
         path: &Path,
@@ -803,31 +827,67 @@ impl Artifact {
         if artifact.schema != 1 {
             return refuse("schema", &artifact.schema.to_string(), "1");
         }
+        if artifact.kernel != ws.kernel {
+            return refuse("kernel", &artifact.kernel, &ws.kernel);
+        }
         if artifact.arch != ws.arch {
             return refuse("arch", &artifact.arch, &ws.arch);
         }
         if artifact.source_hash != ws.source_hash {
             return refuse("source_hash", &artifact.source_hash, &ws.source_hash);
         }
-        for entry in &artifact.entries {
-            if let Some(stored) = &entry.l2_key {
-                if let Some(current) = verify_l2(entry)? {
-                    if &current != stored {
-                        return refuse(
-                            &format!("l2 key for bucket {:?}", entry.bucket),
-                            stored,
-                            &current,
-                        );
-                    }
+        if let (Some(stored), Some(current)) = (&artifact.space_hash, &ws.space_hash) {
+            if stored != current {
+                return refuse("space_hash", stored, current);
+            }
+        }
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for e in &artifact.entries {
+                if !seen.insert(e.bucket.as_str()) {
+                    return Err(crate::error::tensor_error(&format!(
+                        "tuning artifact at {} has duplicate entries for bucket {:?}; fix or re-tune it",
+                        path.display(),
+                        e.bucket,
+                    )));
                 }
             }
         }
+
         let mut warnings = Vec::new();
-        if artifact.tileiras_fingerprint != ws.tileiras_fingerprint {
+        let fingerprint_matches = artifact.tileiras_fingerprint == ws.tileiras_fingerprint;
+        if !fingerprint_matches {
+            // The stored keys embed the old fingerprint: recomputing under
+            // the new toolchain CANNOT match, so the strong check is skipped
+            // rather than misread as staleness. Ordering matters here.
             warnings.push(format!(
-                "tuning artifact was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted — consider re-tuning",
+                "tuning artifact was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted and per-entry key verification was skipped — consider re-tuning",
                 artifact.tileiras_fingerprint, ws.tileiras_fingerprint,
             ));
+        } else {
+            for entry in &artifact.entries {
+                match &entry.l2_key {
+                    None => warnings.push(format!(
+                        "bucket {:?} carries no l2 key; only source-level staleness checks applied",
+                        entry.bucket
+                    )),
+                    Some(stored) => match verify_l2(entry)? {
+                        None => warnings.push(format!(
+                            "bucket {:?}: verifier declined to recompute the l2 key; stored key not checked",
+                            entry.bucket
+                        )),
+                        Some(current) => {
+                            if &current != stored {
+                                return refuse(
+                                    &format!("l2 key for bucket {:?}", entry.bucket),
+                                    stored,
+                                    &current,
+                                );
+                            }
+                        }
+                    },
+                }
+            }
         }
         if artifact.cutile_version != env!("CARGO_PKG_VERSION") {
             warnings.push(format!(
@@ -975,9 +1035,11 @@ mod tests {
 
     fn ws() -> Workspace {
         Workspace {
+            kernel: "fmha_decode".into(),
             source_hash: "abc123".into(),
             arch: "sm_120".into(),
             tileiras_fingerprint: "release 13.3, V13.3.36".into(),
+            space_hash: None,
         }
     }
 
@@ -991,7 +1053,7 @@ mod tests {
     #[test]
     fn artifact_roundtrips_and_verifies() {
         let path = artifact_path("roundtrip");
-        let mut a = Artifact::new("fmha_decode", &ws());
+        let mut a = Artifact::new(&ws());
         a.insert(ArtifactEntry {
             bucket: "tg<=512".into(),
             config: cfg(64, 8),
@@ -1013,7 +1075,7 @@ mod tests {
     #[test]
     fn artifact_refuses_source_hash_and_arch_mismatch() {
         let path = artifact_path("refuse");
-        Artifact::new("k", &ws()).save(&path).unwrap();
+        Artifact::new(&ws()).save(&path).unwrap();
 
         let mut other = ws();
         other.source_hash = "different".into();
@@ -1025,13 +1087,50 @@ mod tests {
         other.arch = "sm_100".into();
         let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("arch mismatch"));
+
+        let mut other = ws();
+        other.kernel = "other_kernel".into();
+        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("kernel mismatch"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn artifact_refuses_space_mismatch_and_duplicate_buckets() {
+        let path = artifact_path("space");
+        let mut with_space = ws();
+        with_space.space_hash = Some(space_hash(&[cfg(64, 8), cfg(128, 8)]));
+        Artifact::new(&with_space).save(&path).unwrap();
+
+        // Same kernel, different candidate set: refused when both carry one.
+        let mut other = ws();
+        other.space_hash = Some(space_hash(&[cfg(64, 8)]));
+        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("space_hash mismatch"));
+        // Loader without an expectation: accepted (no false refusals).
+        let (_, _) = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
+
+        // Duplicate buckets (hand-edited/merge-resolved artifact): refused.
+        let mut dup = Artifact::new(&ws());
+        for _ in 0..2 {
+            dup.entries.push(ArtifactEntry {
+                bucket: "b".into(),
+                config: cfg(64, 8),
+                median_ms: 1.0,
+                samples: 3,
+                l2_key: None,
+            });
+        }
+        dup.save(&path).unwrap();
+        let err = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("duplicate entries for bucket"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn artifact_refuses_l2_key_drift_and_warns_on_fingerprint_drift() {
         let path = artifact_path("l2");
-        let mut a = Artifact::new("k", &ws());
+        let mut a = Artifact::new(&ws());
         a.insert(ArtifactEntry {
             bucket: "b".into(),
             config: cfg(64, 8),
@@ -1057,7 +1156,7 @@ mod tests {
 
     #[test]
     fn artifact_insert_replaces_bucket_winner() {
-        let mut a = Artifact::new("k", &ws());
+        let mut a = Artifact::new(&ws());
         for (bn, ms) in [(64, 2.0), (128, 1.0)] {
             a.insert(ArtifactEntry {
                 bucket: "b".into(),
