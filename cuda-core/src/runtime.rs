@@ -440,6 +440,94 @@ pub(crate) fn teardown_lock() -> std::sync::MutexGuard<'static, ()> {
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
 
+// ── Event ───────────────────────────────────────────────────────────────────
+
+/// A CUDA event, created with timing enabled, for device-side timing and
+/// cross-stream synchronization.
+///
+/// Owned RAII: the driver handle is destroyed on drop (the driver defers
+/// destruction of an event still captured in unfinished work, so dropping
+/// early is safe). An event is bound to its device at construction;
+/// recording it on a stream of another device is rejected.
+pub struct Event {
+    cu_event: cuda_bindings::CUevent,
+    device: Arc<Device>,
+}
+
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}
+
+impl Event {
+    /// Records this event on `stream`.
+    ///
+    /// Errors with `CUDA_ERROR_INVALID_VALUE` if the stream belongs to a
+    /// different device than the one this event was created on.
+    pub fn record(&self, stream: &Arc<Stream>) -> Result<(), DriverError> {
+        if stream.device().ordinal() != self.device.ordinal() {
+            return Err(DriverError(
+                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE,
+            ));
+        }
+        // Safety: both handles are valid by construction (RAII wrappers),
+        // and the same-device check above pins them to one context.
+        unsafe { crate::cudarc_shim::event::record(self.cu_event, stream.cu_stream()) }
+    }
+
+    /// Blocks the calling thread until this event has completed.
+    pub fn synchronize(&self) -> Result<(), DriverError> {
+        // Safety: the handle is valid by construction.
+        unsafe { crate::cudarc_shim::event::synchronize(self.cu_event) }
+    }
+
+    /// Milliseconds elapsed on the device between this event and `end`
+    /// (called on the start event, `torch.cuda.Event` convention:
+    /// `start.elapsed_time(&end)`).
+    ///
+    /// Both events must have been recorded, and `end` must have completed —
+    /// call [`synchronize`](Self::synchronize) on it first, or the driver
+    /// reports not-ready.
+    pub fn elapsed_time(&self, end: &Event) -> Result<f32, DriverError> {
+        // Safety: both handles are valid by construction.
+        unsafe { crate::cudarc_shim::event::elapsed(self.cu_event, end.cu_event) }
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // Safety: owned handle; the driver defers destruction while in use.
+        let _ = unsafe { crate::cudarc_shim::event::destroy(self.cu_event) };
+    }
+}
+
+impl Device {
+    /// Creates a timing-enabled event on this device.
+    pub fn new_event(self: &Arc<Self>) -> Result<Event, DriverError> {
+        self.bind_to_thread()?;
+        let cu_event =
+            crate::cudarc_shim::event::create(cuda_bindings::CUevent_flags_enum_CU_EVENT_DEFAULT)?;
+        Ok(Event {
+            cu_event,
+            device: self.clone(),
+        })
+    }
+
+    /// Returns the device's L2 cache size in bytes.
+    pub fn l2_cache_size_bytes(&self) -> Result<usize, DriverError> {
+        let mut value: core::ffi::c_int = 0;
+        // Safety: out-pointer is valid; the device handle is valid by
+        // construction.
+        unsafe {
+            cuda_bindings::cuDeviceGetAttribute(
+                &mut value,
+                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE,
+                self.cu_device,
+            )
+            .result()?;
+        }
+        Ok(value.max(0) as usize)
+    }
+}
+
 impl Drop for Stream {
     fn drop(&mut self) {
         if !self.owned {
