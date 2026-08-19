@@ -94,6 +94,20 @@ pub unsafe fn malloc_from_pool_async(
 /// Asynchronously frees device memory on the given stream.
 ///
 /// # Safety
+/// Asynchronously sets `num_bytes` bytes at `dptr` to `value` on `stream`.
+///
+/// # Safety
+/// `dptr` must point to a device allocation of at least `num_bytes` bytes
+/// that stays valid until the operation completes on `stream`.
+pub unsafe fn memset_d8_async(
+    dptr: sys::CUdeviceptr,
+    value: u8,
+    num_bytes: usize,
+    stream: &Arc<Stream>,
+) -> Result<(), DriverError> {
+    crate::cudarc_shim::memory::memset_d8_async(dptr, value, num_bytes, stream.cu_stream())
+}
+
 /// `dptr` must have been allocated with `malloc_async` and must not be used after this call.
 pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<Stream>) {
     crate::cudarc_shim::memory::free_async(dptr, stream.cu_stream()).expect("Free async failed.")
