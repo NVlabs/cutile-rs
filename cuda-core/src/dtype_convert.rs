@@ -1,0 +1,544 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Host-side conversions between `f32` and the narrow float storage types.
+//!
+//! The narrow types in [`crate::dtype`] name their formats all the way through
+//! to Tile IR, but nothing could produce or read their bytes on the host. These
+//! conversions close that: anyone quantizing weights or checking a kernel's
+//! output against a reference needs to turn `f32` into fp8/fp4 and back.
+//!
+//! All conversions round to nearest, ties to even, matching what the hardware
+//! `cvt` instructions do. Formats without infinities saturate to their largest
+//! finite value rather than producing NaN.
+
+use crate::dtype::{f4e2m1fn, f8e4m3fn, f8e5m2, f8e8m0fnu};
+
+/// How a narrow format spends its all-ones exponent.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Specials {
+    /// IEEE-like: all-ones exponent is infinity (mantissa 0) or NaN.
+    InfAndNan,
+    /// All-ones exponent with an all-ones mantissa is the only NaN; there are
+    /// no infinities, so that exponent otherwise holds finite values.
+    NanOnAllOnesMantissa,
+    /// No infinities and no NaN; every bit pattern is a finite number.
+    Finite,
+}
+
+/// Layout of a narrow float format.
+struct Format {
+    exp_bits: u32,
+    mant_bits: u32,
+    bias: i32,
+    specials: Specials,
+}
+
+const E4M3FN: Format = Format {
+    exp_bits: 4,
+    mant_bits: 3,
+    bias: 7,
+    specials: Specials::NanOnAllOnesMantissa,
+};
+
+const E5M2: Format = Format {
+    exp_bits: 5,
+    mant_bits: 2,
+    bias: 15,
+    specials: Specials::InfAndNan,
+};
+
+const E2M1FN: Format = Format {
+    exp_bits: 2,
+    mant_bits: 1,
+    bias: 1,
+    specials: Specials::Finite,
+};
+
+impl Format {
+    const fn max_exp(&self) -> i32 {
+        (1i32 << self.exp_bits) - 1
+    }
+
+    const fn mant_mask(&self) -> u8 {
+        (1u8 << self.mant_bits) - 1
+    }
+
+    const fn sign_shift(&self) -> u32 {
+        self.exp_bits + self.mant_bits
+    }
+
+    /// The exponent and mantissa of the largest finite magnitude.
+    const fn max_finite(&self) -> (i32, u8) {
+        match self.specials {
+            // The all-ones exponent is reserved for inf/NaN.
+            Specials::InfAndNan => (self.max_exp() - 1, self.mant_mask()),
+            // Only the all-ones mantissa is reserved, so max finite is one below.
+            Specials::NanOnAllOnesMantissa => (self.max_exp(), self.mant_mask() - 1),
+            Specials::Finite => (self.max_exp(), self.mant_mask()),
+        }
+    }
+}
+
+/// Returns `2^exp` as an `f32`, for `exp` within the normal range.
+fn exp2i(exp: i32) -> f32 {
+    debug_assert!(
+        (-126..=127).contains(&exp),
+        "exponent {exp} out of f32 range"
+    );
+    f32::from_bits(((exp + 127) as u32) << 23)
+}
+
+/// Decodes a narrow float bit pattern to `f32`.
+///
+/// Every value in these formats is exactly representable in `f32`, so this is
+/// lossless.
+fn decode(bits: u8, fmt: &Format) -> f32 {
+    let negative = (bits >> fmt.sign_shift()) & 1 == 1;
+    let exp = ((bits >> fmt.mant_bits) & ((1u8 << fmt.exp_bits) - 1)) as i32;
+    let mant = bits & fmt.mant_mask();
+    let mant_scale = (1u32 << fmt.mant_bits) as f32;
+
+    let magnitude = if exp == fmt.max_exp() {
+        match fmt.specials {
+            Specials::InfAndNan => {
+                if mant == 0 {
+                    f32::INFINITY
+                } else {
+                    return f32::NAN;
+                }
+            }
+            Specials::NanOnAllOnesMantissa => {
+                if mant == fmt.mant_mask() {
+                    return f32::NAN;
+                }
+                (1.0 + mant as f32 / mant_scale) * exp2i(exp - fmt.bias)
+            }
+            Specials::Finite => (1.0 + mant as f32 / mant_scale) * exp2i(exp - fmt.bias),
+        }
+    } else if exp == 0 {
+        // Subnormal: no implicit leading one.
+        mant as f32 * exp2i(1 - fmt.bias - fmt.mant_bits as i32)
+    } else {
+        (1.0 + mant as f32 / mant_scale) * exp2i(exp - fmt.bias)
+    };
+
+    if negative {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Encodes an `f32` into a narrow float bit pattern, rounding to nearest with
+/// ties to even.
+fn encode(value: f32, fmt: &Format) -> u8 {
+    let sign = if value.is_sign_negative() {
+        1u8 << fmt.sign_shift()
+    } else {
+        0
+    };
+    let (max_finite_exp, max_finite_mant) = fmt.max_finite();
+    let saturated = sign | ((max_finite_exp as u8) << fmt.mant_bits) | max_finite_mant;
+
+    if value.is_nan() {
+        return match fmt.specials {
+            Specials::InfAndNan => sign | ((fmt.max_exp() as u8) << fmt.mant_bits) | 1,
+            Specials::NanOnAllOnesMantissa => {
+                sign | ((fmt.max_exp() as u8) << fmt.mant_bits) | fmt.mant_mask()
+            }
+            // No NaN encoding exists; saturating is the only total option.
+            Specials::Finite => saturated,
+        };
+    }
+    if value.is_infinite() {
+        return match fmt.specials {
+            Specials::InfAndNan => sign | ((fmt.max_exp() as u8) << fmt.mant_bits),
+            _ => saturated,
+        };
+    }
+
+    let bits = value.to_bits();
+    let f32_exp = ((bits >> 23) & 0xFF) as i32;
+    let f32_mant = bits & 0x7F_FFFF;
+
+    if f32_exp == 0 && f32_mant == 0 {
+        return sign; // signed zero
+    }
+
+    // Normalize, so f32 subnormals are handled on the same path as normals.
+    let (unbiased, mant24) = if f32_exp == 0 {
+        let shift = f32_mant.leading_zeros() - 8;
+        (1 - 127 - shift as i32, (f32_mant << shift) & 0x7F_FFFF)
+    } else {
+        (f32_exp - 127, f32_mant)
+    };
+
+    let target_exp = unbiased + fmt.bias;
+    // Implicit leading one restored at bit 23.
+    let full = (1u32 << 23) | mant24;
+
+    // How far right to shift to land the mantissa in `mant_bits`. Subnormal
+    // results clamp the exponent to zero and absorb the difference as extra
+    // shift, which is what makes gradual underflow work.
+    let (mut out_exp, shift) = if target_exp <= 0 {
+        (0i32, 23 - fmt.mant_bits as i32 + (1 - target_exp))
+    } else {
+        (target_exp, 23 - fmt.mant_bits as i32)
+    };
+
+    // Shifting out more bits than the value has leaves nothing but a rounding
+    // decision against the smallest subnormal.
+    if shift > 24 {
+        return sign;
+    }
+
+    let mut out_mant = full >> shift;
+    let dropped = full & ((1u32 << shift) - 1);
+    let halfway = 1u32 << (shift - 1);
+    if dropped > halfway || (dropped == halfway && out_mant & 1 == 1) {
+        out_mant += 1;
+    }
+
+    if out_exp == 0 {
+        // Rounding may have carried a subnormal up into the smallest normal.
+        if out_mant >= (1u32 << fmt.mant_bits) {
+            out_exp = 1;
+            out_mant &= fmt.mant_mask() as u32;
+        }
+    } else {
+        // Rounding may have carried into the next binade.
+        if out_mant >= (1u32 << (fmt.mant_bits + 1)) {
+            out_exp += 1;
+            out_mant >>= 1;
+        }
+        out_mant &= fmt.mant_mask() as u32;
+    }
+
+    // Overflow, including overflow produced by the rounding above.
+    if out_exp > max_finite_exp || (out_exp == max_finite_exp && out_mant > max_finite_mant as u32)
+    {
+        return match fmt.specials {
+            Specials::InfAndNan => sign | ((fmt.max_exp() as u8) << fmt.mant_bits),
+            _ => saturated,
+        };
+    }
+
+    sign | ((out_exp as u8) << fmt.mant_bits) | out_mant as u8
+}
+
+impl f8e4m3fn {
+    /// Converts to `f32`. Lossless: every E4M3FN value fits exactly in `f32`.
+    pub fn to_f32(self) -> f32 {
+        decode(self.0, &E4M3FN)
+    }
+
+    /// Converts from `f32`, rounding to nearest with ties to even.
+    ///
+    /// This format has no infinities, so infinite and out-of-range inputs
+    /// saturate to +/-448 rather than becoming NaN.
+    pub fn from_f32(value: f32) -> Self {
+        Self(encode(value, &E4M3FN))
+    }
+}
+
+impl f8e5m2 {
+    /// Converts to `f32`. Lossless: every E5M2 value fits exactly in `f32`.
+    pub fn to_f32(self) -> f32 {
+        decode(self.0, &E5M2)
+    }
+
+    /// Converts from `f32`, rounding to nearest with ties to even.
+    ///
+    /// This format is IEEE-like: overflow produces infinity, and NaN is
+    /// preserved.
+    pub fn from_f32(value: f32) -> Self {
+        Self(encode(value, &E5M2))
+    }
+}
+
+impl f4e2m1fn {
+    /// Converts to `f32`. Lossless; the format holds only
+    /// +/-{0, 0.5, 1, 1.5, 2, 3, 4, 6}.
+    pub fn to_f32(self) -> f32 {
+        decode(self.0 & 0x0F, &E2M1FN)
+    }
+
+    /// Converts from `f32`, rounding to nearest with ties to even.
+    ///
+    /// This format has neither infinities nor NaN, so every non-finite or
+    /// out-of-range input saturates to +/-6.
+    pub fn from_f32(value: f32) -> Self {
+        Self(encode(value, &E2M1FN))
+    }
+}
+
+impl f8e8m0fnu {
+    /// The exponent bias: a stored byte `b` denotes `2^(b - 127)`.
+    pub const BIAS: i32 = 127;
+
+    /// The bit pattern denoting NaN. This format has no infinities and no zero.
+    pub const NAN: Self = Self(0xFF);
+
+    /// Converts to `f32`, returning NaN for the reserved pattern.
+    ///
+    /// This format is a bare power of two: no sign, no mantissa. It exists to
+    /// carry the per-block scale of an MX tensor.
+    pub fn to_f32(self) -> f32 {
+        if self.0 == 0xFF {
+            return f32::NAN;
+        }
+        exp2i(self.0 as i32 - Self::BIAS)
+    }
+
+    /// Returns the exponent this scale denotes, so `to_f32() == 2^exponent()`.
+    pub fn exponent(self) -> Option<i32> {
+        if self.0 == 0xFF {
+            None
+        } else {
+            Some(self.0 as i32 - Self::BIAS)
+        }
+    }
+
+    /// Returns the smallest representable scale that is greater than or equal
+    /// to `magnitude`: the power of two that *covers* it.
+    ///
+    /// # Why this rounds up
+    ///
+    /// This is the primitive for choosing an MX block scale, and the rounding
+    /// direction is not a free choice. A block is encoded by dividing its
+    /// elements by the scale, so the scale must be at least as large as the
+    /// block's maximum magnitude divided by the element format's maximum. Round
+    /// *down* and the scale is too small, the largest elements exceed what the
+    /// element format can hold, and they silently saturate.
+    ///
+    /// That failure is quiet and costly: it degrades accuracy across the whole
+    /// block while every individual conversion still looks correct. Measured on
+    /// a real corpus, using floor here made MXFP8 land at 6x the error of plain
+    /// per-row E4M3 - an impossible-looking result, since MXFP8 has strictly
+    /// more information, which is what exposed the bug.
+    ///
+    /// Rounding up cannot saturate. It costs at most one exponent of dynamic
+    /// range, which is why this function exists rather than a general
+    /// `from_f32`: naming the intent removes the chance to get it backwards.
+    ///
+    /// Non-finite or non-positive inputs give [`Self::NAN`] and the smallest
+    /// scale respectively.
+    pub fn scale_covering(magnitude: f32) -> Self {
+        if magnitude.is_nan() || magnitude.is_infinite() {
+            return Self::NAN;
+        }
+        if magnitude <= 0.0 {
+            return Self(0);
+        }
+        let bits = magnitude.to_bits();
+        let f32_exp = ((bits >> 23) & 0xFF) as i32;
+        let f32_mant = bits & 0x7F_FFFF;
+        let exponent = if f32_exp == 0 {
+            // Subnormal: normalize to find the true exponent. Always an exact
+            // power of two only when a single bit is set.
+            let shift = f32_mant.leading_zeros() - 8;
+            let normalized = (f32_mant << shift) & 0x7F_FFFF;
+            let e = 1 - 127 - shift as i32;
+            if normalized == 0 {
+                e
+            } else {
+                e + 1
+            }
+        } else if f32_mant == 0 {
+            // Exactly a power of two: it covers itself.
+            f32_exp - 127
+        } else {
+            f32_exp - 127 + 1
+        };
+        Self((exponent.clamp(-127, 127) + Self::BIAS) as u8)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every bit pattern of a 1+exp+mant format, given its total width.
+    fn all_patterns(width: u32) -> impl Iterator<Item = u8> {
+        0..=((1u16 << width) - 1) as u8
+    }
+
+    #[test]
+    fn e4m3fn_round_trips_every_bit_pattern() {
+        for bits in all_patterns(8) {
+            let value = f8e4m3fn(bits).to_f32();
+            if value.is_nan() {
+                continue; // NaN has several encodings; not a round-trip target
+            }
+            let back = f8e4m3fn::from_f32(value);
+            assert_eq!(
+                back.0, bits,
+                "0x{bits:02X} decoded to {value} re-encoded to 0x{:02X}",
+                back.0
+            );
+        }
+    }
+
+    #[test]
+    fn e5m2_round_trips_every_bit_pattern() {
+        for bits in all_patterns(8) {
+            let value = f8e5m2(bits).to_f32();
+            if value.is_nan() {
+                continue;
+            }
+            let back = f8e5m2::from_f32(value);
+            assert_eq!(
+                back.0, bits,
+                "0x{bits:02X} decoded to {value} re-encoded to 0x{:02X}",
+                back.0
+            );
+        }
+    }
+
+    #[test]
+    fn e2m1fn_round_trips_every_bit_pattern() {
+        for bits in all_patterns(4) {
+            let value = f4e2m1fn(bits).to_f32();
+            assert!(
+                value.is_finite(),
+                "FP4 has no non-finite values, got {value}"
+            );
+            let back = f4e2m1fn::from_f32(value);
+            assert_eq!(back.0, bits, "0x{bits:X} decoded to {value}");
+        }
+    }
+
+    #[test]
+    fn e2m1fn_holds_exactly_the_documented_value_set() {
+        let mut positives: Vec<f32> = (0..8u8).map(|b| f4e2m1fn(b).to_f32()).collect();
+        positives.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(positives, vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn format_limits_match_the_specifications() {
+        assert_eq!(f8e4m3fn(0x7E).to_f32(), 448.0);
+        assert!(f8e4m3fn(0x7F).to_f32().is_nan());
+        assert_eq!(f8e5m2(0x7B).to_f32(), 57344.0);
+        assert!(f8e5m2(0x7C).to_f32().is_infinite());
+        assert_eq!(f4e2m1fn(0x7).to_f32(), 6.0);
+    }
+
+    #[test]
+    fn out_of_range_saturates_in_formats_without_infinity() {
+        assert_eq!(f8e4m3fn::from_f32(1.0e30).0, 0x7E); // +448
+        assert_eq!(f8e4m3fn::from_f32(-1.0e30).0, 0xFE); // -448
+        assert_eq!(f8e4m3fn::from_f32(f32::INFINITY).0, 0x7E);
+        assert_eq!(f4e2m1fn::from_f32(1000.0).0, 0x7); // +6
+        assert_eq!(f4e2m1fn::from_f32(f32::NEG_INFINITY).0, 0xF); // -6
+    }
+
+    #[test]
+    fn out_of_range_becomes_infinity_in_ieee_like_format() {
+        assert_eq!(f8e5m2::from_f32(1.0e30).0, 0x7C);
+        assert!(f8e5m2::from_f32(f32::INFINITY).to_f32().is_infinite());
+        assert!(f8e5m2::from_f32(f32::NAN).to_f32().is_nan());
+    }
+
+    #[test]
+    fn ties_round_to_even_not_away_from_zero() {
+        // E4M3FN near 1.0: representable neighbours are 1.0 (mant 000) and
+        // 1.125 (mant 001), so 1.0625 is an exact tie. Even mantissa wins.
+        assert_eq!(f8e4m3fn::from_f32(1.0625).0, f8e4m3fn::from_f32(1.0).0);
+        // 1.1875 ties between 1.125 (mant 001) and 1.25 (mant 010); even wins.
+        assert_eq!(f8e4m3fn::from_f32(1.1875).0, f8e4m3fn::from_f32(1.25).0);
+    }
+
+    #[test]
+    fn signed_zero_is_preserved() {
+        assert_eq!(f8e4m3fn::from_f32(0.0).0, 0x00);
+        assert_eq!(f8e4m3fn::from_f32(-0.0).0, 0x80);
+        assert_eq!(f4e2m1fn::from_f32(-0.0).0, 0x8);
+    }
+
+    #[test]
+    fn subnormals_are_gradual_not_flushed() {
+        // E4M3FN smallest subnormal is 2^-9; smallest normal is 2^-6.
+        let smallest_subnormal = 2.0f32.powi(-9);
+        assert_eq!(f8e4m3fn::from_f32(smallest_subnormal).0, 0x01);
+        assert_eq!(f8e4m3fn(0x01).to_f32(), smallest_subnormal);
+        // Half of it rounds to even, which is zero.
+        assert_eq!(f8e4m3fn::from_f32(smallest_subnormal / 2.0).0, 0x00);
+        // Just above half rounds up to the subnormal.
+        assert_eq!(f8e4m3fn::from_f32(smallest_subnormal * 0.75).0, 0x01);
+    }
+
+    #[test]
+    fn tiny_inputs_underflow_to_signed_zero() {
+        assert_eq!(f8e4m3fn::from_f32(1.0e-30).0, 0x00);
+        assert_eq!(f8e4m3fn::from_f32(-1.0e-30).0, 0x80);
+        // An f32 subnormal must not panic or alias a large value.
+        assert_eq!(f8e4m3fn::from_f32(f32::from_bits(1)).0, 0x00);
+    }
+
+    #[test]
+    fn e8m0_scale_is_a_bare_power_of_two() {
+        assert_eq!(f8e8m0fnu(127).to_f32(), 1.0);
+        assert_eq!(f8e8m0fnu(128).to_f32(), 2.0);
+        assert_eq!(f8e8m0fnu(126).to_f32(), 0.5);
+        assert_eq!(f8e8m0fnu(127).exponent(), Some(0));
+        assert!(f8e8m0fnu::NAN.to_f32().is_nan());
+        assert_eq!(f8e8m0fnu::NAN.exponent(), None);
+    }
+
+    #[test]
+    fn scale_covering_never_rounds_down() {
+        // This is the property that prevents silent saturation: the chosen
+        // scale must always be >= the magnitude it has to cover.
+        let mut value = 1.0e-30f32;
+        while value < 1.0e30 {
+            let scale = f8e8m0fnu::scale_covering(value).to_f32();
+            assert!(
+                scale >= value,
+                "scale {scale} does not cover {value} - elements would saturate"
+            );
+            value *= 1.7;
+        }
+    }
+
+    #[test]
+    fn scale_covering_is_exact_on_powers_of_two() {
+        // A power of two covers itself; rounding up here would waste a whole
+        // exponent of range on every block whose max is already a power of two.
+        for exp in -100..=100 {
+            let value = 2.0f32.powi(exp);
+            assert_eq!(
+                f8e8m0fnu::scale_covering(value).exponent(),
+                Some(exp),
+                "2^{exp} should map to itself"
+            );
+        }
+    }
+
+    #[test]
+    fn scale_covering_rounds_up_off_powers_of_two() {
+        assert_eq!(f8e8m0fnu::scale_covering(1.5).exponent(), Some(1)); // 2.0
+        assert_eq!(f8e8m0fnu::scale_covering(3.0).exponent(), Some(2)); // 4.0
+        assert_eq!(f8e8m0fnu::scale_covering(0.6).exponent(), Some(0)); // 1.0
+    }
+
+    #[test]
+    fn scale_covering_handles_degenerate_inputs() {
+        assert_eq!(f8e8m0fnu::scale_covering(0.0).0, 0);
+        assert_eq!(f8e8m0fnu::scale_covering(-5.0).0, 0);
+        assert_eq!(f8e8m0fnu::scale_covering(f32::NAN).0, 0xFF);
+        assert_eq!(f8e8m0fnu::scale_covering(f32::INFINITY).0, 0xFF);
+    }
+
+    #[test]
+    fn scale_covering_clamps_rather_than_wrapping() {
+        // Beyond the format's range the byte must stay in range, not wrap into
+        // a wildly wrong exponent.
+        let huge = f8e8m0fnu::scale_covering(f32::MAX);
+        assert!(huge.0 != 0xFF, "f32::MAX is finite and must not become NaN");
+        assert!(huge.exponent().unwrap() <= 127);
+        let tiny = f8e8m0fnu::scale_covering(f32::from_bits(1));
+        assert!(tiny.exponent().unwrap() >= -127);
+    }
+}
