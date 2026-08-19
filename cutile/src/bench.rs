@@ -43,6 +43,10 @@ pub struct BenchOptions {
     pub max_reps: usize,
     /// Clear the device's L2 cache before every timed rep, so reps measure
     /// cold-cache behavior instead of the previous rep's residency.
+    ///
+    /// Allocates a device buffer of about twice the L2 size (64 MiB to
+    /// 512 MiB) for the duration of the run; like all cutile allocations,
+    /// running out of device memory panics.
     pub clear_l2: bool,
 }
 
