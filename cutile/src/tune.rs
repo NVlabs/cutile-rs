@@ -446,6 +446,186 @@ impl TrialLog {
     }
 }
 
+// ── Artifact ────────────────────────────────────────────────────────────────
+
+/// A persisted, provenance-checked record of tuning winners: one entry per
+/// shape-class bucket, serialized as human-diffable pretty JSON intended to
+/// be committed next to the code it tunes.
+///
+/// Staleness is enforced at load, not documented: [`Artifact::load_verified`]
+/// refuses entries whose provenance no longer matches the running workspace,
+/// so a stale winner cannot silently apply. The strong check is the stored
+/// winner's persistent-cache key: recomputed via
+/// `Specialization::l2_cache_key()` (or `KernelCompiler::l2_cache_key()`),
+/// it covers the serialized bytecode — dependencies included — and the
+/// toolchain fingerprint, closing the known gap of `source_hash` (which
+/// covers only the kernel's own module).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    /// Record-format version; bump on breaking changes.
+    pub schema: u32,
+    /// Kernel (or tuner) name this artifact belongs to.
+    pub kernel: String,
+    /// The kernel module's `_SOURCE_HASH` at tune time.
+    pub source_hash: String,
+    /// cutile crate version at tune time.
+    pub cutile_version: String,
+    /// `tileiras --version` fingerprint at tune time.
+    pub tileiras_fingerprint: String,
+    /// Target architecture (e.g. `sm_120`). Artifacts are per-arch; loading
+    /// on a different arch is refused, never approximated.
+    pub arch: String,
+    /// Hostname the tuning ran on (informational).
+    pub machine: String,
+    /// Unix seconds at creation (informational).
+    pub created_unix_secs: u64,
+    /// Winners, one per bucket.
+    pub entries: Vec<ArtifactEntry>,
+}
+
+/// One bucket's winner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactEntry {
+    /// Shape-class bucket this winner applies to (e.g. `"tg<=512"`).
+    pub bucket: String,
+    /// The winning configuration.
+    pub config: Config,
+    /// Its measured median, milliseconds.
+    pub median_ms: f32,
+    /// Timed reps behind the median.
+    pub samples: usize,
+    /// The winner's persistent-cache (L2) key at tune time, when the caller
+    /// recorded one. Enables the strong staleness check at load.
+    pub l2_key: Option<String>,
+}
+
+/// The provenance the loader checks an artifact against.
+pub struct Workspace {
+    pub source_hash: String,
+    pub arch: String,
+    pub tileiras_fingerprint: String,
+}
+
+impl Artifact {
+    /// Starts an artifact for `kernel` with the given provenance; machine
+    /// name and timestamp are captured from the environment.
+    pub fn new(kernel: &str, ws: &Workspace) -> Self {
+        Self {
+            schema: 1,
+            kernel: kernel.to_string(),
+            source_hash: ws.source_hash.clone(),
+            cutile_version: env!("CARGO_PKG_VERSION").to_string(),
+            tileiras_fingerprint: ws.tileiras_fingerprint.clone(),
+            arch: ws.arch.clone(),
+            machine: hostname(),
+            created_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Inserts or replaces the winner for `bucket`.
+    pub fn insert(&mut self, entry: ArtifactEntry) {
+        self.entries.retain(|e| e.bucket != entry.bucket);
+        self.entries.push(entry);
+    }
+
+    /// The winner for `bucket`, if recorded.
+    pub fn get(&self, bucket: &str) -> Option<&ArtifactEntry> {
+        self.entries.iter().find(|e| e.bucket == bucket)
+    }
+
+    /// Writes pretty JSON (stable field order — committed artifacts should
+    /// diff cleanly).
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| crate::error::tensor_error(&format!("artifact serialize: {e}")))?;
+        std::fs::write(path, json)
+            .map_err(|e| crate::error::tensor_error(&format!("artifact write: {e}")))
+    }
+
+    /// Loads without verification. Prefer [`load_verified`](Self::load_verified)
+    /// anywhere the entries will actually be applied.
+    pub fn load(path: &Path) -> Result<Self, Error> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| crate::error::tensor_error(&format!("artifact read: {e}")))?;
+        serde_json::from_str(&contents)
+            .map_err(|e| crate::error::tensor_error(&format!("artifact parse: {e}")))
+    }
+
+    /// Loads and verifies against the running workspace. REFUSES (errors) on:
+    /// schema, `source_hash`, or `arch` mismatch; or, for entries that carry
+    /// an `l2_key`, a recomputed key (from `verify_l2`) that differs — the
+    /// dependency-inclusive check. Returns non-fatal drift (tileiras
+    /// fingerprint, cutile version) as warnings for the caller to surface.
+    ///
+    /// `verify_l2` receives each entry that carries a stored key and returns
+    /// the key the CURRENT workspace derives for that entry's config —
+    /// typically `launcher.specialize()?.l2_cache_key()` or
+    /// `KernelCompiler::...l2_cache_key()`.
+    pub fn load_verified(
+        path: &Path,
+        ws: &Workspace,
+        mut verify_l2: impl FnMut(&ArtifactEntry) -> Result<Option<String>, Error>,
+    ) -> Result<(Self, Vec<String>), Error> {
+        let artifact = Self::load(path)?;
+        let refuse = |what: &str, stored: &str, current: &str| {
+            Err(crate::error::tensor_error(&format!(
+                "stale tuning artifact at {}: {what} mismatch (artifact: {stored}, workspace: {current}); re-tune or delete it",
+                path.display(),
+            )))
+        };
+        if artifact.schema != 1 {
+            return refuse("schema", &artifact.schema.to_string(), "1");
+        }
+        if artifact.arch != ws.arch {
+            return refuse("arch", &artifact.arch, &ws.arch);
+        }
+        if artifact.source_hash != ws.source_hash {
+            return refuse("source_hash", &artifact.source_hash, &ws.source_hash);
+        }
+        for entry in &artifact.entries {
+            if let Some(stored) = &entry.l2_key {
+                if let Some(current) = verify_l2(entry)? {
+                    if &current != stored {
+                        return refuse(
+                            &format!("l2 key for bucket {:?}", entry.bucket),
+                            stored,
+                            &current,
+                        );
+                    }
+                }
+            }
+        }
+        let mut warnings = Vec::new();
+        if artifact.tileiras_fingerprint != ws.tileiras_fingerprint {
+            warnings.push(format!(
+                "tuning artifact was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted — consider re-tuning",
+                artifact.tileiras_fingerprint, ws.tileiras_fingerprint,
+            ));
+        }
+        if artifact.cutile_version != env!("CARGO_PKG_VERSION") {
+            warnings.push(format!(
+                "tuning artifact was produced by cutile {} (running {})",
+                artifact.cutile_version,
+                env!("CARGO_PKG_VERSION"),
+            ));
+        }
+        Ok((artifact, warnings))
+    }
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +748,104 @@ mod tests {
         };
         let trials = GridSampler::new().search(&mut oracle);
         assert!(trials.is_empty(), "zero budget measures nothing");
+    }
+
+    fn ws() -> Workspace {
+        Workspace {
+            source_hash: "abc123".into(),
+            arch: "sm_120".into(),
+            tileiras_fingerprint: "release 13.3, V13.3.36".into(),
+        }
+    }
+
+    fn artifact_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "cutile_artifact_{label}_{}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn artifact_roundtrips_and_verifies() {
+        let path = artifact_path("roundtrip");
+        let mut a = Artifact::new("fmha_decode", &ws());
+        a.insert(ArtifactEntry {
+            bucket: "tg<=512".into(),
+            config: cfg(64, 8),
+            median_ms: 1.25,
+            samples: 12,
+            l2_key: Some("f".repeat(64)),
+        });
+        a.save(&path).unwrap();
+
+        let (loaded, warnings) =
+            Artifact::load_verified(&path, &ws(), |e| Ok(e.l2_key.clone())).unwrap();
+        assert!(warnings.is_empty());
+        let entry = loaded.get("tg<=512").unwrap();
+        assert_eq!(entry.config.int("BN"), Some(64));
+        assert_eq!(entry.samples, 12);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn artifact_refuses_source_hash_and_arch_mismatch() {
+        let path = artifact_path("refuse");
+        Artifact::new("k", &ws()).save(&path).unwrap();
+
+        let mut other = ws();
+        other.source_hash = "different".into();
+        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("source_hash mismatch"));
+        assert!(err.to_string().contains("re-tune"));
+
+        let mut other = ws();
+        other.arch = "sm_100".into();
+        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("arch mismatch"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn artifact_refuses_l2_key_drift_and_warns_on_fingerprint_drift() {
+        let path = artifact_path("l2");
+        let mut a = Artifact::new("k", &ws());
+        a.insert(ArtifactEntry {
+            bucket: "b".into(),
+            config: cfg(64, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some("a".repeat(64)),
+        });
+        a.save(&path).unwrap();
+
+        // Recomputed key differs => refuse (the dependency-inclusive check).
+        let err = Artifact::load_verified(&path, &ws(), |_| Ok(Some("b".repeat(64)))).unwrap_err();
+        assert!(err.to_string().contains("l2 key for bucket"));
+
+        // Verifier declines (None) => provenance fields alone decide; a
+        // fingerprint drift is a warning, not a refusal.
+        let mut drifted = ws();
+        drifted.tileiras_fingerprint = "release 13.4, V13.4.1".into();
+        let (_, warnings) = Artifact::load_verified(&path, &drifted, |_| Ok(None)).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("different tileiras"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn artifact_insert_replaces_bucket_winner() {
+        let mut a = Artifact::new("k", &ws());
+        for (bn, ms) in [(64, 2.0), (128, 1.0)] {
+            a.insert(ArtifactEntry {
+                bucket: "b".into(),
+                config: cfg(bn, 4),
+                median_ms: ms,
+                samples: 3,
+                l2_key: None,
+            });
+        }
+        assert_eq!(a.entries.len(), 1, "one winner per bucket");
+        assert_eq!(a.get("b").unwrap().config.int("BN"), Some(128));
     }
 
     #[test]
