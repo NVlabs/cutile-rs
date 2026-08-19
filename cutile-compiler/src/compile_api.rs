@@ -23,8 +23,20 @@
 //! println!("{}", artifacts.ir_text());
 //! let bc = artifacts.bytecode()?;
 //! ```
+//!
+//! The persistent JIT-cache key can be derived without compiling a cubin:
+//!
+//! ```rust,ignore
+//! let key = KernelCompiler::new(my_module::__module_ast_self, "my_module", "add")
+//!     .generics(vec!["32".into()])
+//!     .strides(&[("c", &[1])])
+//!     .target("sm_120")
+//!     .l2_cache_key()?;
+//! assert_eq!(key.len(), 64);
+//! ```
 
 use crate::compiler::{CUDATileFunctionCompiler, CUDATileModules};
+use crate::cuda_tile_runtime_utils::current_l2_key_for_module;
 use crate::error::JITError;
 use crate::hints::CompileOptions;
 use crate::specialization::{DivHint, SpecializationBits};
@@ -158,6 +170,21 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
     pub fn options(mut self, options: CompileOptions) -> Self {
         self.compile_options = options;
         self
+    }
+
+    /// Returns the persistent JIT-cache key for this specialization.
+    ///
+    /// This runs the compiler frontend and serializes its Tile IR output using
+    /// the bytecode version selected for the currently resolved `tileiras`
+    /// toolchain. It does not consult a JIT store, compile a cubin, initialize
+    /// the CUDA driver, or require a GPU.
+    ///
+    /// The returned string is the same 64-character lowercase SHA-256 key that
+    /// the runtime's L2 cache lookup would use for this specialization.
+    pub fn l2_cache_key(self) -> Result<String, JITError> {
+        let gpu_name = self.gpu_name.clone();
+        let artifacts = self.compile()?;
+        current_l2_key_for_module(artifacts.module(), &gpu_name)
     }
 
     /// Compiles the kernel and returns the artifacts.
