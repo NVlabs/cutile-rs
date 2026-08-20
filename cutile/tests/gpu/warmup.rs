@@ -9,14 +9,25 @@
 
 use crate::common;
 use cutile::api;
+use cutile::jit_cache::{self, FileSystemJitStore, JitStore};
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
     contains_cuda_function, get_default_device, jit_compile_count, TileFunctionKey, TileKernel,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
-    get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+    get_compiler_version, get_gpu_name, tileiras_fingerprint,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+fn fresh_cache_key_dir() -> std::path::PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "cutile_cache_key_helpers_{}_{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    ))
+}
 
 #[cutile::module]
 mod warmup_test_module {
@@ -32,6 +43,80 @@ mod warmup_test_module {
         let tile_y = load_tile_like(y, z);
         z.store(tile_x + tile_y);
     }
+}
+
+#[test]
+fn generated_cache_key_helpers_match_runtime_lookups() {
+    common::with_test_stack(|| {
+        let _guard = common::cache_test_lock();
+        const TILE: usize = 16;
+        let make_launcher = || {
+            let z = api::meta::<f32>(&[320]).partition([TILE]);
+            let x = api::meta::<f32>(&[320]);
+            let y = api::meta::<f32>(&[320]);
+            warmup_test_module::vector_add(z, x, y).generics(vec!["f32".into(), TILE.to_string()])
+        };
+
+        let l1_key = make_launcher()
+            .l1_cache_key()
+            .expect("generated L1 cache-key helper failed");
+        assert!(
+            !contains_cuda_function(&l1_key),
+            "deriving an L1 key must not compile or populate the in-memory cache"
+        );
+
+        let dir = fresh_cache_key_dir();
+        let store = Arc::new(FileSystemJitStore::new(&dir).expect("open temporary JIT store"));
+        jit_cache::enable(Arc::clone(&store) as Arc<dyn JitStore>);
+        let stats_before_key = jit_cache::stats();
+        let backend_before_key = jit_cache::jit_backend_compile_count();
+
+        let specialization = make_launcher()
+            .specialize()
+            .expect("generated specialization helper failed");
+        assert_eq!(specialization.l1_cache_key(), &l1_key);
+        let l2_key = specialization
+            .l2_cache_key()
+            .expect("L1-to-L2 cache-key conversion failed");
+        let direct_l2_key = make_launcher()
+            .l2_cache_key()
+            .expect("generated L2 cache-key helper failed");
+        assert_eq!(
+            direct_l2_key, l2_key,
+            "direct launcher and resolved-specialization L2 helpers must agree"
+        );
+        assert_eq!(l2_key.len(), 64);
+        assert_eq!(l2_key, l2_key.to_ascii_lowercase());
+        assert_eq!(
+            jit_cache::stats(),
+            stats_before_key,
+            "deriving cache keys must not access the configured JIT store"
+        );
+        assert_eq!(
+            jit_cache::jit_backend_compile_count(),
+            backend_before_key,
+            "deriving an L2 key must not run the tileiras backend"
+        );
+        assert!(
+            !contains_cuda_function(&l1_key),
+            "deriving an L2 key must not populate the in-memory cache"
+        );
+
+        let compile_result = make_launcher().compile();
+        jit_cache::disable();
+        compile_result.expect("compile through the normal runtime path failed");
+
+        assert!(
+            contains_cuda_function(&l1_key),
+            "normal compilation must populate the exact L1 key returned by the helper"
+        );
+        assert!(
+            store.contains(&l2_key).expect("query temporary JIT store"),
+            "normal compilation must query and populate the exact L2 key returned by the helper"
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove temporary JIT store");
+    });
 }
 
 fn vector_add_stride_args() -> Vec<(String, Vec<i32>)> {
@@ -94,7 +179,7 @@ fn different_keys_parallel_compile() {
         let device_id = get_default_device();
         let gpu_name = get_gpu_name(device_id);
         let cv = get_compiler_version();
-        let tv = get_cuda_toolkit_version();
+        let tv = tileiras_fingerprint();
         let key_8 = TileFunctionKey::builder("warmup_test_module", "vector_add")
             .generics(vec!["f32".into(), "128".into()])
             .stride_args(vector_add_stride_args())
@@ -107,7 +192,7 @@ fn different_keys_parallel_compile() {
             .device_id(device_id)
             .gpu_name(gpu_name.clone())
             .compiler_version(cv.clone())
-            .cuda_toolkit_version(tv.clone())
+            .tileiras_fingerprint(tv)
             .build();
         let key_32 = TileFunctionKey::builder("warmup_test_module", "vector_add")
             .generics(vec!["f32".into(), "256".into()])
@@ -121,7 +206,7 @@ fn different_keys_parallel_compile() {
             .device_id(device_id)
             .gpu_name(gpu_name)
             .compiler_version(cv)
-            .cuda_toolkit_version(tv)
+            .tileiras_fingerprint(tv)
             .build();
         assert!(contains_cuda_function(&key_8));
         assert!(contains_cuda_function(&key_32));

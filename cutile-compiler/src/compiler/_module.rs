@@ -438,7 +438,66 @@ fn find_impl_method<'a>(item_impl: &'a ItemImpl, method_name: &str) -> Option<&'
     })
 }
 
-fn instantiate_type_for_lookup(
+/// Returns `false` only when an impl provably cannot apply to the receiver:
+/// an impl const generic declared with a literal array rank (`const D: [i32; 2]`)
+/// appears in the impl self type at a position where the receiver's resolved
+/// const-generic array has a different rank. Variadic impls (`[i32; N]`) and
+/// anything unresolved stay compatible, preserving the permissive name-based
+/// lookup. This disambiguates same-named methods defined per rank, like
+/// `PartitionIndex::components` for rank 2 and rank 3.
+pub(crate) fn impl_self_type_rank_matches(
+    item_impl: &ItemImpl,
+    receiver_ty: &Type,
+    generic_vars: &GenericVars,
+) -> bool {
+    let mut const_ranks: HashMap<String, usize> = HashMap::new();
+    for param in &item_impl.generics.params {
+        if let syn::GenericParam::Const(const_param) = param {
+            if let Type::Array(type_array) = &const_param.ty {
+                if let syn::Expr::Lit(len_lit) = &type_array.len {
+                    if let syn::Lit::Int(len_int) = &len_lit.lit {
+                        if let Ok(rank) = len_int.base10_parse::<usize>() {
+                            const_ranks.insert(const_param.ident.to_string(), rank);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if const_ranks.is_empty() {
+        return true;
+    }
+    let Some(impl_args) = maybe_generic_args(&item_impl.self_ty) else {
+        return true;
+    };
+    let Some(receiver_args) = maybe_generic_args(receiver_ty) else {
+        return true;
+    };
+    for (impl_arg, receiver_arg) in impl_args.args.iter().zip(receiver_args.args.iter()) {
+        let param_ident = match impl_arg {
+            syn::GenericArgument::Const(syn::Expr::Path(path)) => path.path.get_ident(),
+            syn::GenericArgument::Type(Type::Path(type_path)) => type_path.path.get_ident(),
+            _ => None,
+        };
+        let Some(param_ident) = param_ident else {
+            continue;
+        };
+        let Some(&expected_rank) = const_ranks.get(&param_ident.to_string()) else {
+            continue;
+        };
+        let Some(receiver_cga) =
+            crate::generics::get_cga_from_generic_argument(receiver_arg, generic_vars)
+        else {
+            continue;
+        };
+        if receiver_cga.len() != expected_rank {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn instantiate_type_for_lookup(
     ty: &Type,
     generic_vars: &GenericVars,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -830,6 +889,9 @@ impl CUDATileModules {
         if let Some(receiver_type_str) = receiver_type_str.as_deref() {
             if let Some(impls_vec) = self.name_resolver.struct_impls().get(receiver_type_str) {
                 for (module_name, item_impl) in impls_vec {
+                    if !impl_self_type_rank_matches(item_impl, &receiver_lookup_ty, generic_vars) {
+                        continue;
+                    }
                     if let Some(impl_method) = find_impl_method(item_impl, &method_name) {
                         return Ok(Some((
                             module_name.clone(),

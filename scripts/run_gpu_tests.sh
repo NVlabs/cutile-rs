@@ -11,6 +11,7 @@ print_header "Running GPU tests"
 
 for test_target in \
     arange \
+    do_bench \
     dtype_float_ops \
     gpu_execution_ops \
     nested_partition_mut \
@@ -38,6 +39,10 @@ run_step \
 run_step \
     "cutile GPU integration test specialization_bits runtime cases" \
     cargo test -p cutile --test specialization_bits raw_pointer_launch
+
+run_step \
+    "cutile GPU warmup and disk-cache tests" \
+    cargo test -p cutile --test warmup_suite
 
 run_step \
     "cutile GPU aggregate tests" \

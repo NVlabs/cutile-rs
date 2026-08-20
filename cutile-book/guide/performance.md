@@ -125,14 +125,19 @@ Optimization hints guide code generation for a target architecture:
 ```rust
 #[cutile::entry(
     optimization_hints = (
-        sm_120 = (num_cta_in_cga = 2, occupancy = 2, max_divisibility = 16),
+        sm_120 = (
+            num_cta_in_cga = 2,
+            occupancy = 2,
+            max_divisibility = 16,
+            num_worker_warps_per_cta = 4, // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
+        ),
         sm_90 = (num_cta_in_cga = 1),
     )
 )]
 fn kernel<const S: [i32; 2]>(...) { ... }
 ```
 
-Runtime `CompileOptions` can override entry-level hints for autotuning. `occupancy` and `num_cta_in_cga` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
+Runtime `CompileOptions` can override entry-level hints for autotuning. `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. `num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]` and requires bytecode version 13.3 or newer. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
 
 ## Common Pitfalls
 
@@ -148,3 +153,19 @@ Profile before and after each change. [Debugging and Profiling](debugging-and-pr
 ---
 
 Continue to [Interoperability](interoperability.md).
+
+## Measuring Kernels
+
+`cutile::bench` provides device-event timing for kernel measurement and A/B comparison:
+
+```rust
+use cutile::bench::{do_bench, do_bench_paired, BenchOptions};
+
+let r = do_bench(&stream, &BenchOptions::default(), |s| {
+    my_kernel(z.partition([128]), x.clone(), y.clone()).sync_on(s).map(|_| ()).map_err(Into::into)
+})?;
+println!("median {:.3} ms over {} reps", r.median_ms(), r.reps());
+```
+
+Timing uses CUDA events (device timeline, not host clocks), warmup absorbs first-launch JIT, the L2 cache is cleared between reps, and results report medians and quantiles. When comparing two configurations, always use `do_bench_paired` — it alternates the arms rep by rep, so clock and thermal drift cannot masquerade as a difference between them.
+

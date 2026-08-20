@@ -160,8 +160,10 @@
 //! - **Architecture & Design** - How cutile works under the hood
 
 pub mod _core;
+pub mod _tileir;
 pub mod error;
 pub use _core::core;
+pub use _tileir::tileir;
 
 // LINKING Phase B: register an additional registry entry at the public
 // `cutile::core` path so kernel `use cutile::core::*` statements resolve
@@ -178,7 +180,14 @@ static __CUTILE_REEXPORT_CORE: cutile_compiler::registry::CutileModuleEntry =
         absolute_path: "cutile::core",
         build: _core::core::__module_ast_self,
     };
+#[linkme::distributed_slice(cutile_compiler::registry::CUTILE_MODULES)]
+static __CUTILE_REEXPORT_TILEIR: cutile_compiler::registry::CutileModuleEntry =
+    cutile_compiler::registry::CutileModuleEntry {
+        absolute_path: "cutile::tileir",
+        build: _tileir::tileir::__module_ast_self,
+    };
 pub mod api;
+pub mod bench;
 pub mod kernels;
 pub mod prelude;
 pub mod tensor;
@@ -190,6 +199,9 @@ pub use cuda_core;
 pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
 pub use cutile_compiler::compile_api;
+/// Opt-in persistent on-disk cubin cache. Off by default; enable
+/// explicitly via [`jit_cache::enable_default`] or [`jit_cache::enable`].
+pub use cutile_compiler::jit_cache;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;

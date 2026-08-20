@@ -353,6 +353,15 @@ fn module_inner(
     let source_hash_const = quote! {
         /// SHA-256 hash of the module source, computed at compile time.
         /// Changes whenever any kernel source in this module changes.
+        ///
+        /// **Covers this module only.** The JIT walks the use-graph and links in
+        /// the dependency modules a kernel calls, so editing one of those changes
+        /// the generated cubin while this constant stays put.
+        ///
+        /// That makes it unsound as a persistent cache key on its own. Within a
+        /// process it is fine: reaching an edited helper requires a rebuild, which
+        /// restarts the process. The on-disk cache instead keys on the serialized
+        /// Tile IR bytecode, which already has every dependency inlined.
         pub const _SOURCE_HASH: &str = #source_hash;
     };
 
@@ -854,6 +863,38 @@ pub fn kernel_launcher(
                 let ctx = ExecutionContext::new(stream.clone());
                 unsafe { self.execute(&ctx)?; }
                 Ok(())
+            }
+
+            /// Resolves the specialization identity for this launch without compiling or launching the kernel.
+            pub fn specialize(self) -> Result<Specialization<ModuleAstFn>, DeviceError> {
+                let stream = with_default_device_policy(|policy| policy.next_stream())??;
+                self.specialize_on(&stream)
+            }
+
+            /// Resolves the specialization identity for this launch on `stream` without compiling or launching the kernel.
+            pub fn specialize_on(self, stream: &Arc<Stream>) -> Result<Specialization<ModuleAstFn>, DeviceError> {
+                let ctx = ExecutionContext::new(stream.clone());
+                unsafe { self._resolve_specialization(&ctx) }
+            }
+
+            pub fn l1_cache_key(self) -> Result<TileFunctionKey, DeviceError> {
+                Ok(self.specialize()?.into_l1_cache_key())
+            }
+
+            pub fn l1_cache_key_on(self, stream: &Arc<Stream>) -> Result<TileFunctionKey, DeviceError> {
+                Ok(self.specialize_on(stream)?.into_l1_cache_key())
+            }
+
+            pub fn l2_cache_key(self) -> Result<String, DeviceError> {
+                self.specialize()?
+                    .l2_cache_key()
+                    .map_err(|error| DeviceError::from(Error::from(error)))
+            }
+
+            pub fn l2_cache_key_on(self, stream: &Arc<Stream>) -> Result<String, DeviceError> {
+                self.specialize_on(stream)?
+                    .l2_cache_key()
+                    .map_err(|error| DeviceError::from(Error::from(error)))
             }
         }
 

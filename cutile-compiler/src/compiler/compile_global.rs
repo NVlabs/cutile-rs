@@ -572,7 +572,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         })
     }
 
-    fn token_type(&self, generic_vars: &GenericVars) -> Result<TileRustType, JITError> {
+    pub(crate) fn token_type(&self, generic_vars: &GenericVars) -> Result<TileRustType, JITError> {
         let token_ty: Type = syn::parse_quote!(Token);
         self.compile_type(&token_ty, generic_vars, &HashMap::new())?
             .ok_or_else(|| self.jit_error(&token_ty.span(), "failed to compile Token type"))

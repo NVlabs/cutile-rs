@@ -17,12 +17,19 @@ use std::sync::Arc;
 mod persistent_gemm_kernels {
     use cutile::core::*;
 
+    /// No annotations and no declared contract: the compiler derives every
+    /// safety fact from how the kernel walks its inputs — the mapped
+    /// components range over `z`'s axes, `k_tile` over `x`'s k axis — and
+    /// verifies the cross-tensor ties as launch checks (for example
+    /// `ceil(dim(x, 1)/BK) <= ceil(dim(y, 0)/BK)`) before any GPU work.
+    /// `deny_in_kernel_checks` makes any check that would remain in the
+    /// kernel a compile error, so the body is assert-free by construction.
     #[cutile::entry(
         optimization_hints = (
             sm_120 = (num_cta_in_cga = 2,),
             sm_100 = (num_cta_in_cga = 2,),
         ),
-        unchecked_accesses = false,
+        deny_in_kernel_checks = true,
     )]
     fn gemm_persistent<
         T: ElementType,
@@ -35,20 +42,16 @@ mod persistent_gemm_kernels {
         x: &Tensor<T, { [-1, -1] }>,
         y: &Tensor<T, { [-1, -1] }>,
     ) {
-        let m = num_tiles(&z, 0);
-        let n = num_tiles(&z, 1);
-        let k = Dim::new(x.shape()[1] / BK);
-
-        let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-        let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+        let part_x = x.partition(const_shape![BM, BK]);
+        let part_y = y.partition(const_shape![BK, BN]);
 
         for out_idx in z.iter_indices() {
             let (bid_m, bid_n) = out_idx.components();
 
             let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
-            for k_tile in k {
-                let tile_x = part_x.load(coord((bid_m, k_tile)));
-                let tile_y = part_y.load(coord((k_tile, bid_n)));
+            for k_tile in 0i32..num_tiles(&part_x, 1) {
+                let tile_x = part_x.load([bid_m, k_tile]);
+                let tile_y = part_y.load([k_tile, bid_n]);
                 tile_z = mma(tile_x, tile_y, tile_z);
             }
             z.store(tile_z, out_idx);

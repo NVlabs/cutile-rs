@@ -118,9 +118,7 @@ pub mod group_gemm_f16_nt_desc_module {
                 }
 
                 let out: Tile<f16, { [BM, BN] }> = convert_tile(acc);
-                unsafe {
-                    c_part.store(out, [tile_m_idx, tile_n_idx]);
-                }
+                c_part.store(out, [tile_m_idx, tile_n_idx]);
 
                 tile_idx = tile_idx + NUM_SM;
             }

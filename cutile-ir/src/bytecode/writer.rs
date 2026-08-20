@@ -797,7 +797,27 @@ fn write_function_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> 
 
         // Entry flag.
         let is_entry = op.opcode == Opcode::Entry;
-        let has_hints = find_attr(&op.attributes, "optimization_hints").is_some();
+        let hints_attr = if is_entry {
+            find_attr(&op.attributes, "optimization_hints").cloned()
+        } else {
+            None
+        };
+        if ctx.version < BytecodeVersion::V13_3 {
+            if let Some(Attribute::OptimizationHints(hints)) = &hints_attr {
+                for (_, arch_hints) in &hints.entries {
+                    if arch_hints
+                        .iter()
+                        .any(|(name, _)| name == "num_worker_warps_per_cta")
+                    {
+                        return Err(Error::BytecodeWrite(format!(
+                            "optimization hint 'num_worker_warps_per_cta' requires bytecode version 13.3 or newer, requested {}",
+                            ctx.version
+                        )));
+                    }
+                }
+            }
+        }
+        let has_hints = hints_attr.is_some();
         let mut flags: u8 = 0;
         if is_entry {
             flags |= FunctionFlag::KindKernel as u8;
@@ -811,16 +831,14 @@ fn write_function_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> 
         w.write_varint(0);
 
         // Write optimization hints if present.
-        if is_entry && has_hints {
-            if let Some(hints_attr) = find_attr(&op.attributes, "optimization_hints").cloned() {
-                write_self_contained_attribute(
-                    &hints_attr,
-                    &mut w,
-                    &mut ctx.strings,
-                    &mut ctx.types,
-                    &mut ctx.constants,
-                )?;
-            }
+        if let Some(hints_attr) = hints_attr {
+            write_self_contained_attribute(
+                &hints_attr,
+                &mut w,
+                &mut ctx.strings,
+                &mut ctx.types,
+                &mut ctx.constants,
+            )?;
         }
 
         // Write function body.
