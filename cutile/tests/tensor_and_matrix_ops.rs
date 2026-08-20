@@ -283,6 +283,28 @@ mod tensor_and_matrix_ops_module {
     }
 
     #[cutile::entry()]
+    fn raw_mmaf_scaled_fp8_fp4_kernel(
+        output: &mut Tensor<f32, { [16, 16] }>,
+        lhs: &Tensor<f8e4m3fn, { [-1, -1] }>,
+        rhs_bytes: &Tensor<f4e2m1fnx2, { [-1, -1] }>,
+        lhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
+        rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
+    ) {
+        let lhs_tile: Tile<f8e4m3fn, { [16, 64] }> = load_tile(lhs, const_shape![16, 64], [0, 0]);
+        let rhs_raw: Tile<f4e2m1fnx2, { [32, 16] }> =
+            load_tile(rhs_bytes, const_shape![32, 16], [0, 0]);
+        let rhs_tile: Tile<f4e2m1fn, { [64, 16] }> = rhs_raw.unpack(const_shape![64, 16]);
+        let lscale: Tile<f8e8m0fnu, { [16, 2] }> =
+            load_tile(lhs_scale, const_shape![16, 2], [0, 0]);
+        let rscale: Tile<f8e8m0fnu, { [2, 16] }> =
+            load_tile(rhs_scale, const_shape![2, 16], [0, 0]);
+        let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
+
+        let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs_tile, rhs_tile, acc, lscale, rscale);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
     fn batch_mmaf_scaled_fp8_kernel(
         output: &mut Tensor<f32, { [2, 16, 16] }>,
         lhs: &Tensor<f8e4m3fn, { [-1, -1, -1] }>,
@@ -699,6 +721,29 @@ fn compile_raw_mmaf_scaled_fp8() -> () {
         assert!(module_op_str.contains("= mmaf_scaled"));
         assert!(module_op_str.contains("f8e4m3fn"));
         assert!(module_op_str.contains("f8e8m0fnu"));
+    });
+}
+
+#[test]
+fn compile_raw_mmaf_scaled_fp8_fp4_legalizes_for_tile_ir_13_3() -> () {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir(
+            "raw_mmaf_scaled_fp8_fp4_kernel",
+            &[],
+            &[
+                ("output", &[16, 16]),
+                ("lhs", &[16, 64]),
+                ("rhs_bytes", &[32, 16]),
+                ("lhs_scale", &[16, 2]),
+                ("rhs_scale", &[2, 16]),
+            ],
+        );
+
+        assert!(module_op_str.contains("= unpack"));
+        assert!(module_op_str.contains("= ftof"));
+        assert!(module_op_str.contains("= mmaf_scaled"));
+        assert!(module_op_str.contains("tile<64x16xf4e2m1fn>"));
+        assert!(module_op_str.contains("tile<64x16xf8e4m3fn>"));
     });
 }
 

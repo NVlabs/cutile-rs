@@ -28,7 +28,8 @@ use super::utils::*;
 use cutile_ir::builder::{append_op, build_block, OpBuilder};
 use cutile_ir::bytecode::Opcode;
 use cutile_ir::ir::{
-    Attribute, BlockId, Module, PartitionViewType, Region, Type as TileIrType, Value,
+    Attribute, BlockId, Module, PartitionViewType, Region, ScalarType, TileElementType, TileType,
+    Type as TileIrType, Value,
 };
 
 use quote::ToTokens;
@@ -2459,6 +2460,63 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             operand_lengths.push(arg_values.len().to_string());
             op_operands.extend_from_slice(&arg_values);
+        }
+
+        // CUDA Tile IR 13.3 requires both `mmaf_scaled` inputs to have the
+        // same element type even though SM120 has a native FP8 x FP4 MMA.
+        // Keep the Rust DSL useful for W4A8 kernels by legalizing a mixed
+        // logical call to the closest representable Tile IR: FP4 values are
+        // exactly representable in FP8, so widen only the FP4 tile and retain
+        // its original block scales. This is a semantic fallback, not a claim
+        // that Tile IR emitted the native mixed-input instruction.
+        if opcode == Opcode::MmaFScaled && op_operands.len() == 5 {
+            let lhs_type = module.value_type(op_operands[0]).clone();
+            let rhs_type = module.value_type(op_operands[1]).clone();
+            let tile_scalar = |ty: &TileIrType| match ty {
+                TileIrType::Tile(TileType {
+                    element_type: TileElementType::Scalar(scalar),
+                    ..
+                }) => Some(*scalar),
+                _ => None,
+            };
+            let lhs_scalar = tile_scalar(&lhs_type);
+            let rhs_scalar = tile_scalar(&rhs_type);
+            if lhs_scalar != rhs_scalar {
+                let (narrow_index, wide_scalar) = match (lhs_scalar, rhs_scalar) {
+                    (Some(ScalarType::F4E2M1FN), Some(wide @ ScalarType::F8E4M3FN))
+                    | (Some(ScalarType::F4E2M1FN), Some(wide @ ScalarType::F8E5M2)) => {
+                        (0usize, wide)
+                    }
+                    (Some(wide @ ScalarType::F8E4M3FN), Some(ScalarType::F4E2M1FN))
+                    | (Some(wide @ ScalarType::F8E5M2), Some(ScalarType::F4E2M1FN)) => {
+                        (1usize, wide)
+                    }
+                    _ => {
+                        return self.jit_error_result(
+                            &call_expr.span(),
+                            &format!(
+                                "unsupported mixed mmaf_scaled input types: {lhs_type:?} and {rhs_type:?}"
+                            ),
+                        );
+                    }
+                };
+                let TileIrType::Tile(narrow_tile) = module.value_type(op_operands[narrow_index])
+                else {
+                    unreachable!("mixed scaled-MMA operand was already checked as a tile")
+                };
+                let widened_type = TileIrType::Tile(TileType {
+                    shape: narrow_tile.shape.clone(),
+                    element_type: TileElementType::Scalar(wide_scalar),
+                });
+                let (convert_op, results) =
+                    OpBuilder::new(Opcode::FToF, self.ir_location(&call_expr.span()))
+                        .operand(op_operands[narrow_index])
+                        .result(widened_type)
+                        .attr("rounding_mode", rounding_mode_attr("nearest_even").1)
+                        .build(module);
+                append_op(module, block_id, convert_op);
+                op_operands[narrow_index] = results[0];
+            }
         }
 
         let mut attrs: Vec<(String, Attribute)> = vec![];
