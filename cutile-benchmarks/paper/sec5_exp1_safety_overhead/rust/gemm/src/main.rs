@@ -96,7 +96,6 @@ mod kernels {
     }
 
     #[cutile::entry(
-        unchecked_accesses = false,
         optimization_hints = (
             sm_120 = (num_cta_in_cga = 2,),
             sm_100 = (num_cta_in_cga = 2,),
@@ -526,7 +525,6 @@ mod kernels {
                         sm_120 = (num_cta_in_cga = 2,),
                         sm_100 = (num_cta_in_cga = 2,),
                     ),
-                    unchecked_accesses = false,
     )]
     fn gemm_static<
         T: ElementType,
@@ -559,7 +557,6 @@ mod kernels {
                         sm_120 = (num_cta_in_cga = 2,),
                         sm_100 = (num_cta_in_cga = 2,),
                     ),
-                    unchecked_accesses = false,
     )]
     fn gemm_persistent_static<
         T: ElementType,

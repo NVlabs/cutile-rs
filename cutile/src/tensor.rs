@@ -253,9 +253,30 @@ pub struct Partition<T> {
     pub(crate) object: T,
     pub partition_shape: Vec<usize>,
     pub partition_strides: Vec<usize>,
+    /// `true` iff this binding opted into partial coverage
+    /// ([`IntoPartition::partition_prefix`]): the launch grid may be a
+    /// per-axis PREFIX of this partition's block grid instead of equal to
+    /// it. Launched blocks embed identically; blocks beyond the launch grid
+    /// are simply never visited (they keep their prior contents).
+    pub(crate) prefix_coverage: bool,
 }
 
 impl<T> Partition<T> {
+    /// Opts this binding into partial coverage: the launch grid may be a
+    /// per-axis PREFIX of the inferred block grid (`launch <= inferred` on
+    /// every axis) instead of equal to it. Launched blocks map to exactly
+    /// the blocks they would under full coverage — a per-axis prefix is the
+    /// identity embedding into the block grid, so exclusivity and
+    /// disjointness are unchanged — and blocks beyond the launch grid are
+    /// never visited, keeping their prior contents. Exceeding the inferred
+    /// grid on ANY axis remains a hard launch error: that direction is
+    /// genuine out-of-bounds. Prefer the [`IntoPartition::partition_prefix`]
+    /// spelling at call sites.
+    pub fn prefix(mut self) -> Self {
+        self.prefix_coverage = true;
+        self
+    }
+
     /// Unwraps the partition to retrieve the underlying object.
     ///
     /// This consumes the partition and returns the original tensor or value.
@@ -279,11 +300,27 @@ impl<T> Partition<T> {
     /// // Launch 8 tile blocks to traverse the mapped output tiles.
     /// let output = z.partition([32, 64]).map([4, 1], 8);
     /// ```
+    ///
+    /// A map dimension of [`OWNED`] marks an owned axis: the axis is not
+    /// traversed by the work-item stream; each stream item owns the axis's
+    /// full extent (subtensor-per-CTA exclusivity). `iter_indices()` then
+    /// yields one item per streamed-axes coordinate, and the owned axes are
+    /// traversed by in-kernel loops:
+    ///
+    /// ```rust,ignore
+    /// // One stream item per axis-0 tile; each item owns all of axis 1.
+    /// let output = z.partition([1, 2048]).map([1, OWNED], rows);
+    /// ```
     pub fn map<const RANK: usize>(
         self,
         map_shape: [usize; RANK],
         num_tile_blocks: u32,
     ) -> MappedLaunchPartition<Self> {
+        assert!(
+            !self.prefix_coverage,
+            "a partial-coverage (prefix) partition cannot be mapped: a mapped \
+             schedule covers its full index space by construction"
+        );
         MappedLaunchPartition {
             partition: self,
             map_shape: map_shape.to_vec(),
@@ -291,6 +328,14 @@ impl<T> Partition<T> {
         }
     }
 }
+
+/// Map-shape sentinel marking an owned axis.
+///
+/// An owned axis is not traversed by the mapped work-item stream: each stream
+/// item owns the axis's full extent, so in-kernel loops traverse it with
+/// plain (`Dim`-bounded) indices while the minted stream index proves
+/// disjointness on the streamed axes only.
+pub const OWNED: usize = 0;
 
 /// Host-side mapped partition launch argument.
 ///
@@ -310,29 +355,45 @@ impl<P> MappedLaunchPartition<P> {
         partition_grid: (u32, u32, u32),
         num_tile_blocks: u32,
     ) -> Result<(u32, u32, u32), Error> {
-        if self.map_shape.len() != 2 {
-            return tensor_error_result("mapped partitions currently require a 2D map shape.");
-        }
-        if self.map_shape.iter().any(|&dim| dim == 0) {
-            return tensor_error_result("mapped partition requires positive map dimensions.");
-        }
-        if partition_grid.0 == 0 || partition_grid.1 == 0 || partition_grid.2 != 1 {
+        let map_rank = self.map_shape.len();
+        if map_rank == 0 || map_rank > 3 {
             return tensor_error_result(
-                "mapped partition requires a non-empty 2D logical partition grid.",
+                "mapped partitions require a rank-1 through rank-3 map shape.",
             );
         }
-        let total_tiles = partition_grid
-            .0
-            .checked_mul(partition_grid.1)
+        // A map dimension of OWNED (0) marks an owned axis: not traversed by
+        // the stream, so it contributes nothing to the streamed tile count.
+        if self.map_shape.iter().all(|&dim| dim == OWNED) {
+            return tensor_error_result(
+                "mapped partition requires at least one streamed (non-OWNED) map axis.",
+            );
+        }
+        let grid_axes = [partition_grid.0, partition_grid.1, partition_grid.2];
+        if grid_axes.iter().take(map_rank).any(|&axis| axis == 0) {
+            return tensor_error_result(
+                "mapped partition requires a non-empty logical partition grid.",
+            );
+        }
+        if grid_axes.iter().skip(map_rank).any(|&axis| axis != 1) {
+            return tensor_error_result(
+                "mapped partition map rank must match the logical partition grid rank.",
+            );
+        }
+        let streamed_tiles = grid_axes
+            .iter()
+            .zip(self.map_shape.iter())
+            .filter(|&(_, &map_dim)| map_dim != OWNED)
+            .map(|(&axis, _)| axis)
+            .try_fold(1u32, |total, axis| total.checked_mul(axis))
             .ok_or_else(|| {
                 crate::error::tensor_error("mapped partition logical grid is too large")
             })?;
         if num_tile_blocks == 0 {
             return tensor_error_result("mapped partition requires num_tile_blocks > 0.");
         }
-        if num_tile_blocks > total_tiles {
+        if num_tile_blocks > streamed_tiles {
             return tensor_error_result(
-                "mapped partition num_tile_blocks cannot exceed the logical partition tile count.",
+                "mapped partition num_tile_blocks cannot exceed the streamed logical tile count.",
             );
         }
         Ok((num_tile_blocks, 1, 1))
@@ -429,6 +490,19 @@ pub trait IntoPartition {
     fn partition<const RANK: usize>(self, partition_shape: [usize; RANK]) -> Partition<Self>
     where
         Self: Sized;
+
+    /// Partitions with PARTIAL coverage: the launch grid may be a per-axis
+    /// prefix of the block grid instead of equal to it (see
+    /// [`Partition::prefix`] for the contract). The strict-equality
+    /// diagnostic of [`Self::partition`] remains the default; this spelling
+    /// is the explicit opt-in for kernels that deliberately cover only an
+    /// aligned prefix and leave the remainder to another kernel.
+    fn partition_prefix<const RANK: usize>(self, partition_shape: [usize; RANK]) -> Partition<Self>
+    where
+        Self: Sized,
+    {
+        self.partition(partition_shape).prefix()
+    }
 }
 
 /// Enables partitioning an `Arc`-wrapped value into tiles.
@@ -1182,6 +1256,7 @@ impl<T: DType> IntoPartitionArc for Tensor<T> {
             object: tensor,
             partition_shape,
             partition_strides,
+            prefix_coverage: false,
         }
     }
 }
@@ -1195,6 +1270,7 @@ impl<T: DType> IntoPartition for Tensor<T> {
             object: self,
             partition_shape,
             partition_strides,
+            prefix_coverage: false,
         }
     }
 }
@@ -1208,6 +1284,18 @@ pub trait PartitionMut<'a, T: DType> {
         self,
         partition_shape: [usize; RANK],
     ) -> Partition<&'a mut Tensor<T>>;
+
+    /// Partial-coverage variant of [`Self::partition`]; see
+    /// [`IntoPartition::partition_prefix`].
+    fn partition_prefix<const RANK: usize>(
+        self,
+        partition_shape: [usize; RANK],
+    ) -> Partition<&'a mut Tensor<T>>
+    where
+        Self: Sized,
+    {
+        self.partition(partition_shape).prefix()
+    }
 }
 
 impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
@@ -1221,6 +1309,7 @@ impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
             object: self,
             partition_shape,
             partition_strides,
+            prefix_coverage: false,
         }
     }
 }
@@ -1430,9 +1519,27 @@ use cuda_async::launch::AsyncKernelLaunch;
 /// |---|---|---|
 /// | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` |
 /// | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` |
+/// A partition binding's constraint on the launch grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridBound {
+    /// The launch grid must EQUAL this per axis — full coverage, the
+    /// default, and the diagnostic that catches accidental mismatches.
+    Exact((u32, u32, u32)),
+    /// The launch grid may be a per-axis PREFIX of this (opt-in via
+    /// `partition_prefix`). `launch > bound` on any axis is a launch error:
+    /// that direction is genuine out-of-bounds.
+    AtMost((u32, u32, u32)),
+}
+
 pub trait KernelOutputStored<T: DType>: Send {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn grid(&self) -> Result<(u32, u32, u32), Error>;
+    /// This binding's launch-grid constraint. Defaults to exact coverage;
+    /// only bindings that explicitly opted into partial coverage return
+    /// [`GridBound::AtMost`].
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        Ok(GridBound::Exact(self.grid()?))
+    }
     fn map_shape_as_i32(&self) -> Option<Vec<i32>> {
         None
     }
@@ -1451,6 +1558,15 @@ pub trait KernelOutput<T: DType>: Send + Sized {
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        let grid = KernelOutputStored::grid(self)?;
+        Ok(if self.prefix_coverage {
+            GridBound::AtMost(grid)
+        } else {
+            GridBound::Exact(grid)
+        })
+    }
+
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());
@@ -1513,6 +1629,15 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
 }
 
 impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        let grid = KernelOutputStored::grid(self)?;
+        Ok(if self.prefix_coverage {
+            GridBound::AtMost(grid)
+        } else {
+            GridBound::Exact(grid)
+        })
+    }
+
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());
@@ -1884,7 +2009,55 @@ mod tests {
         let err = partition.validate((2, 3, 1), 7).unwrap_err();
         assert!(err
             .to_string()
-            .contains("num_tile_blocks cannot exceed the logical partition tile count"));
+            .contains("num_tile_blocks cannot exceed the streamed logical tile count"));
+    }
+
+    #[test]
+    fn owned_axis_excluded_from_streamed_tile_count() {
+        // Axis 1 is OWNED: only the 2-tile axis 0 is streamed, so
+        // num_tile_blocks is capped at 2 rather than 2*3.
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, OWNED],
+            num_tile_blocks: 2,
+        };
+        let launch_grid = partition.validate((2, 3, 1), 2).unwrap();
+        assert_eq!(launch_grid, (2, 1, 1));
+
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, OWNED],
+            num_tile_blocks: 3,
+        };
+        let err = partition.validate((2, 3, 1), 3).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("num_tile_blocks cannot exceed the streamed logical tile count"));
+    }
+
+    #[test]
+    fn owned_axis_rejects_all_owned_map() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![OWNED, OWNED],
+            num_tile_blocks: 1,
+        };
+        let err = partition.validate((2, 3, 1), 1).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("at least one streamed (non-OWNED) map axis"));
+    }
+
+    #[test]
+    fn owned_axis_accepts_leading_owned() {
+        // Owned axes may sit at any position: axis 0 owned, axis 1 streamed.
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![OWNED, 1],
+            num_tile_blocks: 3,
+        };
+        let launch_grid = partition.validate((2, 3, 1), 3).unwrap();
+        assert_eq!(launch_grid, (3, 1, 1));
     }
 
     #[test]
@@ -1899,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn swizzle_rejects_non_2d_partition_grid() {
+    fn swizzle_rejects_grid_rank_above_map_rank() {
         let partition = MappedLaunchPartition {
             partition: (),
             map_shape: vec![4, 1],
@@ -1908,6 +2081,52 @@ mod tests {
         let err = partition.validate((2, 3, 4), 3).unwrap_err();
         assert!(err
             .to_string()
-            .contains("requires a non-empty 2D logical partition grid"));
+            .contains("map rank must match the logical partition grid rank"));
+    }
+
+    #[test]
+    fn swizzle_accepts_rank1_map() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1],
+            num_tile_blocks: 4,
+        };
+        let launch_grid = partition.validate((8, 1, 1), 4).unwrap();
+        assert_eq!(launch_grid, (4, 1, 1));
+    }
+
+    #[test]
+    fn swizzle_accepts_rank3_map() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, 4, 1],
+            num_tile_blocks: 6,
+        };
+        let launch_grid = partition.validate((2, 3, 4), 6).unwrap();
+        assert_eq!(launch_grid, (6, 1, 1));
+    }
+
+    #[test]
+    fn swizzle_rejects_rank1_map_with_2d_grid() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1],
+            num_tile_blocks: 2,
+        };
+        let err = partition.validate((2, 3, 1), 2).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("map rank must match the logical partition grid rank"));
+    }
+
+    #[test]
+    fn swizzle_rejects_map_rank_above_3() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, 1, 1, 1],
+            num_tile_blocks: 2,
+        };
+        let err = partition.validate((2, 3, 4), 2).unwrap_err();
+        assert!(err.to_string().contains("rank-1 through rank-3 map shape"));
     }
 }

@@ -82,6 +82,11 @@ pub struct TensorParamType {
 #[derive(Debug, Clone)]
 pub struct Validator {
     pub params: Vec<ValidParamType>,
+    /// Compiler-emitted checks to run at launch, before `cuLaunchKernel`. Each
+    /// is a canonical [`crate::predicate::Predicate`] the compiler hoisted out
+    /// of the device kernel; the host evaluates it against the launched tensors'
+    /// extents. Empty unless a kernel hoists a launch-known safety check.
+    pub launch_checks: Vec<crate::predicate::LaunchCheck>,
 }
 
 // ── Global Device (process-wide, per-device singleton) ─────────────────────

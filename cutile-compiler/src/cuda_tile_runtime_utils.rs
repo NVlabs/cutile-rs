@@ -36,6 +36,37 @@ pub fn get_compiler_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Ablation switch: `CUTILE_DISABLE_CHECK_HOISTING=1` keeps every dynamic
+/// partition-access bounds check at its access site instead of hoisting to
+/// loop preheaders. Read uncached so A/B toggling never needs a rebuild —
+/// this is a compile-time (JIT) knob, not a kernel-time one.
+pub fn check_hoisting_disabled() -> bool {
+    env::var("CUTILE_DISABLE_CHECK_HOISTING").is_ok_and(|v| v == "1") || force_device_checks()
+}
+
+/// `CUTILE_FORCE_DEVICE_CHECKS=1`: full placement ablation for differential
+/// testing. Every plain-family access check is emitted at its access site,
+/// two-sided, over the actual runtime values — no preheader hoisting
+/// (implies `CUTILE_DISABLE_CHECK_HOISTING`), no launch relocation, and no
+/// JIT discharge: provenance, static folds, entailment, and inferred lower
+/// bounds are all skipped. The ablated build is the differential harness's
+/// semantic REFERENCE, and a reference that inherits the compiler's proofs
+/// cannot catch one that is wrong (2026-08-12 review, S2) — earlier this
+/// knob kept "verified" proofs, and a wrap-tainted static fold sailed
+/// through both builds identically. The bounded (`with_bounds`) family is
+/// unaffected — its undischarged checks are compile errors, so it has no
+/// device placement to ablate to.
+pub fn force_device_checks() -> bool {
+    env::var("CUTILE_FORCE_DEVICE_CHECKS").is_ok_and(|v| v == "1")
+}
+
+/// `CUTILE_JIT_LOG=1` also reports every bounds check that stays inside a
+/// loop body with the reason it could not hoist.
+pub fn jit_hoist_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env::var("CUTILE_JIT_LOG").is_ok_and(|v| v == "1"))
+}
+
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 ///
 /// Cached per device: the driver is queried once per device and cache hits are
@@ -395,12 +426,145 @@ fn clamp_bytecode_version(version: BytecodeVersion) -> BytecodeVersion {
         .min(BytecodeVersion::CURRENT)
 }
 
+/// Builds the version-probe module: one entry with a pointer parameter, a
+/// token, a tensor/partition view, and a `cuda_tile.for` region whose body
+/// loads through the view. An EMPTY module is not a valid probe — an older
+/// `tileiras` accepted a newer version's empty bytecode while rejecting the
+/// same version's region encoding, so the probe selected a version real
+/// kernels could not compile at (grout B200 evaluation, 2026-08). The probe
+/// must contain the independently versioned encodings a real kernel has:
+/// regions were the construct that caught it, and view/token types are the
+/// other independently versioned family (2026-08-18 review, R1). If a
+/// version-gated encoding is ever added outside these families, extend this
+/// module alongside it.
+fn build_probe_module() -> cutile_ir::Module {
+    use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
+    use cutile_ir::bytecode::Opcode;
+    use cutile_ir::ir::{
+        Attribute, DenseElements, FuncType, Location, Module, PartitionViewType, PointerType,
+        ScalarType, TensorViewType, TileElementType, TileType, Type,
+    };
+
+    let tile_i32 = Type::Tile(TileType {
+        element_type: TileElementType::Scalar(ScalarType::I32),
+        shape: vec![],
+    });
+    let tile_ptr_f32 = Type::Tile(TileType {
+        element_type: TileElementType::Pointer(Box::new(PointerType {
+            pointee: ScalarType::F32,
+        })),
+        shape: vec![],
+    });
+    let tv_ty = Type::TensorView(TensorViewType {
+        element_type: ScalarType::F32,
+        shape: vec![128],
+        strides: vec![1],
+    });
+    let pv_ty = Type::PartitionView(PartitionViewType {
+        tile_shape: vec![16],
+        tensor_view: TensorViewType {
+            element_type: ScalarType::F32,
+            shape: vec![128],
+            strides: vec![1],
+        },
+        dim_map: vec![0],
+        padding_value: None,
+    });
+    let tile_16_f32 = Type::Tile(TileType {
+        element_type: TileElementType::Scalar(ScalarType::F32),
+        shape: vec![16],
+    });
+    let mut module = Module::new("__cutile_probe");
+    let (region_id, block_id, entry_args) =
+        build_single_block_region(&mut module, std::slice::from_ref(&tile_ptr_f32));
+    let const_i32 = |module: &mut Module, val: i32| {
+        let (op, res) = OpBuilder::new(Opcode::Constant, Location::Unknown)
+            .attr(
+                "value",
+                Attribute::DenseElements(DenseElements {
+                    element_type: tile_i32.clone(),
+                    shape: vec![],
+                    data: val.to_le_bytes().to_vec(),
+                }),
+            )
+            .result(tile_i32.clone())
+            .build(module);
+        append_op(module, block_id, op);
+        res[0]
+    };
+    let (tok_op, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
+        .result(Type::Token)
+        .build(&mut module);
+    append_op(&mut module, block_id, tok_op);
+    let seg_i32 = |n: i64| Attribute::Integer(n, tile_i32.clone());
+    let (mtv, mtv_res) = OpBuilder::new(Opcode::MakeTensorView, Location::Unknown)
+        .operand(entry_args[0])
+        .result(tv_ty)
+        .attr(
+            "operandSegmentSizes",
+            Attribute::Array(vec![seg_i32(1), seg_i32(0), seg_i32(0)]),
+        )
+        .build(&mut module);
+    append_op(&mut module, block_id, mtv);
+    let (mpv, mpv_res) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
+        .operand(mtv_res[0])
+        .result(pv_ty)
+        .build(&mut module);
+    append_op(&mut module, block_id, mpv);
+    let lb = const_i32(&mut module, 0);
+    let ub = const_i32(&mut module, 4);
+    let step = const_i32(&mut module, 1);
+    let (body_region, body_blk, body_args) =
+        build_single_block_region(&mut module, &[tile_i32.clone()]);
+    // The load sits INSIDE the region and references parent-scope values
+    // (view, token) plus the block argument — the cross-region encoding a
+    // real kernel exercises.
+    let (load, _) = OpBuilder::new(Opcode::LoadViewTko, Location::Unknown)
+        .operand(mpv_res[0])
+        .operand(body_args[0])
+        .operand(tok_res[0])
+        .attr("memory_ordering_semantics", seg_i32(0))
+        .attr(
+            "operandSegmentSizes",
+            Attribute::Array(vec![seg_i32(1), seg_i32(1), seg_i32(1)]),
+        )
+        .result(tile_16_f32)
+        .result(Type::Token)
+        .build(&mut module);
+    append_op(&mut module, body_blk, load);
+    let (cont, _) = OpBuilder::new(Opcode::Continue, Location::Unknown).build(&mut module);
+    append_op(&mut module, body_blk, cont);
+    let (for_op, _) = OpBuilder::new(Opcode::For, Location::Unknown)
+        .operand(lb)
+        .operand(ub)
+        .operand(step)
+        .region(body_region)
+        .build(&mut module);
+    append_op(&mut module, block_id, for_op);
+    let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
+    append_op(&mut module, block_id, ret);
+    let (entry, _) = OpBuilder::new(Opcode::Entry, Location::Unknown)
+        .attr("sym_name", Attribute::String("__cutile_probe_entry".into()))
+        .attr(
+            "function_type",
+            Attribute::Type(Type::Func(FuncType {
+                inputs: vec![tile_ptr_f32],
+                results: vec![],
+            })),
+        )
+        .region(region_id)
+        .build(&mut module);
+    module.functions.push(entry);
+    module
+}
+
 /// Probes `tileiras` for the newest bytecode version it accepts by compiling a
-/// tiny empty module at each candidate version, newest first.
+/// tiny but REPRESENTATIVE module (an entry with a `for` region) at each
+/// candidate version, newest first.
 fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
     let tmp_dir = env::temp_dir();
     for &version in BytecodeVersion::SUPPORTED.iter().rev() {
-        let module = cutile_ir::Module::new("__cutile_probe");
+        let module = build_probe_module();
         let Ok(bytes) = write_bytecode_version(&module, version) else {
             continue;
         };
@@ -926,6 +1090,43 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The probe module must be a valid, encodable kernel at every supported
+    /// version, and it must contain a `for` region — an EMPTY probe passed a
+    /// version the installed tileiras then rejected on real kernels (grout
+    /// B200 evaluation, 2026-08).
+    #[test]
+    fn probe_module_is_representative_and_valid() {
+        // Reads the tileiras env resolution: serialize with the tests that
+        // mutate it.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let module = build_probe_module();
+        module.verify_dominance().expect("probe module dominance");
+        module
+            .verify_bytecode_indices()
+            .expect("probe module bytecode indices");
+        assert!(
+            !module.functions.is_empty() && module.num_values() >= 4,
+            "the probe must carry an entry with real ops (a `for` region), not \
+             be the empty module that once passed a version real kernels failed at"
+        );
+        for &version in BytecodeVersion::SUPPORTED.iter() {
+            write_bytecode_version(&module, version)
+                .unwrap_or_else(|e| panic!("probe must encode at {version}: {e}"));
+        }
+        // When a real tileiras is reachable, the probe must find SOME
+        // accepted version (i.e. real-construct bytecode compiles, not just
+        // an empty module).
+        let tileiras = tileiras_binary();
+        if Command::new(&tileiras).arg("--version").output().is_ok() {
+            let version = probe_max_supported_bytecode_version(&tileiras);
+            assert!(
+                version >= BytecodeVersion::MIN_SUPPORTED,
+                "probe found no accepted version against {}",
+                tileiras.display()
+            );
+        }
+    }
 
     #[test]
     fn tileiras_binary_defaults_to_path_lookup() {

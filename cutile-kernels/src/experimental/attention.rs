@@ -365,9 +365,7 @@ pub mod fmha_prefill_gqa_lpt_module {
 
         let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
             unsafe { out_tv.partition_full_mut(const_shape![BM, GROUP, D]) };
-        unsafe {
-            out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
-        }
+        out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
     }
 }
 

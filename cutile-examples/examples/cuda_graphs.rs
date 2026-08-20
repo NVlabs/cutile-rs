@@ -60,7 +60,7 @@ mod kernels {
         for j in 0i32..tiles {
             let t: Tile<f32, { [1, BS] }> = x_part.load([row, j]);
             let tw: Tile<f32, { [1, BS] }> = w_part.load([j]).reshape(shape);
-            unsafe { out_part.store(t * scale * tw, [0i32, j]) };
+            out_part.store(t * scale * tw, [0i32, j]);
         }
     }
 
