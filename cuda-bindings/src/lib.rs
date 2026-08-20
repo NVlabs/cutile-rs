@@ -47,6 +47,26 @@ pub fn cuda_toolkit_dir() -> String {
     env!("CUTILE_RESOLVED_CUDA_TOOLKIT_PATH").to_string()
 }
 
+/// Reports the elapsed time in milliseconds between two recorded events.
+///
+/// CUDA 12.8 renamed the driver entry point to `cuEventElapsedTime_v2`; this
+/// crate's minimum supported toolkit (13.2) always declares the `_v2` symbol,
+/// so this helper dispatches to it directly. It exists for source
+/// compatibility with cuda-oxide's bindings, which expose the same helper.
+///
+/// # Safety
+///
+/// Same contract as the underlying driver call: `elapsed_ms` must be valid
+/// for an `f32` write, and `start`/`end` must be valid event handles recorded
+/// in the current context.
+pub unsafe fn cu_event_elapsed_time(
+    elapsed_ms: *mut f32,
+    start: CUevent,
+    end: CUevent,
+) -> CUresult {
+    unsafe { cuEventElapsedTime_v2(elapsed_ms, start, end) }
+}
+
 #[cfg(test)]
 mod cuda_tests {
     use super::*;
@@ -91,6 +111,13 @@ mod cuda_tests {
 
     unsafe fn set_seed(gen: curandGenerator_t, seed: u64) {
         assert!(curandSetPseudoRandomGeneratorSeed(gen, c_ulonglong::from(seed)) == 0);
+    }
+
+    #[test]
+    fn cu_event_elapsed_time_helper_signature() {
+        // Compile-time check that the helper keeps the signature cuda-oxide's
+        // bindings expose.
+        let _: unsafe fn(*mut f32, CUevent, CUevent) -> CUresult = cu_event_elapsed_time;
     }
 
     #[test]
