@@ -906,6 +906,10 @@ where
     }
     /// Sets the type and const generic arguments for this kernel.
     fn generics(self, generics: Vec<String>) -> Self;
+    /// Overrides the inferred divisibility hint for one scalar or raw-pointer
+    /// parameter. This is useful for truly dynamic scalars whose incidental
+    /// runtime divisibility should not create separate JIT specializations.
+    fn scalar_hint(self, name: impl Into<String>, hint: DivHint) -> Self;
     /// Sets a compile-time constant grid, enabling grid-dependent optimizations.
     fn const_grid(self, grid: (u32, u32, u32)) -> Self;
     /// Sets the runtime launch grid dimensions.
