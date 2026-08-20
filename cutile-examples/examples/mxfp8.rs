@@ -11,6 +11,9 @@
  * Run with: cargo run -p cutile-examples --example mxfp8
  */
 
+// Still on the deprecated `Dim::new` spelling; migrate with the examples pass.
+#![allow(deprecated)]
+
 use cutile::cuda_core::{f8e4m3fn, f8e8m0fnu};
 use cutile::prelude::*;
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;

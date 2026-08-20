@@ -48,6 +48,12 @@ fn update_type_meta(
                         let mut new_val = outer_val.clone();
                         new_val.type_meta = inner_val.type_meta.clone();
                         outer_block_vars.vars.insert(outer_key.clone(), new_val);
+                        // The callee advanced this resource's token; propagate it
+                        // up the borrow link to the root tensor, so a later view
+                        // of the same tensor is ordered after these writes. Here
+                        // (the caller boundary) both the view and its root tensor
+                        // are in scope, unlike inside the callee frame.
+                        super::shared_utils::propagate_token_to_root(outer_key, outer_block_vars);
                     }
                 }
             }
@@ -122,7 +128,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .map(|arg| arg.ty.rust_ty.clone())
                 .collect::<Vec<_>>();
             // println!("{call_arg_rust_tys:#?}");
-            generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None);
+            generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None, generic_vars)?;
             // Bind new variables.
             // The variables must:
             // - Have the names of the parameters in the callee.
@@ -130,6 +136,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let param_names = get_sig_param_names(&fn_item.sig);
             let (input_params, _output_param) = get_sig_types(&fn_item.sig, None);
             let mut call_variables = CompilerContext::empty();
+            // The callee body is compiled into the caller's current block, so
+            // the caller's loop context governs check hoisting inside it.
+            call_variables.loop_frames = ctx.loop_frames.clone();
             call_variables.module_scope.push(module_name.clone());
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
@@ -166,7 +175,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .iter()
                     .map(|arg| arg.ty.rust_ty.clone())
                     .collect::<Vec<_>>();
-                generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None);
+                generic_arg_inference.map_args_to_params(&call_arg_rust_tys, None, generic_vars)?;
                 // println!("inline_function_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ngeneric_arg_inference={generic_arg_inference:#?}", fn_item.sig.ident.to_string());
                 generic_arg_inference
                     .get_generic_vars_instance(&generic_vars, &self.modules.primitives())
@@ -343,6 +352,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let param_names = get_sig_param_names(&impl_method.sig);
             let (input_params, _output_param) = get_sig_types(&impl_method.sig, Some(self_ty));
             let mut call_variables = CompilerContext::empty();
+            // The callee body is compiled into the caller's current block, so
+            // the caller's loop context governs check hoisting inside it.
+            call_variables.loop_frames = ctx.loop_frames.clone();
             call_variables.module_scope.push(module_name.clone());
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&impl_method.sig);
@@ -457,6 +469,25 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &outer2inner_map,
                 "token".to_string(),
             );
+            // If this method advanced a mutable view's token (a store) inside a
+            // loop threading that tensor's token, join the output into the loop
+            // accumulator. A no-op outside such a loop.
+            for outer_key in outer2inner_map.keys() {
+                let is_mutable = ctx
+                    .vars
+                    .get(outer_key)
+                    .map(|v| v.mutability == Mutability::Mutable)
+                    .unwrap_or(false);
+                if is_mutable {
+                    self.accumulate_loop_token(
+                        module,
+                        block_id,
+                        ctx,
+                        outer_key,
+                        &call_generic_vars,
+                    )?;
+                }
+            }
             // println!("exit_method_call: {}", method_call_expr.to_token_stream().to_string());
             if let Some(mut res) = result {
                 if let Some(rt) = return_type {

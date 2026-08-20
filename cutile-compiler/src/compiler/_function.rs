@@ -48,7 +48,28 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) entry: syn::ItemFn,
     pub(crate) entry_attrs: EntryAttrs,
     pub(crate) const_grid: Option<(u32, u32, u32)>,
-    pub(crate) proof_results: ProofResults,
+    /// The believed-fact set, parsed once from declared preconditions. It is
+    /// invariant for the whole compile, and every obligation resolution
+    /// consults it — rebuilding it per obligation was O(accesses x facts) on
+    /// the JIT hot path (issue #217).
+    pub(crate) assumptions: crate::passes::obligation::Assumptions,
+    /// Kernel parameter name → 0-based position in the signature (same order as
+    /// `Validator.params` and the host arg-push order). Resolves the tensor
+    /// names in obligations/preconditions to the `predicate::Atom::Dim` param
+    /// index — the resolved-symbol identity the launch checks key on.
+    pub(crate) param_index: HashMap<String, usize>,
+    /// Parameter mutability by signature position. This decides the *frame* a
+    /// parameter's extents live in: an immutable `&Tensor` is passed whole
+    /// (view == root, which is what the host's shape array holds), while a
+    /// `&mut Tensor` is slabbed and each work item sees one piece. Any atom
+    /// naming an extent must respect it. See
+    /// `.internal/tasks/in_progress/check_hoisting/BOUNDS_HOISTING_ANALYSIS.md` §SC1.
+    pub(crate) param_is_mutable: Vec<bool>,
+    /// Launch-time checks hoisted out of this kernel during compilation
+    /// (`Resolution::Launch`). Interior-mutable because compile passes take
+    /// `&self`; merged into the `Validator` in [`Self::get_validator`] and run
+    /// once per launch by the host `validate_launch`.
+    pub(crate) launch_checks: RefCell<Vec<cuda_async::predicate::LaunchCheck>>,
     pub(crate) gpu_name: String,
     pub(crate) optimization_hints: OptimizationHints,
     pub(crate) stride_args: HashMap<String, Vec<i32>>,
@@ -56,6 +77,18 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) validator: Validator,
     pub(crate) module_name_stack: Vec<String>,
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
+    /// Per-compile partition-access check accounting: statically discharged /
+    /// hoisted to a loop preheader / emitted in the access's own block.
+    /// Reported on the `CUTILE_JIT_TIMING` line for coverage measurement.
+    pub check_stats: CheckHoistStats,
+}
+
+/// Counters for where partition-access bounds checks ended up.
+#[derive(Debug, Default)]
+pub struct CheckHoistStats {
+    pub discharged: std::cell::Cell<u32>,
+    pub hoisted: std::cell::Cell<u32>,
+    pub in_place: std::cell::Cell<u32>,
 }
 
 struct FunctionParamTypes {
@@ -64,6 +97,325 @@ struct FunctionParamTypes {
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
+    /// Route a `dim(a) == dim(b)` discharge through the obligation solver.
+    ///
+    /// Returns `true` when the equality is settled without an in-kernel check:
+    /// at `Jit` if a declared `preconditions` fact entails it, otherwise at
+    /// `Launch`, since both operands are extents the host holds before
+    /// `cuLaunchKernel`. `false` only when it must fall to the device.
+    ///
+    /// Use this only where equality IS the requirement — today that is the
+    /// shared mapped-grid check, whose zipped index streams need equal grids.
+    /// An access bound wants [`Self::resolve_dim_le`] instead: emitting an
+    /// equality there also rejects every target strictly larger than the
+    /// source, which is safe.
+    pub(crate) fn resolve_dim_eq(
+        &self,
+        a_tensor: &str,
+        a_axis: usize,
+        b_tensor: &str,
+        b_axis: usize,
+    ) -> bool {
+        use cuda_async::predicate::{Atom, Predicate, Term};
+        // Resolve both tensor names to param indices; if either is not a
+        // parameter, the equality can't be canonicalized — conservatively not
+        // discharged (falls to the existing in-kernel path).
+        let (Some(&a_param), Some(&b_param)) = (
+            self.param_index.get(a_tensor),
+            self.param_index.get(b_tensor),
+        ) else {
+            return false;
+        };
+        let a = Term::atom(Atom::Dim {
+            param: a_param,
+            axis: a_axis,
+        });
+        let b = Term::atom(Atom::Dim {
+            param: b_param,
+            axis: b_axis,
+        });
+        let Some(predicate) = Predicate::eq(&a, &b) else {
+            return false;
+        };
+        self.lower_obligation(
+            predicate,
+            format!("dim({a_tensor}, {a_axis}) == dim({b_tensor}, {b_axis})"),
+        )
+    }
+
+    /// Route a `tiles(a) <= tiles(b)` discharge through the obligation
+    /// solver — the exact form an access bound needs. An index drawn from
+    /// `[0, ceil(dim(a)/t))` stays inside an axis of `ceil(dim(b)/t)` tiles
+    /// (same tile `t`) exactly when the source has at most as many tiles;
+    /// a target shorter in elements but equal in tiles is safe.
+    ///
+    /// Two steps, because the believed facts are equalities. A declared
+    /// `dim(a) == dim(b)` entails the inequality but the solver has no
+    /// entailment theory, so the equality is tried first purely as evidence
+    /// (`Jit`, no check anywhere); only then is the inequality itself lowered,
+    /// landing at `Launch` since extents are host-known. Emitting the
+    /// inequality rather than the equality is what keeps the derived check
+    /// faithful: with `<=`, the only over-rejection left is the sub-tile band
+    /// where a shorter target happens to round up to the same tile count —
+    /// exactness there needs an atom naming a tile count (see
+    /// `HOISTING_COVERAGE.md`).
+    pub(crate) fn resolve_dim_le(
+        &self,
+        a_tensor: &str,
+        a_axis: usize,
+        b_tensor: &str,
+        b_axis: usize,
+        tile: i32,
+    ) -> bool {
+        use crate::passes::obligation::{resolve, Obligation, Resolution};
+        use cuda_async::predicate::{Atom, Predicate, Term};
+        let (Some(&a_param), Some(&b_param)) = (
+            self.param_index.get(a_tensor),
+            self.param_index.get(b_tensor),
+        ) else {
+            return false;
+        };
+        let a = Term::atom(Atom::Dim {
+            param: a_param,
+            axis: a_axis,
+        });
+        let b = Term::atom(Atom::Dim {
+            param: b_param,
+            axis: b_axis,
+        });
+        // Step 1: a declared equality decides the goal at Jit. Evidence only —
+        // when it is not entailed, no equality check is emitted anywhere.
+        if let Some(eq) = Predicate::eq(&a, &b) {
+            let obligation = Obligation::new(eq, "");
+            if matches!(resolve(&obligation, &self.assumptions), Resolution::Jit) {
+                return true;
+            }
+        }
+        // Step 2: state the real goal — over TILE COUNTS, which is what the
+        // walk is actually bounded by — and let it land where its operands
+        // are known, a host compare at launch. Stating it over extents was
+        // stricter than the device check it replaced (a target shorter in
+        // elements but equal in tiles was rejected; issue #216); the
+        // TileCount atom closes that band exactly. Under placement ablation
+        // the goal stays with the access as a device check; step 1 still
+        // ran, because a declared fact is a verified proof, not a placement.
+        if crate::cuda_tile_runtime_utils::force_device_checks() {
+            return false;
+        }
+        if tile < 1 {
+            return false;
+        }
+        let ta = Term::atom(Atom::TileCount {
+            param: a_param,
+            axis: a_axis,
+            tile,
+        });
+        let tb = Term::atom(Atom::TileCount {
+            param: b_param,
+            axis: b_axis,
+            tile,
+        });
+        let Some(le) = Predicate::le(&ta, &tb) else {
+            return false;
+        };
+        self.lower_obligation(
+            le,
+            format!(
+                "ceil(dim({a_tensor}, {a_axis})/{tile}) <= ceil(dim({b_tensor}, {b_axis})/{tile})"
+            ),
+        )
+    }
+
+    /// Lower a safety obligation: resolve `predicate` against the in-scope
+    /// assumptions and route the result. Returns `true` when the obligation was
+    /// placed without any in-kernel check — either statically discharged
+    /// (`Jit`) or evacuated to a host launch check (`Launch`, collected here);
+    /// `false` when it must fall to a device-stage (in-kernel) assert, which the
+    /// caller emits.
+    ///
+    /// This is the shared "lower an assert to an obligation" path. Any client
+    /// that can name a `Predicate` routes through it and the check lands at the
+    /// earliest stage a dominating assumption allows — the bounded-access check
+    /// today; a programmer `require`/`assert` op next. It is what lets *any*
+    /// assert be hoisted out of the kernel when its operands are launch-known.
+    pub(crate) fn lower_obligation(
+        &self,
+        predicate: cuda_async::predicate::Predicate,
+        cause: impl Into<String>,
+    ) -> bool {
+        use crate::passes::obligation::{resolve, Obligation, Resolution};
+        let obligation = Obligation::new(predicate, cause);
+        match resolve(&obligation, &self.assumptions) {
+            Resolution::Jit => true,
+            Resolution::Launch(check) => {
+                // Canonical predicates make duplicate detection exact. Two
+                // obligations reducing to the same host compare (e.g. a shared
+                // `Dim`'s divisibility, once per binding) cost one check.
+                let mut checks = self.launch_checks.borrow_mut();
+                if !checks.iter().any(|c| c.predicate == check.predicate) {
+                    checks.push(check);
+                }
+                true
+            }
+            Resolution::Device => false,
+        }
+    }
+
+    /// The kernel-visible extent of `partition`'s axis `axis`, taken from the
+    /// *declared* parameter shape.
+    ///
+    /// The partition view type erases a `&mut Tensor` parameter's shape to `?`
+    /// — the host passes a slab, so the view is built from runtime shape
+    /// operands — which loses extents the signature states outright
+    /// (`&mut Tensor<f32, {[1, N]}>` lowers to `tensor_view<?x?xf32>`). The
+    /// validator still holds them, and the generated launcher rejects a
+    /// mismatch (`valid_shape == given_shape`) before the kernel runs, so this
+    /// is a *verified* assumption rather than a trusted one (SC2).
+    ///
+    /// This exists so that the binding check and the access check answer
+    /// "what is this axis's extent?" from the *same* source. They previously
+    /// disagreed — the binding read the declared shape and folded at compile
+    /// time, the access read the erased view type and fell back to a launch
+    /// check — which manufactured launch checks for extents the signature had
+    /// already pinned.
+    ///
+    /// FRAME (SC1): the declared shape may stand in for the view extent only
+    /// where the two coincide. That holds for `Partition` and `PartitionMut` —
+    /// an immutable `&Tensor` has view == root, and a `&mut Tensor`'s declared
+    /// shape *is* its per-CTA slab. It does **not** hold for a
+    /// `MappedPartition*`, whose declared shape is the *tile* shape, so callers
+    /// must be reachable only from plain partition paths. See
+    /// `.internal/tasks/in_progress/check_hoisting/BOUNDS_HOISTING_ANALYSIS.md` §SC1.
+    pub(crate) fn declared_view_extent(
+        &self,
+        partition: &TileRustValue,
+        dim_map: &[i32],
+        axis: usize,
+    ) -> Option<i32> {
+        let tensor_axis = *dim_map.get(axis).filter(|&&d| d >= 0)? as usize;
+        let idx = *self.param_index.get(partition.tensor_origin.as_ref()?)?;
+        let shape = match self.validator.params.get(idx)? {
+            cuda_async::device_context::ValidParamType::Tensor(t) => &t.shape,
+            _ => return None,
+        };
+        shape.get(tensor_axis).copied().filter(|&e| e >= 0)
+    }
+
+    /// Give `x.shape()`'s per-axis values their symbolic identity: axis `k` of
+    /// a tensor *parameter*'s shape is exactly `extent(param, k)`, so label it
+    /// with that atom.
+    ///
+    /// This is the bridge between the two fact systems. Facts carried on values
+    /// (bounds, provenance) and predicates over [`cuda_async::predicate::Atom`]s
+    /// have no shared vocabulary, so an extent read out of the signature was an
+    /// opaque scalar: an obligation mentioning it could not be seen as
+    /// launch-known and fell straight to a device check. One label makes every
+    /// such extent speakable in the predicate language, for every obligation —
+    /// nothing here is specific to any one check.
+    ///
+    /// FRAME (SC1): the atom picks the frame, via [`Self::extent_atom`] — the
+    /// one place that decision lives. `x.shape()` inside the kernel returns
+    /// whatever the kernel sees (the whole tensor for an immutable param, the
+    /// per-CTA slab for a `&mut`), and the chosen atom resolves on the host
+    /// against the array holding exactly that quantity.
+    pub(crate) fn label_param_extents(&self, shape: &mut TileRustValue, tensor: &TileRustValue) {
+        let Some(param) = tensor
+            .tensor_origin
+            .as_ref()
+            .and_then(|name| self.param_index.get(name).copied())
+        else {
+            return;
+        };
+        let Some(dims) = shape
+            .fields
+            .as_mut()
+            .and_then(|fields| fields.get_mut("dims"))
+            .and_then(|dims| dims.values.as_mut())
+        else {
+            return;
+        };
+        for (axis, dim) in dims.iter_mut().enumerate() {
+            if dim.term.is_none() {
+                dim.term = Some(cuda_async::predicate::Term::atom(
+                    self.extent_atom(param, axis),
+                ));
+            }
+        }
+    }
+
+    /// The atom naming `param`'s extent on `axis`, in the frame the kernel
+    /// actually sees — the single place the SC1 frame decision is encoded.
+    ///
+    /// An immutable `&Tensor` is passed whole, so its kernel-visible extent is
+    /// the *root* extent: [`cuda_async::predicate::Atom::Dim`], the frame
+    /// declared `preconditions` are stated in (so declared facts can entail
+    /// obligations over it). A `&mut Tensor` is slabbed — each work item sees
+    /// one piece — so its extent is
+    /// [`cuda_async::predicate::Atom::ViewExtent`], resolved on the host
+    /// against the partition shape. The two are distinct atom variants
+    /// precisely so a root-frame fact can never entail a view-frame obligation
+    /// by structural equality: the frame confusion is unrepresentable.
+    pub(crate) fn extent_atom(&self, param: usize, axis: usize) -> cuda_async::predicate::Atom {
+        if self.param_is_mutable.get(param).copied().unwrap_or(true) {
+            cuda_async::predicate::Atom::ViewExtent { param, axis }
+        } else {
+            cuda_async::predicate::Atom::Dim { param, axis }
+        }
+    }
+
+    /// `tensor`'s parameter index, but only when its kernel-visible extent IS
+    /// its root extent — the frame declared `preconditions` speak in.
+    ///
+    /// Any reasoning that relates a partition axis to a *declared* fact must
+    /// go through this: `dim(t, a)` names the whole tensor, so a fact about it
+    /// says nothing about a `&mut` parameter's per-CTA slab, and a tile count
+    /// taken over that slab is not the count the fact divides. Rather than
+    /// re-deriving mutability, this asks [`Self::extent_atom`] — the one place
+    /// the frame decision lives — and accepts only the root answer.
+    pub(crate) fn root_framed_param(&self, tensor: &str) -> Option<usize> {
+        let param = *self.param_index.get(tensor)?;
+        matches!(
+            self.extent_atom(param, 0),
+            cuda_async::predicate::Atom::Dim { .. }
+        )
+        .then_some(param)
+    }
+
+    /// The `deny_in_kernel_checks` policy, applied at the one moment it means
+    /// something: a *compiler-synthesized* safety check is about to become a
+    /// device instruction.
+    ///
+    /// Every synthesized check must call this immediately before emitting its
+    /// `Assert`. The attribute promises that no safety check remains in the
+    /// kernel; a site that skips it makes the promise partial, which is worse
+    /// than absent — an author who trusts the flag would ship exactly the
+    /// register cost it claims to forbid. (A programmer-written `assert!` is
+    /// not a synthesized check and must NOT route through here: the flag
+    /// governs what the compiler adds, not what the author asked for.)
+    ///
+    /// `what` names the check; `remedy` says how to discharge it. The caller
+    /// keeps emitting its own assert when the flag is off, so this is purely a
+    /// policy gate — it never changes what is verified, only whether a residual
+    /// in-kernel check is tolerated.
+    pub(crate) fn deny_residual_check(
+        &self,
+        what: &str,
+        remedy: &str,
+        span: &proc_macro2::Span,
+    ) -> Result<(), JITError> {
+        if !self.entry_attrs.get_entry_arg_bool("deny_in_kernel_checks") {
+            return Ok(());
+        }
+        self.jit_error_result(
+            span,
+            &format!(
+                "`deny_in_kernel_checks`: {what} could not be discharged at compile time \
+                 or hoisted to launch, so it would be emitted in the kernel and cost \
+                 device registers. {remedy}. Or drop the flag."
+            ),
+        )
+    }
+
     pub fn new(
         modules: &'m CUDATileModules,
         module_name: &str,
@@ -185,14 +537,39 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             println!();
         }
 
+        // Resolve parameter names to signature positions (same order as
+        // `Validator.params` and the host arg-push order).
+        let param_index: HashMap<String, usize> = function
+            .sig
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, arg)| match arg {
+                syn::FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+                    syn::Pat::Ident(pat_ident) => Some((pat_ident.ident.to_string(), i)),
+                    _ => None,
+                },
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect();
+
+        let param_is_mutable = get_sig_param_mutability(&function.sig);
+
         // 12. Build struct directly.
+        let assumptions = crate::passes::obligation::Assumptions::from_preconditions(
+            &proof_results,
+            &param_index,
+        );
         Ok(CUDATileFunctionCompiler {
             modules,
             module_name: module_name.to_string(),
             _function_name: function_name.to_string(),
             entry_attrs,
             const_grid,
-            proof_results,
+            assumptions,
+            param_index,
+            param_is_mutable,
+            launch_checks: RefCell::new(Vec::new()),
             gpu_name,
             optimization_hints,
             _function: function,
@@ -202,6 +579,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             stride_args,
             module_name_stack: vec![module_name.to_string()],
             typeck_results: RefCell::new(None),
+            check_stats: CheckHoistStats::default(),
         })
     }
 
@@ -470,6 +848,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 } else {
                     Mutability::Immutable
                 };
+                // Record which kernel parameter this value *is*. Names do not
+                // survive inlining -- inside `Tensor::shape(&self)` the receiver
+                // is `self` -- so provenance has to ride the value, not the
+                // syntax, for anything downstream to resolve it to a parameter.
+                val.tensor_origin = Some(name.clone());
                 ctx.vars.insert(name.clone(), val);
             }
         }
@@ -555,7 +938,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     pub fn get_validator(&self) -> Validator {
-        self.validator.clone()
+        let mut validator = self.validator.clone();
+        // Surface the launch checks hoisted during compilation so the host runs
+        // them at launch.
+        validator.launch_checks = self.launch_checks.borrow().clone();
+        validator
     }
 
     pub fn gpu_name(&self) -> &str {
