@@ -21,9 +21,9 @@ use super::tile_rust_type::TileRustType;
 use super::utils::{
     cmp_ordering_attr, cmp_pred_attr, flag_attr, rounding_mode_attr, signedness_attr, NamedAttr,
 };
-use crate::bounds::bounds_from_bop;
 use crate::error::JITError;
 use crate::generics::GenericVars;
+use crate::value_facts;
 
 use cutile_ir::builder::{append_op, OpBuilder};
 use cutile_ir::bytecode::Opcode;
@@ -319,6 +319,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 .result(operand_result_ty.clone())
                                 .build(module)
                         }
+                        TileBinaryOp::Shl => OpBuilder::new(Opcode::ShLI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr("overflow", Attribute::i32(0))
+                            .result(operand_result_ty.clone())
+                            .build(module),
+                        TileBinaryOp::Shr => OpBuilder::new(Opcode::ShRI, self.ir_location(span))
+                            .operand(lhs_value)
+                            .operand(rhs_value)
+                            .attr(sign_attr.0, sign_attr.1)
+                            .result(operand_result_ty.clone())
+                            .build(module),
                         _ => {
                             return self.jit_error_result(
                                 span,
@@ -434,7 +446,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         };
 
-        let op_bounds = if let (Some(a), Some(b)) = (lhs.bounds, rhs.bounds) {
+        // Value-fact transfer (interval + symbolic), gathered in `value_facts`.
+        // Interval facts require primitive operands; the symbolic term still
+        // propagates when only one side has a range (e.g. an affine index).
+        let facts = if lhs.bounds.is_some() && rhs.bounds.is_some() {
             if !(lhs.kind == Kind::PrimitiveType && rhs.kind == Kind::PrimitiveType) {
                 return self.jit_error_result(
                     span,
@@ -444,11 +459,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     ),
                 );
             }
-            bounds_from_bop(tile_rust_arithmetic_op, &a, &b)
+            let result_domain = return_type
+                .get_instantiated_rust_element_type(&self.modules.primitives())
+                .as_deref()
+                .and_then(value_facts::int_value_domain);
+            value_facts::transfer(tile_rust_arithmetic_op, &lhs, &rhs, result_domain)
         } else {
-            None
+            value_facts::ScalarFacts {
+                bounds: None,
+                term: value_facts::propagate_term(tile_rust_arithmetic_op, &lhs, &rhs),
+                floor_div: value_facts::propagate_floor_div(tile_rust_arithmetic_op, &lhs, &rhs),
+            }
         };
-        if let Some(bounds) = &op_bounds {
+        if let Some(bounds) = &facts.bounds {
             if bounds.is_exact() {
                 // The lower/upper bounds are equivalent — emit a constant
                 // instead. The op allocated above becomes dead (not appended
@@ -468,7 +491,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         append_op(module, block_id, op_id);
         let value = results[0];
         let mut tr_value = TileRustValue::new_value_kind_like(value, return_type.clone());
-        tr_value.bounds = op_bounds;
+        tr_value.bounds = facts.bounds;
+        tr_value.term = facts.term;
+        tr_value.floor_div = facts.floor_div;
         Ok(tr_value)
     }
 }

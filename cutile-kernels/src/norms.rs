@@ -47,8 +47,7 @@ pub mod rms_norm_f16_module {
         let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
 
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
-        let mut out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> =
-            unsafe { out.partition_mut(tile_shape) };
+        let mut out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles {
             let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
             let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
@@ -56,7 +55,7 @@ pub mod rms_norm_f16_module {
             let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_f16);
             let tout: Tile<f32, { [1, BLOCK_SIZE] }> = tx * inv_rms * tw;
             let tout_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(tout);
-            unsafe { out_part.store(tout_f16, [0i32, j]) };
+            out_part.store(tout_f16, [0i32, j]);
         }
     }
 }
@@ -116,10 +115,9 @@ pub mod add_rms_norm_f16_module {
 
         // Second pass: write normalized output and updated residual.
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
-        let mut out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> =
-            unsafe { out.partition_mut(tile_shape) };
+        let mut out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> = out.partition_mut(tile_shape);
         let mut res_out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> =
-            unsafe { residual_out.partition_mut(tile_shape) };
+            residual_out.partition_mut(tile_shape);
         for j in 0i32..num_tiles {
             let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load([row, j]);
             let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
@@ -131,10 +129,8 @@ pub mod add_rms_norm_f16_module {
             let normed: Tile<f32, { [1, BLOCK_SIZE] }> = combined * inv_rms * tw;
             let normed_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(normed);
             let combined_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(combined);
-            unsafe {
-                out_part.store(normed_f16, [0i32, j]);
-                res_out_part.store(combined_f16, [0i32, j]);
-            }
+            out_part.store(normed_f16, [0i32, j]);
+            res_out_part.store(combined_f16, [0i32, j]);
         }
     }
 }
@@ -198,8 +194,7 @@ pub mod qk_norm_f16_module {
             q_weight.partition(const_shape![BLOCK_SIZE]);
         let kw_part: Partition<f16, { [BLOCK_SIZE] }> =
             k_weight.partition(const_shape![BLOCK_SIZE]);
-        let mut out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> =
-            unsafe { out.partition_mut(tile_shape) };
+        let mut out_part: PartitionMut<f16, { [1, BLOCK_SIZE] }> = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles {
             let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = if is_q {
                 q_part.load([local_row, j])
@@ -215,7 +210,7 @@ pub mod qk_norm_f16_module {
             let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_f16);
             let tout: Tile<f32, { [1, BLOCK_SIZE] }> = tx * inv_rms * tw;
             let tout_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(tout);
-            unsafe { out_part.store(tout_f16, [0i32, j]) };
+            out_part.store(tout_f16, [0i32, j]);
         }
     }
 }

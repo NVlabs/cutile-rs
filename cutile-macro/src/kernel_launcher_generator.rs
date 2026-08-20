@@ -926,6 +926,21 @@ pub fn generate_kernel_launcher(
     .block
     .stmts;
     launcher_method.block.stmts.extend(compile_stmts);
+    // Per-parameter runtime extents for launch-time check hoisting; the
+    // per-arg validator statements fill in each tensor param's shape by
+    // signature index (non-tensor params stay empty).
+    launcher_method.block.stmts.push(parse_stmt(
+        "let mut param_shapes: Vec<Vec<i32>> = vec![Vec::new(); validator.params.len()];"
+            .to_string(),
+    ));
+    // The kernel-visible view per parameter: the partition slab for a
+    // `&mut Tensor` output, the whole tensor otherwise. Resolves the
+    // view-frame atoms in hoisted checks, while `param_shapes` (the root
+    // frame) resolves `dim(...)` atoms and declared preconditions.
+    launcher_method.block.stmts.push(parse_stmt(
+        "let mut view_shapes: Vec<Vec<i32>> = vec![Vec::new(); validator.params.len()];"
+            .to_string(),
+    ));
     launcher_method.block.stmts.extend(validator_statements);
 
     // Above the `!_compile_only` gate so warmup validates the grid too.
@@ -933,6 +948,12 @@ pub fn generate_kernel_launcher(
         "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
         launch_grid_expr_strs.join(",")
     )));
+    // Run the compiler-emitted launch checks (safety checks hoisted out of the
+    // kernel) against the runtime extents, before the kernel is launched.
+    launcher_method.block.stmts.push(parse_stmt(
+        "validate_launch_checks(&validator.launch_checks, &param_shapes, &view_shapes, launch_grid)?;"
+            .to_string(),
+    ));
 
     let mut launch_only_stmts: Vec<Stmt> = vec![parse_stmt(
         "let mut kernel_launch = AsyncKernelLaunch::new(function.clone());".to_string(),
@@ -1272,7 +1293,17 @@ struct DimEqualityPrecondition {
     rhs_axis: usize,
 }
 
-fn parse_metadata_preconditions(item: &ItemFn) -> Result<Vec<DimEqualityPrecondition>, Error> {
+enum Precondition {
+    DimEq(DimEqualityPrecondition),
+    /// `dim(tensor, axis) % divisor == 0`, divisor a positive integer literal.
+    DimDivisible {
+        tensor: String,
+        axis: usize,
+        divisor: i64,
+    },
+}
+
+fn parse_metadata_preconditions(item: &ItemFn) -> Result<Vec<Precondition>, Error> {
     let Some(entry_attrs) = get_meta_list_by_last_segment("entry", &item.attrs) else {
         return Ok(Vec::new());
     };
@@ -1305,9 +1336,59 @@ fn parse_metadata_preconditions(item: &ItemFn) -> Result<Vec<DimEqualityPrecondi
                 .ident
                 .err("each `preconditions` entry must be a metadata equality");
         };
-        preconditions.push(parse_dim_equality_precondition(binary)?);
+        preconditions.push(parse_precondition(binary)?);
     }
     Ok(preconditions)
+}
+
+fn parse_precondition(binary: &syn::ExprBinary) -> Result<Precondition, Error> {
+    if !matches!(binary.op, syn::BinOp::Eq(_)) {
+        return binary.err("precondition predicates must use `==`");
+    }
+    // Divisibility spelling: `dim(t, k) % divisor == 0`.
+    if let Expr::Binary(rem) = binary.left.as_ref() {
+        if matches!(rem.op, syn::BinOp::Rem(_)) {
+            let is_zero = match binary.right.as_ref() {
+                Expr::Lit(lit) => match &lit.lit {
+                    Lit::Int(i) => i.base10_parse::<i64>().map(|v| v == 0).unwrap_or(false),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !is_zero {
+                return binary.err(
+                    "a `%` precondition must compare against literal `0`: `dim(t, k) % d == 0`",
+                );
+            }
+            let (tensor, axis) = parse_dim_precondition_expr(&rem.left)?;
+            let Expr::Lit(lit) = rem.right.as_ref() else {
+                return rem.right.err(
+                    "a `%` precondition divisor must be a positive integer literal (a const \
+                     generic cannot be verified by the launcher, which runs before \
+                     monomorphization)",
+                );
+            };
+            let Lit::Int(int_lit) = &lit.lit else {
+                return rem
+                    .right
+                    .err("a `%` precondition divisor must be a positive integer literal");
+            };
+            let divisor = int_lit
+                .base10_parse::<i64>()
+                .map_err(|err| crate::error::syn_err(int_lit.span(), &err.to_string()))?;
+            if divisor < 1 {
+                return rem.right.err(&format!(
+                    "a `%` precondition divisor must be >= 1, got {divisor}"
+                ));
+            }
+            return Ok(Precondition::DimDivisible {
+                tensor,
+                axis,
+                divisor,
+            });
+        }
+    }
+    parse_dim_equality_precondition(binary).map(Precondition::DimEq)
 }
 
 fn parse_dim_equality_precondition(
@@ -1395,11 +1476,51 @@ fn precondition_shape_expr(name: &str, kind: TensorParamKind) -> TokenStream2 {
 }
 
 fn metadata_precondition_validation_stmts(
-    preconditions: &[DimEqualityPrecondition],
+    preconditions: &[Precondition],
     tensor_param_kinds: &HashMap<String, TensorParamKind>,
 ) -> Result<Vec<Stmt>, Error> {
     let mut statements = Vec::new();
     for precondition in preconditions {
+        let precondition = match precondition {
+            Precondition::DimEq(eq) => eq,
+            Precondition::DimDivisible {
+                tensor,
+                axis,
+                divisor,
+            } => {
+                let Some(&kind) = tensor_param_kinds.get(tensor) else {
+                    return Err(crate::error::syn_err(
+                        Span::call_site(),
+                        &format!("precondition references unknown tensor parameter `{tensor}`"),
+                    ));
+                };
+                let shape_expr = precondition_shape_expr(tensor, kind);
+                let axis = *axis;
+                let divisor = *divisor;
+                let validation = syn::parse2::<ExprBlock>(quote! {{
+                    {
+                        let shape: Vec<i32> = #shape_expr;
+                        kernel_launch_assert(
+                            #axis < shape.len(),
+                            format!(
+                                "dim({}, {}) % {} == 0 failed: axis is out of range for shape {:?}",
+                                #tensor, #axis, #divisor, shape
+                            ).as_str(),
+                        )?;
+                        kernel_launch_assert(
+                            (shape[#axis] as i64).rem_euclid(#divisor) == 0,
+                            format!(
+                                "dim({}, {}) % {} == 0 failed: extent is {}",
+                                #tensor, #axis, #divisor, shape[#axis]
+                            ).as_str(),
+                        )?;
+                    }
+                }})
+                .unwrap();
+                statements.extend(validation.block.stmts);
+                continue;
+            }
+        };
         let Some(&lhs_kind) = tensor_param_kinds.get(&precondition.lhs) else {
             return Err(crate::error::syn_err(
                 Span::call_site(),
@@ -1588,7 +1709,7 @@ fn get_tensor_code(
         builder_statements.push(parse_stmt(format!(
             "KernelOutputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
         )));
-        launch_grid_expr_strs.push(format!("KernelOutputStored::grid(&{var_name})?"));
+        launch_grid_expr_strs.push(format!("KernelOutputStored::grid_bound(&{var_name})?"));
         syn::parse2::<ExprBlock>(quote! {{
             {
                 let ValidParamType::Tensor(tensor_validator) = &validator.params[#var_idx] else {
@@ -1600,6 +1721,12 @@ fn get_tensor_code(
                     format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()).as_str())?;
                 kernel_launch_assert(valid_shape == &given_shape,
                     format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape, given_shape).as_str())?;
+                // Runtime extents for launch-time check hoisting (indexed by
+                // signature position): root shape resolves `Dim` atoms, and the
+                // partition slab -- this param's kernel-visible view -- resolves
+                // `ViewExtent` atoms.
+                param_shapes[#var_idx] = KernelOutputStored::shape_as_i32(&#var_ident);
+                view_shapes[#var_idx] = given_shape;
             }
         }})
         .unwrap()
@@ -1626,6 +1753,11 @@ fn get_tensor_code(
                 kernel_launch_assert(pred,
                     format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape_mixed, given_shape).as_str())?;
                 // TODO (hme): add validation for strides here too.
+                // Runtime extents for launch-time check hoisting (indexed by
+                // signature position). An immutable tensor is passed whole, so
+                // its view is its root shape.
+                param_shapes[#var_idx] = #var_ident.shape().to_vec();
+                view_shapes[#var_idx] = param_shapes[#var_idx].clone();
             }
         }})
         .unwrap()

@@ -33,8 +33,8 @@ pub mod kv_cache_update_seq_f16_module {
 
         let new_k_part = new_k.partition(const_shape![1, 1, BLOCK_SIZE]);
         let new_v_part = new_v.partition(const_shape![1, 1, BLOCK_SIZE]);
-        let mut k_cache_part = unsafe { k_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]) };
-        let mut v_cache_part = unsafe { v_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]) };
+        let mut k_cache_part = k_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]);
+        let mut v_cache_part = v_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]);
 
         let s_start: i32 = s_tile_idx * BM_S;
         // Skip trailing CTAs that are entirely beyond seq_len. The
@@ -52,10 +52,8 @@ pub mod kv_cache_update_seq_f16_module {
                         .reshape(const_shape![1, 1, BLOCK_SIZE]);
                     // Local index within per-CTA tile; position_start
                     // is assumed 0 (see function docstring).
-                    unsafe {
-                        k_cache_part.store(k_tile, [0i32, s_local, 0i32]);
-                        v_cache_part.store(v_tile, [0i32, s_local, 0i32]);
-                    }
+                    k_cache_part.store(k_tile, [0i32, s_local, 0i32]);
+                    v_cache_part.store(v_tile, [0i32, s_local, 0i32]);
                 }
             }
         }
@@ -98,8 +96,8 @@ pub mod kv_cache_update_seq_dynpos_f16_module {
 
         let new_k_part = new_k.partition(const_shape![1, 1, BLOCK_SIZE]);
         let new_v_part = new_v.partition(const_shape![1, 1, BLOCK_SIZE]);
-        let mut k_cache_part = unsafe { k_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]) };
-        let mut v_cache_part = unsafe { v_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]) };
+        let mut k_cache_part = k_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]);
+        let mut v_cache_part = v_cache.partition_mut(const_shape![1, 1, BLOCK_SIZE]);
 
         for s in 0i32..seq_len {
             let k_tile = new_k_part
@@ -109,10 +107,8 @@ pub mod kv_cache_update_seq_dynpos_f16_module {
                 .load([s, head, d_block])
                 .reshape(const_shape![1, 1, BLOCK_SIZE]);
             let cache_pos = pos_start + s;
-            unsafe {
-                k_cache_part.store(k_tile, [0i32, cache_pos, 0i32]);
-                v_cache_part.store(v_tile, [0i32, cache_pos, 0i32]);
-            }
+            k_cache_part.store(k_tile, [0i32, cache_pos, 0i32]);
+            v_cache_part.store(v_tile, [0i32, cache_pos, 0i32]);
         }
     }
 }

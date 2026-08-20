@@ -37,6 +37,8 @@ pub enum TileBinaryOp {
     BitAnd,
     BitOr,
     BitXor,
+    Shl,
+    Shr,
 }
 
 /// Maps a string operation name (e.g. `"add"`, `"ceil_div"`) to a [`TileBinaryOp`].
@@ -60,6 +62,8 @@ pub fn get_binary_op_from_op_str(op_str: &str) -> Result<TileBinaryOp, JITError>
         "and" => Ok(TileBinaryOp::BitAnd),
         "or" => Ok(TileBinaryOp::BitOr),
         "xor" => Ok(TileBinaryOp::BitXor),
+        "shl" => Ok(TileBinaryOp::Shl),
+        "shr" => Ok(TileBinaryOp::Shr),
         _ => SourceLocation::unknown()
             .jit_error_result(&format!("unrecognized arithmetic operation `{op_str}`")),
     }
@@ -84,6 +88,8 @@ pub fn get_tile_bop_from_rust_bop(rust_bin_op: &BinOp) -> Result<TileBinaryOp, J
         BinOp::BitXor(_) => Ok(TileBinaryOp::BitXor),
         BinOp::And(_) => Ok(TileBinaryOp::BitAnd),
         BinOp::Or(_) => Ok(TileBinaryOp::BitOr),
+        BinOp::Shl(_) => Ok(TileBinaryOp::Shl),
+        BinOp::Shr(_) => Ok(TileBinaryOp::Shr),
         _ => SourceLocation::unknown().jit_error_result("this binary operator is not supported"),
     }
 }
@@ -365,6 +371,9 @@ fn bitwise_bounds(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> Bounds
 /// Returns the result bounds for a [`TileBinaryOp`], or `None` on division by zero.
 pub fn bounds_from_bop(op: &TileBinaryOp, a: &Bounds<i64>, b: &Bounds<i64>) -> Option<Bounds<i64>> {
     match op {
+        // Shift intervals are not corner-monotone for negative or oversized
+        // operands; stay conservative.
+        TileBinaryOp::Shl | TileBinaryOp::Shr => None,
         TileBinaryOp::CeilDiv | TileBinaryOp::Div | TileBinaryOp::TrueDiv | TileBinaryOp::Rem => {
             // Any op with a divisor is handled here so it can reject a zero
             // divisor. Reject when zero lies anywhere in the divisor's inclusive

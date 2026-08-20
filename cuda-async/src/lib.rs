@@ -14,6 +14,7 @@ pub mod device_operation;
 pub mod error;
 pub mod launch;
 mod loom_compat;
+pub mod predicate;
 pub mod prelude;
 // The real CUDA backend wraps pinned memory via `AtomicU32::from_ptr`, which is
 // incompatible with loom's swapped atomics; under `--cfg loom` the protocol is

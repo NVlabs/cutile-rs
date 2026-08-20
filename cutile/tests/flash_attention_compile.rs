@@ -15,7 +15,6 @@ mod flash_attention_compile_module {
     use cutile::core::*;
 
     #[cutile::entry(
-        unchecked_accesses = false,
         optimization_hints = (
             sm_120 = (num_cta_in_cga = 1, max_divisibility = 16,),
         )
