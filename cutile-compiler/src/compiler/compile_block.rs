@@ -35,7 +35,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         matches!(
             ident.to_string().as_str(),
-            "Tensor" | "Partition" | "BoundedPartition" | "PartitionMut" | "MappedPartitionMut"
+            "Tensor"
+                | "Partition"
+                | "BoundedPartition"
+                | "BoundedPartitionMut"
+                | "PartitionMut"
+                | "MappedPartitionMut"
         )
     }
 

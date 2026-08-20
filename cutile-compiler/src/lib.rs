@@ -24,6 +24,7 @@ pub mod train_map;
 pub mod type_aliases;
 pub mod types;
 pub mod use_classifier;
+mod value_facts;
 
 pub mod compiler;
 pub mod dump;

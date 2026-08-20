@@ -10,6 +10,9 @@
  * Run with: cargo run -p cutile-examples --example nvfp4
  */
 
+// Still on the deprecated `Dim::new` spelling; migrate with the examples pass.
+#![allow(deprecated)]
+
 use cutile::cuda_core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::prelude::*;
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
