@@ -47,5 +47,8 @@ mod async_device_op;
 #[path = "gpu/book_snippets.rs"]
 mod book_snippets;
 
+#[path = "gpu/launch_attributes.rs"]
+mod launch_attributes;
+
 #[path = "gpu/tensor_permute.rs"]
 mod tensor_permute;

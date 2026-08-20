@@ -27,6 +27,19 @@ pub struct LaunchConfig {
     pub shared_mem_bytes: u32,
 }
 
+/// Optional attributes submitted with a CUDA extended kernel launch.
+///
+/// Keep launch behavior in one value so new attributes can be composed
+/// without adding mutually exclusive launch entry points.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LaunchAttributes {
+    /// Permit this grid to overlap the preceding grid in the same stream.
+    ///
+    /// The dependent kernel must establish a device-side dependency before it
+    /// consumes prerequisite output.
+    pub programmatic_stream_serialization: bool,
+}
+
 /// A GPU device handle wrapping a CUDA primary context.
 ///
 /// Can be either **owned** (created via [`Device::new`], releases the

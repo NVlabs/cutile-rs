@@ -11,7 +11,10 @@ use crate::device_operation::{DeviceOp, ExecutionContext};
 use crate::error::DeviceError;
 use anyhow::{Context, Result};
 use cuda_core::sys::CUdeviceptr;
-use cuda_core::{launch_kernel, DType, Function, LaunchConfig, Stream};
+use cuda_core::{
+    launch_kernel, launch_kernel_with_attributes, DType, Function, LaunchAttributes, LaunchConfig,
+    Stream,
+};
 use std::ffi::c_void;
 use std::fmt::Debug;
 use std::future::IntoFuture;
@@ -24,6 +27,7 @@ pub struct AsyncKernelLaunch {
     pub func: Arc<Function>,
     pub args: Vec<*mut c_void>,
     cfg: Option<LaunchConfig>,
+    attributes: LaunchAttributes,
 }
 
 unsafe impl Send for AsyncKernelLaunch {}
@@ -48,6 +52,7 @@ impl AsyncKernelLaunch {
             func,
             args: Vec::new(),
             cfg: None,
+            attributes: LaunchAttributes::default(),
         }
     }
 
@@ -84,6 +89,12 @@ impl AsyncKernelLaunch {
         self
     }
 
+    /// Replaces the composable attributes used for this launch.
+    pub fn set_launch_attributes(&mut self, attributes: LaunchAttributes) -> &mut Self {
+        self.attributes = attributes;
+        self
+    }
+
     /// Launches the kernel on the given CUDA stream.
     ///
     /// # Safety
@@ -92,15 +103,27 @@ impl AsyncKernelLaunch {
         let cfg = self.cfg.ok_or(DeviceError::Launch(
             "Await called before launching the kernel.".to_string(),
         ))?;
-        launch_kernel(
-            self.func.cu_function(),
-            cfg.grid_dim,
-            cfg.block_dim,
-            cfg.shared_mem_bytes,
-            stream.cu_stream(),
-            &mut self.args,
-        )
-        .with_context(|| {
+        let result = if self.attributes == LaunchAttributes::default() {
+            launch_kernel(
+                self.func.cu_function(),
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                stream.cu_stream(),
+                &mut self.args,
+            )
+        } else {
+            launch_kernel_with_attributes(
+                self.func.cu_function(),
+                cfg.grid_dim,
+                cfg.block_dim,
+                cfg.shared_mem_bytes,
+                self.attributes,
+                stream.cu_stream(),
+                &mut self.args,
+            )
+        };
+        result.with_context(|| {
             format!(
                 r#"
                 Failed to launch kernel.

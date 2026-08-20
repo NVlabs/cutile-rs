@@ -20,7 +20,7 @@ use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
 
 use crate::error::*;
-use crate::runtime::Stream;
+use crate::runtime::{LaunchAttributes, Stream};
 
 /// Initializes the CUDA driver API. Must be called before any other driver call.
 ///
@@ -67,6 +67,68 @@ pub unsafe fn launch_kernel(
         std::ptr::null_mut(),
     )
     .result()
+}
+
+fn encode_i32_launch_attribute(
+    id: cuda_bindings::CUlaunchAttributeID_enum,
+    value: i32,
+) -> cuda_bindings::CUlaunchAttribute_st {
+    // Bindgen keeps CUlaunchAttribute_st opaque across CUDA toolkit revisions.
+    // Its C layout is an enum at byte 0 followed by an eight-byte-aligned union
+    // payload at byte 8.
+    let mut attribute: cuda_bindings::CUlaunchAttribute_st = unsafe { std::mem::zeroed() };
+    unsafe {
+        let base = &mut attribute as *mut _ as *mut u8;
+        (base as *mut u32).write(id);
+        (base.add(8) as *mut i32).write(value);
+    }
+    attribute
+}
+
+/// Launches a CUDA kernel with composable extended-launch attributes.
+///
+/// # Safety
+///
+/// The caller must uphold the same function, stream, argument, and launch
+/// configuration requirements as [`launch_kernel`]. When
+/// `programmatic_stream_serialization` is enabled, device code must establish
+/// an ordering edge before reading prerequisite output.
+#[inline]
+pub unsafe fn launch_kernel_with_attributes(
+    f: cuda_bindings::CUfunction,
+    grid_dim: (c_uint, c_uint, c_uint),
+    block_dim: (c_uint, c_uint, c_uint),
+    shared_mem_bytes: c_uint,
+    attributes: LaunchAttributes,
+    stream: cuda_bindings::CUstream,
+    kernel_params: &mut [*mut c_void],
+) -> Result<(), DriverError> {
+    let mut encoded_attributes = Vec::with_capacity(1);
+    if attributes.programmatic_stream_serialization {
+        encoded_attributes.push(encode_i32_launch_attribute(
+            cuda_bindings::CUlaunchAttributeID_enum_CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION,
+            1,
+        ));
+    }
+    let attrs = if encoded_attributes.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        encoded_attributes.as_mut_ptr()
+    };
+    let config = cuda_bindings::CUlaunchConfig_st {
+        gridDimX: grid_dim.0,
+        gridDimY: grid_dim.1,
+        gridDimZ: grid_dim.2,
+        blockDimX: block_dim.0,
+        blockDimY: block_dim.1,
+        blockDimZ: block_dim.2,
+        sharedMemBytes: shared_mem_bytes,
+        hStream: stream,
+        attrs,
+        numAttrs: encoded_attributes.len() as u32,
+    };
+    cuda_bindings::cuLaunchKernelEx(&config, f, kernel_params.as_mut_ptr(), std::ptr::null_mut())
+        .result()
 }
 
 /// Asynchronously allocates `num_bytes` of device memory on the given stream.
