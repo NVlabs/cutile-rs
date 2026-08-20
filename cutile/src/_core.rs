@@ -2751,7 +2751,8 @@ pub mod core {
     )]
     #[cuda_tile::variadic_op(N = 3)]
     pub fn mmaf_scaled<
-        EIn: ElementType,
+        ELhs: ElementType,
+        ERhs: ElementType,
         EScale: ElementType,
         const LHS: [i32; N],
         const RHS: [i32; N],
@@ -2759,8 +2760,8 @@ pub mod core {
         const LHS_SCALE: [i32; N],
         const RHS_SCALE: [i32; N],
     >(
-        lhs: Tile<EIn, LHS>,
-        rhs: Tile<EIn, RHS>,
+        lhs: Tile<ELhs, LHS>,
+        rhs: Tile<ERhs, RHS>,
         acc: Tile<f32, ACC>,
         lhs_scale: Tile<EScale, LHS_SCALE>,
         rhs_scale: Tile<EScale, RHS_SCALE>,
