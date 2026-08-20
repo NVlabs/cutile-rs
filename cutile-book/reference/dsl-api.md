@@ -587,7 +587,7 @@ let prefix: Tile<f32, { [128] }> = scan_sum(row, 0i32, reverse::Forward, 0.0f32)
 | Function | Signature | Description |
 |---|---|---|
 | `mma(a, b, c)` | `(Tile<E, {[M,K]}>, Tile<E, {[K,N]}>, Tile<E, {[M,N]}>) -> Tile<E, {[M,N]}>` | Matrix multiply-accumulate |
-| `mmaf_scaled(a, b, c, a_scale, b_scale)` | `(Tile<E, A>, Tile<E, B>, Tile<f32, C>, Tile<S, AS>, Tile<S, BS>) -> Tile<f32, C>` | Block-scaled floating-point matrix multiply-accumulate |
+| `mmaf_scaled(a, b, c, a_scale, b_scale)` | `(Tile<EA, A>, Tile<EB, B>, Tile<f32, C>, Tile<S, AS>, Tile<S, BS>) -> Tile<f32, C>` | Block-scaled floating-point matrix multiply-accumulate |
 
 Maps to hardware tensor cores when available.
 
@@ -608,6 +608,12 @@ ops operate on rank-1 tiles; the FP4 tile methods emit the required
 flatten/pack-or-unpack/reshape sequence. See
 [Inference with NVFP4/MXFP8](../tutorials/11-nvfp4-inference.md)
 for the full pattern.
+
+The Rust frontend also accepts one FP8 operand and one FP4 operand. CUDA Tile
+IR 13.3 requires the two `mmaf_scaled` operands to have the same element type,
+so the compiler legalizes that combination by widening the logical FP4 tile
+exactly to the FP8 type before emitting Tile IR. This preserves W4A8 values and
+W4 storage, but it does not claim native mixed-input MMA throughput.
 
 ### Low-Level Memory Ops
 
