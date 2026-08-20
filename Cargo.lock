@@ -41,7 +41,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
 dependencies = [
- "object",
+ "object 0.37.3",
 ]
 
 [[package]]
@@ -424,6 +424,7 @@ dependencies = [
  "half",
  "loom",
  "once_cell",
+ "rustc-hash 2.1.2",
  "thiserror 1.0.69",
 ]
 
@@ -446,6 +447,8 @@ dependencies = [
  "anyhow",
  "cuda-bindings",
  "half",
+ "object 0.36.7",
+ "trybuild",
 ]
 
 [[package]]
@@ -1244,6 +1247,18 @@ checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
 dependencies = [
  "hermit-abi",
  "libc",
+]
+
+[[package]]
+name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "memchr",
 ]
 
 [[package]]
