@@ -13,3 +13,8 @@ readme = "README.md"
 cuda-bindings = { workspace = true }
 anyhow = { workspace = true }
 half = { workspace = true }
+# Used by the vendored artifact-bundle reader in `simt::artifacts`.
+object = { version = "0.36", default-features = false, features = ["read", "std", "write"] }
+
+[dev-dependencies]
+trybuild = "1"
