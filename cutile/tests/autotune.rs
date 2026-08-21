@@ -5,6 +5,8 @@
 
 //! GPU integration test: a real (tiny) tuning run end to end.
 
+#![cfg(feature = "experimental-tune")]
+
 use cuda_core::Device;
 use cutile::bench::BenchOptions;
 use cutile::prelude::*;

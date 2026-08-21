@@ -12,6 +12,9 @@ keywords = ["mlir", "cutile", "cuda", "gpu", "async"]
 
 [features]
 default = []
+# Kernel autotuning (`cutile::tune`). Experimental: enabling this feature
+# opts into an API that may change in breaking ways between releases.
+experimental-tune = []
 
 [dependencies]
 syn = { workspace = true }

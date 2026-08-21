@@ -20,7 +20,7 @@ Start with powers of two or dimensions that align with the compute operation:
 | GEMM | Tile shapes compatible with Tensor Core MMA dimensions |
 | Reductions | Axis sizes that avoid excessive register pressure |
 
-Use profiling to tune from there. Very small tiles spend too much time on overhead. Very large tiles can spill registers or reduce the number of resident tile blocks.
+Use profiling to tune from there, or search the candidates automatically with [autotuning](#autotuning-experimental). Very small tiles spend too much time on overhead. Very large tiles can spill registers or reduce the number of resident tile blocks.
 
 ## Memory Traffic and Fusion
 
@@ -137,7 +137,7 @@ Optimization hints guide code generation for a target architecture:
 fn kernel<const S: [i32; 2]>(...) { ... }
 ```
 
-Runtime `CompileOptions` can override entry-level hints for autotuning. `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. `num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]` and requires bytecode version 13.3 or newer. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
+Runtime `CompileOptions` can override entry-level hints, which makes them a tunable axis: put the candidate values in a `Config` and apply them in the tuner's setup closure (see [Autotuning](#autotuning-experimental)). `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. `num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]` and requires bytecode version 13.3 or newer. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
 
 ## Common Pitfalls
 
@@ -149,10 +149,6 @@ Runtime `CompileOptions` can override entry-level hints for autotuning. `occupan
 - Strided access pattern: tile loads coalesce well, but algorithmic strides can still reduce effective bandwidth.
 
 Profile before and after each change. [Debugging and Profiling](debugging-and-profiling.md) describes Nsight Compute and Nsight Systems.
-
----
-
-Continue to [Interoperability](interoperability.md).
 
 ## Measuring Kernels
 
@@ -167,5 +163,55 @@ let r = do_bench(&stream, &BenchOptions::default(), |s| {
 println!("median {:.3} ms over {} reps", r.median_ms(), r.reps());
 ```
 
-Timing uses CUDA events (device timeline, not host clocks), warmup absorbs first-launch JIT, the L2 cache is cleared between reps, and results report medians and quantiles. When comparing two configurations, always use `do_bench_paired` — it alternates the arms rep by rep, so clock and thermal drift cannot masquerade as a difference between them.
+Timing uses CUDA events (device timeline, not host clocks), warmup absorbs first-launch JIT, the L2 cache is cleared between reps, and results report medians and quantiles. When comparing two configurations, use `do_bench_paired`. It alternates the arms rep by rep, so clock and thermal drift cannot masquerade as a difference between them.
+
+## Autotuning (experimental)
+
+`cutile::tune` automates the candidate search described in the sections above. It is gated behind the `experimental-tune` Cargo feature, and the API may change between releases:
+
+```toml
+cutile = { version = "...", features = ["experimental-tune"] }
+```
+
+The programmer declares the candidates, writes a setup closure, and the tuner measures each one:
+
+```rust
+use cutile::tune::{Autotuner, Config, ParamValue};
+
+let configs: Vec<Config> = [32i64, 64, 128, 256]
+    .into_iter()
+    .map(|bs| Config::new([("BLOCK_SIZE", ParamValue::Int(bs))]))
+    .collect();
+
+let outcome = Autotuner::new("rms_norm")
+    .configs(configs)
+    .run(&stream, |stream, config| {
+        let block_size = config.int("BLOCK_SIZE").unwrap();
+        // Prepare the launch for this candidate, run it once as a
+        // correctness gate, and return the closure to be timed.
+        let mut launch = build_launch(block_size)?;
+        launch(stream)?;
+        Ok(launch)
+    })?;
+
+let best = outcome.best.expect("a winner");
+```
+
+How it works:
+
+- A `Config` is a named set of integer or string parameters. The setup closure reads them to pick a monomorphization, a partition shape, or `CompileOptions` values.
+- Setup runs once per candidate. If it returns an error, the candidate is recorded as `Outcome::Invalid` with the message and the search continues. Invalid candidates never abort a run.
+- Each surviving candidate is timed with `do_bench`. After the search, the two best candidates are re-measured head to head with `do_bench_paired`, and that contemporaneous comparison picks the winner. Sequential medians never decide on their own.
+- `.prune(...)` removes candidates before they are visited. `.budget(...)` bounds the total wall-clock time of the run.
+- `.log(path)` appends every trial to a JSONL file. Rerunning with the same log resumes an interrupted search instead of starting over. The log records the tuner name and a hash of the search space, and refuses to resume from a log that belongs to a different search.
+
+The `autotune` example runs a complete search over the block size of an RMS normalization kernel:
+
+```sh
+cargo run -p cutile-examples --example autotune --features experimental-tune
+```
+
+---
+
+Continue to [Interoperability](interoperability.md).
 

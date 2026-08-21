@@ -6,6 +6,10 @@
 //! Kernel autotuning: declared search spaces, pluggable samplers, and
 //! persisted, provenance-checked results.
 //!
+//! **Experimental.** This module is gated behind the `experimental-tune`
+//! Cargo feature; enabling it opts into an API that may change in breaking
+//! ways between releases.
+//!
 //! The vocabulary follows the tools users already know: a [`Config`] is one
 //! candidate configuration (Triton's `Config`), a [`Sampler`] decides the
 //! visit order (Optuna's word), [`GridSampler`] is the default exhaustive
@@ -20,10 +24,10 @@
 //! - **Invalid candidates are data.** A candidate rejected by launch checks
 //!   or the correctness gate records [`Outcome::Invalid`] with its message;
 //!   it never aborts the search.
-//! - **Persistence is checked.** Artifacts carry provenance (source hash,
-//!   toolchain fingerprint, arch, machine, date) and an optional per-entry
-//!   verification key; a loader that detects a mismatch refuses the entry
-//!   rather than silently applying a stale winner.
+//! - **Persistence is checked.** The trial log records the tuner's name and
+//!   a hash of its search space and refuses to resume from a log that does
+//!   not match; the artifact store built on top extends the same discipline
+//!   with full provenance (source hash, toolchain fingerprint, arch).
 
 use crate::bench::{do_bench, BenchOptions, Measurement};
 use crate::error::Error;
@@ -44,9 +48,11 @@ use std::time::{Duration, Instant};
 /// the launch closure via `CompileOptions`). Keeping them in one ordered map
 /// makes a `Config` fully serializable for artifacts and logs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Config {
     /// Stable identity within a search space; artifact and log records key
-    /// on it. [`Config::new`] derives it from the parameters.
+    /// on it. [`Config::new`] derives it from the parameters — construct
+    /// through `new` so the two can never disagree.
     pub id: String,
     /// Ordered parameter map.
     pub params: BTreeMap<String, ParamValue>,
@@ -72,15 +78,24 @@ impl Config {
             params.into_iter().map(|(k, v)| (k.into(), v)).collect();
         // String values are JSON-encoded (quoted + escaped) so ids cannot
         // alias: `A=1` (int) differs from `A="1"` (string), and a string
-        // containing `,` or `=` cannot imitate additional parameters.
+        // containing `,` or `=` cannot imitate additional parameters. Keys
+        // holding a separator (or a quote) are JSON-encoded the same way; a
+        // raw key can never start with `"`, so the two forms cannot collide.
         let id = params
             .iter()
-            .map(|(k, v)| match v {
-                ParamValue::Int(i) => format!("{k}={i}"),
-                ParamValue::Str(s) => format!(
-                    "{k}={}",
-                    serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
-                ),
+            .map(|(k, v)| {
+                let key = if k.contains(['=', ',', '"']) {
+                    serde_json::to_string(k).unwrap_or_else(|_| format!("{k:?}"))
+                } else {
+                    k.clone()
+                };
+                match v {
+                    ParamValue::Int(i) => format!("{key}={i}"),
+                    ParamValue::Str(s) => format!(
+                        "{key}={}",
+                        serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+                    ),
+                }
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -125,6 +140,7 @@ pub fn space_hash(configs: &[Config]) -> String {
 
 /// The result of visiting one candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Trial {
     pub config_id: String,
     pub outcome: Outcome,
@@ -132,6 +148,7 @@ pub struct Trial {
 
 /// What happened when a candidate was visited.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Correctness gate passed; timing measured.
     Measured {
@@ -284,6 +301,7 @@ pub struct Autotuner {
 }
 
 /// The outcome of a tuning run: all trials plus the winning config.
+#[non_exhaustive]
 pub struct TuneOutcome {
     pub trials: Vec<Trial>,
     pub best: Option<Config>,
@@ -349,7 +367,10 @@ impl Autotuner {
     /// decided from that contemporaneous comparison — sequential (or resumed)
     /// medians never pick the winner on their own, since clock and thermal
     /// drift between measurements can exceed the margin between two good
-    /// configurations.
+    /// configurations. The runoff is skipped when the budget is already
+    /// exhausted; a finalist that fails its runoff setup forfeits to the
+    /// other; and if the paired measurement itself fails, the sequential
+    /// medians decide.
     pub fn run<S, F>(mut self, stream: &Arc<Stream>, setup: S) -> Result<TuneOutcome, Error>
     where
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
@@ -412,39 +433,19 @@ impl Autotuner {
         };
         let mut trials = sampler.search(&mut oracle);
 
-        // Paired runoff between the two best. Rationale in run()'s docs.
+        // Paired runoff between the two best. Rationale in run()'s docs. An
+        // exhausted budget skips it: the sequential medians decide, and no
+        // further GPU work runs.
         let best = match top_two(&oracle.configs, &trials) {
             None => None,
             Some((only, None)) => Some(only.clone()),
             Some((a, Some(b))) => {
                 let (a, b) = (a.clone(), b.clone());
-                match oracle.runoff(&a, &b) {
-                    Err(e) => {
-                        // A runoff that cannot run leaves the sequential
-                        // medians as the (recorded) decision basis.
-                        trials.push(Trial {
-                            config_id: a.id.clone(),
-                            outcome: Outcome::Invalid {
-                                reason: format!("runoff failed: {e}"),
-                            },
-                        });
-                        Some(a)
-                    }
-                    Ok((ms_a, ms_b)) => {
-                        for (cfg, ms) in [(&a, ms_a), (&b, ms_b)] {
-                            let t = Trial {
-                                config_id: cfg.id.clone(),
-                                outcome: Outcome::Measured {
-                                    median_ms: ms,
-                                    min_ms: ms,
-                                    reps: self.bench.min_reps.max(1),
-                                },
-                            };
-                            oracle.log.append(&t);
-                            trials.push(t);
-                        }
-                        Some(if ms_a <= ms_b { a } else { b })
-                    }
+                if oracle.budget_remaining() == Some(Duration::ZERO) {
+                    Some(a)
+                } else {
+                    let result = oracle.runoff(&a, &b);
+                    Some(runoff_verdict(a, b, result, &mut trials, oracle.log))
                 }
             }
         };
@@ -529,14 +530,86 @@ where
     S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
     F: FnMut(&Arc<Stream>) -> Result<(), Error>,
 {
-    /// Contemporaneous A/B/A/B re-measurement of two finalists; returns
-    /// their paired medians.
-    fn runoff(&mut self, a: &Config, b: &Config) -> Result<(f32, f32), Error> {
-        let mut fa = (self.setup)(&self.stream, a)?;
-        let mut fb = (self.setup)(&self.stream, b)?;
-        let (ma, mb) =
-            crate::bench::do_bench_paired(&self.stream, &self.bench, |s| fa(s), |s| fb(s))?;
-        Ok((ma.median_ms(), mb.median_ms()))
+    /// Contemporaneous A/B/A/B re-measurement of two finalists.
+    fn runoff(
+        &mut self,
+        a: &Config,
+        b: &Config,
+    ) -> Result<(Measurement, Measurement), RunoffError> {
+        let mut fa = (self.setup)(&self.stream, a).map_err(|error| RunoffError::Setup {
+            b_failed: false,
+            error,
+        })?;
+        let mut fb = (self.setup)(&self.stream, b).map_err(|error| RunoffError::Setup {
+            b_failed: true,
+            error,
+        })?;
+        crate::bench::do_bench_paired(&self.stream, &self.bench, |s| fa(s), |s| fb(s))
+            .map_err(RunoffError::Bench)
+    }
+}
+
+/// Why a runoff could not produce a verdict.
+enum RunoffError {
+    /// One finalist failed its runoff setup (compile, launch check, or the
+    /// correctness gate): that finalist is invalid now, whatever its earlier
+    /// median said.
+    Setup { b_failed: bool, error: Error },
+    /// The paired measurement failed after both setups succeeded —
+    /// environmental, not attributable to either finalist.
+    #[allow(dead_code)] // payload kept for debugging; not attributed to a config
+    Bench(Error),
+}
+
+/// Decides the winner from a runoff attempt. `a` is the sequential leader:
+/// it wins ties and unattributable failures. A finalist that fails its own
+/// runoff setup forfeits to the other, and the failure is recorded (and
+/// logged) against the finalist that actually failed.
+fn runoff_verdict(
+    a: Config,
+    b: Config,
+    result: Result<(Measurement, Measurement), RunoffError>,
+    trials: &mut Vec<Trial>,
+    log: &mut TrialLog,
+) -> Config {
+    match result {
+        Err(RunoffError::Setup { b_failed, error }) => {
+            let (loser, winner) = if b_failed { (b, a) } else { (a, b) };
+            let t = Trial {
+                config_id: loser.id.clone(),
+                outcome: Outcome::Invalid {
+                    reason: format!("runoff setup failed: {error}"),
+                },
+            };
+            log.append(&t);
+            trials.push(t);
+            winner
+        }
+        // Neither finalist is marked Invalid: the failure cannot be pinned
+        // on one of them, and the sequential medians remain the recorded
+        // decision basis.
+        Err(RunoffError::Bench(_)) => a,
+        Ok((ma, mb)) => {
+            let (oa, ob) = (measured(&ma), measured(&mb));
+            for (cfg, o) in [(&a, &oa), (&b, &ob)] {
+                let t = Trial {
+                    config_id: cfg.id.clone(),
+                    outcome: o.clone(),
+                };
+                log.append(&t);
+                trials.push(t);
+            }
+            // An Invalid or non-finite runoff median can never win.
+            let key = |o: &Outcome| match o {
+                Outcome::Measured { median_ms, .. } if median_ms.is_finite() => *median_ms,
+                _ => f32::INFINITY,
+            };
+            if key(&oa) <= key(&ob) {
+                a
+            } else {
+                b
+            }
+        }
     }
 }
 
@@ -597,6 +670,10 @@ impl TrialLog {
         };
         let mut existing = Vec::new();
         let mut needs_newline = false;
+        // Fresh means "no valid header on disk": a missing file, an empty
+        // file, or a whitespace-only one. Fresh logs are truncated and headed;
+        // anything else must present a matching header or be refused.
+        let mut fresh = true;
         match std::fs::read_to_string(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
@@ -633,24 +710,27 @@ impl TrialLog {
                 // A crash mid-write can leave a torn final line without a
                 // newline; appending directly would corrupt the next record.
                 needs_newline = !contents.ends_with('\n');
+                fresh = false;
             }
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| {
-                crate::error::tensor_error(&format!(
-                    "trial log {} cannot be opened for append: {e}",
-                    path.display()
-                ))
-            })?;
+        let mut opts = std::fs::OpenOptions::new();
+        if fresh {
+            // Truncate so stray whitespace can't precede the header.
+            opts.create(true).write(true).truncate(true);
+        } else {
+            opts.append(true);
+        }
+        let mut file = opts.open(path).map_err(|e| {
+            crate::error::tensor_error(&format!(
+                "trial log {} cannot be opened for append: {e}",
+                path.display()
+            ))
+        })?;
         if needs_newline {
             let _ = writeln!(file);
         }
-        // Head a fresh (or emptied) log with the identity record.
-        let is_empty = file.metadata().map(|m| m.len() == 0).unwrap_or(false);
-        if is_empty {
+        // Head a fresh log with the identity record.
+        if fresh {
             if let Ok(line) = serde_json::to_string(&expected) {
                 let _ = writeln!(file, "{line}");
             }
@@ -1332,5 +1412,145 @@ mod tests {
         ];
         let best = best_config(&configs, &trials).unwrap();
         assert_eq!(best.int("BN"), Some(128), "NaN never wins");
+    }
+
+    fn meas(times: &[f32]) -> Measurement {
+        Measurement::from_times_ms(times.to_vec())
+    }
+
+    fn silent_log() -> TrialLog {
+        TrialLog::open(None, "t", "s").unwrap()
+    }
+
+    #[test]
+    fn runoff_setup_failure_forfeits_to_the_other_finalist() {
+        let (a, b) = (cfg(32, 2), cfg(64, 4));
+        for (b_failed, winner_id, loser_id) in [
+            (false, b.id.clone(), a.id.clone()),
+            (true, a.id.clone(), b.id.clone()),
+        ] {
+            let mut trials = Vec::new();
+            let err = RunoffError::Setup {
+                b_failed,
+                error: crate::error::tensor_error("boom"),
+            };
+            let winner = runoff_verdict(
+                a.clone(),
+                b.clone(),
+                Err(err),
+                &mut trials,
+                &mut silent_log(),
+            );
+            assert_eq!(winner.id, winner_id);
+            assert_eq!(trials.len(), 1);
+            assert_eq!(
+                trials[0].config_id, loser_id,
+                "failure blamed on the failing finalist"
+            );
+            assert!(matches!(
+                &trials[0].outcome,
+                Outcome::Invalid { reason } if reason.contains("runoff setup failed")
+            ));
+        }
+    }
+
+    #[test]
+    fn runoff_bench_failure_keeps_the_sequential_leader() {
+        let (a, b) = (cfg(32, 2), cfg(64, 4));
+        let mut trials = Vec::new();
+        let winner = runoff_verdict(
+            a.clone(),
+            b,
+            Err(RunoffError::Bench(crate::error::tensor_error(
+                "stream died",
+            ))),
+            &mut trials,
+            &mut silent_log(),
+        );
+        assert_eq!(winner.id, a.id);
+        assert!(
+            trials.is_empty(),
+            "unattributable failures mark nobody Invalid"
+        );
+    }
+
+    #[test]
+    fn non_finite_runoff_median_never_wins() {
+        let (a, b) = (cfg(32, 2), cfg(64, 4));
+        // Under a plain `<=`, `ms_a <= NaN` is false and NaN-b would win.
+        let winner = runoff_verdict(
+            a.clone(),
+            b.clone(),
+            Ok((meas(&[2.0, 2.0, 2.0]), meas(&[f32::NAN, f32::NAN]))),
+            &mut Vec::new(),
+            &mut silent_log(),
+        );
+        assert_eq!(winner.id, a.id);
+        let winner = runoff_verdict(
+            a,
+            b.clone(),
+            Ok((meas(&[f32::NAN]), meas(&[3.0]))),
+            &mut Vec::new(),
+            &mut silent_log(),
+        );
+        assert_eq!(winner.id, b.id);
+    }
+
+    #[test]
+    fn runoff_trials_carry_real_measurement_metadata() {
+        let (a, b) = (cfg(32, 2), cfg(64, 4));
+        let mut trials = Vec::new();
+        let winner = runoff_verdict(
+            a.clone(),
+            b,
+            Ok((meas(&[1.0, 2.0, 3.0]), meas(&[4.0, 5.0, 6.0]))),
+            &mut trials,
+            &mut silent_log(),
+        );
+        assert_eq!(winner.id, a.id);
+        assert_eq!(trials.len(), 2);
+        match &trials[0].outcome {
+            Outcome::Measured {
+                median_ms,
+                min_ms,
+                reps,
+            } => {
+                assert_eq!(*median_ms, 2.0);
+                assert_eq!(*min_ms, 1.0);
+                assert_eq!(*reps, 3, "reps reflect the actual paired measurement");
+            }
+            other => panic!("expected Measured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_ids_do_not_alias_across_key_separators() {
+        // A key containing separators must not imitate two parameters.
+        let smuggled = Config::new([("A=1,B", ParamValue::Int(2))]);
+        let honest = Config::new([("A", ParamValue::Int(1)), ("B", ParamValue::Int(2))]);
+        assert_ne!(smuggled.id, honest.id);
+        // Nor can a key with literal quotes imitate an encoded one.
+        let quoted = Config::new([("\"A\"", ParamValue::Int(1))]);
+        let plain = Config::new([("A", ParamValue::Int(1))]);
+        assert_ne!(quoted.id, plain.id);
+    }
+
+    #[test]
+    fn whitespace_only_log_is_headed_and_resumable() {
+        let dir = std::env::temp_dir().join(format!("cutile_tune_ws_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trials.jsonl");
+        std::fs::write(&path, "\n").unwrap();
+        {
+            let mut log = TrialLog::open(Some(&path), "t", "s").unwrap();
+            log.append(&Trial {
+                config_id: cfg(1, 1).id,
+                outcome: Outcome::Invalid { reason: "x".into() },
+            });
+        }
+        // Reopening must find a valid header, not refuse the log.
+        let log = TrialLog::open(Some(&path), "t", "s").unwrap();
+        assert_eq!(log.existing_trials().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
