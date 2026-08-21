@@ -183,7 +183,7 @@ let configs: Vec<Config> = [32i64, 64, 128, 256]
     .map(|bs| Config::new([("BLOCK_SIZE", ParamValue::Int(bs))]))
     .collect();
 
-let state = Autotuner::new("rms_norm")
+let output = Autotuner::new("rms_norm")
     .configs(configs)
     .run(&stream, |stream, config| {
         let block_size = config.int("BLOCK_SIZE").unwrap();
@@ -194,7 +194,7 @@ let state = Autotuner::new("rms_norm")
         Ok(launch)
     })?;
 
-let best = state.best.expect("a winner");
+let best = output.best.expect("a winner");
 ```
 
 How it works:
