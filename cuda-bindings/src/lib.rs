@@ -49,10 +49,12 @@ pub fn cuda_toolkit_dir() -> String {
 
 /// Reports the elapsed time in milliseconds between two recorded events.
 ///
-/// CUDA 12.8 renamed the driver entry point to `cuEventElapsedTime_v2`; this
-/// crate's minimum supported toolkit (13.2) always declares the `_v2` symbol,
-/// so this helper dispatches to it directly. It exists for source
-/// compatibility with cuda-oxide's bindings, which expose the same helper.
+/// CUDA 12.8 renamed the driver entry point to `cuEventElapsedTime_v2`;
+/// earlier toolkits only declare `cuEventElapsedTime`. The build script
+/// probes the resolved `cuda.h` and sets `cuda_has_cuEventElapsedTime_v2`,
+/// so callers stay source-compatible across toolkit versions. The helper
+/// exists for source compatibility with cuda-oxide's bindings, which expose
+/// the same one.
 ///
 /// # Safety
 ///
@@ -64,7 +66,14 @@ pub unsafe fn cu_event_elapsed_time(
     start: CUevent,
     end: CUevent,
 ) -> CUresult {
-    unsafe { cuEventElapsedTime_v2(elapsed_ms, start, end) }
+    #[cfg(cuda_has_cuEventElapsedTime_v2)]
+    {
+        unsafe { cuEventElapsedTime_v2(elapsed_ms, start, end) }
+    }
+    #[cfg(not(cuda_has_cuEventElapsedTime_v2))]
+    {
+        unsafe { cuEventElapsedTime(elapsed_ms, start, end) }
+    }
 }
 
 #[cfg(test)]
