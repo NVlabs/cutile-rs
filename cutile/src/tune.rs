@@ -20,13 +20,13 @@
 //! Principles, in order:
 //! - **Explicit opt-in, no magic.** Nothing tunes behind the programmer's
 //!   back; the search space is declared, the objective is programmer-written,
-//!   and results apply only when a program explicitly loads an artifact.
+//!   and results apply only when a program explicitly loads a record.
 //! - **Invalid candidates are data.** A candidate rejected by launch checks
 //!   or the correctness gate records [`TrialState::Invalid`] with its message;
 //!   it never aborts the search.
 //! - **Persistence is checked.** The trial log records the tuner's name and
 //!   a hash of its search space and refuses to resume from a log that does
-//!   not match; the artifact store built on top extends the same discipline
+//!   not match; the record store built on top extends the same discipline
 //!   with full provenance (source hash, toolchain fingerprint, arch).
 
 use crate::bench::{do_bench, BenchOptions, Measurement};
@@ -46,11 +46,11 @@ use std::time::{Duration, Instant};
 /// Parameters cover both user axes (tile sizes, split counts — read by the
 /// launch closure to pick a monomorphization) and compiler knobs (applied by
 /// the launch closure via `CompileOptions`). Keeping them in one ordered map
-/// makes a `Config` fully serializable for artifacts and logs.
+/// makes a `Config` fully serializable for records and logs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Config {
-    /// Stable identity within a search space; artifact and log records key
+    /// Stable identity within a search space; record and log records key
     /// on it. [`Config::new`] derives it from the parameters — construct
     /// through `new` so the two can never disagree.
     pub id: String,
@@ -120,7 +120,7 @@ impl Config {
 }
 
 /// Order-independent fingerprint of a candidate set. The trial log and
-/// artifacts record it so that resume/apply against a *different* search
+/// records record it so that resume/apply against a *different* search
 /// space is detected instead of silently trusted.
 pub fn space_hash(configs: &[Config]) -> String {
     // FNV-1a over the sorted ids; stability matters, cryptography does not.
@@ -753,16 +753,16 @@ impl TrialLog {
     }
 }
 
-// ── Artifact ────────────────────────────────────────────────────────────────
+// ── Record ────────────────────────────────────────────────────────────────
 
-/// Artifact record-format version; bump on breaking changes.
-const ARTIFACT_SCHEMA: u32 = 1;
+/// On-disk format version; bump on breaking changes.
+const RECORD_SCHEMA: u32 = 1;
 
 /// A persisted, provenance-checked record of tuning winners: one entry per
 /// shape-class bucket, serialized as human-diffable pretty JSON intended to
 /// be committed next to the code it tunes.
 ///
-/// Staleness is enforced at load, not documented: [`Artifact::load_verified`]
+/// Staleness is enforced at load, not documented: [`Record::load_verified`]
 /// refuses entries whose provenance no longer matches the running workspace,
 /// so a stale winner cannot silently apply. The strong check is the stored
 /// winner's persistent-cache key: recomputed via
@@ -771,10 +771,10 @@ const ARTIFACT_SCHEMA: u32 = 1;
 /// toolchain fingerprint, closing the known gap of `source_hash` (which
 /// covers only the kernel's own module).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Artifact {
+pub struct Record {
     /// Record-format version; bump on breaking changes.
     pub schema: u32,
-    /// Kernel (or tuner) name this artifact belongs to.
+    /// Kernel (or tuner) name this record belongs to.
     pub kernel: String,
     /// The kernel module's `_SOURCE_HASH` at tune time.
     pub source_hash: String,
@@ -782,7 +782,7 @@ pub struct Artifact {
     pub cutile_version: String,
     /// `tileiras --version` fingerprint at tune time.
     pub tileiras_fingerprint: String,
-    /// Target architecture (e.g. `sm_120`). Artifacts are per-arch; loading
+    /// Target architecture (e.g. `sm_120`). Records are per-arch; loading
     /// on a different arch is refused, never approximated.
     pub arch: String,
     /// Hostname the tuning ran on (informational).
@@ -797,12 +797,12 @@ pub struct Artifact {
     #[serde(default)]
     pub gate: Option<String>,
     /// Winners, one per bucket.
-    pub entries: Vec<ArtifactEntry>,
+    pub entries: Vec<RecordEntry>,
 }
 
 /// One bucket's winner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactEntry {
+pub struct RecordEntry {
     /// Shape-class bucket this winner applies to (e.g. `"tg<=512"`).
     pub bucket: String,
     /// The winning configuration.
@@ -816,7 +816,7 @@ pub struct ArtifactEntry {
     pub l2_key: Option<String>,
 }
 
-/// The provenance the loader checks an artifact against.
+/// The provenance the loader checks a record against.
 pub struct Workspace {
     /// Kernel/tuner name the caller is loading FOR. Two kernels in one
     /// module share a source hash, so this is its own refusal axis.
@@ -830,12 +830,12 @@ pub struct Workspace {
     pub space_hash: Option<String>,
 }
 
-impl Artifact {
-    /// Starts an artifact with the given provenance; machine name and
+impl Record {
+    /// Starts a record with the given provenance; machine name and
     /// timestamp are captured from the environment.
     pub fn new(ws: &Workspace) -> Self {
         Self {
-            schema: ARTIFACT_SCHEMA,
+            schema: RECORD_SCHEMA,
             kernel: ws.kernel.clone(),
             source_hash: ws.source_hash.clone(),
             cutile_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -853,8 +853,8 @@ impl Artifact {
     }
 
     /// Inserts or replaces the winner for `bucket`. Replacement is in place,
-    /// preserving entry order (committed artifacts should diff cleanly).
-    pub fn insert(&mut self, entry: ArtifactEntry) {
+    /// preserving entry order (committed records should diff cleanly).
+    pub fn insert(&mut self, entry: RecordEntry) {
         match self.entries.iter_mut().find(|e| e.bucket == entry.bucket) {
             Some(slot) => *slot = entry,
             None => self.entries.push(entry),
@@ -862,26 +862,26 @@ impl Artifact {
     }
 
     /// The winner for `bucket`, if recorded.
-    pub fn get(&self, bucket: &str) -> Option<&ArtifactEntry> {
+    pub fn get(&self, bucket: &str) -> Option<&RecordEntry> {
         self.entries.iter().find(|e| e.bucket == bucket)
     }
 
-    /// Writes pretty JSON (stable field order — committed artifacts should
+    /// Writes pretty JSON (stable field order — committed records should
     /// diff cleanly).
     pub fn save(&self, path: &Path) -> Result<(), Error> {
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| crate::error::tensor_error(&format!("artifact serialize: {e}")))?;
+            .map_err(|e| crate::error::tensor_error(&format!("record serialize: {e}")))?;
         std::fs::write(path, json)
-            .map_err(|e| crate::error::tensor_error(&format!("artifact write: {e}")))
+            .map_err(|e| crate::error::tensor_error(&format!("record write: {e}")))
     }
 
     /// Loads without verification. Prefer [`load_verified`](Self::load_verified)
     /// anywhere the entries will actually be applied.
     pub fn load(path: &Path) -> Result<Self, Error> {
         let contents = std::fs::read_to_string(path)
-            .map_err(|e| crate::error::tensor_error(&format!("artifact read: {e}")))?;
+            .map_err(|e| crate::error::tensor_error(&format!("record read: {e}")))?;
         serde_json::from_str(&contents)
-            .map_err(|e| crate::error::tensor_error(&format!("artifact parse: {e}")))
+            .map_err(|e| crate::error::tensor_error(&format!("record parse: {e}")))
     }
 
     /// Loads and verifies against the running workspace.
@@ -905,42 +905,42 @@ impl Artifact {
     pub fn load_verified(
         path: &Path,
         ws: &Workspace,
-        mut verify_l2: impl FnMut(&ArtifactEntry) -> Result<Option<String>, Error>,
+        mut verify_l2: impl FnMut(&RecordEntry) -> Result<Option<String>, Error>,
     ) -> Result<(Self, Vec<String>), Error> {
-        let artifact = Self::load(path)?;
+        let record = Self::load(path)?;
         let refuse = |what: &str, stored: &str, current: &str| {
             Err(crate::error::tensor_error(&format!(
-                "stale tuning artifact at {}: {what} mismatch (artifact: {stored}, workspace: {current}); re-tune or delete it",
+                "stale tuning record at {}: {what} mismatch (record: {stored}, workspace: {current}); re-tune or delete it",
                 path.display(),
             )))
         };
-        if artifact.schema != ARTIFACT_SCHEMA {
+        if record.schema != RECORD_SCHEMA {
             return refuse(
                 "schema",
-                &artifact.schema.to_string(),
-                &ARTIFACT_SCHEMA.to_string(),
+                &record.schema.to_string(),
+                &RECORD_SCHEMA.to_string(),
             );
         }
-        if artifact.kernel != ws.kernel {
-            return refuse("kernel", &artifact.kernel, &ws.kernel);
+        if record.kernel != ws.kernel {
+            return refuse("kernel", &record.kernel, &ws.kernel);
         }
-        if artifact.arch != ws.arch {
-            return refuse("arch", &artifact.arch, &ws.arch);
+        if record.arch != ws.arch {
+            return refuse("arch", &record.arch, &ws.arch);
         }
-        if artifact.source_hash != ws.source_hash {
-            return refuse("source_hash", &artifact.source_hash, &ws.source_hash);
+        if record.source_hash != ws.source_hash {
+            return refuse("source_hash", &record.source_hash, &ws.source_hash);
         }
-        if let (Some(stored), Some(current)) = (&artifact.space_hash, &ws.space_hash) {
+        if let (Some(stored), Some(current)) = (&record.space_hash, &ws.space_hash) {
             if stored != current {
                 return refuse("space_hash", stored, current);
             }
         }
         {
             let mut seen = std::collections::BTreeSet::new();
-            for e in &artifact.entries {
+            for e in &record.entries {
                 if !seen.insert(e.bucket.as_str()) {
                     return Err(crate::error::tensor_error(&format!(
-                        "tuning artifact at {} has duplicate entries for bucket {:?}; fix or re-tune it",
+                        "tuning record at {} has duplicate entries for bucket {:?}; fix or re-tune it",
                         path.display(),
                         e.bucket,
                     )));
@@ -960,26 +960,26 @@ impl Artifact {
         }
 
         let mut warnings = Vec::new();
-        if artifact.space_hash.is_none() && ws.space_hash.is_some() {
-            // The workspace records a space hash, so an artifact without one
+        if record.space_hash.is_none() && ws.space_hash.is_some() {
+            // The workspace records a space hash, so a record without one
             // predates the field or has had it stripped; either way the
             // same-space check silently cannot run.
             warnings.push(
-                "tuning artifact carries no space_hash; the search-space match was not checked"
+                "tuning record carries no space_hash; the search-space match was not checked"
                     .to_string(),
             );
         }
-        let fingerprint_matches = artifact.tileiras_fingerprint == ws.tileiras_fingerprint;
+        let fingerprint_matches = record.tileiras_fingerprint == ws.tileiras_fingerprint;
         if !fingerprint_matches {
             // The stored keys embed the old fingerprint: recomputing under
             // the new toolchain CANNOT match, so the strong check is skipped
             // rather than misread as staleness. Ordering matters here.
             warnings.push(format!(
-                "tuning artifact was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted and per-entry key verification was skipped — consider re-tuning",
-                artifact.tileiras_fingerprint, ws.tileiras_fingerprint,
+                "tuning record was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted and per-entry key verification was skipped — consider re-tuning",
+                record.tileiras_fingerprint, ws.tileiras_fingerprint,
             ));
         } else {
-            for entry in &artifact.entries {
+            for entry in &record.entries {
                 match &entry.l2_key {
                     None => warnings.push(format!(
                         "bucket {:?} carries no l2 key; only source-level staleness checks applied",
@@ -1003,14 +1003,14 @@ impl Artifact {
                 }
             }
         }
-        if artifact.cutile_version != env!("CARGO_PKG_VERSION") {
+        if record.cutile_version != env!("CARGO_PKG_VERSION") {
             warnings.push(format!(
-                "tuning artifact was produced by cutile {} (running {})",
-                artifact.cutile_version,
+                "tuning record was produced by cutile {} (running {})",
+                record.cutile_version,
                 env!("CARGO_PKG_VERSION"),
             ));
         }
-        Ok((artifact, warnings))
+        Ok((record, warnings))
     }
 }
 
@@ -1157,18 +1157,15 @@ mod tests {
         }
     }
 
-    fn artifact_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "cutile_artifact_{label}_{}.json",
-            std::process::id()
-        ))
+    fn record_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("cutile_record_{label}_{}.json", std::process::id()))
     }
 
     #[test]
-    fn artifact_roundtrips_and_verifies() {
-        let path = artifact_path("roundtrip");
-        let mut a = Artifact::new(&ws());
-        a.insert(ArtifactEntry {
+    fn record_roundtrips_and_verifies() {
+        let path = record_path("roundtrip");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
             bucket: "tg<=512".into(),
             config: cfg(64, 8),
             median_ms: 1.25,
@@ -1178,7 +1175,7 @@ mod tests {
         a.save(&path).unwrap();
 
         let (loaded, warnings) =
-            Artifact::load_verified(&path, &ws(), |e| Ok(e.l2_key.clone())).unwrap();
+            Record::load_verified(&path, &ws(), |e| Ok(e.l2_key.clone())).unwrap();
         assert!(warnings.is_empty());
         let entry = loaded.get("tg<=512").unwrap();
         assert_eq!(entry.config.int("BN"), Some(64));
@@ -1187,47 +1184,47 @@ mod tests {
     }
 
     #[test]
-    fn artifact_refuses_source_hash_and_arch_mismatch() {
-        let path = artifact_path("refuse");
-        Artifact::new(&ws()).save(&path).unwrap();
+    fn record_refuses_source_hash_and_arch_mismatch() {
+        let path = record_path("refuse");
+        Record::new(&ws()).save(&path).unwrap();
 
         let mut other = ws();
         other.source_hash = "different".into();
-        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("source_hash mismatch"));
         assert!(err.to_string().contains("re-tune"));
 
         let mut other = ws();
         other.arch = "sm_100".into();
-        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("arch mismatch"));
 
         let mut other = ws();
         other.kernel = "other_kernel".into();
-        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("kernel mismatch"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn artifact_refuses_space_mismatch_and_duplicate_buckets() {
-        let path = artifact_path("space");
+    fn record_refuses_space_mismatch_and_duplicate_buckets() {
+        let path = record_path("space");
         let mut with_space = ws();
         with_space.space_hash = Some(space_hash(&[cfg(64, 8), cfg(128, 8)]));
-        Artifact::new(&with_space).save(&path).unwrap();
+        Record::new(&with_space).save(&path).unwrap();
 
         // Same kernel, different candidate set: refused when both carry one.
         let mut other = ws();
         other.space_hash = Some(space_hash(&[cfg(64, 8)]));
-        let err = Artifact::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("space_hash mismatch"));
         // Loader without an expectation: accepted (no false refusals).
-        let (_, _) = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
+        let (_, _) = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
 
-        // Duplicate buckets (hand-edited/merge-resolved artifact): refused.
-        let mut dup = Artifact::new(&ws());
+        // Duplicate buckets (hand-edited/merge-resolved record): refused.
+        let mut dup = Record::new(&ws());
         for _ in 0..2 {
-            dup.entries.push(ArtifactEntry {
+            dup.entries.push(RecordEntry {
                 bucket: "b".into(),
                 config: cfg(64, 8),
                 median_ms: 1.0,
@@ -1236,16 +1233,16 @@ mod tests {
             });
         }
         dup.save(&path).unwrap();
-        let err = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("duplicate entries for bucket"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn artifact_refuses_l2_key_drift_and_warns_on_fingerprint_drift() {
-        let path = artifact_path("l2");
-        let mut a = Artifact::new(&ws());
-        a.insert(ArtifactEntry {
+    fn record_refuses_l2_key_drift_and_warns_on_fingerprint_drift() {
+        let path = record_path("l2");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
             bucket: "b".into(),
             config: cfg(64, 8),
             median_ms: 1.0,
@@ -1255,24 +1252,24 @@ mod tests {
         a.save(&path).unwrap();
 
         // Recomputed key differs => refuse (the dependency-inclusive check).
-        let err = Artifact::load_verified(&path, &ws(), |_| Ok(Some("b".repeat(64)))).unwrap_err();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(Some("b".repeat(64)))).unwrap_err();
         assert!(err.to_string().contains("l2 key for bucket"));
 
         // Verifier declines (None) => provenance fields alone decide; a
         // fingerprint drift is a warning, not a refusal.
         let mut drifted = ws();
         drifted.tileiras_fingerprint = "release 13.4, V13.4.1".into();
-        let (_, warnings) = Artifact::load_verified(&path, &drifted, |_| Ok(None)).unwrap();
+        let (_, warnings) = Record::load_verified(&path, &drifted, |_| Ok(None)).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("different tileiras"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn artifact_insert_replaces_bucket_winner() {
-        let mut a = Artifact::new(&ws());
+    fn record_insert_replaces_bucket_winner() {
+        let mut a = Record::new(&ws());
         for (bn, ms) in [(64, 2.0), (128, 1.0)] {
-            a.insert(ArtifactEntry {
+            a.insert(RecordEntry {
                 bucket: "b".into(),
                 config: cfg(bn, 4),
                 median_ms: ms,
@@ -1285,19 +1282,19 @@ mod tests {
     }
 
     #[test]
-    fn artifact_refuses_schema_and_id_param_mismatch() {
-        let path = artifact_path("schema");
-        let mut a = Artifact::new(&ws());
-        a.schema = ARTIFACT_SCHEMA + 1;
+    fn record_refuses_schema_and_id_param_mismatch() {
+        let path = record_path("schema");
+        let mut a = Record::new(&ws());
+        a.schema = RECORD_SCHEMA + 1;
         a.save(&path).unwrap();
-        let err = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("schema mismatch"));
 
         // A hand-edited entry whose id disagrees with its params: refused.
-        let mut a = Artifact::new(&ws());
+        let mut a = Record::new(&ws());
         let mut config = cfg(64, 8);
         config.id = "BN=128,SPLITS=8".into();
-        a.insert(ArtifactEntry {
+        a.insert(RecordEntry {
             bucket: "b".into(),
             config,
             median_ms: 1.0,
@@ -1305,18 +1302,18 @@ mod tests {
             l2_key: None,
         });
         a.save(&path).unwrap();
-        let err = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
         assert!(err.to_string().contains("config id for bucket"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn artifact_without_space_hash_warns_when_workspace_expects_one() {
-        let path = artifact_path("nospace");
-        Artifact::new(&ws()).save(&path).unwrap(); // artifact: space_hash None
+    fn record_without_space_hash_warns_when_workspace_expects_one() {
+        let path = record_path("nospace");
+        Record::new(&ws()).save(&path).unwrap(); // record: space_hash None
         let mut expecting = ws();
         expecting.space_hash = Some(space_hash(&[cfg(64, 8)]));
-        let (_, warnings) = Artifact::load_verified(&path, &expecting, |_| Ok(None)).unwrap();
+        let (_, warnings) = Record::load_verified(&path, &expecting, |_| Ok(None)).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("no space_hash"));
         let _ = std::fs::remove_file(&path);
@@ -1327,9 +1324,9 @@ mod tests {
         // Ordering pin: under toolchain drift the recomputed key CANNOT match
         // the stored one, so a mismatching recomputation must be ignored
         // (drift warning), never misread as staleness.
-        let path = artifact_path("driftorder");
-        let mut a = Artifact::new(&ws());
-        a.insert(ArtifactEntry {
+        let path = record_path("driftorder");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
             bucket: "b".into(),
             config: cfg(64, 8),
             median_ms: 1.0,
@@ -1340,7 +1337,7 @@ mod tests {
         let mut drifted = ws();
         drifted.tileiras_fingerprint = "release 13.4, V13.4.1".into();
         let mut called = false;
-        let (_, warnings) = Artifact::load_verified(&path, &drifted, |_| {
+        let (_, warnings) = Record::load_verified(&path, &drifted, |_| {
             called = true;
             Ok(Some("b".repeat(64))) // would refuse if it were consulted
         })
@@ -1352,12 +1349,12 @@ mod tests {
     }
 
     #[test]
-    fn artifact_version_drift_warns() {
-        let path = artifact_path("version");
-        let mut a = Artifact::new(&ws());
+    fn record_version_drift_warns() {
+        let path = record_path("version");
+        let mut a = Record::new(&ws());
         a.cutile_version = "0.0.0-elsewhere".into();
         a.save(&path).unwrap();
-        let (_, warnings) = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
+        let (_, warnings) = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("produced by cutile 0.0.0-elsewhere"));
         let _ = std::fs::remove_file(&path);

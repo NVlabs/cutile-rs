@@ -109,7 +109,7 @@ fn end_to_end_grid_tune_on_gpu() {
     let _ = std::fs::remove_file(&log);
 }
 
-// ── Artifact end-to-end with a real kernel and real L2 verification ─────────
+// ── Record end-to-end with a real kernel and real L2 verification ─────────
 
 #[cutile::module]
 mod tune_test_module {
@@ -126,8 +126,8 @@ mod tune_test_module {
 /// L2 key, and proves load_verified accepts the honest workspace and refuses
 /// a tampered key.
 #[test]
-fn artifact_end_to_end_with_real_l2_verification() {
-    use cutile::tune::{Artifact, ArtifactEntry, Workspace};
+fn record_end_to_end_with_real_l2_verification() {
+    use cutile::tune::{Record, RecordEntry, Workspace};
 
     let device = Device::new(0).expect("device 0");
     let stream = device.new_stream().expect("stream");
@@ -188,8 +188,8 @@ fn artifact_end_to_end_with_real_l2_verification() {
             cutile::cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string(),
         space_hash: Some(cutile::tune::space_hash(&configs)),
     };
-    let mut artifact = Artifact::new(&ws);
-    artifact.insert(ArtifactEntry {
+    let mut record = Record::new(&ws);
+    record.insert(RecordEntry {
         bucket: format!("n={n}"),
         config: best.clone(),
         median_ms: outcome
@@ -201,12 +201,11 @@ fn artifact_end_to_end_with_real_l2_verification() {
         samples: 3,
         l2_key: Some(winner_key.clone()),
     });
-    let path =
-        std::env::temp_dir().join(format!("cutile_artifact_gpu_{}.json", std::process::id()));
-    artifact.save(&path).expect("save");
+    let path = std::env::temp_dir().join(format!("cutile_record_gpu_{}.json", std::process::id()));
+    record.save(&path).expect("save");
 
     // Honest workspace + real recomputation: accepted, no warnings.
-    let (loaded, warnings) = Artifact::load_verified(&path, &ws, |entry| {
+    let (loaded, warnings) = Record::load_verified(&path, &ws, |entry| {
         let tile = entry.config.int("TILE").unwrap() as usize;
         Ok(Some(l2_key_for(tile)))
     })
@@ -218,7 +217,7 @@ fn artifact_end_to_end_with_real_l2_verification() {
     let mut tampered = loaded.clone();
     tampered.entries[0].l2_key = Some("0".repeat(64));
     tampered.save(&path).expect("save tampered");
-    let err = Artifact::load_verified(&path, &ws, |entry| {
+    let err = Record::load_verified(&path, &ws, |entry| {
         let tile = entry.config.int("TILE").unwrap() as usize;
         Ok(Some(l2_key_for(tile)))
     })
