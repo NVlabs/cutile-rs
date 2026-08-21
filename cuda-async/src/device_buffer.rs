@@ -24,12 +24,19 @@ use std::sync::Arc;
 ///
 /// # Safety
 /// Implementors must guarantee that, for as long as the implementor is alive:
-/// - `device_ptr()` returns a valid CUDA device pointer on `device_id()`, and
-/// - the allocation there is at least `len_bytes()` bytes.
+/// - `device_ptr()` returns a valid CUDA device pointer on `device_id()`,
+/// - the allocation there is at least `len_bytes()` bytes, and
+/// - all three getters are **stable**: they return the same values on every
+///   call for the implementor's entire lifetime. Consumers read them once at
+///   construction and cache the results (`DeviceBuffer::foreign`), so an
+///   implementor whose pointer moves would silently diverge from the cached
+///   copy. This is the same stability `std`'s allocator traits demand of a
+///   currently-allocated block.
 ///
-/// This is the whole obligation, and it is discharged **once, in the `impl`** —
-/// not at each borrow — so constructing a tensor from a `DeviceAllocation`
-/// (`Tensor::from_foreign`) is a safe call.
+/// This positional obligation is discharged **once, in the `impl`** — not at
+/// each borrow. The temporal obligation (nobody else touches the bytes while
+/// cutile work is in flight) cannot live here: it is per-borrow, and is why
+/// `Tensor::from_foreign` remains an `unsafe` call.
 pub unsafe trait DeviceAllocation: Send + Sync + 'static {
     /// The device pointer of the allocation.
     fn device_ptr(&self) -> CUdeviceptr;
@@ -161,9 +168,12 @@ impl DeviceBuffer {
     /// Wraps `len_bytes` of a foreign allocation, holding `owner` alive so the
     /// memory outlives this buffer. Dropping it does **not** free the memory.
     ///
-    /// This is a **safe** constructor: liveness is enforced by `owner`'s
-    /// refcount, and pointer validity was asserted once when `owner`'s type
-    /// implemented [`DeviceAllocation`].
+    /// `len_bytes` is the borrowing view's **logical** size (what the tensor
+    /// invariant checks), not the owner's allocation size — the owner may be
+    /// larger, and the addressable-extent-vs-owner check happens in
+    /// `Tensor::from_foreign` before this is called. Liveness is enforced by
+    /// `owner`'s refcount; pointer validity was asserted once when `owner`'s
+    /// type implemented [`DeviceAllocation`].
     pub fn foreign(owner: Arc<dyn DeviceAllocation>, len_bytes: usize) -> Self {
         Self {
             cudptr: owner.device_ptr(),

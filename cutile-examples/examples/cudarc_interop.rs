@@ -8,10 +8,11 @@
 //!
 //! `foreign::Buffer` stands in for the framework's allocation: it owns the
 //! memory and frees it on drop. It implements [`DeviceAllocation`] once (the
-//! single `unsafe` assertion), after which `Tensor::from_foreign` is a **safe**
-//! call. The tensor holds an `Arc` to the buffer as a liveness token, so the
-//! memory provably outlives every cutile use — even after the framework drops
-//! its own handle.
+//! pointer-validity assertion), after which `Tensor::from_foreign` verifies
+//! everything positional at construction — the remaining `unsafe` at the
+//! borrow asserts only exclusive access for the duration. The tensor holds an
+//! `Arc` to the buffer as a liveness token, so the memory provably outlives
+//! every cutile use — even after the framework drops its own handle.
 //!
 //! A real cudarc `CudaSlice` (or a torch storage) is wrapped the same way: a
 //! few-line `unsafe impl DeviceAllocation` that returns its device pointer,
@@ -104,12 +105,20 @@ fn main() -> Result<(), Error> {
         memcpy_htod_async(y.device_ptr(), ones.as_ptr(), N, &stream);
     }
 
-    // cutile borrows the foreign memory — safe, no copy. Each tensor holds an
-    // Arc to its buffer.
+    // cutile borrows the foreign memory — no copy. Validity and liveness are
+    // verified at construction (the Arc is the liveness token); the `unsafe`
+    // asserts the one residual: exclusive access for the duration.
+    // SAFETY: from here on, only cutile touches these buffers — x and y are
+    // read-only inputs, z is written only by the kernel below, and the
+    // framework's own last access (the h2d fills) completed above.
     let shape = vec![N as i32];
-    let tx = Tensor::<f32>::from_foreign(x.clone(), shape.clone(), vec![1]);
-    let ty = Tensor::<f32>::from_foreign(y.clone(), shape.clone(), vec![1]);
-    let tz = Tensor::<f32>::from_foreign(z.clone(), shape.clone(), vec![1]);
+    let (tx, ty, tz) = unsafe {
+        (
+            Tensor::<f32>::from_foreign(x.clone(), shape.clone(), vec![1]),
+            Tensor::<f32>::from_foreign(y.clone(), shape.clone(), vec![1]),
+            Tensor::<f32>::from_foreign(z.clone(), shape.clone(), vec![1]),
+        )
+    };
 
     // The framework drops its OWN handle to z. The memory is not freed: cutile's
     // tensor still holds the buffer alive. (Keep z's address — a copyable u64 —

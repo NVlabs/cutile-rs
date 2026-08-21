@@ -122,12 +122,12 @@ fn from_foreign_keep_alive_holds_owner() {
             dropped: dropped.clone(),
         });
 
-        // Safe borrow — the tensor holds a clone of the owner Arc.
-        let t = Arc::new(Tensor::<f32>::from_foreign(
-            owner.clone(),
-            vec![N as i32],
-            vec![1],
-        ));
+        // The tensor holds a clone of the owner Arc as its liveness token.
+        // SAFETY: nothing else touches the bytes after the h2d fill above; the
+        // test only reads through cutile from here on.
+        let t = Arc::new(unsafe {
+            Tensor::<f32>::from_foreign(owner.clone(), vec![N as i32], vec![1])
+        });
 
         // The framework drops its own handle; the owner is NOT dropped, because
         // the tensor still holds it.
