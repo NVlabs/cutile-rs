@@ -22,7 +22,7 @@ for test_target in \
 do
     run_step \
         "cutile GPU integration test ${test_target}" \
-        cargo test -p cutile --test "$test_target"
+        cargo test -p cutile --features experimental-tune --test "$test_target"
 done
 
 run_step \
