@@ -147,6 +147,38 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let param_name = &param_names[i];
                 let param_type = &input_params[i];
                 let mut param_val = call_arg_values[i].clone();
+                if param_val.enum_variant.as_deref() == Some("Some") {
+                    let payload_expr = param_val.enum_payload.as_deref().ok_or_else(|| {
+                        self.jit_error(
+                            &call_expr.args[i].span(),
+                            "inlined `Some` argument is missing its payload",
+                        )
+                    })?;
+                    let payload_value = self
+                        .compile_expression(
+                            module,
+                            block_id,
+                            payload_expr,
+                            generic_vars,
+                            ctx,
+                            None,
+                        )?
+                        .ok_or_else(|| {
+                            self.jit_error(
+                                &call_expr.args[i].span(),
+                                "failed to compile inlined `Some` payload",
+                            )
+                        })?;
+                    let payload_name = format!("__cutile_inline_option_payload_{i}");
+                    let payload_path = syn::parse_str::<Expr>(&payload_name).map_err(|error| {
+                        self.jit_error(
+                            &call_expr.args[i].span(),
+                            &format!("failed to create inlined option payload path: {error}"),
+                        )
+                    })?;
+                    call_variables.vars.insert(payload_name, payload_value);
+                    param_val.enum_payload = Some(Box::new(payload_path));
+                }
                 // TODO (hme): This may not be enough, depending on what level of inspection we require of compound / struct types.
                 param_val.ty.rust_ty = param_type.clone();
                 param_val.mutability = if sig_param_mutability[i] {
