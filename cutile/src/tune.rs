@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Kernel autotuning: declared search spaces, pluggable samplers, and
+//! Kernel autotuning: declared search spaces, pluggable searchers, and
 //! persisted, provenance-checked results.
 //!
 //! **Experimental.** This module is gated behind the `experimental-tune`
@@ -11,9 +11,10 @@
 //! ways between releases.
 //!
 //! The vocabulary follows the tools users already know: a [`Config`] is one
-//! candidate configuration (Triton's `Config`), a [`Sampler`] decides the
-//! visit order (Optuna's word), [`GridSampler`] is the default exhaustive
-//! sampler, and each measured candidate produces a [`Trial`]. Measurement
+//! candidate configuration (Triton's `Config`), a [`Searcher`] decides the
+//! visit order (Ray Tune's word), [`GridSearch`] is the default exhaustive
+//! searcher, and each measured candidate produces a [`Trial`] (Optuna's
+//! word). Measurement
 //! runs through [`crate::bench::do_bench`] (CUDA events, warmup, L2
 //! clearing, medians).
 //!
@@ -173,7 +174,7 @@ impl Trial {
 
 // ── Oracle ──────────────────────────────────────────────────────────────────
 
-/// What a [`Sampler`] searches through: a finite candidate list and a way to
+/// What a [`Searcher`] searches through: a finite candidate list and a way to
 /// measure one candidate. The library implements this; users supply the
 /// launch and gate closures via [`Autotuner`].
 pub trait Oracle {
@@ -186,29 +187,29 @@ pub trait Oracle {
     fn budget_remaining(&self) -> Option<Duration>;
 }
 
-// ── Sampler ─────────────────────────────────────────────────────────────────
+// ── Searcher ─────────────────────────────────────────────────────────────────
 
 /// Decides which candidates to visit and in what order.
 ///
 /// Implementations must treat the oracle's budget as authoritative and must
-/// tolerate [`TrialState::Invalid`] trials. The library ships [`GridSampler`]
-/// (the default); a TPE sampler is planned as an explicit opt-in.
-pub trait Sampler {
+/// tolerate [`TrialState::Invalid`] trials. The library ships [`GridSearch`]
+/// (the default); a TPE searcher is planned as an explicit opt-in.
+pub trait Searcher {
     /// Runs the search, returning every trial visited (in visit order).
     fn search(&mut self, oracle: &mut dyn Oracle) -> Vec<Trial>;
 }
 
-/// Exhaustive sampler: visits every candidate once, in declaration order,
+/// Exhaustive searcher: visits every candidate once, in declaration order,
 /// skipping candidates whose trials were supplied by [`resume`] and stopping
 /// early only when the oracle's budget runs out.
 ///
-/// [`resume`]: GridSampler::resume
+/// [`resume`]: GridSearch::resume
 #[derive(Default)]
-pub struct GridSampler {
+pub struct GridSearch {
     known: Vec<Trial>,
 }
 
-impl GridSampler {
+impl GridSearch {
     pub fn new() -> Self {
         Self::default()
     }
@@ -221,7 +222,7 @@ impl GridSampler {
     }
 }
 
-impl Sampler for GridSampler {
+impl Searcher for GridSearch {
     fn search(&mut self, oracle: &mut dyn Oracle) -> Vec<Trial> {
         // Resumed trials count only when (a) their config still exists in the
         // current space — a removed or renamed candidate's history must not
@@ -348,14 +349,14 @@ impl Autotuner {
     }
 
     /// Appends every trial to a JSONL log at `path` (created if missing) and
-    /// seeds the sampler from any trials already in it — which is what makes
+    /// seeds the searcher from any trials already in it — which is what makes
     /// an interrupted exhaustive run resumable.
     pub fn log(mut self, path: impl Into<PathBuf>) -> Self {
         self.log_path = Some(path.into());
         self
     }
 
-    /// Runs the search with [`GridSampler`] (the default sampler), resuming
+    /// Runs the search with [`GridSearch`] (the default searcher), resuming
     /// from the trial log when one is configured.
     ///
     /// `setup` is called once per candidate. It applies the config (picks the
@@ -383,15 +384,15 @@ impl Autotuner {
             &self.name,
             &space_hash(&self.configs),
         )?;
-        let sampler = GridSampler::new().resume(log.existing_trials());
-        self.run_sampler(sampler, stream, setup, &mut log)
+        let searcher = GridSearch::new().resume(log.existing_trials());
+        self.run_searcher(searcher, stream, setup, &mut log)
     }
 
-    /// Runs the search with an explicit [`Sampler`]. The trial log still
-    /// records every trial, but resume semantics are the sampler's concern.
+    /// Runs the search with an explicit [`Searcher`]. The trial log still
+    /// records every trial, but resume semantics are the searcher's concern.
     pub fn run_with<S, F>(
         mut self,
-        sampler: impl Sampler,
+        searcher: impl Searcher,
         stream: &Arc<Stream>,
         setup: S,
     ) -> Result<Output, Error>
@@ -405,7 +406,7 @@ impl Autotuner {
             &self.name,
             &space_hash(&self.configs),
         )?;
-        self.run_sampler(sampler, stream, setup, &mut log)
+        self.run_searcher(searcher, stream, setup, &mut log)
     }
 
     fn apply_prune(&mut self) {
@@ -413,9 +414,9 @@ impl Autotuner {
         self.configs.retain(|c| prune.iter().all(|keep| keep(c)));
     }
 
-    fn run_sampler<S, F>(
+    fn run_searcher<S, F>(
         mut self,
-        mut sampler: impl Sampler,
+        mut searcher: impl Searcher,
         stream: &Arc<Stream>,
         setup: S,
         log: &mut TrialLog,
@@ -432,7 +433,7 @@ impl Autotuner {
             deadline: self.budget.map(|b| Instant::now() + b),
             log,
         };
-        let mut trials = sampler.search(&mut oracle);
+        let mut trials = searcher.search(&mut oracle);
 
         // Paired runoff between the two best. Rationale in run()'s docs. An
         // exhausted budget skips it: the sequential medians decide, and no
@@ -809,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn grid_sampler_visits_everything_once_and_picks_best() {
+    fn grid_search_visits_everything_once_and_picks_best() {
         let configs = vec![cfg(32, 2), cfg(64, 4), cfg(128, 8)];
         let mut oracle = FakeOracle {
             configs: configs.clone(),
@@ -817,7 +818,7 @@ mod tests {
             measured: Vec::new(),
             budget: None,
         };
-        let trials = GridSampler::new().search(&mut oracle);
+        let trials = GridSearch::new().search(&mut oracle);
         assert_eq!(oracle.measured.len(), 3);
         assert_eq!(trials.len(), 3);
         let best = best_config(&configs, &trials).unwrap();
@@ -833,7 +834,7 @@ mod tests {
             measured: Vec::new(),
             budget: None,
         };
-        let trials = GridSampler::new().search(&mut oracle);
+        let trials = GridSearch::new().search(&mut oracle);
         assert_eq!(trials.len(), 2);
         assert!(matches!(trials[0].state, TrialState::Invalid { .. }));
         let best = best_config(&configs, &trials).unwrap();
@@ -857,7 +858,7 @@ mod tests {
             measured: Vec::new(),
             budget: None,
         };
-        let trials = GridSampler::new().resume(known).search(&mut oracle);
+        let trials = GridSearch::new().resume(known).search(&mut oracle);
         assert_eq!(oracle.measured.len(), 2, "known candidate not re-measured");
         assert_eq!(trials.len(), 3, "known trial still in the result set");
         let best = best_config(&configs, &trials).unwrap();
@@ -873,7 +874,7 @@ mod tests {
             measured: Vec::new(),
             budget: Some(Duration::ZERO),
         };
-        let trials = GridSampler::new().search(&mut oracle);
+        let trials = GridSearch::new().search(&mut oracle);
         assert!(trials.is_empty(), "zero budget measures nothing");
     }
 
@@ -968,7 +969,7 @@ mod tests {
             measured: Vec::new(),
             budget: None,
         };
-        let trials = GridSampler::new().resume(vec![stale]).search(&mut oracle);
+        let trials = GridSearch::new().resume(vec![stale]).search(&mut oracle);
         assert_eq!(trials.len(), 1, "stale trial dropped from results");
         let best = best_config(&configs, &trials).expect("valid winner survives");
         assert_eq!(best.int("BN"), Some(64));
@@ -989,7 +990,7 @@ mod tests {
             measured: Vec::new(),
             budget: None,
         };
-        let trials = GridSampler::new().resume(vec![invalid]).search(&mut oracle);
+        let trials = GridSearch::new().resume(vec![invalid]).search(&mut oracle);
         assert_eq!(oracle.measured.len(), 1, "previously-Invalid retried");
         assert!(trials.iter().any(|t| t.median_ms() == Some(1.0)));
     }
