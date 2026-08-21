@@ -84,6 +84,39 @@ jobs:
           source "${HOME}/.cargo/env"
           ./scripts/run_cpu_tests.sh
 
+  # The shared host-side crates (cuda-bindings, cuda-core, cuda-async)
+  # support CUDA 12.8+, while the Tile stack requires 13.2+. This lane keeps
+  # the 12.x floor honest: compile-only, no GPU, no TileIR toolchain (12.x
+  # images have no tileiras, which is exactly the point).
+  shared-crates-cuda12:
+    runs-on: linux-amd64-cpu16
+    container:
+      image: nvidia/cuda:12.8.0-devel-ubuntu22.04
+      env:
+        DEBIAN_FRONTEND: noninteractive
+    env:
+      CUDA_TOOLKIT_PATH: /usr/local/cuda
+    timeout-minutes: 30
+    steps:
+      - name: Install basic dependencies
+        run: |
+          apt update
+          apt install -y --no-install-recommends build-essential curl \
+            ca-certificates git cmake pkg-config libclang-dev zlib1g-dev \
+            libzstd-dev
+
+      - name: Clone repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+      - name: Check shared crates against CUDA 12.8
+        run: |
+          source "${HOME}/.cargo/env"
+          cargo check -p cuda-bindings -p cuda-core -p cuda-async --all-targets
+
   # Model-checks / sanitizers for the cuda-async completion reactor's lock-free
   # slot protocol. CPU-only, no GPU: loom explores the interleavings and weak-
   # memory outcomes, miri checks the UnsafeCell/pointer UB, ThreadSanitizer

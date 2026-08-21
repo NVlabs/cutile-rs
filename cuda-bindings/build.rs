@@ -18,7 +18,7 @@ use syn::{
     TypeBareFn,
 };
 
-const MIN_CUDA_VERSION: u32 = 13020;
+const MIN_CUDA_VERSION: u32 = 12080;
 const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
 const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
 
@@ -74,6 +74,24 @@ fn run() -> Result<(), Box<dyn Error>> {
     let cuda_toolkit = resolve_cuda_toolkit()?;
     let cuda_toolkit = cuda_toolkit.to_string_lossy().into_owned();
     println!("cargo:rustc-env=CUTILE_RESOLVED_CUDA_TOOLKIT_PATH={cuda_toolkit}");
+
+    // CUDA 12.8 renamed the event elapsed-time entry point to
+    // cuEventElapsedTime_v2; earlier toolkits only declare
+    // cuEventElapsedTime. Probe the resolved headers so src/lib.rs can
+    // dispatch to whichever symbol this build's toolkit declares.
+    println!("cargo::rustc-check-cfg=cfg(cuda_has_cuEventElapsedTime_v2)");
+    println!("cargo::rustc-check-cfg=cfg(cuda_has_cuLaunchHostFunc_v2)");
+    let resolved_cuda_h = std::path::Path::new(&cuda_toolkit)
+        .join("include")
+        .join("cuda.h");
+    if let Ok(header) = fs::read_to_string(&resolved_cuda_h) {
+        if header.contains("cuEventElapsedTime_v2") {
+            println!("cargo:rustc-cfg=cuda_has_cuEventElapsedTime_v2");
+        }
+        if header.contains("cuLaunchHostFunc_v2") {
+            println!("cargo:rustc-cfg=cuda_has_cuLaunchHostFunc_v2");
+        }
+    }
     let out_dir = env::var("OUT_DIR")?;
     let out_dir = Path::new(&out_dir);
 
@@ -88,7 +106,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn resolve_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
     match env::var_os(CUDA_TOOLKIT_PATH_ENV) {
         Some(value) if value.is_empty() => Err(format!(
-            "{CUDA_TOOLKIT_PATH_ENV} is set to an empty string. Set it to a CUDA 13.2+ toolkit directory."
+            "{CUDA_TOOLKIT_PATH_ENV} is set to an empty string. Set it to a CUDA 12.8+ toolkit directory."
         )
         .into()),
         Some(value) => resolve_explicit_cuda_toolkit(value),
@@ -135,7 +153,7 @@ fn find_default_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
     }
 
     Err(format!(
-        "{CUDA_TOOLKIT_PATH_ENV} is not set, and no CUDA 13.2+ toolkit was found in default locations:\n{}\nSet {CUDA_TOOLKIT_PATH_ENV} to a CUDA 13.2+ toolkit directory.",
+        "{CUDA_TOOLKIT_PATH_ENV} is not set, and no CUDA 12.8+ toolkit was found in default locations:\n{}\nSet {CUDA_TOOLKIT_PATH_ENV} to a CUDA 12.8+ toolkit directory.",
         rejected.join("\n")
     )
     .into())
@@ -154,6 +172,7 @@ fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
             "/usr/local/cuda-13.3",
             "/usr/local/cuda-13.2",
             "/usr/local/cuda-13",
+            "/usr/local/cuda-12",
             "/usr/local/cuda",
         ];
 
@@ -177,7 +196,7 @@ fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<u32, String> {
     let version = cuda_version_from_header(&cuda_h).map_err(|error| error.to_string())?;
     if version < MIN_CUDA_VERSION {
         return Err(format!(
-            "CUDA toolkit {} is too old. cuTile requires CUDA 13.2+ and recommends CUDA 13.3",
+            "CUDA toolkit {} is too old. The CUDA host-side crates require CUDA 12.8+ (the Tile compiler needs 13.2+)",
             format_cuda_version(version)
         ));
     }
@@ -198,7 +217,7 @@ fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, Box<dyn Error>> {
         })
         .ok_or_else(|| {
             format!(
-                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH to a CUDA 13.2+ toolkit directory.",
+                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH to a CUDA 12.8+ toolkit directory.",
                 cuda_h.display()
             )
             .into()
