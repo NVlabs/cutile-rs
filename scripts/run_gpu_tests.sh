@@ -53,6 +53,10 @@ run_step \
     "cuda-core GPU integration test vmm" \
     cargo test -p cuda-core --test vmm
 
+run_step \
+    "cuda-core GPU integration test vmm_multicast" \
+    cargo test -p cuda-core --test vmm_multicast
+
 for test_target in \
     concurrent_capture \
     cuda_graph \
