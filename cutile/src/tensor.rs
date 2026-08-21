@@ -596,10 +596,14 @@ pub(crate) enum Storage {
 impl Storage {
     /// 16-aligned sentinel address fed to [`compute_spec`] for meta tensors.
     ///
-    /// `DivHint::from_ptr` clamps pointer alignment to 16, and every real device
-    /// allocation is >=16-byte aligned, so this yields the exact same
-    /// `base_ptr_div` a real tensor would — keeping the warmup cache key
-    /// byte-identical to the launch key.
+    /// `DivHint::from_ptr` clamps pointer alignment to 16, and every
+    /// cutile-owned device allocation is >=16-byte aligned, so this yields
+    /// the exact same `base_ptr_div` an owned tensor would — keeping the
+    /// warmup cache key byte-identical to the launch key. Foreign/borrowed
+    /// pointers (`from_foreign`, `borrow_raw_parts`) may be less aligned;
+    /// they get their own measured `base_ptr_div` and therefore their own
+    /// specialization — a warmup-key mismatch at worst, never wrong code —
+    /// so the sentinel deliberately reflects only the owned common case.
     const META_SPEC_PTR: u64 = 16;
 
     fn len_bytes(&self) -> usize {
