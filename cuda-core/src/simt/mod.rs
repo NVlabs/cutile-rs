@@ -24,16 +24,15 @@
 //! - `DeviceCopy` for the unstable `f16` primitive sits behind the
 //!   default-off `f16` cargo feature, since it is nightly-only; the
 //!   `half::f16` and `half::bf16` impls are always present.
-//! - The `#[derive(DeviceCopy)]` re-export is dropped; the derive lives in
-//!   cuda-oxide's `cuda-macros`, which is not one of the shared crates.
-//! - `peer` is not copied: nothing outside cuda-oxide's own crate used it.
-//!   `vmm` is copied, one example consumes it; #202 remains the idiomatic
-//!   port of the same wrappers onto this crate's own runtime types.
+//! - `#[derive(DeviceCopy)]` comes from the sibling `cuda-core-derive`
+//!   crate, extracted from cuda-oxide's `cuda-macros` so it is publishable.
+//! - `vmm` and `peer` are copied like the rest; #202 remains the idiomatic
+//!   port of the VMM wrappers onto this crate's own runtime types.
 //! - `init` and `launch_kernel` are not copied: the crate root already
 //!   exposes identical ones, re-exported below.
-//! - `oxide-artifacts` is vendored as [`artifacts`]; see the note there.
+//! - `oxide-artifacts` comes from crates.io (cuda-oxide publishes it) and is
+//!   re-exported as [`artifacts`].
 
-pub mod artifacts;
 pub mod context;
 pub mod device_buffer;
 pub mod embedded;
@@ -41,11 +40,15 @@ pub mod event;
 pub mod launch;
 pub mod memory;
 pub mod module;
+pub mod peer;
 pub mod pinned_host_buffer;
 pub mod stream;
 pub mod vmm;
 
 pub use context::{ContextLimit, CudaContext, StreamPriorityRange, SyncPolicy};
+/// `#[derive(DeviceCopy)]`, re-exported next to the trait so
+/// `use cuda_core::DeviceCopy;` brings both into scope (serde pattern).
+pub use cuda_core_derive::DeviceCopy;
 pub use device_buffer::{DeviceBuffer, DeviceCopy};
 pub use embedded::{EmbeddedModule, EmbeddedModuleError};
 pub use event::CudaEvent;
@@ -64,6 +67,8 @@ pub use crate::error::{DriverError, IntoResult};
 pub use crate::init;
 pub use crate::launch_kernel;
 pub use cuda_bindings as sys;
+/// Artifact-bundle metadata, from the published crate cuda-oxide releases.
+pub use oxide_artifacts as artifacts;
 
 /// Launches a CUDA kernel on a specific [`CudaStream`], binding its context first.
 ///

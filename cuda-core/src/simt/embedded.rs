@@ -5,12 +5,12 @@
 
 //! Loading CUDA modules from embedded device artifact bundles.
 
-use crate::simt::artifacts::ArtifactError;
-pub use crate::simt::artifacts::{
+use crate::{CudaContext, CudaModule, DriverError};
+use oxide_artifacts::ArtifactError;
+pub use oxide_artifacts::{
     ArtifactCompileOptions, ArtifactDebugPolicy, ArtifactPayloadKind, OwnedArtifactBundle,
     COMPILE_OPTIONS_TARGET_MARKER,
 };
-use crate::{CudaContext, CudaModule, DriverError};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,7 +66,7 @@ pub fn artifact_bundles_from_binary_path(
         path: path.to_path_buf(),
         source,
     })?;
-    crate::simt::artifacts::read_artifact_bundles_from_object_bytes(&bytes)
+    oxide_artifacts::read_artifact_bundles_from_object_bytes(&bytes)
         .map_err(EmbeddedModuleError::Artifacts)
 }
 
@@ -154,7 +154,7 @@ impl std::error::Error for EmbeddedModuleError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simt::artifacts::{
+    use oxide_artifacts::{
         build_artifact_blob, build_host_object_for_target, ArtifactBundleSpec, ArtifactPayloadSpec,
         OwnedArtifactPayload,
     };
