@@ -70,8 +70,8 @@ pub struct Measurement {
 }
 
 impl Measurement {
-    /// Crate-internal constructor (tuner plumbing and tests).
-    #[cfg(feature = "experimental-tune")]
+    /// Crate-internal constructor for the tuner's unit tests.
+    #[cfg(all(test, feature = "experimental-tune"))]
     pub(crate) fn from_times_ms(times_ms: Vec<f32>) -> Self {
         Self { times_ms }
     }
