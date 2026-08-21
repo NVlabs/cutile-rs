@@ -71,6 +71,8 @@ anyhow = "1"
 stacker = "0.1"
 libloading = "0.8"
 thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 candle-core = { version = "0.9.2", features = [] }

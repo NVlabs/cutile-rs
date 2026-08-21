@@ -192,6 +192,8 @@ pub mod kernels;
 pub mod prelude;
 pub mod tensor;
 pub mod tile_kernel;
+#[cfg(feature = "experimental-tune")]
+pub mod tune;
 pub mod utils;
 
 pub use cuda_async;
