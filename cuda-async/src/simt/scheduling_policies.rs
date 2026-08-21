@@ -19,10 +19,10 @@
 
 use crate::simt::device_future::DeviceFuture;
 use crate::simt::device_operation::{DeviceOperation, ExecutionContext};
-use crate::simt::error::{DeviceError, device_error};
+use crate::simt::error::{device_error, DeviceError};
 use cuda_core::{CudaContext, CudaStream};
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 /// Top-level enum wrapping all supported scheduling policy implementations.
 ///

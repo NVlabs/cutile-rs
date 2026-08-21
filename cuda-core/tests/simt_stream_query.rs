@@ -11,8 +11,8 @@
 //! tests do not compile device code.
 
 use cuda_core::CudaContext;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Long enough that the first query lands inside it on a loaded machine,

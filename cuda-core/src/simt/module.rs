@@ -27,10 +27,10 @@
 //! [`CudaModule::cu_module`] exposes a non-owning raw `CUmodule` handle under
 //! an explicit `unsafe` contract.
 
-use crate::simt::context::CudaContext;
 use crate::error::{DriverError, IntoResult};
+use crate::simt::context::CudaContext;
 use std::borrow::Cow;
-use std::ffi::{CString, c_void};
+use std::ffi::{c_void, CString};
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
@@ -298,7 +298,9 @@ impl ConstantHandle {
         num_bytes: usize,
     ) -> Result<(), DriverError> {
         stream.context().bind_to_thread()?;
-        unsafe { crate::simt::memory::memcpy_htod_async(self.dptr, src, num_bytes, stream.cu_stream()) }
+        unsafe {
+            crate::simt::memory::memcpy_htod_async(self.dptr, src, num_bytes, stream.cu_stream())
+        }
     }
 
     /// Stream-ordered `cuMemcpyHtoDAsync` from owned host bytes into the

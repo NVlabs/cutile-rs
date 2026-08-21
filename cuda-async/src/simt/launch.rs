@@ -406,9 +406,7 @@ macro_rules! impl_scalar_kernel_arg {
     };
 }
 
-impl_scalar_kernel_arg!(
-    u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64, bool
-);
+impl_scalar_kernel_arg!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64, bool);
 
 // ---------------------------------------------------------------------------
 // KernelArguments — push multiple heterogeneous args in a single call

@@ -18,9 +18,9 @@ use std::ptr::NonNull;
 use std::slice;
 use std::sync::Arc;
 
+use crate::error::DriverError;
 use crate::simt::context::CudaContext;
 use crate::simt::device_buffer::DeviceCopy;
-use crate::error::DriverError;
 
 /// Owned page-locked host buffer.
 ///

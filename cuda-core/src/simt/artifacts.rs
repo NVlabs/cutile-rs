@@ -1294,11 +1294,9 @@ mod tests {
         assert!(anchor.is_definition());
         assert!(anchor.is_global());
         assert!(anchor.is_weak());
-        assert!(
-            read_artifact_bundles_from_object_bytes(&bytes)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(read_artifact_bundles_from_object_bytes(&bytes)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

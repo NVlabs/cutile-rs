@@ -35,8 +35,8 @@ use std::sync::Arc;
 
 use cuda_bindings::CUdeviceptr;
 
-use crate::simt::context::CudaContext;
 use crate::error::DriverError;
+use crate::simt::context::CudaContext;
 use crate::simt::pinned_host_buffer::PinnedHostBuffer;
 use crate::simt::stream::CudaStream;
 
@@ -169,7 +169,9 @@ impl<T> Drop for DeviceBuffer<T> {
             // stream-ordered allocation.
             let result = match &self.dealloc_stream {
                 Some(stream) => match self.ctx.synchronize() {
-                    Ok(()) => unsafe { crate::simt::memory::free_async(self.ptr, stream.cu_stream()) },
+                    Ok(()) => unsafe {
+                        crate::simt::memory::free_async(self.ptr, stream.cu_stream())
+                    },
                     Err(error) => Err(error),
                 },
                 None => unsafe { crate::simt::memory::free_sync(self.ptr) },
@@ -431,7 +433,12 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         // return below frees it through the buffer's own `Drop`.
         let buf = unsafe { Self::from_raw_parts(ptr, len, ctx) };
         let enqueue_result = unsafe {
-            crate::simt::memory::memcpy_htod_async(buf.ptr, data.as_ptr(), num_bytes, stream.cu_stream())
+            crate::simt::memory::memcpy_htod_async(
+                buf.ptr,
+                data.as_ptr(),
+                num_bytes,
+                stream.cu_stream(),
+            )
         };
         let sync_result = stream.synchronize();
         enqueue_result?;
@@ -709,7 +716,12 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         );
         let num_bytes = src.num_bytes();
         unsafe {
-            crate::simt::memory::memcpy_htod_async(self.ptr, src.as_ptr(), num_bytes, stream.cu_stream())
+            crate::simt::memory::memcpy_htod_async(
+                self.ptr,
+                src.as_ptr(),
+                num_bytes,
+                stream.cu_stream(),
+            )
         }
     }
 
@@ -882,7 +894,9 @@ impl<T: DeviceCopy> DeviceBuffer<T> {
         if self.num_bytes() == 0 {
             return Ok(());
         }
-        unsafe { crate::simt::memory::memset_d8_async(self.ptr, 0, self.num_bytes(), stream.cu_stream()) }
+        unsafe {
+            crate::simt::memory::memset_d8_async(self.ptr, 0, self.num_bytes(), stream.cu_stream())
+        }
     }
 }
 

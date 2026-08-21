@@ -31,8 +31,8 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::mem;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Lifecycle state of a [`DeviceFuture`].
@@ -358,9 +358,9 @@ impl<T: Send + 'static, DO: DeviceOperation<Output = T>> Future for DeviceFuture
 mod tests {
     use super::*;
     use crate::simt::device_operation::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone)]
     struct DropTracker {

@@ -185,8 +185,8 @@ pub fn drain() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     /// Serializes the tests in this module: they share the global limbo,
     /// and `drain` consumes (and waits on) every parked entry.

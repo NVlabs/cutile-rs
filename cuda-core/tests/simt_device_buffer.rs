@@ -4,7 +4,7 @@
  */
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DriverError, PinnedHostBuffer};
-use std::sync::{Mutex, MutexGuard, mpsc};
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 

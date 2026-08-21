@@ -5,12 +5,12 @@
 
 //! Loading CUDA modules from embedded device artifact bundles.
 
-use crate::{CudaContext, CudaModule, DriverError};
 use crate::simt::artifacts::ArtifactError;
 pub use crate::simt::artifacts::{
-    ArtifactCompileOptions, ArtifactDebugPolicy, ArtifactPayloadKind,
-    COMPILE_OPTIONS_TARGET_MARKER, OwnedArtifactBundle,
+    ArtifactCompileOptions, ArtifactDebugPolicy, ArtifactPayloadKind, OwnedArtifactBundle,
+    COMPILE_OPTIONS_TARGET_MARKER,
 };
+use crate::{CudaContext, CudaModule, DriverError};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -155,8 +155,8 @@ impl std::error::Error for EmbeddedModuleError {
 mod tests {
     use super::*;
     use crate::simt::artifacts::{
-        ArtifactBundleSpec, ArtifactPayloadSpec, OwnedArtifactPayload, build_artifact_blob,
-        build_host_object_for_target,
+        build_artifact_blob, build_host_object_for_target, ArtifactBundleSpec, ArtifactPayloadSpec,
+        OwnedArtifactPayload,
     };
 
     #[test]

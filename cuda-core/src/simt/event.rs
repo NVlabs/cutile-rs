@@ -17,8 +17,8 @@
 //! [`CudaContext::new_event`] or [`CudaStream::record_event`] if you
 //! need [`elapsed_ms`](CudaEvent::elapsed_ms).
 
-use crate::simt::context::CudaContext;
 use crate::error::{DriverError, IntoResult};
+use crate::simt::context::CudaContext;
 use crate::simt::stream::CudaStream;
 use std::mem::MaybeUninit;
 use std::sync::Arc;

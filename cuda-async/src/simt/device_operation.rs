@@ -33,8 +33,8 @@ use cuda_core::{CudaContext, CudaStream};
 use std::cell::UnsafeCell;
 use std::future::IntoFuture;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// CUDA device ordinal. Type alias for readability.
 pub type Device = usize;
@@ -563,11 +563,11 @@ fn _zip<T1: Send, T2: Send, A: DeviceOperation<Output = T1>, B: DeviceOperation<
 
 /// Executes `a` then `b` on the same stream, returning `(T1, T2)`.
 impl<
-    T1: Send + 'static,
-    T2: Send + 'static,
-    A: DeviceOperation<Output = T1>,
-    B: DeviceOperation<Output = T2>,
-> DeviceOperation for Zip<T1, T2, A, B>
+        T1: Send + 'static,
+        T2: Send + 'static,
+        A: DeviceOperation<Output = T1>,
+        B: DeviceOperation<Output = T2>,
+    > DeviceOperation for Zip<T1, T2, A, B>
 {
     type Output = (T1, T2);
 
@@ -582,11 +582,11 @@ impl<
 
 /// Schedules via the thread-local default policy.
 impl<
-    T1: Send + 'static,
-    T2: Send + 'static,
-    A: DeviceOperation<Output = T1>,
-    B: DeviceOperation<Output = T2>,
-> IntoFuture for Zip<T1, T2, A, B>
+        T1: Send + 'static,
+        T2: Send + 'static,
+        A: DeviceOperation<Output = T1>,
+        B: DeviceOperation<Output = T2>,
+    > IntoFuture for Zip<T1, T2, A, B>
 {
     type Output = Result<(T1, T2), DeviceError>;
     type IntoFuture = DeviceFuture<(T1, T2), Zip<T1, T2, A, B>>;
@@ -609,11 +609,11 @@ pub trait Zippable<I, O: Send> {
 
 /// Zips two operations into a pair.
 impl<
-    T0: Send + 'static,
-    T1: Send + 'static,
-    DI0: DeviceOperation<Output = T0>,
-    DI1: DeviceOperation<Output = T1>,
-> Zippable<(DI0, DI1), (T0, T1)> for (DI0, DI1)
+        T0: Send + 'static,
+        T1: Send + 'static,
+        DI0: DeviceOperation<Output = T0>,
+        DI1: DeviceOperation<Output = T1>,
+    > Zippable<(DI0, DI1), (T0, T1)> for (DI0, DI1)
 {
     fn zip(self) -> impl DeviceOperation<Output = (T0, T1)> {
         _zip(self.0, self.1)
@@ -622,13 +622,13 @@ impl<
 
 /// Zips three operations into a triple by nesting two binary zips.
 impl<
-    T0: Send + 'static,
-    T1: Send + 'static,
-    T2: Send + 'static,
-    DI0: DeviceOperation<Output = T0>,
-    DI1: DeviceOperation<Output = T1>,
-    DI2: DeviceOperation<Output = T2>,
-> Zippable<(DI0, DI1, DI2), (T0, T1, T2)> for (DI0, DI1, DI2)
+        T0: Send + 'static,
+        T1: Send + 'static,
+        T2: Send + 'static,
+        DI0: DeviceOperation<Output = T0>,
+        DI1: DeviceOperation<Output = T1>,
+        DI2: DeviceOperation<Output = T2>,
+    > Zippable<(DI0, DI1, DI2), (T0, T1, T2)> for (DI0, DI1, DI2)
 {
     fn zip(self) -> impl DeviceOperation<Output = (T0, T1, T2)> {
         let cons = _zip(self.1, self.2);
@@ -674,8 +674,11 @@ pub struct StreamOperation<
 }
 
 /// Calls the closure with the context, then executes the resulting operation.
-impl<O: Send + 'static, DO: DeviceOperation<Output = O>, F: FnOnce(&ExecutionContext) -> DO + Send>
-    DeviceOperation for StreamOperation<O, DO, F>
+impl<
+        O: Send + 'static,
+        DO: DeviceOperation<Output = O>,
+        F: FnOnce(&ExecutionContext) -> DO + Send,
+    > DeviceOperation for StreamOperation<O, DO, F>
 {
     type Output = O;
 
@@ -703,8 +706,11 @@ pub fn with_context<
 }
 
 /// Schedules via the thread-local default policy.
-impl<O: Send + 'static, DO: DeviceOperation<Output = O>, F: FnOnce(&ExecutionContext) -> DO + Send>
-    IntoFuture for StreamOperation<O, DO, F>
+impl<
+        O: Send + 'static,
+        DO: DeviceOperation<Output = O>,
+        F: FnOnce(&ExecutionContext) -> DO + Send,
+    > IntoFuture for StreamOperation<O, DO, F>
 {
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, StreamOperation<O, DO, F>>;
@@ -747,7 +753,10 @@ impl<T1: Send, T2: Send, DI: DeviceOperation<Output = (T1, T2)>> Select<T1, T2, 
                 let input = self.input.get();
                 let input = input.as_mut();
                 let input = input.unwrap().take().ok_or_else(|| {
-                    crate::simt::error::device_error(context.get_device_id(), "Select operation failed.")
+                    crate::simt::error::device_error(
+                        context.get_device_id(),
+                        "Select operation failed.",
+                    )
                 })?;
                 let (left, right) = input.execute(context)?;
                 *self.left.get() = Some(left);

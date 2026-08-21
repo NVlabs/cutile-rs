@@ -24,13 +24,13 @@
 //! completes. This is the primary bridge between CUDA stream completion and
 //! Rust `async` futures.
 
-use crate::simt::context::CudaContext;
 use crate::error::{DriverError, IntoResult};
+use crate::simt::context::CudaContext;
 use crate::simt::event::CudaEvent;
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// An RAII wrapper around a `CUstream` handle.
 ///

@@ -21,8 +21,8 @@ use crate::simt::launch::DeviceLaunchLimits;
 use crate::simt::stream::CudaStream;
 use std::ffi::c_int;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Owns a reference to a CUDA device's primary context.
 ///

@@ -19,8 +19,10 @@
 //!
 //! [`CudaContext`]: cuda_core::CudaContext
 
-use crate::simt::error::{DeviceError, device_assert, device_error};
-use crate::simt::scheduling_policies::{GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin};
+use crate::simt::error::{device_assert, device_error, DeviceError};
+use crate::simt::scheduling_policies::{
+    GlobalSchedulingPolicy, SchedulingPolicy, StreamPoolRoundRobin,
+};
 use cuda_core::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use rustc_hash::FxHashMap;
 use std::cell::Cell;
