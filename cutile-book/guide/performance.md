@@ -205,6 +205,32 @@ How it works:
 - `.prune(...)` removes candidates before they are visited. `.budget(...)` bounds the total wall-clock time of the run.
 - `.log(path)` appends every trial to a JSONL file. Rerunning with the same log resumes an interrupted search instead of starting over. The log records the tuner name and a hash of the search space, and refuses to resume from a log that belongs to a different search.
 
+### Committing winners
+
+A `tune::Record` persists winners so production loads them instead of re-searching. It is one JSON file per kernel, written by `save` and intended to be committed next to the code it tunes. The file holds a provenance header (kernel name, source hash, cutile version, `tileiras` fingerprint, target architecture, search-space hash) and one entry per shape-class bucket: the winning `Config`, its median, and optionally the winner's JIT cache key.
+
+```rust
+use cutile::tune::{Record, RecordEntry, Workspace};
+
+// After tuning: store the winner for this bucket.
+let mut record = Record::new(&workspace);
+record.insert(RecordEntry {
+    bucket: "tg<=512".into(),
+    config: best,
+    median_ms,
+    samples,
+    l2_key: Some(launcher.specialize()?.l2_cache_key()?),
+});
+record.save(&path)?;
+
+// In production: load, verified against the running workspace.
+let (record, warnings) = Record::load_verified(&path, &workspace, |entry| {
+    Ok(Some(specialize_for(&entry.config)?.l2_cache_key()?))
+})?;
+```
+
+`load_verified` refuses a record whose kernel, architecture, source hash, or search space does not match the running workspace, and refuses any entry whose stored JIT cache key no longer matches the recomputed one. That last check covers the kernel's dependencies and the toolchain, so a stale winner fails loudly instead of applying silently. Conditions that do not invalidate the configs themselves, such as a `tileiras` version drift that only shifts timings, come back as warnings. A record is never applied on a best-effort basis: it either verifies or it does not load.
+
 The `autotune` example runs a complete search over the block size of an RMS normalization kernel:
 
 ```sh

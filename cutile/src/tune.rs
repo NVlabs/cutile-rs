@@ -21,13 +21,13 @@
 //! Principles, in order:
 //! - **Explicit opt-in, no magic.** Nothing tunes behind the programmer's
 //!   back; the search space is declared, the objective is programmer-written,
-//!   and results apply only when a program explicitly loads an artifact.
+//!   and results apply only when a program explicitly loads a record.
 //! - **Invalid candidates are data.** A candidate rejected by launch checks
 //!   or the correctness gate records [`TrialState::Invalid`] with its message;
 //!   it never aborts the search.
 //! - **Persistence is checked.** The trial log records the tuner's name and
 //!   a hash of its search space and refuses to resume from a log that does
-//!   not match; the artifact store built on top extends the same discipline
+//!   not match; the record store built on top extends the same discipline
 //!   with full provenance (source hash, toolchain fingerprint, arch).
 
 use crate::bench::{do_bench, BenchOptions, Measurement};
@@ -47,11 +47,11 @@ use std::time::{Duration, Instant};
 /// Parameters cover both user axes (tile sizes, split counts — read by the
 /// launch closure to pick a monomorphization) and compiler knobs (applied by
 /// the launch closure via `CompileOptions`). Keeping them in one ordered map
-/// makes a `Config` fully serializable for artifacts and logs.
+/// makes a `Config` fully serializable for records and logs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Config {
-    /// Stable identity within a search space; artifact and log records key
+    /// Stable identity within a search space; record and log records key
     /// on it. [`Config::new`] derives it from the parameters — construct
     /// through `new` so the two can never disagree.
     pub id: String,
@@ -121,7 +121,7 @@ impl Config {
 }
 
 /// Order-independent fingerprint of a candidate set. The trial log and
-/// artifacts record it so that resume/apply against a *different* search
+/// records record it so that resume/apply against a *different* search
 /// space is detected instead of silently trusted.
 pub fn space_hash(configs: &[Config]) -> String {
     // FNV-1a over the sorted ids; stability matters, cryptography does not.
@@ -754,6 +754,276 @@ impl TrialLog {
     }
 }
 
+// ── Record ────────────────────────────────────────────────────────────────
+
+/// On-disk format version; bump on breaking changes.
+const RECORD_SCHEMA: u32 = 1;
+
+/// A persisted, provenance-checked record of tuning winners: one entry per
+/// shape-class bucket, serialized as human-diffable pretty JSON intended to
+/// be committed next to the code it tunes.
+///
+/// Staleness is enforced at load, not documented: [`Record::load_verified`]
+/// refuses entries whose provenance no longer matches the running workspace,
+/// so a stale winner cannot silently apply. The strong check is the stored
+/// winner's persistent-cache key: recomputed via
+/// `Specialization::l2_cache_key()` (or `KernelCompiler::l2_cache_key()`),
+/// it covers the serialized bytecode — dependencies included — and the
+/// toolchain fingerprint, closing the known gap of `source_hash` (which
+/// covers only the kernel's own module).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Record {
+    /// Record-format version; bump on breaking changes.
+    pub schema: u32,
+    /// Kernel (or tuner) name this record belongs to.
+    pub kernel: String,
+    /// The kernel module's `_SOURCE_HASH` at tune time.
+    pub source_hash: String,
+    /// cutile crate version at tune time.
+    pub cutile_version: String,
+    /// `tileiras --version` fingerprint at tune time.
+    pub tileiras_fingerprint: String,
+    /// Target architecture (e.g. `sm_120`). Records are per-arch; loading
+    /// on a different arch is refused, never approximated.
+    pub arch: String,
+    /// Hostname the tuning ran on (informational).
+    pub machine: String,
+    /// Unix seconds at creation (informational).
+    pub created_unix_secs: u64,
+    /// Fingerprint of the candidate set the winners were chosen from.
+    #[serde(default)]
+    pub space_hash: Option<String>,
+    /// Free-form revision tag for the correctness gate / objective; drift is
+    /// surfaced as a warning (a stronger gate may invalidate old winners).
+    #[serde(default)]
+    pub gate: Option<String>,
+    /// Winners, one per bucket.
+    pub entries: Vec<RecordEntry>,
+}
+
+/// One bucket's winner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordEntry {
+    /// Shape-class bucket this winner applies to (e.g. `"tg<=512"`).
+    pub bucket: String,
+    /// The winning configuration.
+    pub config: Config,
+    /// Its measured median, milliseconds.
+    pub median_ms: f32,
+    /// Timed reps behind the median.
+    pub samples: usize,
+    /// The winner's persistent-cache (L2) key at tune time, when the caller
+    /// recorded one. Enables the strong staleness check at load.
+    pub l2_key: Option<String>,
+}
+
+/// The provenance the loader checks a record against.
+pub struct Workspace {
+    /// Kernel/tuner name the caller is loading FOR. Two kernels in one
+    /// module share a source hash, so this is its own refusal axis.
+    pub kernel: String,
+    pub source_hash: String,
+    pub arch: String,
+    pub tileiras_fingerprint: String,
+    /// Fingerprint of the CURRENT candidate set (see [`space_hash`]); when
+    /// both sides carry one, a mismatch refuses — a winner chosen from a
+    /// different space is not a winner here.
+    pub space_hash: Option<String>,
+}
+
+impl Record {
+    /// Starts a record with the given provenance; machine name and
+    /// timestamp are captured from the environment.
+    pub fn new(ws: &Workspace) -> Self {
+        Self {
+            schema: RECORD_SCHEMA,
+            kernel: ws.kernel.clone(),
+            source_hash: ws.source_hash.clone(),
+            cutile_version: env!("CARGO_PKG_VERSION").to_string(),
+            tileiras_fingerprint: ws.tileiras_fingerprint.clone(),
+            arch: ws.arch.clone(),
+            machine: hostname(),
+            created_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            space_hash: ws.space_hash.clone(),
+            gate: None,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Inserts or replaces the winner for `bucket`. Replacement is in place,
+    /// preserving entry order (committed records should diff cleanly).
+    pub fn insert(&mut self, entry: RecordEntry) {
+        match self.entries.iter_mut().find(|e| e.bucket == entry.bucket) {
+            Some(slot) => *slot = entry,
+            None => self.entries.push(entry),
+        }
+    }
+
+    /// The winner for `bucket`, if recorded.
+    pub fn get(&self, bucket: &str) -> Option<&RecordEntry> {
+        self.entries.iter().find(|e| e.bucket == bucket)
+    }
+
+    /// Writes pretty JSON (stable field order — committed records should
+    /// diff cleanly).
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| crate::error::tensor_error(&format!("record serialize: {e}")))?;
+        std::fs::write(path, json)
+            .map_err(|e| crate::error::tensor_error(&format!("record write: {e}")))
+    }
+
+    /// Loads without verification. Prefer [`load_verified`](Self::load_verified)
+    /// anywhere the entries will actually be applied.
+    pub fn load(path: &Path) -> Result<Self, Error> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| crate::error::tensor_error(&format!("record read: {e}")))?;
+        serde_json::from_str(&contents)
+            .map_err(|e| crate::error::tensor_error(&format!("record parse: {e}")))
+    }
+
+    /// Loads and verifies against the running workspace.
+    ///
+    /// REFUSES (errors) on: schema, kernel, arch, or `source_hash` mismatch;
+    /// a `space_hash` mismatch when both sides carry one; duplicate buckets;
+    /// and — when the toolchain fingerprints MATCH — a stored winner
+    /// `l2_key` that differs from the recomputed one (the strong,
+    /// dependency-inclusive check).
+    ///
+    /// WARNS (returned, never silent) on: toolchain-fingerprint drift (the
+    /// stored l2 keys embed the old fingerprint, so recomputation cannot
+    /// match and is skipped — configs remain valid, timings may not); gate
+    /// tag drift; entries without a stored key; and entries whose key the
+    /// verifier declined to recompute (`Ok(None)`).
+    ///
+    /// `verify_l2` receives each keyed entry and returns the key the CURRENT
+    /// workspace derives for its config — typically
+    /// `launcher.specialize()?.l2_cache_key()` or
+    /// `KernelCompiler::...l2_cache_key()`.
+    pub fn load_verified(
+        path: &Path,
+        ws: &Workspace,
+        mut verify_l2: impl FnMut(&RecordEntry) -> Result<Option<String>, Error>,
+    ) -> Result<(Self, Vec<String>), Error> {
+        let record = Self::load(path)?;
+        let refuse = |what: &str, stored: &str, current: &str| {
+            Err(crate::error::tensor_error(&format!(
+                "stale tuning record at {}: {what} mismatch (record: {stored}, workspace: {current}); re-tune or delete it",
+                path.display(),
+            )))
+        };
+        if record.schema != RECORD_SCHEMA {
+            return refuse(
+                "schema",
+                &record.schema.to_string(),
+                &RECORD_SCHEMA.to_string(),
+            );
+        }
+        if record.kernel != ws.kernel {
+            return refuse("kernel", &record.kernel, &ws.kernel);
+        }
+        if record.arch != ws.arch {
+            return refuse("arch", &record.arch, &ws.arch);
+        }
+        if record.source_hash != ws.source_hash {
+            return refuse("source_hash", &record.source_hash, &ws.source_hash);
+        }
+        if let (Some(stored), Some(current)) = (&record.space_hash, &ws.space_hash) {
+            if stored != current {
+                return refuse("space_hash", stored, current);
+            }
+        }
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for e in &record.entries {
+                if !seen.insert(e.bucket.as_str()) {
+                    return Err(crate::error::tensor_error(&format!(
+                        "tuning record at {} has duplicate entries for bucket {:?}; fix or re-tune it",
+                        path.display(),
+                        e.bucket,
+                    )));
+                }
+                // A config's id is derived from its params; a stored entry
+                // where the two disagree has been hand-edited or corrupted,
+                // and downstream consumers key on the id.
+                let derived = Config::new(e.config.params.clone()).id;
+                if e.config.id != derived {
+                    return refuse(
+                        &format!("config id for bucket {:?}", e.bucket),
+                        &e.config.id,
+                        &derived,
+                    );
+                }
+            }
+        }
+
+        let mut warnings = Vec::new();
+        if record.space_hash.is_none() && ws.space_hash.is_some() {
+            // The workspace records a space hash, so a record without one
+            // predates the field or has had it stripped; either way the
+            // same-space check silently cannot run.
+            warnings.push(
+                "tuning record carries no space_hash; the search-space match was not checked"
+                    .to_string(),
+            );
+        }
+        let fingerprint_matches = record.tileiras_fingerprint == ws.tileiras_fingerprint;
+        if !fingerprint_matches {
+            // The stored keys embed the old fingerprint: recomputing under
+            // the new toolchain CANNOT match, so the strong check is skipped
+            // rather than misread as staleness. Ordering matters here.
+            warnings.push(format!(
+                "tuning record was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted and per-entry key verification was skipped — consider re-tuning",
+                record.tileiras_fingerprint, ws.tileiras_fingerprint,
+            ));
+        } else {
+            for entry in &record.entries {
+                match &entry.l2_key {
+                    None => warnings.push(format!(
+                        "bucket {:?} carries no l2 key; only source-level staleness checks applied",
+                        entry.bucket
+                    )),
+                    Some(stored) => match verify_l2(entry)? {
+                        None => warnings.push(format!(
+                            "bucket {:?}: verifier declined to recompute the l2 key; stored key not checked",
+                            entry.bucket
+                        )),
+                        Some(current) => {
+                            if &current != stored {
+                                return refuse(
+                                    &format!("l2 key for bucket {:?}", entry.bucket),
+                                    stored,
+                                    &current,
+                                );
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        if record.cutile_version != env!("CARGO_PKG_VERSION") {
+            warnings.push(format!(
+                "tuning record was produced by cutile {} (running {})",
+                record.cutile_version,
+                env!("CARGO_PKG_VERSION"),
+            ));
+        }
+        Ok((record, warnings))
+    }
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,6 +1146,219 @@ mod tests {
         };
         let trials = GridSearch::new().search(&mut oracle);
         assert!(trials.is_empty(), "zero budget measures nothing");
+    }
+
+    fn ws() -> Workspace {
+        Workspace {
+            kernel: "fmha_decode".into(),
+            source_hash: "abc123".into(),
+            arch: "sm_120".into(),
+            tileiras_fingerprint: "release 13.3, V13.3.36".into(),
+            space_hash: None,
+        }
+    }
+
+    fn record_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("cutile_record_{label}_{}.json", std::process::id()))
+    }
+
+    #[test]
+    fn record_roundtrips_and_verifies() {
+        let path = record_path("roundtrip");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
+            bucket: "tg<=512".into(),
+            config: cfg(64, 8),
+            median_ms: 1.25,
+            samples: 12,
+            l2_key: Some("f".repeat(64)),
+        });
+        a.save(&path).unwrap();
+
+        let (loaded, warnings) =
+            Record::load_verified(&path, &ws(), |e| Ok(e.l2_key.clone())).unwrap();
+        assert!(warnings.is_empty());
+        let entry = loaded.get("tg<=512").unwrap();
+        assert_eq!(entry.config.int("BN"), Some(64));
+        assert_eq!(entry.samples, 12);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_refuses_source_hash_and_arch_mismatch() {
+        let path = record_path("refuse");
+        Record::new(&ws()).save(&path).unwrap();
+
+        let mut other = ws();
+        other.source_hash = "different".into();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("source_hash mismatch"));
+        assert!(err.to_string().contains("re-tune"));
+
+        let mut other = ws();
+        other.arch = "sm_100".into();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("arch mismatch"));
+
+        let mut other = ws();
+        other.kernel = "other_kernel".into();
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("kernel mismatch"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_refuses_space_mismatch_and_duplicate_buckets() {
+        let path = record_path("space");
+        let mut with_space = ws();
+        with_space.space_hash = Some(space_hash(&[cfg(64, 8), cfg(128, 8)]));
+        Record::new(&with_space).save(&path).unwrap();
+
+        // Same kernel, different candidate set: refused when both carry one.
+        let mut other = ws();
+        other.space_hash = Some(space_hash(&[cfg(64, 8)]));
+        let err = Record::load_verified(&path, &other, |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("space_hash mismatch"));
+        // Loader without an expectation: accepted (no false refusals).
+        let (_, _) = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
+
+        // Duplicate buckets (hand-edited/merge-resolved record): refused.
+        let mut dup = Record::new(&ws());
+        for _ in 0..2 {
+            dup.entries.push(RecordEntry {
+                bucket: "b".into(),
+                config: cfg(64, 8),
+                median_ms: 1.0,
+                samples: 3,
+                l2_key: None,
+            });
+        }
+        dup.save(&path).unwrap();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("duplicate entries for bucket"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_refuses_l2_key_drift_and_warns_on_fingerprint_drift() {
+        let path = record_path("l2");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
+            bucket: "b".into(),
+            config: cfg(64, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some("a".repeat(64)),
+        });
+        a.save(&path).unwrap();
+
+        // Recomputed key differs => refuse (the dependency-inclusive check).
+        let err = Record::load_verified(&path, &ws(), |_| Ok(Some("b".repeat(64)))).unwrap_err();
+        assert!(err.to_string().contains("l2 key for bucket"));
+
+        // Verifier declines (None) => provenance fields alone decide; a
+        // fingerprint drift is a warning, not a refusal.
+        let mut drifted = ws();
+        drifted.tileiras_fingerprint = "release 13.4, V13.4.1".into();
+        let (_, warnings) = Record::load_verified(&path, &drifted, |_| Ok(None)).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("different tileiras"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_insert_replaces_bucket_winner() {
+        let mut a = Record::new(&ws());
+        for (bn, ms) in [(64, 2.0), (128, 1.0)] {
+            a.insert(RecordEntry {
+                bucket: "b".into(),
+                config: cfg(bn, 4),
+                median_ms: ms,
+                samples: 3,
+                l2_key: None,
+            });
+        }
+        assert_eq!(a.entries.len(), 1, "one winner per bucket");
+        assert_eq!(a.get("b").unwrap().config.int("BN"), Some(128));
+    }
+
+    #[test]
+    fn record_refuses_schema_and_id_param_mismatch() {
+        let path = record_path("schema");
+        let mut a = Record::new(&ws());
+        a.schema = RECORD_SCHEMA + 1;
+        a.save(&path).unwrap();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("schema mismatch"));
+
+        // A hand-edited entry whose id disagrees with its params: refused.
+        let mut a = Record::new(&ws());
+        let mut config = cfg(64, 8);
+        config.id = "BN=128,SPLITS=8".into();
+        a.insert(RecordEntry {
+            bucket: "b".into(),
+            config,
+            median_ms: 1.0,
+            samples: 3,
+            l2_key: None,
+        });
+        a.save(&path).unwrap();
+        let err = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("config id for bucket"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_without_space_hash_warns_when_workspace_expects_one() {
+        let path = record_path("nospace");
+        Record::new(&ws()).save(&path).unwrap(); // record: space_hash None
+        let mut expecting = ws();
+        expecting.space_hash = Some(space_hash(&[cfg(64, 8)]));
+        let (_, warnings) = Record::load_verified(&path, &expecting, |_| Ok(None)).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no space_hash"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fingerprint_drift_skips_l2_verification_instead_of_refusing() {
+        // Ordering pin: under toolchain drift the recomputed key CANNOT match
+        // the stored one, so a mismatching recomputation must be ignored
+        // (drift warning), never misread as staleness.
+        let path = record_path("driftorder");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
+            bucket: "b".into(),
+            config: cfg(64, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some("a".repeat(64)),
+        });
+        a.save(&path).unwrap();
+        let mut drifted = ws();
+        drifted.tileiras_fingerprint = "release 13.4, V13.4.1".into();
+        let mut called = false;
+        let (_, warnings) = Record::load_verified(&path, &drifted, |_| {
+            called = true;
+            Ok(Some("b".repeat(64))) // would refuse if it were consulted
+        })
+        .unwrap();
+        assert!(!called, "verifier must not run under fingerprint drift");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("skipped"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_version_drift_warns() {
+        let path = record_path("version");
+        let mut a = Record::new(&ws());
+        a.cutile_version = "0.0.0-elsewhere".into();
+        a.save(&path).unwrap();
+        let (_, warnings) = Record::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("produced by cutile 0.0.0-elsewhere"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
