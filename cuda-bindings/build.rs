@@ -80,13 +80,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     // cuEventElapsedTime. Probe the resolved headers so src/lib.rs can
     // dispatch to whichever symbol this build's toolkit declares.
     println!("cargo::rustc-check-cfg=cfg(cuda_has_cuEventElapsedTime_v2)");
+    println!("cargo::rustc-check-cfg=cfg(cuda_has_cuLaunchHostFunc_v2)");
     let resolved_cuda_h = std::path::Path::new(&cuda_toolkit)
         .join("include")
         .join("cuda.h");
-    if fs::read_to_string(&resolved_cuda_h)
-        .is_ok_and(|header| header.contains("cuEventElapsedTime_v2"))
-    {
-        println!("cargo:rustc-cfg=cuda_has_cuEventElapsedTime_v2");
+    if let Ok(header) = fs::read_to_string(&resolved_cuda_h) {
+        if header.contains("cuEventElapsedTime_v2") {
+            println!("cargo:rustc-cfg=cuda_has_cuEventElapsedTime_v2");
+        }
+        if header.contains("cuLaunchHostFunc_v2") {
+            println!("cargo:rustc-cfg=cuda_has_cuLaunchHostFunc_v2");
+        }
     }
     let out_dir = env::var("OUT_DIR")?;
     let out_dir = Path::new(&out_dir);

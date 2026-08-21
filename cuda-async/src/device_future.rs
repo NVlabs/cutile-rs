@@ -124,12 +124,8 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
             // CUDA driver flag bindings have platform-dependent integer types, so FFI calls cast them as `_`.
             *MODE.get_or_init(
                 || match std::env::var("CUDA_ASYNC_HOST_SYNC").ok()?.as_str() {
-                    "spin" | "spinwait" => {
-                        Some(cuda_bindings::CUhostTaskSyncMode_enum_CU_HOST_TASK_SPINWAIT as _)
-                    }
-                    "block" | "blocking" => {
-                        Some(cuda_bindings::CUhostTaskSyncMode_enum_CU_HOST_TASK_BLOCKING as _)
-                    }
+                    "spin" | "spinwait" => Some(cuda_bindings::CU_HOST_TASK_SPINWAIT),
+                    "block" | "blocking" => Some(cuda_bindings::CU_HOST_TASK_BLOCKING),
                     _ => None,
                 },
             )

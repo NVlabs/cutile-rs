@@ -47,6 +47,42 @@ pub fn cuda_toolkit_dir() -> String {
     env!("CUTILE_RESOLVED_CUDA_TOOLKIT_PATH").to_string()
 }
 
+/// Host-task sync modes for [`cu_launch_host_func`], defined as literals so
+/// consumers compile against any toolkit: the `CUhostTaskSyncMode` enum only
+/// exists in CUDA 13.x headers.
+pub const CU_HOST_TASK_BLOCKING: ::core::ffi::c_uint = 0;
+pub const CU_HOST_TASK_SPINWAIT: ::core::ffi::c_uint = 1;
+
+/// Enqueues a host function on the stream, with a sync mode where the
+/// toolkit supports one.
+///
+/// CUDA 13.x adds `cuLaunchHostFunc_v2`, whose `sync_mode` selects between
+/// the blocking default and a spin-waiting host task (lower callback latency,
+/// one busy core). On older toolkits the entry point does not exist and the
+/// call degrades to `cuLaunchHostFunc`: spin-wait is a latency optimization,
+/// so the degraded call keeps the same semantics at the default latency.
+///
+/// # Safety
+///
+/// Same contract as the underlying driver call: `func` and `arg` must remain
+/// valid until the callback executes, and `stream` must be a valid stream.
+pub unsafe fn cu_launch_host_func(
+    stream: CUstream,
+    func: ::core::option::Option<unsafe extern "C" fn(*mut ::core::ffi::c_void)>,
+    arg: *mut ::core::ffi::c_void,
+    sync_mode: ::core::ffi::c_uint,
+) -> CUresult {
+    #[cfg(cuda_has_cuLaunchHostFunc_v2)]
+    {
+        unsafe { cuLaunchHostFunc_v2(stream, func, arg, sync_mode) }
+    }
+    #[cfg(not(cuda_has_cuLaunchHostFunc_v2))]
+    {
+        let _ = sync_mode;
+        unsafe { cuLaunchHostFunc(stream, func, arg) }
+    }
+}
+
 /// Reports the elapsed time in milliseconds between two recorded events.
 ///
 /// CUDA 12.8 renamed the driver entry point to `cuEventElapsedTime_v2`;
