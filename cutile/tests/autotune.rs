@@ -10,7 +10,7 @@
 use cuda_core::Device;
 use cutile::bench::BenchOptions;
 use cutile::prelude::*;
-use cutile::tune::{Autotuner, Config, Outcome, ParamValue};
+use cutile::tune::{Autotuner, Config, ParamValue, TrialState};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -77,17 +77,17 @@ fn end_to_end_grid_tune_on_gpu() {
             .expect("tuning run")
     };
 
-    let outcome = run(&log);
+    let state = run(&log);
     // 3 search trials + 2 paired-runoff trials for the two finalists.
-    assert_eq!(outcome.trials.len(), 5, "search trials plus runoff pair");
-    let invalid: Vec<_> = outcome
+    assert_eq!(state.trials.len(), 5, "search trials plus runoff pair");
+    let invalid: Vec<_> = state
         .trials
         .iter()
-        .filter(|t| matches!(t.outcome, Outcome::Invalid { .. }))
+        .filter(|t| matches!(t.state, TrialState::Invalid { .. }))
         .collect();
     assert_eq!(invalid.len(), 1, "the N=0 candidate is invalid");
     assert!(invalid[0].config_id.contains("N=0"));
-    let best = outcome.best.expect("a winner");
+    let best = state.best.expect("a winner");
     assert_eq!(
         best.int("N"),
         Some(1 << 16),

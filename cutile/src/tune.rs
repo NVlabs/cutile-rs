@@ -22,7 +22,7 @@
 //!   back; the search space is declared, the objective is programmer-written,
 //!   and results apply only when a program explicitly loads an artifact.
 //! - **Invalid candidates are data.** A candidate rejected by launch checks
-//!   or the correctness gate records [`Outcome::Invalid`] with its message;
+//!   or the correctness gate records [`TrialState::Invalid`] with its message;
 //!   it never aborts the search.
 //! - **Persistence is checked.** The trial log records the tuner's name and
 //!   a hash of its search space and refuses to resume from a log that does
@@ -143,13 +143,13 @@ pub fn space_hash(configs: &[Config]) -> String {
 #[non_exhaustive]
 pub struct Trial {
     pub config_id: String,
-    pub outcome: Outcome,
+    pub state: TrialState,
 }
 
 /// What happened when a candidate was visited.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum Outcome {
+pub enum TrialState {
     /// Correctness gate passed; timing measured.
     Measured {
         median_ms: f32,
@@ -164,9 +164,9 @@ pub enum Outcome {
 impl Trial {
     /// The median time, if measured.
     pub fn median_ms(&self) -> Option<f32> {
-        match &self.outcome {
-            Outcome::Measured { median_ms, .. } => Some(*median_ms),
-            Outcome::Invalid { .. } => None,
+        match &self.state {
+            TrialState::Measured { median_ms, .. } => Some(*median_ms),
+            TrialState::Invalid { .. } => None,
         }
     }
 }
@@ -180,7 +180,7 @@ pub trait Oracle {
     /// The declared candidates, pruned, in declaration order.
     fn configs(&self) -> &[Config];
     /// Visits candidate `index`: correctness gate, then timing. Failures
-    /// become [`Outcome::Invalid`]; this never panics for a bad candidate.
+    /// become [`TrialState::Invalid`]; this never panics for a bad candidate.
     fn measure(&mut self, index: usize) -> Trial;
     /// Remaining wall-clock budget, if one was set.
     fn budget_remaining(&self) -> Option<Duration>;
@@ -191,7 +191,7 @@ pub trait Oracle {
 /// Decides which candidates to visit and in what order.
 ///
 /// Implementations must treat the oracle's budget as authoritative and must
-/// tolerate [`Outcome::Invalid`] trials. The library ships [`GridSampler`]
+/// tolerate [`TrialState::Invalid`] trials. The library ships [`GridSampler`]
 /// (the default); a TPE sampler is planned as an explicit opt-in.
 pub trait Sampler {
     /// Runs the search, returning every trial visited (in visit order).
@@ -276,13 +276,13 @@ pub fn best_config<'a>(configs: &'a [Config], trials: &[Trial]) -> Option<&'a Co
 /// The assembled tuner for one kernel and one shape class.
 ///
 /// ```rust,ignore
-/// let outcome = Autotuner::new("fmha_decode")
+/// let output = Autotuner::new("fmha_decode")
 ///     .configs(configs)
 ///     .prune(|c| c.int("BN").unwrap() <= pp)
 ///     .budget(Duration::from_secs(300))
 ///     .run(&stream, |stream, config| {
 ///         // launch with `config`, verify against a reference, then return
-///         // the closure do_bench will time. Err(..) => Outcome::Invalid.
+///         // the closure do_bench will time. Err(..) => TrialState::Invalid.
 ///         ...
 ///     })?;
 /// ```
@@ -300,9 +300,10 @@ pub struct Autotuner {
     log_path: Option<PathBuf>,
 }
 
-/// The outcome of a tuning run: all trials plus the winning config.
+/// What a tuning run returns: every trial visited plus the winning config,
+/// if any. Named like [`std::process::Output`].
 #[non_exhaustive]
-pub struct TuneOutcome {
+pub struct Output {
     pub trials: Vec<Trial>,
     pub best: Option<Config>,
 }
@@ -360,7 +361,7 @@ impl Autotuner {
     /// `setup` is called once per candidate. It applies the config (picks the
     /// monomorphization, builds `CompileOptions`), runs the programmer's
     /// correctness gate, and returns the closure to be timed — or an error,
-    /// which records the candidate as [`Outcome::Invalid`] and moves on.
+    /// which records the candidate as [`TrialState::Invalid`] and moves on.
     ///
     /// After the search, the two best candidates are re-measured
     /// head-to-head with [`crate::bench::do_bench_paired`] and the winner is
@@ -371,7 +372,7 @@ impl Autotuner {
     /// exhausted; a finalist that fails its runoff setup forfeits to the
     /// other; and if the paired measurement itself fails, the sequential
     /// medians decide.
-    pub fn run<S, F>(mut self, stream: &Arc<Stream>, setup: S) -> Result<TuneOutcome, Error>
+    pub fn run<S, F>(mut self, stream: &Arc<Stream>, setup: S) -> Result<Output, Error>
     where
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
         F: FnMut(&Arc<Stream>) -> Result<(), Error>,
@@ -393,7 +394,7 @@ impl Autotuner {
         sampler: impl Sampler,
         stream: &Arc<Stream>,
         setup: S,
-    ) -> Result<TuneOutcome, Error>
+    ) -> Result<Output, Error>
     where
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
         F: FnMut(&Arc<Stream>) -> Result<(), Error>,
@@ -418,7 +419,7 @@ impl Autotuner {
         stream: &Arc<Stream>,
         setup: S,
         log: &mut TrialLog,
-    ) -> Result<TuneOutcome, Error>
+    ) -> Result<Output, Error>
     where
         S: FnMut(&Arc<Stream>, &Config) -> Result<F, Error>,
         F: FnMut(&Arc<Stream>) -> Result<(), Error>,
@@ -449,7 +450,7 @@ impl Autotuner {
                 }
             }
         };
-        Ok(TuneOutcome { trials, best })
+        Ok(Output { trials, best })
     }
 }
 
@@ -500,12 +501,12 @@ where
 
     fn measure(&mut self, index: usize) -> Trial {
         let config = &self.configs[index];
-        let outcome = match (self.setup)(&self.stream, config) {
-            Err(e) => Outcome::Invalid {
+        let state = match (self.setup)(&self.stream, config) {
+            Err(e) => TrialState::Invalid {
                 reason: e.to_string(),
             },
             Ok(mut f) => match do_bench(&self.stream, &self.bench, |s| f(s)) {
-                Err(e) => Outcome::Invalid {
+                Err(e) => TrialState::Invalid {
                     reason: e.to_string(),
                 },
                 Ok(m) => measured(&m),
@@ -513,7 +514,7 @@ where
         };
         let trial = Trial {
             config_id: config.id.clone(),
-            outcome,
+            state,
         };
         self.log.append(&trial);
         trial
@@ -577,7 +578,7 @@ fn runoff_verdict(
             let (loser, winner) = if b_failed { (b, a) } else { (a, b) };
             let t = Trial {
                 config_id: loser.id.clone(),
-                outcome: Outcome::Invalid {
+                state: TrialState::Invalid {
                     reason: format!("runoff setup failed: {error}"),
                 },
             };
@@ -594,14 +595,14 @@ fn runoff_verdict(
             for (cfg, o) in [(&a, &oa), (&b, &ob)] {
                 let t = Trial {
                     config_id: cfg.id.clone(),
-                    outcome: o.clone(),
+                    state: o.clone(),
                 };
                 log.append(&t);
                 trials.push(t);
             }
             // An Invalid or non-finite runoff median can never win.
-            let key = |o: &Outcome| match o {
-                Outcome::Measured { median_ms, .. } if median_ms.is_finite() => *median_ms,
+            let key = |o: &TrialState| match o {
+                TrialState::Measured { median_ms, .. } if median_ms.is_finite() => *median_ms,
                 _ => f32::INFINITY,
             };
             if key(&oa) <= key(&ob) {
@@ -613,15 +614,15 @@ fn runoff_verdict(
     }
 }
 
-fn measured(m: &Measurement) -> Outcome {
+fn measured(m: &Measurement) -> TrialState {
     if m.reps() == 0 {
         // Reachable via BenchOptions { min_reps: 0 } with a zero budget;
         // median of nothing would panic, and Oracle::measure never panics.
-        return Outcome::Invalid {
+        return TrialState::Invalid {
             reason: "no timed reps (check BenchOptions)".into(),
         };
     }
-    Outcome::Measured {
+    TrialState::Measured {
         median_ms: m.median_ms(),
         min_ms: m.min_ms(),
         reps: m.reps(),
@@ -1047,19 +1048,19 @@ mod tests {
         fn measure(&mut self, index: usize) -> Trial {
             let c = &self.configs[index];
             self.measured.push(c.id.clone());
-            let outcome = match (self.cost)(c) {
-                Some(ms) => Outcome::Measured {
+            let state = match (self.cost)(c) {
+                Some(ms) => TrialState::Measured {
                     median_ms: ms,
                     min_ms: ms,
                     reps: 3,
                 },
-                None => Outcome::Invalid {
+                None => TrialState::Invalid {
                     reason: "gate failed".into(),
                 },
             };
             Trial {
                 config_id: c.id.clone(),
-                outcome,
+                state,
             }
         }
         fn budget_remaining(&self) -> Option<Duration> {
@@ -1104,7 +1105,7 @@ mod tests {
         };
         let trials = GridSampler::new().search(&mut oracle);
         assert_eq!(trials.len(), 2);
-        assert!(matches!(trials[0].outcome, Outcome::Invalid { .. }));
+        assert!(matches!(trials[0].state, TrialState::Invalid { .. }));
         let best = best_config(&configs, &trials).unwrap();
         assert_eq!(best.int("BN"), Some(64), "invalid one never wins");
     }
@@ -1114,7 +1115,7 @@ mod tests {
         let configs = vec![cfg(32, 2), cfg(64, 4), cfg(128, 8)];
         let known = vec![Trial {
             config_id: configs[1].id.clone(),
-            outcome: Outcome::Measured {
+            state: TrialState::Measured {
                 median_ms: 0.5,
                 min_ms: 0.5,
                 reps: 3,
@@ -1370,7 +1371,7 @@ mod tests {
             let mut log = TrialLog::open(Some(dir.as_path()), "t", "s").unwrap();
             log.append(&Trial {
                 config_id: "BN=64".into(),
-                outcome: Outcome::Measured {
+                state: TrialState::Measured {
                     median_ms: 1.5,
                     min_ms: 1.4,
                     reps: 5,
@@ -1378,7 +1379,7 @@ mod tests {
             });
             log.append(&Trial {
                 config_id: "BN=128".into(),
-                outcome: Outcome::Invalid {
+                state: TrialState::Invalid {
                     reason: "launch check".into(),
                 },
             });
@@ -1405,7 +1406,7 @@ mod tests {
             let mut log = TrialLog::open(Some(dir.as_path()), "t", "s").unwrap();
             log.append(&Trial {
                 config_id: "BN=256".into(),
-                outcome: Outcome::Measured {
+                state: TrialState::Measured {
                     median_ms: 2.0,
                     min_ms: 2.0,
                     reps: 3,
@@ -1441,7 +1442,7 @@ mod tests {
         let configs = vec![cfg(64, 4)];
         let stale = Trial {
             config_id: "BN=16,SPLITS=2".into(),
-            outcome: Outcome::Measured {
+            state: TrialState::Measured {
                 median_ms: 0.1,
                 min_ms: 0.1,
                 reps: 3,
@@ -1464,7 +1465,7 @@ mod tests {
         let configs = vec![cfg(64, 4)];
         let invalid = Trial {
             config_id: configs[0].id.clone(),
-            outcome: Outcome::Invalid {
+            state: TrialState::Invalid {
                 reason: "transient".into(),
             },
         };
@@ -1504,7 +1505,7 @@ mod tests {
         let trials = vec![
             Trial {
                 config_id: configs[0].id.clone(),
-                outcome: Outcome::Measured {
+                state: TrialState::Measured {
                     median_ms: f32::NAN,
                     min_ms: f32::NAN,
                     reps: 3,
@@ -1512,7 +1513,7 @@ mod tests {
             },
             Trial {
                 config_id: configs[1].id.clone(),
-                outcome: Outcome::Measured {
+                state: TrialState::Measured {
                     median_ms: 2.0,
                     min_ms: 2.0,
                     reps: 3,
@@ -1557,8 +1558,8 @@ mod tests {
                 "failure blamed on the failing finalist"
             );
             assert!(matches!(
-                &trials[0].outcome,
-                Outcome::Invalid { reason } if reason.contains("runoff setup failed")
+                &trials[0].state,
+                TrialState::Invalid { reason } if reason.contains("runoff setup failed")
             ));
         }
     }
@@ -1618,8 +1619,8 @@ mod tests {
         );
         assert_eq!(winner.id, a.id);
         assert_eq!(trials.len(), 2);
-        match &trials[0].outcome {
-            Outcome::Measured {
+        match &trials[0].state {
+            TrialState::Measured {
                 median_ms,
                 min_ms,
                 reps,
@@ -1654,7 +1655,7 @@ mod tests {
             let mut log = TrialLog::open(Some(&path), "t", "s").unwrap();
             log.append(&Trial {
                 config_id: cfg(1, 1).id,
-                outcome: Outcome::Invalid { reason: "x".into() },
+                state: TrialState::Invalid { reason: "x".into() },
             });
         }
         // Reopening must find a valid header, not refuse the log.
