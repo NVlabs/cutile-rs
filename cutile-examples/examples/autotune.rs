@@ -83,7 +83,7 @@ fn main() -> Result<(), Error> {
         .map(|bs| Config::new([("BLOCK_SIZE", ParamValue::Int(bs))]))
         .collect();
 
-    let outcome = Autotuner::new("rms_norm")
+    let output = Autotuner::new("rms_norm")
         .configs(configs)
         .prune(move |c| c.int("BLOCK_SIZE").unwrap_or(0) <= n as i64)
         .run(&stream, |stream, config| {
@@ -106,10 +106,10 @@ fn main() -> Result<(), Error> {
             Ok(launch)
         })?;
 
-    for trial in &outcome.trials {
-        println!("{}: {:?}", trial.config_id, trial.outcome);
+    for trial in &output.trials {
+        println!("{}: {:?}", trial.config_id, trial.state);
     }
-    let best = outcome.best.expect("a winner");
+    let best = output.best.expect("a winner");
     println!("best: {}", best.id);
     Ok(())
 }

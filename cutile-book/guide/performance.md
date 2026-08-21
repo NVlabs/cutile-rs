@@ -183,7 +183,7 @@ let configs: Vec<Config> = [32i64, 64, 128, 256]
     .map(|bs| Config::new([("BLOCK_SIZE", ParamValue::Int(bs))]))
     .collect();
 
-let outcome = Autotuner::new("rms_norm")
+let state = Autotuner::new("rms_norm")
     .configs(configs)
     .run(&stream, |stream, config| {
         let block_size = config.int("BLOCK_SIZE").unwrap();
@@ -194,13 +194,13 @@ let outcome = Autotuner::new("rms_norm")
         Ok(launch)
     })?;
 
-let best = outcome.best.expect("a winner");
+let best = state.best.expect("a winner");
 ```
 
 How it works:
 
 - A `Config` is a named set of integer or string parameters. The setup closure reads them to pick a monomorphization, a partition shape, or `CompileOptions` values.
-- Setup runs once per candidate. If it returns an error, the candidate is recorded as `Outcome::Invalid` with the message and the search continues. Invalid candidates never abort a run.
+- Setup runs once per candidate. If it returns an error, the candidate is recorded as `TrialState::Invalid` with the message and the search continues. Invalid candidates never abort a run.
 - Each surviving candidate is timed with `do_bench`. After the search, the two best candidates are re-measured head to head with `do_bench_paired`, and that contemporaneous comparison picks the winner. Sequential medians never decide on their own.
 - `.prune(...)` removes candidates before they are visited. `.budget(...)` bounds the total wall-clock time of the run.
 - `.log(path)` appends every trial to a JSONL file. Rerunning with the same log resumes an interrupted search instead of starting over. The log records the tuner name and a hash of the search space, and refuses to resume from a log that belongs to a different search.
