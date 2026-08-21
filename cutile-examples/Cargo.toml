@@ -11,6 +11,12 @@ readme = "README.md"
 publish = false
 
 [features]
+# Enables the autotune example (cutile's experimental tuning API).
+experimental-tune = ["cutile/experimental-tune"]
+
+[[example]]
+name = "autotune"
+required-features = ["experimental-tune"]
 
 [dependencies]
 cutile-compiler = { workspace = true }

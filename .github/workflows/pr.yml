@@ -72,7 +72,7 @@ jobs:
       - name: Clippy
         run: |
           source "${HOME}/.cargo/env"
-          cargo clippy
+          cargo clippy --all-features
 
       - name: Test (compile only)
         run: |

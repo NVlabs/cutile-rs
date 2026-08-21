@@ -64,3 +64,6 @@ mod mapped_partition_schedule_matrix;
 
 #[path = "gpu/atomic_red_view.rs"]
 mod atomic_red_view;
+
+#[path = "gpu/borrow_raw_parts.rs"]
+mod borrow_raw_parts;
