@@ -5,6 +5,8 @@
 
 //! Low-level CUDA driver API bindings and safe wrappers.
 
+#![cfg_attr(feature = "f16", feature(f16))]
+
 mod api;
 pub(crate) mod cudarc_shim;
 mod dtype;
@@ -22,6 +24,7 @@ pub use runtime::*;
 // expect it. `simt::LaunchConfig` is deliberately absent: it collides with
 // this crate's own `LaunchConfig` and stays reachable only through `simt::`.
 pub use simt::embedded;
+pub use simt::vmm;
 pub use simt::{
     launch_kernel_cooperative, launch_kernel_cooperative_on_stream,
     launch_kernel_ex, launch_kernel_ex_cooperative, launch_kernel_ex_cooperative_on_stream,

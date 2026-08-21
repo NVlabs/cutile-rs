@@ -21,12 +21,14 @@
 //! Differences from the cuda-oxide original, recorded for the
 //! reconciliation:
 //!
-//! - `DeviceCopy` for the unstable `f16` primitive is dropped, since it is
-//!   nightly-only; the `half::f16` and `half::bf16` impls remain.
+//! - `DeviceCopy` for the unstable `f16` primitive sits behind the
+//!   default-off `f16` cargo feature, since it is nightly-only; the
+//!   `half::f16` and `half::bf16` impls are always present.
 //! - The `#[derive(DeviceCopy)]` re-export is dropped; the derive lives in
 //!   cuda-oxide's `cuda-macros`, which is not one of the shared crates.
-//! - `vmm` and `peer` are not copied: no shared consumer uses them, and the
-//!   VMM wrappers are arriving separately (cutile-rs#202).
+//! - `peer` is not copied: nothing outside cuda-oxide's own crate used it.
+//!   `vmm` is copied, one example consumes it; #202 remains the idiomatic
+//!   port of the same wrappers onto this crate's own runtime types.
 //! - `init` and `launch_kernel` are not copied: the crate root already
 //!   exposes identical ones, re-exported below.
 //! - `oxide-artifacts` is vendored as [`artifacts`]; see the note there.
@@ -41,6 +43,7 @@ pub mod memory;
 pub mod module;
 pub mod pinned_host_buffer;
 pub mod stream;
+pub mod vmm;
 
 pub use context::{ContextLimit, CudaContext, StreamPriorityRange, SyncPolicy};
 pub use device_buffer::{DeviceBuffer, DeviceCopy};

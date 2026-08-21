@@ -115,6 +115,8 @@ impl_device_copy_tuple!(A, B, C, D, E, F);
 impl_device_copy_tuple!(A, B, C, D, E, F, G);
 impl_device_copy_tuple!(A, B, C, D, E, F, G, H);
 
+#[cfg(feature = "f16")]
+unsafe impl DeviceCopy for f16 {}
 unsafe impl DeviceCopy for half::bf16 {}
 unsafe impl DeviceCopy for half::f16 {}
 

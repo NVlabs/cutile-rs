@@ -18,3 +18,7 @@ object = { version = "0.36", default-features = false, features = ["read", "std"
 
 [dev-dependencies]
 trybuild = "1"
+
+[features]
+# Nightly-only: DeviceCopy for the unstable f16 primitive.
+f16 = []
