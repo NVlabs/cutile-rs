@@ -754,6 +754,9 @@ impl TrialLog {
 
 // ── Artifact ────────────────────────────────────────────────────────────────
 
+/// Artifact record-format version; bump on breaking changes.
+const ARTIFACT_SCHEMA: u32 = 1;
+
 /// A persisted, provenance-checked record of tuning winners: one entry per
 /// shape-class bucket, serialized as human-diffable pretty JSON intended to
 /// be committed next to the code it tunes.
@@ -831,7 +834,7 @@ impl Artifact {
     /// timestamp are captured from the environment.
     pub fn new(ws: &Workspace) -> Self {
         Self {
-            schema: 1,
+            schema: ARTIFACT_SCHEMA,
             kernel: ws.kernel.clone(),
             source_hash: ws.source_hash.clone(),
             cutile_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -848,10 +851,13 @@ impl Artifact {
         }
     }
 
-    /// Inserts or replaces the winner for `bucket`.
+    /// Inserts or replaces the winner for `bucket`. Replacement is in place,
+    /// preserving entry order (committed artifacts should diff cleanly).
     pub fn insert(&mut self, entry: ArtifactEntry) {
-        self.entries.retain(|e| e.bucket != entry.bucket);
-        self.entries.push(entry);
+        match self.entries.iter_mut().find(|e| e.bucket == entry.bucket) {
+            Some(slot) => *slot = entry,
+            None => self.entries.push(entry),
+        }
     }
 
     /// The winner for `bucket`, if recorded.
@@ -907,8 +913,12 @@ impl Artifact {
                 path.display(),
             )))
         };
-        if artifact.schema != 1 {
-            return refuse("schema", &artifact.schema.to_string(), "1");
+        if artifact.schema != ARTIFACT_SCHEMA {
+            return refuse(
+                "schema",
+                &artifact.schema.to_string(),
+                &ARTIFACT_SCHEMA.to_string(),
+            );
         }
         if artifact.kernel != ws.kernel {
             return refuse("kernel", &artifact.kernel, &ws.kernel);
@@ -934,10 +944,30 @@ impl Artifact {
                         e.bucket,
                     )));
                 }
+                // A config's id is derived from its params; a stored entry
+                // where the two disagree has been hand-edited or corrupted,
+                // and downstream consumers key on the id.
+                let derived = Config::new(e.config.params.clone()).id;
+                if e.config.id != derived {
+                    return refuse(
+                        &format!("config id for bucket {:?}", e.bucket),
+                        &e.config.id,
+                        &derived,
+                    );
+                }
             }
         }
 
         let mut warnings = Vec::new();
+        if artifact.space_hash.is_none() && ws.space_hash.is_some() {
+            // The workspace records a space hash, so an artifact without one
+            // predates the field or has had it stripped; either way the
+            // same-space check silently cannot run.
+            warnings.push(
+                "tuning artifact carries no space_hash; the search-space match was not checked"
+                    .to_string(),
+            );
+        }
         let fingerprint_matches = artifact.tileiras_fingerprint == ws.tileiras_fingerprint;
         if !fingerprint_matches {
             // The stored keys embed the old fingerprint: recomputing under
@@ -1251,6 +1281,85 @@ mod tests {
         }
         assert_eq!(a.entries.len(), 1, "one winner per bucket");
         assert_eq!(a.get("b").unwrap().config.int("BN"), Some(128));
+    }
+
+    #[test]
+    fn artifact_refuses_schema_and_id_param_mismatch() {
+        let path = artifact_path("schema");
+        let mut a = Artifact::new(&ws());
+        a.schema = ARTIFACT_SCHEMA + 1;
+        a.save(&path).unwrap();
+        let err = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("schema mismatch"));
+
+        // A hand-edited entry whose id disagrees with its params: refused.
+        let mut a = Artifact::new(&ws());
+        let mut config = cfg(64, 8);
+        config.id = "BN=128,SPLITS=8".into();
+        a.insert(ArtifactEntry {
+            bucket: "b".into(),
+            config,
+            median_ms: 1.0,
+            samples: 3,
+            l2_key: None,
+        });
+        a.save(&path).unwrap();
+        let err = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("config id for bucket"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn artifact_without_space_hash_warns_when_workspace_expects_one() {
+        let path = artifact_path("nospace");
+        Artifact::new(&ws()).save(&path).unwrap(); // artifact: space_hash None
+        let mut expecting = ws();
+        expecting.space_hash = Some(space_hash(&[cfg(64, 8)]));
+        let (_, warnings) = Artifact::load_verified(&path, &expecting, |_| Ok(None)).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no space_hash"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fingerprint_drift_skips_l2_verification_instead_of_refusing() {
+        // Ordering pin: under toolchain drift the recomputed key CANNOT match
+        // the stored one, so a mismatching recomputation must be ignored
+        // (drift warning), never misread as staleness.
+        let path = artifact_path("driftorder");
+        let mut a = Artifact::new(&ws());
+        a.insert(ArtifactEntry {
+            bucket: "b".into(),
+            config: cfg(64, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some("a".repeat(64)),
+        });
+        a.save(&path).unwrap();
+        let mut drifted = ws();
+        drifted.tileiras_fingerprint = "release 13.4, V13.4.1".into();
+        let mut called = false;
+        let (_, warnings) = Artifact::load_verified(&path, &drifted, |_| {
+            called = true;
+            Ok(Some("b".repeat(64))) // would refuse if it were consulted
+        })
+        .unwrap();
+        assert!(!called, "verifier must not run under fingerprint drift");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("skipped"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn artifact_version_drift_warns() {
+        let path = artifact_path("version");
+        let mut a = Artifact::new(&ws());
+        a.cutile_version = "0.0.0-elsewhere".into();
+        a.save(&path).unwrap();
+        let (_, warnings) = Artifact::load_verified(&path, &ws(), |_| Ok(None)).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("produced by cutile 0.0.0-elsewhere"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
