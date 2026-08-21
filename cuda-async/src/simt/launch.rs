@@ -38,8 +38,8 @@ use std::sync::Arc;
 /// [`finalize_unchecked`](Self::finalize_unchecked).
 ///
 /// ```compile_fail,E0277
-/// use cuda_async::device_operation::DeviceOperation;
-/// use cuda_async::launch::AsyncKernelLaunchBuilder;
+/// use cuda_async::simt::device_operation::DeviceOperation;
+/// use cuda_async::simt::launch::AsyncKernelLaunchBuilder;
 ///
 /// fn schedule<O: DeviceOperation>(_operation: O) {}
 ///
@@ -52,7 +52,7 @@ use std::sync::Arc;
 /// storage. Only the immutable finalized operation is `Send`:
 ///
 /// ```compile_fail,E0277
-/// use cuda_async::launch::AsyncKernelLaunchBuilder;
+/// use cuda_async::simt::launch::AsyncKernelLaunchBuilder;
 ///
 /// fn assert_send<T: Send>() {}
 /// assert_send::<AsyncKernelLaunchBuilder<'static>>();
@@ -81,7 +81,7 @@ pub struct AsyncKernelLaunchBuilder<'a> {
 /// launch configuration has been accepted.
 ///
 /// ```compile_fail,E0599
-/// use cuda_async::launch::AsyncKernelLaunch;
+/// use cuda_async::simt::launch::AsyncKernelLaunch;
 /// use cuda_core::simt::LaunchConfig;
 ///
 /// fn cannot_reconfigure(launch: &mut AsyncKernelLaunch<'_>, config: LaunchConfig) {
@@ -187,7 +187,7 @@ impl<'a> AsyncKernelLaunchBuilder<'a> {
     /// storage that will later become a `Send` operation:
     ///
     /// ```compile_fail,E0277
-    /// use cuda_async::launch::AsyncKernelLaunchBuilder;
+    /// use cuda_async::simt::launch::AsyncKernelLaunchBuilder;
     /// use std::rc::Rc;
     ///
     /// fn reject_rc(mut builder: AsyncKernelLaunchBuilder<'static>) {
@@ -260,7 +260,7 @@ impl<'a> AsyncKernelLaunchBuilder<'a> {
     /// or CUDA driver errors.
     ///
     /// ```compile_fail,E0133
-    /// use cuda_async::launch::AsyncKernelLaunchBuilder;
+    /// use cuda_async::simt::launch::AsyncKernelLaunchBuilder;
     /// use cuda_core::simt::LaunchConfig;
     ///
     /// fn raw_finalize_requires_unsafe(
