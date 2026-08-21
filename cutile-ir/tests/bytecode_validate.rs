@@ -235,6 +235,49 @@ fn for_loop_with_iter_args() {
 }
 
 #[test]
+fn for_loop_with_token_iter_arg() {
+    // Feasibility probe for token-ordering loop-carry: a for-loop that carries a
+    // `!cuda_tile.token` as an iter-arg (seeded by make_token, yielded back). If
+    // this validates through tileiras, a token is a legal loop-carried value —
+    // which is what the mutable-store token threading needs (carry the token, not
+    // the partition_view, which is a restricted iter-arg type).
+    let module = build_kernel("for_token_iter_arg", &[], |m, blk, _args| {
+        let lb = const_i32(m, blk, 0);
+        let ub = const_i32(m, blk, 10);
+        let step = const_i32(m, blk, 1);
+
+        // Seed token.
+        let (tok_op, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
+            .result(token_ty())
+            .build(m);
+        append_op(m, blk, tok_op);
+        let init = tok_res[0];
+
+        // for %iv, %tok = lb to ub step step iter(%init) { continue %tok }
+        // The body threads the carried token straight through (identity), the
+        // minimal shape that puts a token on the loop's block-arg + result.
+        let (body_region, body_blk, body_args) =
+            build_single_block_region(m, &[tile_i32(), token_ty()]); // iv, tok
+
+        let (cont, _) = OpBuilder::new(Opcode::Continue, Location::Unknown)
+            .operand(body_args[1]) // yield the carried token
+            .build(m);
+        append_op(m, body_blk, cont);
+
+        let (for_op, _) = OpBuilder::new(Opcode::For, Location::Unknown)
+            .operand(lb)
+            .operand(ub)
+            .operand(step)
+            .operand(init)
+            .result(token_ty()) // carried token result
+            .region(body_region)
+            .build(m);
+        append_op(m, blk, for_op);
+    });
+    validate_module(&module);
+}
+
+#[test]
 fn nested_for_loops() {
     // Outer for containing an inner for.
     let module = build_kernel("nested_for", &[tile_i32()], |m, blk, args| {

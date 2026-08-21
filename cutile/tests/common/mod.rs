@@ -6,7 +6,7 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use cutile::compile_api::KernelCompiler;
+use cutile::compile_api::{CheckPlacementCounts, KernelCompiler};
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::error::JITError;
@@ -84,6 +84,36 @@ pub fn compile_to_ir<F>(
 where
     F: Fn() -> Module,
 {
+    compile_to_ir_with_counts(
+        module_ast_fn,
+        module_name,
+        function_name,
+        generics,
+        strides,
+        spec_args,
+        scalar_hints,
+        const_grid,
+        options,
+    )
+    .map(|(ir, _)| ir)
+}
+
+/// `compile_to_ir` that also returns the bounds-check placement counters.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub fn compile_to_ir_with_counts<F>(
+    module_ast_fn: F,
+    module_name: &str,
+    function_name: &str,
+    generics: &[String],
+    strides: &[(&str, &[i32])],
+    spec_args: &[(&str, &SpecializationBits)],
+    scalar_hints: &[(&str, &DivHint)],
+    const_grid: Option<(u32, u32, u32)>,
+    options: &CompileOptions,
+) -> Result<(String, CheckPlacementCounts), JITError>
+where
+    F: Fn() -> Module,
+{
     let spec_args = spec_args
         .iter()
         .map(|(name, spec)| (*name, (*spec).clone()))
@@ -105,5 +135,7 @@ where
         compiler = compiler.grid(grid);
     }
 
-    compiler.compile().map(|artifacts| artifacts.ir_text())
+    compiler
+        .compile()
+        .map(|artifacts| (artifacts.ir_text(), artifacts.check_counts()))
 }

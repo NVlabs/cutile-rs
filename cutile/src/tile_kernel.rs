@@ -5,7 +5,7 @@
 
 //! Tile kernel compilation, caching, launching, and partitioning for CUDA device operations.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cuda_async::error::DeviceError;
 use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, Function};
@@ -62,11 +62,11 @@ fn record_jit_compile() {
 }
 
 use crate::error::*;
-use crate::tensor::{IntoPartition, IntoPartitionArc, Partition, Tensor};
+use crate::tensor::{GridBound, IntoPartition, IntoPartitionArc, Partition, Tensor};
 
 pub use cuda_async::{
     device_buffer::*, device_context::*, device_future::*, device_operation::*, launch::*,
-    scheduling_policies::*,
+    predicate::*, scheduling_policies::*,
 };
 
 pub use cutile_compiler::compiler::utils::CompileOptions;
@@ -498,7 +498,7 @@ fn compile_and_load_kernel(
         scalar_hints.iter().map(|x| (x.0.as_str(), &x.1)).collect();
 
     let stage1_start = std::time::Instant::now();
-    let (tile_module, validator) = {
+    let (tile_module, validator, check_stats) = {
         let compiler = CUDATileFunctionCompiler::new(
             modules,
             module_name,
@@ -511,9 +511,21 @@ fn compile_and_load_kernel(
             gpu_name.to_string(),
             compile_options,
         )?;
-        let validator = Arc::new(compiler.get_validator());
         let tile_module = compiler.compile()?;
-        (tile_module, validator)
+        // AFTER compile, not before: the launch-check accumulator fills
+        // DURING compilation, and this snapshot is the one the generated
+        // launcher enforces. Taken early, every hoisted check is silently
+        // dropped at launch while the compiler has already discharged the
+        // in-kernel assert on its promise — out-of-bounds accesses then run
+        // unchecked (caught by the differential placement harness; pinned by
+        // `launch_checks_are_enforced_at_launch`).
+        let validator = Arc::new(compiler.get_validator());
+        let check_stats = (
+            compiler.check_stats.discharged.get(),
+            compiler.check_stats.hoisted.get(),
+            compiler.check_stats.in_place.get(),
+        );
+        (tile_module, validator, check_stats)
     };
     let stage1_ms = stage1_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -602,7 +614,10 @@ fn compile_and_load_kernel(
             Stage2Source::DiskCache { .. } => "disk",
         };
         eprintln!(
-            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage2_source={stage2_source} stage3_ms={stage3_ms:.3} generics={}",
+            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage2_source={stage2_source} stage3_ms={stage3_ms:.3} checks_discharged={} checks_hoisted={} checks_in_place={} generics={}",
+            check_stats.0,
+            check_stats.1,
+            check_stats.2,
             generics.join(","),
         );
     }
@@ -756,6 +771,156 @@ pub fn validate_grids(
     }
 }
 
+/// Validates the launch grid against every binding's [`GridBound`]:
+/// exact-coverage bindings must equal the grid; partial-coverage
+/// (`partition_prefix`) bindings must bound it per axis. `launch <= bound`
+/// per axis is the sound direction — a per-axis prefix embeds identically
+/// into the block grid, uncovered blocks are simply never visited — while
+/// `launch > bound` on ANY axis is genuine out-of-bounds and always an
+/// error. Per-axis, never total-count: delinearizing against a different
+/// grid shape would remap CTAs to the wrong blocks.
+pub fn validate_grid_bounds(grid: (u32, u32, u32), bounds: &[GridBound]) -> Result<(), Error> {
+    for bound in bounds {
+        let GridBound::Exact(expected) = bound else {
+            continue;
+        };
+        if *expected != grid {
+            return Err(Error::KernelLaunch(KernelLaunchError(format!(
+                "launch grid {:?} does not match the inferred partition grid {:?}",
+                grid, expected
+            ))));
+        }
+    }
+    for bound in bounds {
+        let GridBound::AtMost(max) = bound else {
+            continue;
+        };
+        let launch = [grid.0, grid.1, grid.2];
+        let max_axes = [max.0, max.1, max.2];
+        if let Some(axis) = (0..3).find(|&k| launch[k] > max_axes[k]) {
+            return Err(Error::KernelLaunch(KernelLaunchError(format!(
+                "launch grid {:?} exceeds the partial-coverage partition grid {:?} on axis {axis}",
+                grid, max
+            ))));
+        }
+    }
+    Ok(())
+}
+
+/// Runs the full set of launch-time checks before `cuLaunchKernel`: the
+/// built-in grid family (all partition grids match the launch grid) plus any
+/// compiler-emitted checks hoisted out of the device kernel.
+///
+/// `param_shapes[i]` is the runtime extent vector of the i-th kernel parameter
+/// (empty for non-tensor params). This is the host end of launch-time check
+/// hoisting: the compiler evacuated these checks from the kernel, so they run
+/// here once per launch instead of per-thread on the device. `validate_grids`
+/// is folded in as the first, always-present family; compiler-emitted checks
+/// are canonical [`Predicate`]s evaluated against the parameter extents.
+pub fn validate_launch(
+    launch_checks: &[LaunchCheck],
+    grid: (u32, u32, u32),
+    partition_bounds: &[GridBound],
+    param_shapes: &[Vec<i32>],
+    view_shapes: &[Vec<i32>],
+) -> Result<(), Error> {
+    // Built-in family: launch grid vs. partition grid bounds.
+    validate_grid_bounds(grid, partition_bounds)?;
+    // Compiler-emitted families (empty unless a kernel hoisted a check).
+    for check in launch_checks {
+        evaluate_launch_check(check, param_shapes, view_shapes, grid)?;
+    }
+    Ok(())
+}
+
+/// Runs only the compiler-emitted launch checks (the grid family is already
+/// validated by `infer_launch_grid`). Called from the generated launcher after
+/// grid inference, both arrays indexed in signature order (empty for
+/// non-tensor params):
+/// - `param_shapes[i]` — the i-th parameter's *root* extents (the whole
+///   tensor). Resolves [`Atom::Dim`], the frame declared `preconditions` are
+///   stated in.
+/// - `view_shapes[i]` — the i-th parameter's *kernel-visible view* extents:
+///   the partition slab for a `&mut Tensor` output, the whole tensor
+///   otherwise. Resolves [`Atom::ViewExtent`].
+/// - `launch_grid` — the grid the kernel will actually be launched with.
+///   Resolves [`Atom::NumTileBlocks`]: the block-id axiom rung discharges
+///   `tile_block_id(k)` accesses in the kernel against a launch check over
+///   this exact grid, so validating any other grid would unsound the rung.
+pub fn validate_launch_checks(
+    launch_checks: &[LaunchCheck],
+    param_shapes: &[Vec<i32>],
+    view_shapes: &[Vec<i32>],
+    launch_grid: (u32, u32, u32),
+) -> Result<(), Error> {
+    for check in launch_checks {
+        evaluate_launch_check(check, param_shapes, view_shapes, launch_grid)?;
+    }
+    Ok(())
+}
+
+/// Evaluates one hoisted [`LaunchCheck`] by interpreting its canonical
+/// [`Predicate`] against the runtime parameter extents, each atom against the
+/// array holding its frame. Fails closed: a predicate whose atoms cannot be
+/// resolved (a missing parameter/axis, or a non-launch-known `Iv` atom that
+/// should never appear here) is an error, not a silent skip.
+fn evaluate_launch_check(
+    check: &LaunchCheck,
+    param_shapes: &[Vec<i32>],
+    view_shapes: &[Vec<i32>],
+    launch_grid: (u32, u32, u32),
+) -> Result<(), Error> {
+    // Resolve each atom to its runtime value, in the atom's own frame.
+    let resolve_atom = |atom: &Atom| -> Option<i64> {
+        match atom {
+            Atom::Dim { param, axis } => param_shapes
+                .get(*param)
+                .and_then(|shape| shape.get(*axis))
+                .map(|&extent| extent as i64),
+            Atom::ViewExtent { param, axis } => view_shapes
+                .get(*param)
+                .and_then(|shape| shape.get(*axis))
+                .map(|&extent| extent as i64),
+            // ceil(root extent / tile). The mint site guarantees tile >= 1;
+            // fail closed on a malformed atom rather than dividing by zero.
+            Atom::TileCount { param, axis, tile } => {
+                if *tile < 1 {
+                    return None;
+                }
+                param_shapes
+                    .get(*param)
+                    .and_then(|shape| shape.get(*axis))
+                    .map(|&extent| (extent as i64 + *tile as i64 - 1) / *tile as i64)
+            }
+            // The grid axis extents: the host fixes the grid before launch,
+            // and the block-id axiom rung's checks are stated over it. Only
+            // three grid axes exist; anything else fails closed.
+            Atom::NumTileBlocks(k) => match k {
+                0 => Some(launch_grid.0 as i64),
+                1 => Some(launch_grid.1 as i64),
+                2 => Some(launch_grid.2 as i64),
+                _ => None,
+            },
+            // A device-runtime induction variable and the block-id register
+            // are not launch-known; they never appear in a launch check (the
+            // axiom rung replaces the block id with its grid bound), so fail
+            // closed if one somehow does.
+            Atom::Iv(_) | Atom::TileBlockId(_) => None,
+        }
+    };
+    match check.predicate.eval(&resolve_atom) {
+        Some(true) => Ok(()),
+        Some(false) => Err(Error::KernelLaunch(KernelLaunchError(format!(
+            "launch check failed: {}",
+            check.cause
+        )))),
+        None => Err(Error::KernelLaunch(KernelLaunchError(format!(
+            "launch check has unresolved operands (extent unavailable at launch): {}",
+            check.cause
+        )))),
+    }
+}
+
 /// Infers the launch grid for a kernel from partitioned tensor inputs.
 ///
 /// If a grid is explicitly specified (non-zero), it is used directly. Otherwise, the grid
@@ -768,24 +933,36 @@ pub fn validate_grids(
 /// grids from different inputs don't match.
 pub fn infer_launch_grid(
     grid: (u32, u32, u32),
-    inferred_grids: &[(u32, u32, u32)],
+    bounds: &[GridBound],
 ) -> Result<(u32, u32, u32), Error> {
+    let exact: Vec<(u32, u32, u32)> = bounds
+        .iter()
+        .filter_map(|b| match b {
+            GridBound::Exact(g) => Some(*g),
+            GridBound::AtMost(_) => None,
+        })
+        .collect();
     if grid != (0, 0, 0) {
         // A launch grid was specified.
-        if !inferred_grids.is_empty() {
-            validate_grids(grid, inferred_grids).with_context(|| {
-                "Specified launch grid does not match inferred tensor partition grid"
-            })?;
-        }
+        validate_grid_bounds(grid, bounds)?;
         return Ok(grid);
     }
-    // Try to infer launch grid.
-    if inferred_grids.is_empty() {
-        return kernel_launch_error_result("Launch grid required.");
+    // Try to infer the launch grid. Only an EXACT binding can define it: a
+    // partial-coverage binding is an upper bound, and inferring the bound
+    // itself would silently reconstruct full coverage — the thing the
+    // caller opted out of.
+    if exact.is_empty() {
+        if bounds.is_empty() {
+            return kernel_launch_error_result("Launch grid required.");
+        }
+        return kernel_launch_error_result(
+            "Launch grid required: a partial-coverage (partition_prefix) binding \
+             only bounds the grid; specify the grid explicitly or bind with \
+             partition().",
+        );
     }
-    let grid = inferred_grids[0];
-    validate_grids(grid, inferred_grids)
-        .with_context(|| "Inferred tensor partition grids do not match")?;
+    let grid = exact[0];
+    validate_grid_bounds(grid, bounds)?;
     Ok(grid)
 }
 
@@ -913,12 +1090,9 @@ where
     /// Sets the runtime compile options (occupancy, num_cta_in_cga).
     fn compile_options(self, options: CompileOptions) -> Self;
     /// Infers the launch grid from partitioned tensor inputs, or uses the explicit grid.
-    fn infer_launch_grid(
-        &self,
-        inferred_grids: &[(u32, u32, u32)],
-    ) -> Result<(u32, u32, u32), Error> {
+    fn infer_launch_grid(&self, bounds: &[GridBound]) -> Result<(u32, u32, u32), Error> {
         let grid = self.get_launch_grid();
-        infer_launch_grid(grid, inferred_grids)
+        infer_launch_grid(grid, bounds)
     }
     /// Returns the currently configured launch grid dimensions.
     fn get_launch_grid(&self) -> (u32, u32, u32);
@@ -1313,6 +1487,112 @@ pub trait ToHostVecOp<T: DType> {
 }
 
 impl<T: DType, DI> ToHostVecOp<T> for DI where DI: DeviceOp<Output = Tensor<T>> {}
+
+#[cfg(test)]
+mod launch_check_tests {
+    use super::*;
+
+    fn nonzero(param: usize, axis: usize) -> LaunchCheck {
+        LaunchCheck {
+            predicate: Predicate::nonzero(Term::atom(Atom::Dim { param, axis })),
+            cause: "extent > 0".to_string(),
+        }
+    }
+
+    fn view_nonzero(param: usize, axis: usize) -> LaunchCheck {
+        LaunchCheck {
+            predicate: Predicate::nonzero(Term::atom(Atom::ViewExtent { param, axis })),
+            cause: "view extent > 0".to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_checks_run_only_the_grid_family() {
+        // Matching grids pass; no compiler checks means no extent evaluation.
+        assert!(validate_launch(&[], (4, 1, 1), &[GridBound::Exact((4, 1, 1))], &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn grid_family_still_rejects_mismatched_partition_grid() {
+        assert!(validate_launch(&[], (4, 1, 1), &[GridBound::Exact((2, 1, 1))], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn dim_nonzero_passes_for_positive_extent() {
+        let shapes = vec![vec![128, 256]];
+        assert!(validate_launch(&[nonzero(0, 0)], (1, 1, 1), &[], &shapes, &[]).is_ok());
+    }
+
+    #[test]
+    fn dim_nonzero_rejects_zero_extent() {
+        let shapes = vec![vec![0, 256]];
+        assert!(validate_launch(&[nonzero(0, 0)], (1, 1, 1), &[], &shapes, &[]).is_err());
+    }
+
+    #[test]
+    fn dim_nonzero_fails_closed_on_missing_parameter() {
+        // Check references param 1 axis 0, but only one param was supplied.
+        let shapes = vec![vec![128]];
+        assert!(validate_launch(&[nonzero(1, 0)], (1, 1, 1), &[], &shapes, &[]).is_err());
+    }
+
+    #[test]
+    fn each_atom_resolves_against_its_own_frame() {
+        // Root says 256 rows; the kernel-visible view (the per-CTA slab) says
+        // zero. A root-frame check passes while the view-frame check rejects:
+        // the frames are not interchangeable, and the atom picks the array.
+        let roots = vec![vec![256, 256]];
+        let views = vec![vec![0, 256]];
+        assert!(validate_launch(&[nonzero(0, 0)], (1, 1, 1), &[], &roots, &views).is_ok());
+        assert!(validate_launch(&[view_nonzero(0, 0)], (1, 1, 1), &[], &roots, &views).is_err());
+    }
+
+    #[test]
+    fn view_atoms_fail_closed_without_view_shapes() {
+        let roots = vec![vec![256, 256]];
+        assert!(validate_launch(&[view_nonzero(0, 0)], (1, 1, 1), &[], &roots, &[]).is_err());
+    }
+
+    #[test]
+    fn prefix_bound_admits_a_per_axis_prefix_and_nothing_more() {
+        use GridBound::{AtMost, Exact};
+        // Equal and per-axis-smaller launches pass; exceeding ANY axis fails.
+        assert!(validate_grid_bounds((3, 2, 1), &[AtMost((3, 2, 1))]).is_ok());
+        assert!(validate_grid_bounds((2, 2, 1), &[AtMost((3, 2, 1))]).is_ok());
+        assert!(validate_grid_bounds((2, 1, 1), &[AtMost((3, 2, 1))]).is_ok());
+        assert!(validate_grid_bounds((4, 1, 1), &[AtMost((3, 2, 1))]).is_err());
+        assert!(validate_grid_bounds((1, 3, 1), &[AtMost((3, 2, 1))]).is_err());
+        // Per-axis, never total-count: 6 = 3*2 total blocks but the wrong
+        // shape must be rejected (delinearization would remap CTAs).
+        assert!(validate_grid_bounds((6, 1, 1), &[AtMost((3, 2, 1))]).is_err());
+        // Exact bindings keep strict equality even alongside a prefix one.
+        assert!(validate_grid_bounds((2, 1, 1), &[Exact((3, 1, 1)), AtMost((3, 1, 1))]).is_err());
+        assert!(validate_grid_bounds((3, 1, 1), &[Exact((3, 1, 1)), AtMost((4, 1, 1))]).is_ok());
+    }
+
+    #[test]
+    fn prefix_bound_cannot_define_the_launch_grid() {
+        use GridBound::{AtMost, Exact};
+        // Inference needs an exact binding; a bound alone is not a grid.
+        let err = infer_launch_grid((0, 0, 0), &[AtMost((3, 1, 1))]).unwrap_err();
+        assert!(
+            err.to_string().contains("partial-coverage"),
+            "the error should say why inference refused: {err}"
+        );
+        // With an exact sibling, inference works and the bound still gates.
+        assert_eq!(
+            infer_launch_grid((0, 0, 0), &[Exact((3, 1, 1)), AtMost((4, 1, 1))]).unwrap(),
+            (3, 1, 1)
+        );
+        assert!(infer_launch_grid((0, 0, 0), &[Exact((3, 1, 1)), AtMost((2, 1, 1))]).is_err());
+        // An explicit grid validates against both kinds.
+        assert_eq!(
+            infer_launch_grid((2, 1, 1), &[AtMost((3, 1, 1))]).unwrap(),
+            (2, 1, 1)
+        );
+        assert!(infer_launch_grid((4, 1, 1), &[AtMost((3, 1, 1))]).is_err());
+    }
+}
 
 #[cfg(test)]
 mod tests {
