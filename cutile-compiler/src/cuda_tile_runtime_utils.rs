@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 /// The minimum CUDA toolkit the Tile compiler supports; `tileiras` ships
-/// with CUDA 13.2. The shared host-side crates support 12.0+ and enforce
+/// with CUDA 13.2. The shared host-side crates support 12.8+ and enforce
 /// their own floor in `cuda-bindings`.
 const MIN_TILE_CUDA_VERSION: u32 = 13020;
 
@@ -378,7 +378,7 @@ fn compute_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> Byte
     if let Some(dir) = toolkit_dir {
         let cuda_h = dir.join("include").join("cuda.h");
         if let Ok(cuda_version) = cuda_version_from_header(&cuda_h) {
-            // The Tile floor. The shared host-side crates support CUDA 12.0+,
+            // The Tile floor. The shared host-side crates support CUDA 12.8+,
             // but the Tile compiler drives toolkit binaries (tileiras) that
             // ship with CUDA 13.2+, so complain here, at tool discovery, with
             // the context to say what was found. SIMT-only users never reach
@@ -388,7 +388,7 @@ fn compute_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> Byte
                 panic!(
                     "cuTile requires CUDA 13.2 or newer: the resolved toolkit at {} is CUDA {}.{}. \
                      Set {CUDA_TOOLKIT_PATH_ENV} to a CUDA 13.2+ install \
-                     (the shared CUDA host-side crates themselves support 12.0+).",
+                     (the shared CUDA host-side crates themselves support 12.8+).",
                     dir.display(),
                     cuda_version / 1000,
                     (cuda_version % 1000) / 10,

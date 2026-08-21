@@ -85,13 +85,13 @@ jobs:
           ./scripts/run_cpu_tests.sh
 
   # The shared host-side crates (cuda-bindings, cuda-core, cuda-async)
-  # support CUDA 12.0+, while the Tile stack requires 13.2+. This lane keeps
+  # support CUDA 12.8+, while the Tile stack requires 13.2+. This lane keeps
   # the 12.x floor honest: compile-only, no GPU, no TileIR toolchain (12.x
   # images have no tileiras, which is exactly the point).
   shared-crates-cuda12:
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:12.0.1-devel-ubuntu22.04
+      image: nvidia/cuda:12.8.0-devel-ubuntu22.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
@@ -112,7 +112,7 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-      - name: Check shared crates against CUDA 12.0
+      - name: Check shared crates against CUDA 12.8
         run: |
           source "${HOME}/.cargo/env"
           cargo check -p cuda-bindings -p cuda-core -p cuda-async --all-targets

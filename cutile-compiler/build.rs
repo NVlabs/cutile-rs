@@ -44,7 +44,7 @@ fn main() {
             println!(
                 "cargo:warning=cutile-compiler: the toolkit at {} is CUDA {}.{}; \
                  cuTile requires CUDA 13.2+ at run time (tileiras ships with it). \
-                 The shared CUDA host-side crates support 12.0+.",
+                 The shared CUDA host-side crates support 12.8+.",
                 toolkit,
                 version / 1000,
                 (version % 1000) / 10

@@ -18,7 +18,7 @@ use syn::{
     TypeBareFn,
 };
 
-const MIN_CUDA_VERSION: u32 = 12000;
+const MIN_CUDA_VERSION: u32 = 12080;
 const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
 const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
 
@@ -102,7 +102,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn resolve_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
     match env::var_os(CUDA_TOOLKIT_PATH_ENV) {
         Some(value) if value.is_empty() => Err(format!(
-            "{CUDA_TOOLKIT_PATH_ENV} is set to an empty string. Set it to a CUDA 12.0+ toolkit directory."
+            "{CUDA_TOOLKIT_PATH_ENV} is set to an empty string. Set it to a CUDA 12.8+ toolkit directory."
         )
         .into()),
         Some(value) => resolve_explicit_cuda_toolkit(value),
@@ -149,7 +149,7 @@ fn find_default_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
     }
 
     Err(format!(
-        "{CUDA_TOOLKIT_PATH_ENV} is not set, and no CUDA 12.0+ toolkit was found in default locations:\n{}\nSet {CUDA_TOOLKIT_PATH_ENV} to a CUDA 12.0+ toolkit directory.",
+        "{CUDA_TOOLKIT_PATH_ENV} is not set, and no CUDA 12.8+ toolkit was found in default locations:\n{}\nSet {CUDA_TOOLKIT_PATH_ENV} to a CUDA 12.8+ toolkit directory.",
         rejected.join("\n")
     )
     .into())
@@ -192,7 +192,7 @@ fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<u32, String> {
     let version = cuda_version_from_header(&cuda_h).map_err(|error| error.to_string())?;
     if version < MIN_CUDA_VERSION {
         return Err(format!(
-            "CUDA toolkit {} is too old. The CUDA host-side crates require CUDA 12.0+ (the Tile compiler needs 13.2+)",
+            "CUDA toolkit {} is too old. The CUDA host-side crates require CUDA 12.8+ (the Tile compiler needs 13.2+)",
             format_cuda_version(version)
         ));
     }
@@ -213,7 +213,7 @@ fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, Box<dyn Error>> {
         })
         .ok_or_else(|| {
             format!(
-                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH to a CUDA 12.0+ toolkit directory.",
+                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH to a CUDA 12.8+ toolkit directory.",
                 cuda_h.display()
             )
             .into()
