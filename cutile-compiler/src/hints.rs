@@ -98,6 +98,20 @@ pub struct CompileOptions {
     pub num_cta_in_cga: Option<i32>,
     pub max_divisibility: Option<i32>,
     pub num_worker_warps_per_cta: Option<i32>,
+    /// `tileiras` optimization level (`--opt-level`). `None` means the
+    /// default: 3, or 0 when `device_debug` is set.
+    pub opt_level: Option<u8>,
+    /// Compile for debugging (`tileiras --device-debug`): the frontend keeps
+    /// every bounds check where the source puts it (no hoisting, no launch
+    /// relocation) and the backend generates debug information. Implies
+    /// `--opt-level 0` unless `opt_level` is set explicitly.
+    pub device_debug: bool,
+    /// Emit line-number information (`tileiras --lineinfo`) for profiler
+    /// correlation, without the rest of the debug contract.
+    pub lineinfo: bool,
+    /// Instrument memory accesses for Compute Sanitizer's memcheck tool
+    /// (`tileiras --sanitize=memcheck`).
+    pub sanitize_memcheck: bool,
 }
 
 impl CompileOptions {
@@ -122,6 +136,26 @@ impl CompileOptions {
 
     pub fn num_worker_warps_per_cta(mut self, num_worker_warps_per_cta: i32) -> Self {
         self.num_worker_warps_per_cta = Some(num_worker_warps_per_cta);
+        self
+    }
+
+    pub fn opt_level(mut self, opt_level: u8) -> Self {
+        self.opt_level = Some(opt_level);
+        self
+    }
+
+    pub fn device_debug(mut self, device_debug: bool) -> Self {
+        self.device_debug = device_debug;
+        self
+    }
+
+    pub fn lineinfo(mut self, lineinfo: bool) -> Self {
+        self.lineinfo = lineinfo;
+        self
+    }
+
+    pub fn sanitize_memcheck(mut self, sanitize_memcheck: bool) -> Self {
+        self.sanitize_memcheck = sanitize_memcheck;
         self
     }
 }

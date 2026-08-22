@@ -564,9 +564,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             &proof_results,
             &param_index,
         );
+        // The environment resolves first (the differential harness's
+        // ablation switches), then --device-debug tightens placement: no
+        // in-kernel code motion (see CheckOptimizations::device_debug for
+        // why discharge and launch relocation are untouched).
+        let mut check_opts = crate::check_optimizations::CheckOptimizations::from_env();
+        if compile_options.device_debug {
+            check_opts.hoist_to_preheaders = false;
+        }
         Ok(CUDATileFunctionCompiler {
             modules,
-            check_opts: crate::check_optimizations::CheckOptimizations::from_env(),
+            check_opts,
             module_name: module_name.to_string(),
             _function_name: function_name.to_string(),
             entry_attrs,

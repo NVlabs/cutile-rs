@@ -42,18 +42,20 @@ impl CheckOptimizations {
         }
     }
 
-    /// Device-debug policy: checks stay where the source puts them.
+    /// Device-debug policy: any check that lives in the kernel lives where
+    /// the source puts it.
     ///
-    /// No hoisting and no launch relocation, so the debugger stops on the
-    /// assert at the source line that wrote it and inlined regions remain
-    /// contiguous (the rangeless `-O0 -G` DWARF contract). Proof discharge
-    /// stays on: a check the compiler proved cannot fire has nothing to
-    /// debug, and resurrecting it would change which checks exist rather
-    /// than where they sit.
+    /// No preheader hoisting — that is in-kernel code motion, and moving an
+    /// assert across inlined-at scopes makes the rangeless `-O0 -G` DWARF
+    /// intervals lie about exactly the instructions users stop on. Proof
+    /// discharge and launch relocation stay on: both remove a check from
+    /// device code entirely (nothing left to debug, no motion inside the
+    /// kernel), and the bounded family's launch checks are load-bearing —
+    /// without relocation its undischarged checks are compile errors.
     pub fn device_debug() -> Self {
         Self {
             hoist_to_preheaders: false,
-            relocate_to_launch: false,
+            relocate_to_launch: true,
             discharge_proofs: true,
         }
     }
@@ -94,5 +96,70 @@ impl CheckOptimizations {
             hoist_to_preheaders: !flag("CUTILE_DISABLE_CHECK_HOISTING"),
             ..Self::release()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cuda_tile_runtime_utils::{TileirasOptions, DEFAULT_OPT_LEVEL};
+    use crate::hints::CompileOptions;
+
+    #[test]
+    fn device_debug_implies_opt_zero_unless_explicit() {
+        let debug =
+            TileirasOptions::from_compile_options(&CompileOptions::new().device_debug(true));
+        assert_eq!(debug.opt_level, 0);
+        assert!(debug.device_debug);
+
+        let explicit = TileirasOptions::from_compile_options(
+            &CompileOptions::new().device_debug(true).opt_level(2),
+        );
+        assert_eq!(explicit.opt_level, 2, "an explicit level wins");
+
+        let release = TileirasOptions::from_compile_options(&CompileOptions::new());
+        assert_eq!(release.opt_level, DEFAULT_OPT_LEVEL);
+        assert_eq!(release, TileirasOptions::default());
+    }
+
+    #[test]
+    fn flags_byte_is_injective_over_the_flag_combinations() {
+        let mut seen = std::collections::BTreeSet::new();
+        for dd in [false, true] {
+            for li in [false, true] {
+                for sm in [false, true] {
+                    let o = TileirasOptions {
+                        opt_level: 3,
+                        device_debug: dd,
+                        lineinfo: li,
+                        sanitize_memcheck: sm,
+                    };
+                    assert!(seen.insert(o.flags_byte()), "flags_byte collision");
+                }
+            }
+        }
+        assert_eq!(
+            TileirasOptions::default().flags_byte(),
+            0,
+            "release flags must encode as 0 so pre-flags cache entries keep validating"
+        );
+    }
+
+    #[test]
+    fn named_policies_differ_only_where_documented() {
+        let release = CheckOptimizations::release();
+        let debug = CheckOptimizations::device_debug();
+        let disabled = CheckOptimizations::disabled();
+
+        assert!(release.hoist_to_preheaders && !debug.hoist_to_preheaders);
+        // Debug removes in-kernel motion ONLY: discharge and launch
+        // relocation still apply (the bounded family's launch checks are
+        // load-bearing).
+        assert!(debug.relocate_to_launch && debug.discharge_proofs);
+        assert!(
+            !disabled.hoist_to_preheaders
+                && !disabled.relocate_to_launch
+                && !disabled.discharge_proofs
+        );
     }
 }

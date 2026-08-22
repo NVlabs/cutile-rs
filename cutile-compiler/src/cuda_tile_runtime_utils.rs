@@ -665,11 +665,10 @@ pub(crate) fn current_l2_key_for_bytecode(
     bytecode: &[u8],
     bytecode_version: BytecodeVersion,
     gpu_name: &str,
-    opt_level: u8,
+    opts: &TileirasOptions,
 ) -> (String, &'static str) {
     let tileiras_fp = tileiras_fingerprint();
-    let key =
-        crate::jit_cache::l2_key(bytecode, bytecode_version, gpu_name, opt_level, tileiras_fp);
+    let key = crate::jit_cache::l2_key(bytecode, bytecode_version, gpu_name, opts, tileiras_fp);
     (key, tileiras_fp)
 }
 
@@ -681,20 +680,81 @@ pub(crate) fn current_l2_key_for_bytecode(
 pub(crate) fn current_l2_key_for_module(
     module: &cutile_ir::Module,
     gpu_name: &str,
+    opts: &TileirasOptions,
 ) -> Result<String, JITError> {
     let (bytecode, bytecode_version) = serialize_tile_ir_bytecode(module)?;
-    Ok(current_l2_key_for_bytecode(&bytecode, bytecode_version, gpu_name, DEFAULT_OPT_LEVEL).0)
+    Ok(current_l2_key_for_bytecode(&bytecode, bytecode_version, gpu_name, opts).0)
+}
+
+/// Flags forwarded to the `tileiras` invocation.
+///
+/// These are the complete stage-2 inputs besides the bytecode, the target
+/// GPU, and the binary itself — so they participate in the L2 cache key and
+/// are validated in disk-cache entries. Two compiles that differ in any
+/// field can never share a cubin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TileirasOptions {
+    /// `--opt-level <N>`.
+    pub opt_level: u8,
+    /// `--device-debug`: generate debug information.
+    pub device_debug: bool,
+    /// `--lineinfo`: generate line-number information only.
+    pub lineinfo: bool,
+    /// `--sanitize=memcheck`: instrument memory accesses for the sanitizer.
+    pub sanitize_memcheck: bool,
+}
+
+impl Default for TileirasOptions {
+    fn default() -> Self {
+        Self {
+            opt_level: DEFAULT_OPT_LEVEL,
+            device_debug: false,
+            lineinfo: false,
+            sanitize_memcheck: false,
+        }
+    }
+}
+
+impl TileirasOptions {
+    /// Resolves the launch-facing [`crate::hints::CompileOptions`] into the
+    /// stage-2 flags. `device_debug` implies `--opt-level 0` unless an
+    /// explicit level was requested.
+    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Self {
+        let opt_level = options.opt_level.unwrap_or(if options.device_debug {
+            0
+        } else {
+            DEFAULT_OPT_LEVEL
+        });
+        Self {
+            opt_level,
+            device_debug: options.device_debug,
+            lineinfo: options.lineinfo,
+            sanitize_memcheck: options.sanitize_memcheck,
+        }
+    }
+
+    /// The boolean flags packed into one byte, for the cache-entry header
+    /// and the L2 key material.
+    pub fn flags_byte(&self) -> u8 {
+        (self.device_debug as u8)
+            | ((self.lineinfo as u8) << 1)
+            | ((self.sanitize_memcheck as u8) << 2)
+    }
 }
 
 /// Compiles Tile IR bytecode to a cubin image by spawning `tileiras`.
 ///
-/// `bytecode`, `gpu_name` and `opt_level`, plus the `tileiras` binary itself, are
+/// `bytecode`, `gpu_name` and `opts`, plus the `tileiras` binary itself, are
 /// the complete input to this stage.
 ///
 /// The temporary `.bc` and `.cubin` are removed before returning. The one
 /// exception is a failing `tileiras` run, which leaves the `.bc` on disk because
 /// the error message names it.
-pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Vec<u8>, JITError> {
+pub fn run_tileiras(
+    bytecode: &[u8],
+    gpu_name: &str,
+    opts: &TileirasOptions,
+) -> Result<Vec<u8>, JITError> {
     let base_filename = env::temp_dir().join(Uuid::new_v4().to_string());
     let bc_file = ScopedTempFile::new(base_filename.with_extension("bc"));
     let cubin_file = ScopedTempFile::new(base_filename.with_extension("cubin"));
@@ -706,18 +766,20 @@ pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Ve
     })?;
 
     let tileiras = tileiras_binary();
-    let opt_level_arg = opt_level.to_string();
-    let args = [
-        "--gpu-name",
-        gpu_name,
-        "--opt-level",
-        &opt_level_arg,
-        "-o",
-        &cubin_filename,
-        &bc_filename,
-    ];
+    let opt_level_arg = opts.opt_level.to_string();
+    let mut args = vec!["--gpu-name", gpu_name, "--opt-level", &opt_level_arg];
+    if opts.device_debug {
+        args.push("--device-debug");
+    }
+    if opts.lineinfo {
+        args.push("--lineinfo");
+    }
+    if opts.sanitize_memcheck {
+        args.push("--sanitize=memcheck");
+    }
+    args.extend(["-o", &cubin_filename, &bc_filename]);
     let output = Command::new(&tileiras)
-        .args(args)
+        .args(&args)
         .output()
         .map_err(|e| JITError::Generic(tileiras_launch_error(&tileiras, &args, &bc_filename, e)))?;
     if !output.status.success() {
@@ -777,7 +839,7 @@ pub enum Stage2Source {
 /// installed (see [`crate::jit_cache::enable`]).
 ///
 /// The lookup sits exactly between bytecode serialization and the `tileiras`
-/// spawn: `bytecode` plus `gpu_name`, `opt_level` and the resolved `tileiras`
+/// spawn: `bytecode` plus `gpu_name`, `opts` and the resolved `tileiras`
 /// are the subprocess's complete input, so the content-addressed key derived
 /// from them (see [`crate::jit_cache::l2_key`]) is correct by construction.
 ///
@@ -787,24 +849,25 @@ pub fn compile_bytecode_cached(
     bytecode: &[u8],
     bc_version: BytecodeVersion,
     gpu_name: &str,
-    opt_level: u8,
+    opts: &TileirasOptions,
 ) -> Result<(Vec<u8>, Stage2Source), JITError> {
     use crate::jit_cache::{self, EntryParams};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::Ordering;
 
     let Some(store) = jit_cache::installed_store() else {
-        return run_tileiras(bytecode, gpu_name, opt_level).map(|c| (c, Stage2Source::Tileiras));
+        return run_tileiras(bytecode, gpu_name, opts).map(|c| (c, Stage2Source::Tileiras));
     };
 
     // `bc_version` is the version the caller actually serialized into `bytecode`,
     // not a fresh re-resolution — so the key's version field can never disagree
     // with the bytes it sits next to (see #7).
-    let (key, tileiras_fp) = current_l2_key_for_bytecode(bytecode, bc_version, gpu_name, opt_level);
+    let (key, tileiras_fp) = current_l2_key_for_bytecode(bytecode, bc_version, gpu_name, opts);
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,
-        opt_level,
+        opt_level: opts.opt_level,
+        flags: opts.flags_byte(),
         tileiras_fp,
     };
 
@@ -837,7 +900,7 @@ pub fn compile_bytecode_cached(
     }
 
     jit_cache::STATS.misses.fetch_add(1, Ordering::Relaxed);
-    let cubin = run_tileiras(bytecode, gpu_name, opt_level)?;
+    let cubin = run_tileiras(bytecode, gpu_name, opts)?;
 
     match jit_cache::encode_entry(&params, &cubin) {
         Some(entry) => match store.put(&key, &entry) {
@@ -875,7 +938,7 @@ pub fn recompile_after_disk_rejection(
     key: &str,
     bytecode: &[u8],
     gpu_name: &str,
-    opt_level: u8,
+    opts: &TileirasOptions,
 ) -> Result<Vec<u8>, JITError> {
     use std::sync::atomic::Ordering;
 
@@ -885,7 +948,7 @@ pub fn recompile_after_disk_rejection(
             .fetch_add(1, Ordering::Relaxed);
         crate::jit_cache::cache_log(format_args!("failed to evict entry {key}: {e}"));
     }
-    run_tileiras(bytecode, gpu_name, opt_level)
+    run_tileiras(bytecode, gpu_name, opts)
 }
 
 /// Compiles a `cutile_ir::Module` to a cubin image via bytecode serialization and
@@ -898,7 +961,7 @@ pub fn compile_tile_ir_module(
     gpu_name: &str,
 ) -> Result<Vec<u8>, JITError> {
     let (bytecode, bc_version) = serialize_tile_ir_bytecode(module)?;
-    compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL)
+    compile_bytecode_cached(&bytecode, bc_version, gpu_name, &TileirasOptions::default())
         .map(|(cubin, _)| cubin)
 }
 
@@ -1398,7 +1461,7 @@ mod tests {
             &bytecode,
             bc_version,
             gpu_name,
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
             tileiras_fp,
         );
 
@@ -1474,7 +1537,7 @@ mod tests {
             &bytecode,
             bc_version,
             gpu_name,
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
             tileiras_fp,
         );
 
@@ -1492,7 +1555,7 @@ mod tests {
             &key,
             &bytecode,
             gpu_name,
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
         )
         .expect("recompile_after_disk_rejection should succeed");
 

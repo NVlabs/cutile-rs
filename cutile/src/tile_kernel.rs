@@ -15,7 +15,7 @@ use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
     compile_bytecode_cached, env_flag_enabled, get_compiler_version, get_gpu_name,
     recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint, Stage2Source,
-    DEFAULT_OPT_LEVEL,
+    TileirasOptions,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;
@@ -557,8 +557,9 @@ fn compile_and_load_kernel(
         }
     }
     let (bytecode, bc_version) = serialize_tile_ir_bytecode(&tile_module)?;
+    let tileiras_opts = TileirasOptions::from_compile_options(compile_options);
     let (cubin, mut stage2_source) =
-        compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL)?;
+        compile_bytecode_cached(&bytecode, bc_version, gpu_name, &tileiras_opts)?;
     let mut stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
 
     // A retry recompile (below) runs inside the stage-3 window but is really
@@ -586,7 +587,7 @@ fn compile_and_load_kernel(
                     &key,
                     &bytecode,
                     gpu_name,
-                    DEFAULT_OPT_LEVEL,
+                    &tileiras_opts,
                 )?;
                 recompile_ms = recompile_start.elapsed().as_secs_f64() * 1000.0;
                 stage2_ms += recompile_ms;

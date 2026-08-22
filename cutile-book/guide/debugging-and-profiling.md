@@ -135,6 +135,30 @@ gdb --args ./target/debug/my_program
 
 Check the CUDA driver, CUDA Toolkit path, raw pointer lifetimes, spawned task lifetimes, and host memory use during first-launch compilation.
 
+## Debug Builds and Sanitizers
+
+`CompileOptions` selects debugging and instrumentation modes per launch. Each option is part of the JIT cache key, so a debug build and a release build never share a compiled kernel:
+
+```rust
+use cutile::tile_kernel::CompileOptions;
+
+// cuda-gdb: debug information, no optimization.
+my_kernel(args).compile_options(CompileOptions::new().device_debug(true)).sync()?;
+
+// Profiler correlation: line-number information only, full optimization.
+my_kernel(args).compile_options(CompileOptions::new().lineinfo(true)).sync()?;
+
+// Compute Sanitizer: memory-access instrumentation.
+my_kernel(args).compile_options(CompileOptions::new().sanitize_memcheck(true)).sync()?;
+```
+
+What each option does:
+
+- `device_debug(true)` passes `--device-debug` to the device compiler and implies optimization level 0 (set `opt_level` explicitly to override). The frontend also stops hoisting bounds checks out of loops, so every check that runs on the device sits at the source line that wrote it. Checks the compiler proved impossible, and checks it moved to launch time on the host, are unaffected — they never reach device code in any mode.
+- `lineinfo(true)` passes `--lineinfo`: source-line correlation for Nsight Compute and Nsight Systems without changing code generation. This is the option for profiling optimized kernels.
+- `sanitize_memcheck(true)` passes `--sanitize=memcheck` for `compute-sanitizer --tool memcheck`.
+- `opt_level(n)` selects `--opt-level` directly; the default is 3.
+
 ## Profiling
 
 Use Nsight Compute for individual kernels:
