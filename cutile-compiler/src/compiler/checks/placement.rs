@@ -101,8 +101,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     ) -> (Option<(LoopFrame, HoistIndex)>, Option<&'static str>) {
         let mut no_hoist_why: Option<&'static str> = None;
         let hoist = 'classify: {
-            if crate::cuda_tile_runtime_utils::check_hoisting_disabled() {
-                no_hoist_why = Some("hoisting disabled via CUTILE_DISABLE_CHECK_HOISTING");
+            if !self.check_opts.hoist_to_preheaders {
+                no_hoist_why = Some("preheader hoisting disabled by the check policy");
                 break 'classify None;
             }
             let frames = &ctx.loop_frames;
@@ -348,10 +348,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // path emitted ONLY the upper comparison, so a signed `-1` passed
         // `index < ceil(extent/tile)` and reached the access (2026-08-04
         // review, finding Ask3-1).
-        // Under placement ablation nothing is inferred: the reference build
+        // Without proof discharge nothing is inferred: the reference build
         // tests the actual value on BOTH sides, or it cannot referee the
         // inference that removed a side (2026-08-12 review, S2).
-        let lower_static: Option<i64> = if crate::cuda_tile_runtime_utils::force_device_checks() {
+        let lower_static: Option<i64> = if !self.check_opts.discharge_proofs {
             None
         } else {
             goals
@@ -448,13 +448,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 self.compile_constant(module, check_block, generic_vars, *max)?
             }
             Some(HoistIndex::Invariant) | None => {
-                // Under placement ablation the check is the semantic
+                // Without proof discharge the check is the semantic
                 // reference, so it tests the index's ACTUAL value; the
                 // static-max substitution below is an optimization that
                 // deliberately over-tests (the range's extreme), which is
                 // exactly what the differential harness must not inherit
                 // from the thing it referees.
-                if crate::cuda_tile_runtime_utils::force_device_checks() {
+                if !self.check_opts.discharge_proofs {
                     goals.index.clone()
                 } else if let Some(bounds) = goals.index.bounds.filter(fits_i32) {
                     self.compile_constant(module, check_block, generic_vars, bounds.end as i32)?
