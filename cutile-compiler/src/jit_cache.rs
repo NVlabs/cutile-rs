@@ -795,9 +795,13 @@ pub struct EntryParams<'a> {
     pub bc_sha256: [u8; 32],
     pub gpu_name: &'a str,
     pub opt_level: u8,
-    /// Packed stage-2 flags (see `TileirasOptions::flags_byte`). Stored in
-    /// the entry header's formerly-reserved byte, so release entries (flags
-    /// 0) written by older versions still validate.
+    /// Packed stage-2 flags (see `TileirasOptions::flags_byte`). Stored in a
+    /// formerly-padding header byte, which is why `ENTRY_FORMAT_VERSION` was
+    /// deliberately not bumped: old readers never look at the byte, old
+    /// entries carry 0 (the release encoding) in it. This is defense in
+    /// depth — the flags also joined the key material, which orphaned all
+    /// pre-flags entries (a one-time recompile), so the field can only
+    /// disagree with a request under a key collision.
     pub flags: u8,
     pub tileiras_fp: &'a str,
 }
@@ -819,9 +823,9 @@ pub fn encode_entry(params: &EntryParams<'_>, cubin: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&gpu_len.to_le_bytes());
     out.extend_from_slice(&fp_len.to_le_bytes());
     out.push(params.opt_level);
-    // Packed stage-2 flags in a formerly-padding byte: entries written
-    // before the field existed carry 0, which is exactly the release flags,
-    // so they keep validating for release requests.
+    // Packed stage-2 flags in a formerly-padding byte (no format bump: old
+    // readers ignore it, old entries carry the release encoding 0). The key
+    // already separates flag sets; this validates them independently.
     out.push(params.flags);
     out.extend_from_slice(&[0u8; 2]); // padding
     out.extend_from_slice(&(cubin.len() as u64).to_le_bytes());

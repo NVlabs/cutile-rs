@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(
             TileirasOptions::default().flags_byte(),
             0,
-            "release flags must encode as 0 so pre-flags cache entries keep validating"
+            "release flags must encode as 0, matching the byte old cache entries carry"
         );
     }
 

@@ -101,9 +101,11 @@ pub struct CompileOptions {
     /// `tileiras` optimization level (`--opt-level`). `None` means the
     /// default: 3, or 0 when `device_debug` is set.
     pub opt_level: Option<u8>,
-    /// Compile for debugging (`tileiras --device-debug`): the frontend keeps
-    /// every bounds check where the source puts it (no hoisting, no launch
-    /// relocation) and the backend generates debug information. Implies
+    /// Compile for debugging (`tileiras --device-debug`): the frontend stops
+    /// hoisting bounds checks out of loops, so every check that runs on the
+    /// device sits at the source line that wrote it, and the backend
+    /// generates debug information. Checks the compiler discharged by proof
+    /// or moved to launch time never reach device code in any mode. Implies
     /// `--opt-level 0` unless `opt_level` is set explicitly.
     pub device_debug: bool,
     /// Emit line-number information (`tileiras --lineinfo`) for profiler
