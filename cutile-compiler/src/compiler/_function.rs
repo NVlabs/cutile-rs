@@ -42,6 +42,9 @@ use syn::spanned::Spanned;
 /// Compiles a single Rust function into Tile IR bytecode.
 pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) modules: &'m CUDATileModules,
+    /// Bounds-check optimization policy for this compile, resolved once at
+    /// construction. See [`crate::check_optimizations::CheckOptimizations`].
+    pub(crate) check_opts: crate::check_optimizations::CheckOptimizations,
     pub(crate) module_name: String,
     pub(crate) _function_name: String,
     pub(crate) _function: &'m syn::ItemFn,
@@ -196,10 +199,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // are known, a host compare at launch. Stating it over extents was
         // stricter than the device check it replaced (a target shorter in
         // elements but equal in tiles was rejected; issue #216); the
-        // TileCount atom closes that band exactly. Under placement ablation
-        // the goal stays with the access as a device check; step 1 still
-        // ran, because a declared fact is a verified proof, not a placement.
-        if crate::cuda_tile_runtime_utils::force_device_checks() {
+        // TileCount atom closes that band exactly. Without launch
+        // relocation the goal stays with the access as a device check;
+        // step 1 still ran, because a declared fact is a verified proof,
+        // not a placement.
+        if !self.check_opts.relocate_to_launch {
             return false;
         }
         if tile < 1 {
@@ -562,6 +566,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         );
         Ok(CUDATileFunctionCompiler {
             modules,
+            check_opts: crate::check_optimizations::CheckOptimizations::from_env(),
             module_name: module_name.to_string(),
             _function_name: function_name.to_string(),
             entry_attrs,

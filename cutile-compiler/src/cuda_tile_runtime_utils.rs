@@ -36,29 +36,10 @@ pub fn get_compiler_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Ablation switch: `CUTILE_DISABLE_CHECK_HOISTING=1` keeps every dynamic
-/// partition-access bounds check at its access site instead of hoisting to
-/// loop preheaders. Read uncached so A/B toggling never needs a rebuild —
-/// this is a compile-time (JIT) knob, not a kernel-time one.
-pub fn check_hoisting_disabled() -> bool {
-    env::var("CUTILE_DISABLE_CHECK_HOISTING").is_ok_and(|v| v == "1") || force_device_checks()
-}
-
-/// `CUTILE_FORCE_DEVICE_CHECKS=1`: full placement ablation for differential
-/// testing. Every plain-family access check is emitted at its access site,
-/// two-sided, over the actual runtime values — no preheader hoisting
-/// (implies `CUTILE_DISABLE_CHECK_HOISTING`), no launch relocation, and no
-/// JIT discharge: provenance, static folds, entailment, and inferred lower
-/// bounds are all skipped. The ablated build is the differential harness's
-/// semantic REFERENCE, and a reference that inherits the compiler's proofs
-/// cannot catch one that is wrong (2026-08-12 review, S2) — earlier this
-/// knob kept "verified" proofs, and a wrap-tainted static fold sailed
-/// through both builds identically. The bounded (`with_bounds`) family is
-/// unaffected — its undischarged checks are compile errors, so it has no
-/// device placement to ablate to.
-pub fn force_device_checks() -> bool {
-    env::var("CUTILE_FORCE_DEVICE_CHECKS").is_ok_and(|v| v == "1")
-}
+// The `CUTILE_DISABLE_CHECK_HOISTING` / `CUTILE_FORCE_DEVICE_CHECKS`
+// ablation switches are resolved once per compile into a
+// [`crate::check_optimizations::CheckOptimizations`] (see `from_env` there);
+// the compiler consults that policy, never the environment.
 
 /// `CUTILE_JIT_LOG=1` also reports every bounds check that stays inside a
 /// loop body with the reason it could not hoist.
