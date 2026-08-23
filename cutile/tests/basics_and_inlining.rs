@@ -711,5 +711,12 @@ fn inlined_ops_carry_call_site_debug_info() {
             dump.contains(r#"name="inlining_kernel", linkage="inlining_kernel_entry""#),
             "subprogram must pair user name with the entry symbol:\n{dump}"
         );
+        // The inlined callee gets its OWN subprogram (with a synthetic
+        // linkage name — it has no symbol), so inline debug frames name
+        // other_function, not the kernel entry.
+        assert!(
+            dump.contains(r#"name="other_function", linkage="other_function@"#),
+            "inlined ops must be scoped to the callee's subprogram:\n{dump}"
+        );
     });
 }

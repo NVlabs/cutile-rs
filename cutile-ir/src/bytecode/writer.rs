@@ -907,6 +907,15 @@ impl DebugInfoCollector {
     }
 
     /// Converts a location into an interned attribute id (0 = no info).
+    ///
+    /// Known consumer limitation: the current `tileiras` accepts this
+    /// section everywhere (verifier and `--lineinfo` line tables, both
+    /// files/lines correct), but its full `--device-debug` DWARF emission
+    /// can reject real programs whose inline chains reference multiple
+    /// subprogram scopes (probed in `tests/bytecode_validate.rs` `dbg_v*`;
+    /// every isolated shape passes, whole programs can fail). Being raised
+    /// upstream; emission stays reference-conformant rather than degrading
+    /// the data.
     fn attr_for(&mut self, strings: &mut StringManager, loc: &crate::ir::Location) -> u64 {
         use crate::ir::Location;
         match loc {
@@ -983,6 +992,12 @@ impl DebugInfoCollector {
     /// Records one operation's attribute id, in serialization order.
     pub fn record_op(&mut self, strings: &mut StringManager, loc: &crate::ir::Location) {
         let attr = self.attr_for(strings, loc);
+        // Ops are only ever serialized inside a function; recording one
+        // outside would silently desync every subsequent per-op index.
+        debug_assert!(
+            !self.per_function.is_empty(),
+            "op serialized before any begin_function"
+        );
         if let Some(list) = self.per_function.last_mut() {
             list.push(attr);
         }

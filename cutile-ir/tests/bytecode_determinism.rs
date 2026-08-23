@@ -50,7 +50,14 @@ fn build_string_heavy_module() -> Module {
 
     // Several constants: multiple values and repeated type references.
     for v in 0..8i32 {
-        let (op, _res) = OpBuilder::new(Opcode::Constant, Location::Unknown)
+        // Distinct locations: the debug section (attr table + per-op ids)
+        // must serialize deterministically too.
+        let loc = Location::FileLineCol {
+            filename: "src/determinism.rs".to_string(),
+            line: 10 + v as u32,
+            column: 4,
+        };
+        let (op, _res) = OpBuilder::new(Opcode::Constant, loc)
             .attr(
                 "value",
                 Attribute::DenseElements(DenseElements {
@@ -70,10 +77,17 @@ fn build_string_heavy_module() -> Module {
     // Entry with many distinct string attributes: ~24 extra strings in the
     // pool (12 keys + 12 values), enough that a HashMap-ordered pool would
     // almost certainly differ between two instances.
-    let mut entry = OpBuilder::new(Opcode::Entry, Location::Unknown)
-        .attr("sym_name", Attribute::String("determinism_kernel".into()))
-        .attr("function_type", Attribute::Type(func_type))
-        .region(region_id);
+    let mut entry = OpBuilder::new(
+        Opcode::Entry,
+        Location::FileLineCol {
+            filename: "src/determinism.rs".to_string(),
+            line: 5,
+            column: 0,
+        },
+    )
+    .attr("sym_name", Attribute::String("determinism_kernel".into()))
+    .attr("function_type", Attribute::Type(func_type))
+    .region(region_id);
     for i in 0..12 {
         entry = entry.attr(
             format!("str_attr_key_{i:02}"),

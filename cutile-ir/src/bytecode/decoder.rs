@@ -284,15 +284,19 @@ fn parse_debug_section(payload: &[u8], strings: &[String], out: &mut String) -> 
     use super::enums::DebugTag;
 
     let mut r = Reader::new(payload);
+    // Counts come from attacker-controllable varints: cap pre-allocation by
+    // what the payload could physically hold, so a huge count fails at the
+    // read below instead of aborting on allocation.
+    let cap = |n: usize| n.min(payload.len());
     let num_functions = r.read_varint()? as usize;
     r.skip_padding(4)?;
-    let mut index_offsets = Vec::with_capacity(num_functions);
+    let mut index_offsets = Vec::with_capacity(cap(num_functions));
     for _ in 0..num_functions {
         index_offsets.push(r.read_le_u32()? as usize);
     }
     let num_indices = r.read_varint()? as usize;
     r.skip_padding(8)?;
-    let mut attr_ids = Vec::with_capacity(num_indices);
+    let mut attr_ids = Vec::with_capacity(cap(num_indices));
     for _ in 0..num_indices {
         let bytes = r.read_bytes(8)?;
         attr_ids.push(u64::from_le_bytes(bytes.try_into().unwrap()));
@@ -300,7 +304,7 @@ fn parse_debug_section(payload: &[u8], strings: &[String], out: &mut String) -> 
 
     let attr_count = r.read_varint()? as usize;
     r.skip_padding(4)?;
-    let mut attr_offsets = Vec::with_capacity(attr_count);
+    let mut attr_offsets = Vec::with_capacity(cap(attr_count));
     for _ in 0..attr_count {
         attr_offsets.push(r.read_le_u32()? as usize);
     }
