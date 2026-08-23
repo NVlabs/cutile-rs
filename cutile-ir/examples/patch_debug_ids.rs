@@ -38,21 +38,34 @@ fn main() {
             let mut q = p;
             let nf = read_varint(&d, &mut q) as usize;
             q += (4 - ((q - start) % 4)) % 4;
-            q += nf * 4;
+            // Each function's flattened list starts with ITS OWN location
+            // attr; the layout is [func0, ops0.., func1, ops1..], so the
+            // offset table marks every list head to protect — not just the
+            // first nf slots.
+            let mut heads = Vec::with_capacity(nf);
+            for _ in 0..nf {
+                heads.push(u32::from_le_bytes(d[q..q + 4].try_into().unwrap()) as usize);
+                q += 4;
+            }
             let ni = read_varint(&d, &mut q) as usize;
             q += (8 - ((q - start) % 8)) % 8;
             let single = std::env::var("PATCH_SINGLE").is_ok();
+            // Op counter that skips each function's head slot.
+            let mut op_idx = 0usize;
             for i in 0..ni {
+                if heads.contains(&i) {
+                    continue; // a function's own attr, never patched
+                }
                 let hit = if single {
-                    i == keep_n + nf
+                    op_idx == keep_n
                 } else {
-                    i >= keep_n + nf
+                    op_idx >= keep_n
                 };
                 if hit {
-                    // never touch the per-function [0] attrs
                     let off = q + i * 8;
                     d[off..off + 8].copy_from_slice(&fill.to_le_bytes());
                 }
+                op_idx += 1;
             }
         }
         p += len;
