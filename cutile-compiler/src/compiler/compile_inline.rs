@@ -121,6 +121,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // Compile caller arguments.
             let call_arg_values =
                 self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+            // Arguments above belong to the caller's frame; everything from
+            // here on compiles the callee's body inline, so ops carry an
+            // "inlined at" chain rooted at this call expression.
+            let _call_site = self.push_call_site(&call_expr.span());
             // Map function generic params to caller generic args.
             let mut generic_arg_inference = GenericArgInference::new_function(fn_item.sig.clone());
             let call_arg_rust_tys = call_arg_values
@@ -304,6 +308,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             args.insert(0, *method_call_expr.receiver.clone());
             let call_arg_values =
                 self.compile_call_args(module, block_id, &args, generic_vars, ctx)?;
+            // Arguments above belong to the caller's frame; the inlined
+            // method body below carries an "inlined at" chain rooted here.
+            let _call_site = self.push_call_site(&method_call_expr.span());
             let receiver_rust_ty = &call_arg_values[0].ty.rust_ty;
             let call_arg_rust_tys = call_arg_values
                 .iter()

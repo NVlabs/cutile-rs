@@ -77,10 +77,26 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) validator: Validator,
     pub(crate) module_name_stack: Vec<String>,
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
+    /// Call-site locations of the inline expansions currently in progress,
+    /// innermost last. While non-empty, [`Self::ir_location`] wraps each
+    /// op's location in `Location::CallSite`, chaining "inlined at" info the
+    /// bytecode debug section turns into inline debug frames. Interior
+    /// mutability because inlining runs under `&self`.
+    pub(crate) call_site_stack: RefCell<Vec<cutile_ir::ir::Location>>,
     /// Per-compile partition-access check accounting: statically discharged /
     /// hoisted to a loop preheader / emitted in the access's own block.
     /// Reported on the `CUTILE_JIT_TIMING` line for coverage measurement.
     pub check_stats: CheckHoistStats,
+}
+
+/// Pops the innermost call-site location on drop (see
+/// [`CUDATileFunctionCompiler::push_call_site`]).
+pub(crate) struct CallSiteGuard<'a>(&'a RefCell<Vec<cutile_ir::ir::Location>>);
+
+impl Drop for CallSiteGuard<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().pop();
+    }
 }
 
 /// Counters for where partition-access bounds checks ended up.
@@ -579,6 +595,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             stride_args,
             module_name_stack: vec![module_name.to_string()],
             typeck_results: RefCell::new(None),
+            call_site_stack: RefCell::new(Vec::new()),
             check_stats: CheckHoistStats::default(),
         })
     }
@@ -620,17 +637,37 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     /// Convert a proc_macro2 span into a tile-ir Location for IR operations.
+    ///
+    /// Inside an inline expansion (see [`Self::push_call_site`]) the
+    /// location is wrapped in `Location::CallSite`, recording where the
+    /// containing function was inlined; nesting chains naturally because
+    /// each pushed caller location was itself resolved under the outer
+    /// stack.
     pub(crate) fn ir_location(&self, span: &proc_macro2::Span) -> cutile_ir::ir::Location {
         let loc = self.resolve_span(span);
-        if loc.is_known() {
-            cutile_ir::ir::Location::FileLineCol {
-                filename: loc.file,
-                line: loc.line as u32,
-                column: loc.column as u32,
-            }
-        } else {
-            cutile_ir::ir::Location::Unknown
+        if !loc.is_known() {
+            return cutile_ir::ir::Location::Unknown;
         }
+        let base = cutile_ir::ir::Location::FileLineCol {
+            filename: loc.file,
+            line: loc.line as u32,
+            column: loc.column as u32,
+        };
+        match self.call_site_stack.borrow().last() {
+            Some(caller) => cutile_ir::ir::Location::CallSite {
+                callee: Box::new(base),
+                caller: Box::new(caller.clone()),
+            },
+            None => base,
+        }
+    }
+
+    /// Pushes an inline expansion's call-site location; popped when the
+    /// returned guard drops, so error paths unwind the stack correctly.
+    pub(crate) fn push_call_site(&self, span: &proc_macro2::Span) -> CallSiteGuard<'_> {
+        let loc = self.ir_location(span);
+        self.call_site_stack.borrow_mut().push(loc);
+        CallSiteGuard(&self.call_site_stack)
     }
 
     pub(crate) fn jit_error(&self, span: &proc_macro2::Span, error_message: &str) -> JITError {

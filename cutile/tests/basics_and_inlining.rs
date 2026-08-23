@@ -669,3 +669,47 @@ fn symbolic_dim_mma_unifies_substituted_and_symbolic_shapes() {
         );
     });
 }
+
+// The bytecode debug section must chain "inlined at" info: ops compiled
+// from other_function's body carry a CallSite linking their own source
+// line to the call expression inside inlining_kernel.
+#[test]
+fn inlined_ops_carry_call_site_debug_info() {
+    common::with_test_stack(|| {
+        let artifacts = cutile_compiler::compile_api::KernelCompiler::new(
+            __module_ast_self,
+            "basics_and_inlining_module",
+            "inlining_kernel",
+        )
+        .target("sm_120")
+        .generics(vec![
+            "f32".into(),
+            "1".into(),
+            "128".into(),
+            "256".into(),
+            "512".into(),
+            "2".into(),
+        ])
+        .strides(&[("y", &[1024, 1, 1])])
+        .compile()
+        .expect("compile inlining_kernel");
+        let bytecode = artifacts.bytecode().expect("bytecode");
+        let dump =
+            cutile_ir::bytecode::decoder::decode_bytecode(&bytecode).expect("decode bytecode");
+
+        assert!(
+            dump.contains("CallSite(callee=di["),
+            "inlined ops must carry a call-site chain:\n{dump}"
+        );
+        // Both frames name this test file: the callee op (reshape inside
+        // other_function) and the caller (the call in inlining_kernel).
+        assert!(
+            dump.contains("basics_and_inlining.rs"),
+            "debug locations must name the source file:\n{dump}"
+        );
+        assert!(
+            dump.contains(r#"name="inlining_kernel", linkage="inlining_kernel_entry""#),
+            "subprogram must pair user name with the entry symbol:\n{dump}"
+        );
+    });
+}
