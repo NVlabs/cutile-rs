@@ -922,8 +922,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         let entry_location = self.ir_location(&fn_item.sig.ident.span());
+        // Debug info shows the name the user wrote; the `_entry` symbol
+        // stays as the linkage name (the bytecode writer pairs the two).
+        let di_name =
+            KernelNaming::public_name_from_entry_name(&fn_name).unwrap_or_else(|| fn_name.clone());
         let mut entry_builder = OpBuilder::new(Opcode::Entry, entry_location)
             .attr("sym_name", Attribute::String(fn_name))
+            .attr("di_name", Attribute::String(di_name))
             .attr("function_type", Attribute::Type(func_type))
             .region(region_id);
 
