@@ -159,14 +159,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 axis,
                 index,
             );
-            // Rungs 1 and 2 are proofs, not placements — but under full
-            // placement ablation they are skipped anyway: the ablated build
-            // is the differential harness's semantic reference, and a
-            // reference that inherits the very proofs under audit cannot
-            // catch one that is wrong (2026-08-12 review, S2). The bounded
-            // family keeps its rungs — its undischarged checks are compile
-            // errors, so it has no device placement to ablate to.
-            if !crate::cuda_tile_runtime_utils::force_device_checks() {
+            // Rungs 1 and 2 are proofs, not placements — but the disabled
+            // policy skips them anyway: that build is the differential
+            // harness's semantic reference, and a reference that inherits
+            // the very proofs under audit cannot catch one that is wrong
+            // (2026-08-12 review, S2). The bounded family keeps its rungs —
+            // its undischarged checks are compile errors, so it has no
+            // device placement to fall back to.
+            if self.check_opts.discharge_proofs {
                 // Rung 1/3: axis provenance — a same-view iterand, or a
                 // foreign iterand whose axis a declared root-dimension
                 // equality relates to this one.
@@ -202,10 +202,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             // Rung 3/4: a constant `[0, 0]` coordinate against a dynamic
             // extent reduces to `extent > 0`, a launch-known predicate.
-            // Gated here, not inside the rung: the bounded family shares it
-            // and MUST keep it under ablation, since its undischarged checks
-            // are compile errors rather than device placements.
-            if !crate::cuda_tile_runtime_utils::force_device_checks()
+            // Gated on launch relocation because the check leaves the
+            // kernel. Gated here, not inside the rung: the bounded family
+            // shares it and MUST keep it under every policy, since its
+            // undischarged checks are compile errors rather than device
+            // placements.
+            if self.check_opts.relocate_to_launch
                 && self.hoist_zero_coordinate_nonempty_extent(&axis_goals, &partition_value)
             {
                 self.count_discharged();
