@@ -721,6 +721,15 @@ pub fn jit_disk_hit_count() -> u64 {
 /// rule changes: every old entry then misses naturally, no manual cache wipe.
 const DOMAIN: &[u8] = b"cutile-jit-cubin-v1\0";
 
+/// Version of the [`l2_key`] preimage. A cache entry that misses under a new
+/// encoding just recompiles, but a key *persisted* outside the cache (a
+/// `cutile::tune` record) has no such recovery: its holder must be able to
+/// tell "the workspace drifted" from "this key was never comparable". Bump
+/// this whenever the preimage changes, encoding rules and field set alike.
+///
+/// 1: `opt_level` alone. 2: `opt_level` plus the stage-2 flags byte.
+pub const L2_KEY_SCHEMA: u32 = 2;
+
 /// Content-addressed cache key: SHA-256 over the complete `tileiras` input.
 ///
 /// The key deliberately contains no `module_name`, no generics, and no

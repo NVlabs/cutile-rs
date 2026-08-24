@@ -207,10 +207,10 @@ How it works:
 
 ### Committing winners
 
-A `tune::Record` persists winners so production loads them instead of re-searching. It is one JSON file per kernel, written by `save` and intended to be committed next to the code it tunes. The file holds a provenance header (kernel name, source hash, cutile version, `tileiras` fingerprint, target architecture, search-space hash) and one entry per shape-class bucket: the winning `Config`, its median, and optionally the winner's JIT cache key.
+A `tune::Record` persists winners so production loads them instead of re-searching. It is one JSON file per kernel, written by `save` and intended to be committed next to the code it tunes. The file holds a provenance header (kernel name, source hash, cutile version, `tileiras` fingerprint, target architecture, search-space hash) and one entry per shape-class bucket: the winning `Config`, its median, and optionally the winner's JIT cache key. A stored key carries the key encoding that produced it, because cutile can change that encoding without any change to the kernel or the toolchain.
 
 ```rust
-use cutile::tune::{Record, RecordEntry, Workspace};
+use cutile::tune::{L2Key, Record, RecordEntry, Workspace};
 
 // After tuning: store the winner for this bucket.
 let mut record = Record::new(&workspace);
@@ -219,7 +219,7 @@ record.insert(RecordEntry {
     config: best,
     median_ms,
     samples,
-    l2_key: Some(launcher.specialize()?.l2_cache_key()?),
+    l2_key: Some(L2Key::current(launcher.specialize()?.l2_cache_key()?)),
 });
 record.save(&path)?;
 
@@ -229,7 +229,7 @@ let (record, warnings) = Record::load_verified(&path, &workspace, |entry| {
 })?;
 ```
 
-`load_verified` refuses a record whose kernel, architecture, source hash, or search space does not match the running workspace, and refuses any entry whose stored JIT cache key no longer matches the recomputed one. That last check covers the kernel's dependencies and the toolchain, so a stale winner fails loudly instead of applying silently. Conditions that do not invalidate the configs themselves, such as a `tileiras` version drift that only shifts timings, come back as warnings. A record is never applied on a best-effort basis: it either verifies or it does not load.
+`load_verified` refuses a record whose kernel, architecture, source hash, or search space does not match the running workspace, and refuses any entry whose stored JIT cache key no longer matches the recomputed one. That last check covers the kernel's dependencies and the toolchain, so a stale winner fails loudly instead of applying silently. Conditions that do not invalidate the configs themselves come back as warnings: a `tileiras` version drift that only shifts timings, and a stored key from an older key encoding — in both cases a recomputed key cannot match the stored one, so the check is skipped rather than read as staleness. A record is never applied on a best-effort basis: it either verifies or it does not load.
 
 The `autotune` example runs a complete search over the block size of an RMS normalization kernel:
 

@@ -199,7 +199,7 @@ fn record_end_to_end_with_real_l2_verification() {
             .and_then(|t| t.median_ms())
             .unwrap(),
         samples: 3,
-        l2_key: Some(winner_key.clone()),
+        l2_key: Some(cutile::tune::L2Key::current(winner_key.clone())),
     });
     let path = std::env::temp_dir().join(format!("cutile_record_gpu_{}.json", std::process::id()));
     record.save(&path).expect("save");
@@ -215,7 +215,7 @@ fn record_end_to_end_with_real_l2_verification() {
 
     // Tampered stored key: refused.
     let mut tampered = loaded.clone();
-    tampered.entries[0].l2_key = Some("0".repeat(64));
+    tampered.entries[0].l2_key = Some(cutile::tune::L2Key::current("0".repeat(64)));
     tampered.save(&path).expect("save tampered");
     let err = Record::load_verified(&path, &ws, |entry| {
         let tile = entry.config.int("TILE").unwrap() as usize;
