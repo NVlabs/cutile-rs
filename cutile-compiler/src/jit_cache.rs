@@ -746,7 +746,7 @@ pub fn l2_key(
     put_field(&mut h, gpu_name.as_bytes());
     // The stage-2 flags are key material: a debug or sanitizer cubin must
     // never be served for a release request (or vice versa).
-    put_field(&mut h, &[opts.opt_level, opts.flags_byte()]);
+    put_field(&mut h, &[opts.opt_level(), opts.flags_byte()]);
     put_field(&mut h, tileiras_fp.as_bytes());
     hex(&h.finalize())
 }
@@ -883,6 +883,7 @@ pub fn decode_entry(bytes: &[u8], params: &EntryParams<'_>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hints::Optimization;
     use cutile_ir::bytecode::BytecodeVersion;
 
     #[cfg(unix)]
@@ -1010,8 +1011,58 @@ mod tests {
 
     fn opts(opt_level: u8) -> crate::cuda_tile_runtime_utils::TileirasOptions {
         crate::cuda_tile_runtime_utils::TileirasOptions {
-            opt_level,
+            optimization: Optimization::Level(opt_level),
             ..Default::default()
+        }
+    }
+
+    fn legacy_l2_key(
+        opt_level: u8,
+        device_debug: bool,
+        lineinfo: bool,
+        sanitize_memcheck: bool,
+    ) -> String {
+        let mut h = Sha256::new();
+        h.update(DOMAIN);
+        put_field(&mut h, &[V.major, V.minor]);
+        put_field(&mut h, &V.tag.to_le_bytes());
+        put_field(&mut h, b"bc");
+        put_field(&mut h, b"sm_90");
+        let flags =
+            (device_debug as u8) | ((lineinfo as u8) << 1) | ((sanitize_memcheck as u8) << 2);
+        put_field(&mut h, &[opt_level, flags]);
+        put_field(&mut h, b"fp");
+        hex(&h.finalize())
+    }
+
+    #[test]
+    fn optimization_model_preserves_existing_cache_keys() {
+        for optimization in [
+            Optimization::Level(0),
+            Optimization::Level(1),
+            Optimization::Level(2),
+            Optimization::Level(3),
+            Optimization::FullDebug,
+        ] {
+            for lineinfo in [false, true] {
+                for sanitize_memcheck in [false, true] {
+                    let current = crate::cuda_tile_runtime_utils::TileirasOptions {
+                        optimization,
+                        lineinfo,
+                        sanitize_memcheck,
+                    };
+                    let device_debug = matches!(optimization, Optimization::FullDebug);
+                    assert_eq!(
+                        l2_key(b"bc", V, "sm_90", &current, "fp"),
+                        legacy_l2_key(
+                            current.opt_level(),
+                            device_debug,
+                            lineinfo,
+                            sanitize_memcheck,
+                        )
+                    );
+                }
+            }
         }
     }
 
@@ -1036,7 +1087,7 @@ mod tests {
         // Every stage-2 flag is key material: a debug, lineinfo, or
         // sanitizer cubin must never share a slot with a release one.
         let mut flagged = opts(3);
-        flagged.device_debug = true;
+        flagged.optimization = Optimization::FullDebug;
         assert_ne!(base, l2_key(b"bc", V, "sm_90", &flagged, "fp"));
         let mut flagged = opts(3);
         flagged.lineinfo = true;

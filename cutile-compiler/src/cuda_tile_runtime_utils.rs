@@ -7,6 +7,7 @@
 //! Provides GPU detection and bytecode compilation helpers.
 
 use crate::error::JITError;
+use crate::hints::Optimization;
 use cuda_core::{get_device_sm_name, Device};
 use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion};
 use std::collections::HashMap;
@@ -694,10 +695,8 @@ pub(crate) fn current_l2_key_for_module(
 /// field can never share a cubin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileirasOptions {
-    /// `--opt-level <N>`.
-    pub opt_level: u8,
-    /// `--device-debug`: generate debug information.
-    pub device_debug: bool,
+    /// Optimization level or full device-debug mode.
+    pub optimization: Optimization,
     /// `--lineinfo`: generate line-number information only.
     pub lineinfo: bool,
     /// `--sanitize=memcheck`: instrument memory accesses for the sanitizer.
@@ -707,8 +706,7 @@ pub struct TileirasOptions {
 impl Default for TileirasOptions {
     fn default() -> Self {
         Self {
-            opt_level: DEFAULT_OPT_LEVEL,
-            device_debug: false,
+            optimization: Optimization::Level(DEFAULT_OPT_LEVEL),
             lineinfo: false,
             sanitize_memcheck: false,
         }
@@ -717,26 +715,36 @@ impl Default for TileirasOptions {
 
 impl TileirasOptions {
     /// Resolves the launch-facing [`crate::hints::CompileOptions`] into the
-    /// stage-2 flags. `device_debug` implies `--opt-level 0` unless an
-    /// explicit level was requested.
-    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Self {
-        let opt_level = options.opt_level.unwrap_or(if options.device_debug {
-            0
-        } else {
-            DEFAULT_OPT_LEVEL
-        });
-        Self {
-            opt_level,
-            device_debug: options.device_debug,
+    /// stage-2 flags. Full debug always uses the backend-required level 0.
+    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Result<Self, JITError> {
+        let optimization = options
+            .optimization
+            .unwrap_or(Optimization::Level(DEFAULT_OPT_LEVEL));
+        if let Optimization::Level(level) = optimization {
+            if level > 3 {
+                return Err(JITError::Generic(format!(
+                    "invalid tileiras optimization level {level}; expected 0 through 3"
+                )));
+            }
+        }
+        Ok(Self {
+            optimization,
             lineinfo: options.lineinfo,
             sanitize_memcheck: options.sanitize_memcheck,
+        })
+    }
+
+    pub fn opt_level(&self) -> u8 {
+        match self.optimization {
+            Optimization::Level(level) => level,
+            Optimization::FullDebug => 0,
         }
     }
 
     /// The boolean flags packed into one byte, for the cache-entry header
     /// and the L2 key material.
     pub fn flags_byte(&self) -> u8 {
-        (self.device_debug as u8)
+        (matches!(self.optimization, Optimization::FullDebug) as u8)
             | ((self.lineinfo as u8) << 1)
             | ((self.sanitize_memcheck as u8) << 2)
     }
@@ -766,9 +774,9 @@ pub fn run_tileiras(
     })?;
 
     let tileiras = tileiras_binary();
-    let opt_level_arg = opts.opt_level.to_string();
+    let opt_level_arg = opts.opt_level().to_string();
     let mut args = vec!["--gpu-name", gpu_name, "--opt-level", &opt_level_arg];
-    if opts.device_debug {
+    if matches!(opts.optimization, Optimization::FullDebug) {
         args.push("--device-debug");
     }
     if opts.lineinfo {
@@ -866,7 +874,7 @@ pub fn compile_bytecode_cached(
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,
-        opt_level: opts.opt_level,
+        opt_level: opts.opt_level(),
         flags: opts.flags_byte(),
         tileiras_fp,
     };

@@ -210,7 +210,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         let gpu_name = self.gpu_name.clone();
         let tileiras_opts = crate::cuda_tile_runtime_utils::TileirasOptions::from_compile_options(
             &self.compile_options,
-        );
+        )?;
         let artifacts = self.compile()?;
         current_l2_key_for_module(artifacts.module(), &gpu_name, &tileiras_opts)
     }
