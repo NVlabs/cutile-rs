@@ -159,6 +159,19 @@ What each option does:
 - `sanitize_memcheck(true)` passes `--sanitize=memcheck` for `compute-sanitizer --tool memcheck`.
 - `opt_level(n)` selects `--opt-level` directly; the default is 3.
 
+For wrappers and debugging sessions that cannot change application code, the
+same settings can be overridden for the process:
+
+- `CUTILE_JIT_OPTIMIZATION=0|1|2|3|debug`
+- `CUTILE_JIT_SANITIZE=memcheck|none`
+- `CUTILE_JIT_LINEINFO=1|0` (also `true`/`false`, `yes`/`no`, or `on`/`off`)
+
+An unset variable preserves the code setting, including its default. An
+explicit value replaces it, so `none` and false values turn a code-enabled
+option off. Invalid and non-Unicode values are errors rather than being
+silently ignored. These variables are read once when the process first
+resolves JIT options, before cache keys are constructed.
+
 ## Profiling
 
 Use Nsight Compute for individual kernels:
