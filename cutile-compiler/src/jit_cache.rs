@@ -721,6 +721,15 @@ pub fn jit_disk_hit_count() -> u64 {
 /// rule changes: every old entry then misses naturally, no manual cache wipe.
 const DOMAIN: &[u8] = b"cutile-jit-cubin-v1\0";
 
+/// Version of the [`l2_key`] preimage. A cache entry that misses under a new
+/// encoding just recompiles, but a key *persisted* outside the cache (a
+/// `cutile::tune` record) has no such recovery: its holder must be able to
+/// tell "the workspace drifted" from "this key was never comparable". Bump
+/// this whenever the preimage changes, encoding rules and field set alike.
+///
+/// 1: `opt_level` alone. 2: `opt_level` plus the stage-2 flags byte.
+pub const L2_KEY_SCHEMA: u32 = 2;
+
 /// Content-addressed cache key: SHA-256 over the complete `tileiras` input.
 ///
 /// The key deliberately contains no `module_name`, no generics, and no
@@ -1154,5 +1163,21 @@ mod tests {
             tileiras_fp: &"x".repeat(usize::from(u16::MAX) + 1),
         };
         assert_eq!(encode_entry(&p, b"cubin"), None);
+    }
+    #[test]
+    fn l2_key_preimage_is_pinned_to_the_schema() {
+        // This digest is the point: it pins the key PREIMAGE, not just its
+        // properties. If this assertion fails, you changed the l2 key
+        // encoding (field set, field order, or field encoding). That is
+        // allowed — but you MUST bump L2_KEY_SCHEMA, update this digest,
+        // and extend the schema history in its doc comment. Persisted keys
+        // (cutile::tune records) rely on the schema to tell an encoding
+        // migration apart from a stale winner; changing the preimage
+        // without the bump silently re-creates the #236/#241 bug.
+        assert_eq!(
+            l2_key(b"bc", V, "sm_90", &opts(3), "fp"),
+            "45274c4d279d97c5e383d8a8b035225d5ec81c91bd9f27c3027f5f5593473533",
+            "l2 key preimage changed: bump L2_KEY_SCHEMA (see comment above)"
+        );
     }
 }
