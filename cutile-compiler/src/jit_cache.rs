@@ -721,6 +721,15 @@ pub fn jit_disk_hit_count() -> u64 {
 /// rule changes: every old entry then misses naturally, no manual cache wipe.
 const DOMAIN: &[u8] = b"cutile-jit-cubin-v1\0";
 
+/// Version of the [`l2_key`] preimage. A cache entry that misses under a new
+/// encoding just recompiles, but a key *persisted* outside the cache (a
+/// `cutile::tune` record) has no such recovery: its holder must be able to
+/// tell "the workspace drifted" from "this key was never comparable". Bump
+/// this whenever the preimage changes, encoding rules and field set alike.
+///
+/// 1: `opt_level` alone. 2: `opt_level` plus the stage-2 flags byte.
+pub const L2_KEY_SCHEMA: u32 = 2;
+
 /// Content-addressed cache key: SHA-256 over the complete `tileiras` input.
 ///
 /// The key deliberately contains no `module_name`, no generics, and no
@@ -733,7 +742,7 @@ pub fn l2_key(
     bc: &[u8],
     bc_version: cutile_ir::bytecode::BytecodeVersion,
     gpu_name: &str,
-    opt_level: u8,
+    opts: &crate::cuda_tile_runtime_utils::TileirasOptions,
     tileiras_fp: &str,
 ) -> String {
     let mut h = Sha256::new();
@@ -744,7 +753,9 @@ pub fn l2_key(
     put_field(&mut h, &bc_version.tag.to_le_bytes());
     put_field(&mut h, bc);
     put_field(&mut h, gpu_name.as_bytes());
-    put_field(&mut h, &[opt_level]);
+    // The stage-2 flags are key material: a debug or sanitizer cubin must
+    // never be served for a release request (or vice versa).
+    put_field(&mut h, &[opts.opt_level, opts.flags_byte()]);
     put_field(&mut h, tileiras_fp.as_bytes());
     hex(&h.finalize())
 }
@@ -793,6 +804,14 @@ pub struct EntryParams<'a> {
     pub bc_sha256: [u8; 32],
     pub gpu_name: &'a str,
     pub opt_level: u8,
+    /// Packed stage-2 flags (see `TileirasOptions::flags_byte`). Stored in a
+    /// formerly-padding header byte, which is why `ENTRY_FORMAT_VERSION` was
+    /// deliberately not bumped: old readers never look at the byte, old
+    /// entries carry 0 (the release encoding) in it. This is defense in
+    /// depth — the flags also joined the key material, which orphaned all
+    /// pre-flags entries (a one-time recompile), so the field can only
+    /// disagree with a request under a key collision.
+    pub flags: u8,
     pub tileiras_fp: &'a str,
 }
 
@@ -813,7 +832,11 @@ pub fn encode_entry(params: &EntryParams<'_>, cubin: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&gpu_len.to_le_bytes());
     out.extend_from_slice(&fp_len.to_le_bytes());
     out.push(params.opt_level);
-    out.extend_from_slice(&[0u8; 3]); // padding
+    // Packed stage-2 flags in a formerly-padding byte (no format bump: old
+    // readers ignore it, old entries carry the release encoding 0). The key
+    // already separates flag sets; this validates them independently.
+    out.push(params.flags);
+    out.extend_from_slice(&[0u8; 2]); // padding
     out.extend_from_slice(&(cubin.len() as u64).to_le_bytes());
     debug_assert_eq!(out.len(), ENTRY_HEADER_LEN);
     out.extend_from_slice(params.gpu_name.as_bytes());
@@ -838,6 +861,7 @@ pub fn decode_entry(bytes: &[u8], params: &EntryParams<'_>) -> Option<Vec<u8>> {
     let gpu_len = u16::from_le_bytes(bytes[80..82].try_into().unwrap()) as usize;
     let fp_len = u16::from_le_bytes(bytes[82..84].try_into().unwrap()) as usize;
     let opt_level = bytes[84];
+    let flags = bytes[85];
     let payload_len = u64::from_le_bytes(bytes[88..96].try_into().unwrap());
 
     let payload_len: usize = payload_len.try_into().ok()?;
@@ -856,6 +880,7 @@ pub fn decode_entry(bytes: &[u8], params: &EntryParams<'_>) -> Option<Vec<u8>> {
     if bc_sha256 != params.bc_sha256
         || gpu_name != params.gpu_name.as_bytes()
         || opt_level != params.opt_level
+        || flags != params.flags
         || fp != params.tileiras_fp.as_bytes()
         || <[u8; 32]>::from(Sha256::digest(payload)) != payload_sha256
     {
@@ -987,38 +1012,58 @@ mod tests {
             bc_sha256: Sha256::digest(bc).into(),
             gpu_name: "sm_90",
             opt_level: 3,
+            flags: 0,
             tileiras_fp: "release 13.3, V13.3.36",
+        }
+    }
+
+    fn opts(opt_level: u8) -> crate::cuda_tile_runtime_utils::TileirasOptions {
+        crate::cuda_tile_runtime_utils::TileirasOptions {
+            opt_level,
+            ..Default::default()
         }
     }
 
     #[test]
     fn key_is_deterministic_and_field_sensitive() {
-        let base = l2_key(b"bc", V, "sm_90", 3, "fp");
-        assert_eq!(base, l2_key(b"bc", V, "sm_90", 3, "fp"));
+        let base = l2_key(b"bc", V, "sm_90", &opts(3), "fp");
+        assert_eq!(base, l2_key(b"bc", V, "sm_90", &opts(3), "fp"));
         assert_eq!(base.len(), 64);
         assert!(base.bytes().all(|b| b.is_ascii_hexdigit()));
 
-        assert_ne!(base, l2_key(b"bc2", V, "sm_90", 3, "fp"));
-        assert_ne!(base, l2_key(b"bc", V, "sm_80", 3, "fp"));
-        assert_ne!(base, l2_key(b"bc", V, "sm_90", 0, "fp"));
-        assert_ne!(base, l2_key(b"bc", V, "sm_90", 3, "fp2"));
+        assert_ne!(base, l2_key(b"bc2", V, "sm_90", &opts(3), "fp"));
+        assert_ne!(base, l2_key(b"bc", V, "sm_80", &opts(3), "fp"));
+        assert_ne!(base, l2_key(b"bc", V, "sm_90", &opts(0), "fp"));
+        assert_ne!(base, l2_key(b"bc", V, "sm_90", &opts(3), "fp2"));
         let v2 = BytecodeVersion {
             major: 13,
             minor: 3,
             tag: 0,
         };
-        assert_ne!(base, l2_key(b"bc", v2, "sm_90", 3, "fp"));
+        assert_ne!(base, l2_key(b"bc", v2, "sm_90", &opts(3), "fp"));
+
+        // Every stage-2 flag is key material: a debug, lineinfo, or
+        // sanitizer cubin must never share a slot with a release one.
+        let mut flagged = opts(3);
+        flagged.device_debug = true;
+        assert_ne!(base, l2_key(b"bc", V, "sm_90", &flagged, "fp"));
+        let mut flagged = opts(3);
+        flagged.lineinfo = true;
+        assert_ne!(base, l2_key(b"bc", V, "sm_90", &flagged, "fp"));
+        let mut flagged = opts(3);
+        flagged.sanitize_memcheck = true;
+        assert_ne!(base, l2_key(b"bc", V, "sm_90", &flagged, "fp"));
     }
 
     #[test]
     fn key_length_prefix_blocks_field_boundary_shifts() {
         // Same concatenated bytes, different field split.
-        let a = l2_key(b"bc", V, "sm_9", 3, "0fp");
-        let b = l2_key(b"bc", V, "sm_90", 3, "fp");
+        let a = l2_key(b"bc", V, "sm_9", &opts(3), "0fp");
+        let b = l2_key(b"bc", V, "sm_90", &opts(3), "fp");
         assert_ne!(a, b);
 
-        let c = l2_key(b"bcX", V, "sm_90", 3, "fp");
-        let d = l2_key(b"bc", V, "Xsm_90", 3, "fp");
+        let c = l2_key(b"bcX", V, "sm_90", &opts(3), "fp");
+        let d = l2_key(b"bc", V, "Xsm_90", &opts(3), "fp");
         assert_ne!(c, d);
     }
 
@@ -1039,6 +1084,25 @@ mod tests {
         let encoded = encode_entry(&p_write, b"cubin").unwrap();
         let p_read = params(b"bytecode B");
         assert_eq!(decode_entry(&encoded, &p_read), None);
+    }
+
+    #[test]
+    fn entry_rejects_flag_mismatches_and_accepts_legacy_zero() {
+        let bc = b"bc";
+        // A release entry written before the flags field existed carries 0
+        // in the (then-padding) byte; a release request must still accept it.
+        let release = params(bc);
+        let encoded = encode_entry(&release, b"cubin").unwrap();
+        assert!(decode_entry(&encoded, &release).is_some());
+
+        // A debug request must not be served the release cubin, and vice
+        // versa, even under an (impossible) key collision.
+        let mut debug = params(bc);
+        debug.flags = 1;
+        assert_eq!(decode_entry(&encoded, &debug), None);
+        let debug_encoded = encode_entry(&debug, b"debug cubin").unwrap();
+        assert_eq!(decode_entry(&debug_encoded, &release), None);
+        assert!(decode_entry(&debug_encoded, &debug).is_some());
     }
 
     #[test]
@@ -1095,8 +1159,25 @@ mod tests {
             bc_sha256: [0; 32],
             gpu_name: "sm_90",
             opt_level: 3,
+            flags: 0,
             tileiras_fp: &"x".repeat(usize::from(u16::MAX) + 1),
         };
         assert_eq!(encode_entry(&p, b"cubin"), None);
+    }
+    #[test]
+    fn l2_key_preimage_is_pinned_to_the_schema() {
+        // This digest is the point: it pins the key PREIMAGE, not just its
+        // properties. If this assertion fails, you changed the l2 key
+        // encoding (field set, field order, or field encoding). That is
+        // allowed — but you MUST bump L2_KEY_SCHEMA, update this digest,
+        // and extend the schema history in its doc comment. Persisted keys
+        // (cutile::tune records) rely on the schema to tell an encoding
+        // migration apart from a stale winner; changing the preimage
+        // without the bump silently re-creates the #236/#241 bug.
+        assert_eq!(
+            l2_key(b"bc", V, "sm_90", &opts(3), "fp"),
+            "45274c4d279d97c5e383d8a8b035225d5ec81c91bd9f27c3027f5f5593473533",
+            "l2 key preimage changed: bump L2_KEY_SCHEMA (see comment above)"
+        );
     }
 }
