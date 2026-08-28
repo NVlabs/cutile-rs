@@ -67,3 +67,6 @@ mod atomic_red_view;
 
 #[path = "gpu/borrow_raw_parts.rs"]
 mod borrow_raw_parts;
+
+#[path = "gpu/device_debug.rs"]
+mod device_debug;

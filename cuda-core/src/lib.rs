@@ -13,6 +13,7 @@ mod dtype;
 mod error;
 mod runtime;
 pub mod simt;
+pub mod vmm;
 
 pub use api::*;
 pub use cuda_bindings as sys;
@@ -21,10 +22,11 @@ pub use error::*;
 pub use runtime::*;
 
 // The cuda-oxide surface, re-exported at the root where its consumers
-// expect it. `simt::LaunchConfig` is deliberately absent: it collides with
-// this crate's own `LaunchConfig` and stays reachable only through `simt::`.
+// expect it. `simt::LaunchConfig` and `simt::vmm` are deliberately absent:
+// they collide with this crate's own `LaunchConfig` and with the reviewed
+// `vmm` module above (both forks of the same cuda-oxide ancestor), and stay
+// reachable only through `simt::`.
 pub use simt::embedded;
-pub use simt::vmm;
 pub use simt::{
     launch_kernel_cooperative, launch_kernel_cooperative_on_stream, launch_kernel_ex,
     launch_kernel_ex_cooperative, launch_kernel_ex_cooperative_on_stream,

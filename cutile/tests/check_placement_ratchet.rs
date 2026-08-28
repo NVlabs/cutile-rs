@@ -262,3 +262,89 @@ fn ratchet_mapped_gemm() {
         });
     });
 }
+
+// ── --device-debug placement ────────────────────────────────────────────────
+//
+// Under CompileOptions::device_debug, in-kernel code motion is off: a check
+// that would hoist to a loop preheader stays at its access site, so the
+// rangeless -O0 -G DWARF intervals stay honest. Discharge and launch
+// relocation are unaffected — both remove the check from device code
+// entirely, and the bounded family's launch checks are load-bearing.
+
+fn debug_counts(
+    name: &str,
+    generics: &[&str],
+    strides: &[(&str, &[i32])],
+    grid: Option<(u32, u32, u32)>,
+) -> (u32, u32, u32, usize) {
+    let generics: Vec<String> = generics.iter().map(|s| s.to_string()).collect();
+    let strides: Vec<(&str, &[i32])> = strides.to_vec();
+    let mut compiler = cutile_compiler::compile_api::KernelCompiler::new(
+        __module_ast_self,
+        "ratchet_module",
+        name,
+    )
+    .target("sm_120")
+    .generics(generics)
+    .strides(&strides)
+    .options(CompileOptions::new().device_debug(true));
+    if let Some(grid) = grid {
+        compiler = compiler.grid(grid);
+    }
+    let artifacts = compiler
+        .compile()
+        .unwrap_or_else(|e| panic!("compile {name} under device_debug: {e}"));
+    let c = artifacts.check_counts();
+    (
+        c.discharged,
+        c.hoisted,
+        c.in_place,
+        artifacts.launch_checks().len(),
+    )
+}
+
+#[test]
+fn device_debug_keeps_hoistable_checks_at_the_access_site() {
+    common::with_test_stack(|| {
+        // Release pins this kernel at (0, 1, 0, 0): one preheader hoist.
+        // Debug must trade exactly that hoist for an in-place check.
+        assert_eq!(
+            debug_counts(
+                "plain_dynamic_loop",
+                &["64"],
+                &[("z", &[1]), ("x", &[1])],
+                None
+            ),
+            (0, 0, 1, 0),
+        );
+    });
+}
+
+#[test]
+fn device_debug_keeps_discharge_and_launch_relocation() {
+    common::with_test_stack(|| {
+        // Release pins (2, 0, 0, 2): all proof- and launch-based, no
+        // in-kernel motion to give up. Debug must not disturb any of it —
+        // in particular the bounded family's launch checks, without which
+        // this kernel would not compile at all.
+        assert_eq!(
+            debug_counts(
+                "branded_dynamic",
+                &["64", "64"],
+                &[("z", &[64, 1]), ("x", &[64, 1])],
+                None,
+            ),
+            (2, 0, 0, 2),
+        );
+        // Release pins (2, 2, 0, 0); the two hoists fall back in place.
+        assert_eq!(
+            debug_counts(
+                "mapped_gemm",
+                &["32", "32", "32", "4", "4"],
+                &[("z", &[256, 1]), ("x", &[256, 1]), ("y", &[256, 1])],
+                Some((16, 1, 1)),
+            ),
+            (2, 0, 2, 0),
+        );
+    });
+}
