@@ -45,6 +45,15 @@ impl KernelNaming {
             .map(|s| s.to_string())
     }
 
+    /// If `name` is a generated `_entry` symbol (see
+    /// [`entry_name`](Self::entry_name)), returns the user-visible kernel
+    /// name. Debug info uses this as the subprogram name so debuggers and
+    /// profilers show the name the user wrote, with the symbol kept as the
+    /// linkage name.
+    pub fn public_name_from_entry_name(name: &str) -> Option<String> {
+        name.strip_suffix("_entry").map(|s| s.to_string())
+    }
+
     /// Returns the user-visible kernel name.
     ///
     /// This is the name callers pass to `CUDATileFunctionCompiler::new(...)`

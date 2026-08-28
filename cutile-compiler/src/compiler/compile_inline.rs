@@ -121,6 +121,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // Compile caller arguments.
             let call_arg_values =
                 self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
+            // Arguments above belong to the caller's frame; everything from
+            // here on compiles the callee's body inline. Same-module
+            // callees keep their real spans and get full debug frames
+            // (callee subprogram + "inlined at" chain); cross-module
+            // callees have their spans rewritten to the call site below
+            // (CallSiteSpanSetter), so their ops are attributed to the call
+            // site itself.
+            let _call_site = if same_module_identity(module_name, &self.module_name) {
+                self.push_call_site(
+                    &call_expr.span(),
+                    &fn_item.sig.ident.to_string(),
+                    &fn_item.sig.ident.span(),
+                    module_name,
+                )
+            } else {
+                self.push_opaque_call_site(&call_expr.span())
+            };
             // Map function generic params to caller generic args.
             let mut generic_arg_inference = GenericArgInference::new_function(fn_item.sig.clone());
             let call_arg_rust_tys = call_arg_values
@@ -338,6 +355,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let (module_name, impl_item, impl_method) = impl_item_fn.unwrap();
                     (module_name, impl_item, impl_method, None)
                 };
+            // Arguments (above) belong to the caller's frame. Method bodies
+            // always have their spans rewritten to the call site
+            // (CallSiteSpanSetter below), so their ops are attributed to
+            // this call expression — the way the reference frontend
+            // attributes its builtins.
+            let _call_site = self.push_opaque_call_site(&method_call_expr.span());
             // println!("Expr::MethodCall: {:#?}, generic_vars: {generic_vars:#?}", impl_item_fn.to_token_stream().to_string());
 
             // Remap function parameters.

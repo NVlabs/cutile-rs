@@ -9,6 +9,7 @@
 //! consumed by `tileiras`. Format reference: `BytecodeWriter.cpp` in the
 //! `cuda-tile` submodule.
 
+mod debug_info;
 pub mod decoder;
 pub mod encoding;
 mod enums;

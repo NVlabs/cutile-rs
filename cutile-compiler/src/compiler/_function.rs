@@ -80,10 +80,48 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) validator: Validator,
     pub(crate) module_name_stack: Vec<String>,
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
+    /// Inline expansions currently in progress, innermost last. While
+    /// non-empty, [`Self::ir_location`] scopes each op to the callee's own
+    /// subprogram and wraps it in `Location::CallSite`, chaining "inlined
+    /// at" info the bytecode debug section turns into inline debug frames.
+    /// Interior mutability because inlining runs under `&self`.
+    pub(crate) call_site_stack: RefCell<Vec<CallFrame>>,
     /// Per-compile partition-access check accounting: statically discharged /
     /// hoisted to a loop preheader / emitted in the access's own block.
     /// Reported on the `CUTILE_JIT_TIMING` line for coverage measurement.
     pub check_stats: CheckHoistStats,
+}
+
+/// One in-progress inline expansion.
+pub(crate) enum CallFrame {
+    /// Same-module inlining: the callee body keeps its REAL spans, so ops
+    /// get the callee's own subprogram scope plus an "inlined at" chain —
+    /// full debug frames, like the reference frontend gives user-authored
+    /// helpers.
+    Transparent {
+        /// Where the call happened, in the caller's frame (itself chained
+        /// when the caller was inlined too).
+        caller: cutile_ir::ir::Location,
+        callee_scope: Option<cutile_ir::ir::DISubprogram>,
+        /// Span base of the module that owns the callee.
+        span_base: SpanBase,
+    },
+    /// Cross-module function and ALL method inlining: `CallSiteSpanSetter`
+    /// rewrites the body's spans to the call-site span before compilation,
+    /// so the callee's real lines no longer exist — the only truthful
+    /// location is the call site itself. Ops are attributed to the caller's
+    /// location, the way the reference frontend attributes its builtins.
+    Opaque { caller: cutile_ir::ir::Location },
+}
+
+/// Pops the innermost call-site location on drop (see
+/// [`CUDATileFunctionCompiler::push_call_site`]).
+pub(crate) struct CallSiteGuard<'a>(&'a RefCell<Vec<CallFrame>>);
+
+impl Drop for CallSiteGuard<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().pop();
+    }
 }
 
 /// Counters for where partition-access bounds checks ended up.
@@ -592,6 +630,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             stride_args,
             module_name_stack: vec![module_name.to_string()],
             typeck_results: RefCell::new(None),
+            call_site_stack: RefCell::new(Vec::new()),
             check_stats: CheckHoistStats::default(),
         })
     }
@@ -633,17 +672,126 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     }
 
     /// Convert a proc_macro2 span into a tile-ir Location for IR operations.
+    ///
+    /// Inside an inline expansion (see [`Self::push_call_site`]) the
+    /// location is wrapped in `Location::CallSite`, recording where the
+    /// containing function was inlined; nesting chains naturally because
+    /// each pushed caller location was itself resolved under the outer
+    /// stack.
     pub(crate) fn ir_location(&self, span: &proc_macro2::Span) -> cutile_ir::ir::Location {
-        let loc = self.resolve_span(span);
-        if loc.is_known() {
-            cutile_ir::ir::Location::FileLineCol {
+        let stack = self.call_site_stack.borrow();
+        let (caller, callee_scope, span_base) = match stack.last() {
+            None => {
+                let loc = self.resolve_span(span);
+                return if loc.is_known() {
+                    cutile_ir::ir::Location::FileLineCol {
+                        filename: loc.file,
+                        line: loc.line as u32,
+                        column: loc.column as u32,
+                    }
+                } else {
+                    cutile_ir::ir::Location::Unknown
+                };
+            }
+            // The body's spans were rewritten to the call site
+            // (CallSiteSpanSetter); the caller location — already resolved
+            // and chained — is the truth.
+            Some(CallFrame::Opaque { caller }) => return caller.clone(),
+            Some(CallFrame::Transparent {
+                caller,
+                callee_scope,
+                span_base,
+            }) => (caller, callee_scope, span_base),
+        };
+        // Transparent frame: real callee spans, resolved against the
+        // callee's own module base; scope the op to the CALLEE's subprogram
+        // (so inline debug frames name the inlined function, not the kernel
+        // entry) and chain where it was inlined.
+        let loc = span_base.resolve_span(span);
+        if !loc.is_known() {
+            return cutile_ir::ir::Location::Unknown;
+        }
+        let callee = match callee_scope {
+            Some(sp) => cutile_ir::ir::Location::DebugInfo(cutile_ir::ir::DebugInfoLoc {
                 filename: loc.file,
                 line: loc.line as u32,
                 column: loc.column as u32,
-            }
-        } else {
-            cutile_ir::ir::Location::Unknown
+                scope: cutile_ir::ir::DebugScope::Subprogram(sp.clone()),
+            }),
+            None => cutile_ir::ir::Location::FileLineCol {
+                filename: loc.file,
+                line: loc.line as u32,
+                column: loc.column as u32,
+            },
+        };
+        cutile_ir::ir::Location::CallSite {
+            callee: Box::new(callee),
+            caller: Box::new(caller.clone()),
         }
+    }
+
+    /// Pushes an opaque inline expansion (rewritten spans — cross-module
+    /// functions and all methods): every op inside is attributed to the
+    /// call site, in the caller's frame.
+    pub(crate) fn push_opaque_call_site(&self, call_span: &proc_macro2::Span) -> CallSiteGuard<'_> {
+        let caller = self.ir_location(call_span);
+        self.call_site_stack
+            .borrow_mut()
+            .push(CallFrame::Opaque { caller });
+        CallSiteGuard(&self.call_site_stack)
+    }
+
+    /// Pushes an inline expansion; popped when the returned guard drops, so
+    /// error paths unwind the stack correctly. `callee_name` and
+    /// `callee_def_span` identify the function being inlined; its
+    /// subprogram gets a synthetic linkage name (`name@file:line:col`,
+    /// following the reference frontend) since inlined-away functions have
+    /// no symbol.
+    pub(crate) fn push_call_site(
+        &self,
+        call_span: &proc_macro2::Span,
+        callee_name: &str,
+        callee_def_span: &proc_macro2::Span,
+        callee_module: &str,
+    ) -> CallSiteGuard<'_> {
+        // The call expression is caller-frame code: resolved under the
+        // CURRENT stack (outer frame's base, or the entry module's).
+        let caller = self.ir_location(call_span);
+        let span_base = self
+            .modules
+            .get_span_base(callee_module)
+            .cloned()
+            .unwrap_or_default();
+        let def = span_base.resolve_span(callee_def_span);
+        let callee_scope = if def.is_known() {
+            let (dir, base) = match def.file.rfind('/') {
+                Some(i) => (&def.file[..i], &def.file[i + 1..]),
+                None => ("", def.file.as_str()),
+            };
+            let file = cutile_ir::ir::DIFile {
+                name: base.to_string(),
+                directory: dir.to_string(),
+            };
+            let stem = base.split('.').next().unwrap_or("anonymous");
+            Some(cutile_ir::ir::DISubprogram {
+                file: file.clone(),
+                line: def.line as u32,
+                name: callee_name.to_string(),
+                linkage_name: format!("{callee_name}@{stem}:{}:{}", def.line, def.column),
+                compile_unit: cutile_ir::ir::DICompileUnit { file },
+                scope_line: def.line as u32,
+            })
+        } else {
+            None
+        };
+        self.call_site_stack
+            .borrow_mut()
+            .push(CallFrame::Transparent {
+                caller,
+                callee_scope,
+                span_base,
+            });
+        CallSiteGuard(&self.call_site_stack)
     }
 
     pub(crate) fn jit_error(&self, span: &proc_macro2::Span, error_message: &str) -> JITError {
@@ -935,8 +1083,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         let entry_location = self.ir_location(&fn_item.sig.ident.span());
+        // Debug info shows the name the user wrote; the `_entry` symbol
+        // stays as the linkage name (the bytecode writer pairs the two).
+        let di_name =
+            KernelNaming::public_name_from_entry_name(&fn_name).unwrap_or_else(|| fn_name.clone());
         let mut entry_builder = OpBuilder::new(Opcode::Entry, entry_location)
             .attr("sym_name", Attribute::String(fn_name))
+            .attr("di_name", Attribute::String(di_name))
             .attr("function_type", Attribute::Type(func_type))
             .region(region_id);
 
