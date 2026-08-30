@@ -33,6 +33,7 @@
 use crate::bench::{do_bench, BenchOptions, Measurement};
 use crate::error::Error;
 use cuda_core::Stream;
+use cutile_compiler::jit_cache::L2_KEY_SCHEMA;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -801,6 +802,57 @@ pub struct Record {
     pub entries: Vec<RecordEntry>,
 }
 
+/// A stored L2 cache key and the key encoding that produced it.
+///
+/// The two travel as one value on purpose. A digest is comparable only
+/// against another digest from the same encoding: cutile can change the key
+/// preimage without touching the kernel or the toolchain, and a bare digest
+/// cannot tell that migration apart from a stale winner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum L2Key {
+    Tagged {
+        /// [`L2_KEY_SCHEMA`] at the time the digest was computed.
+        schema: u32,
+        digest: String,
+    },
+    /// A key written before the encoding was recorded. It cannot claim an
+    /// encoding, so it is never comparable.
+    Untagged(String),
+}
+
+impl L2Key {
+    /// Tags `digest` with the encoding this build computes keys under.
+    pub fn current(digest: String) -> Self {
+        Self::Tagged {
+            schema: L2_KEY_SCHEMA,
+            digest,
+        }
+    }
+
+    /// The digest itself, discarding comparability. For display and tooling;
+    /// [`comparable`](Self::comparable) is what a staleness check wants.
+    pub fn digest(&self) -> &str {
+        match self {
+            Self::Tagged { digest, .. } | Self::Untagged(digest) => digest,
+        }
+    }
+
+    /// The digest when this build would derive keys the same way, or why a
+    /// comparison would be meaningless.
+    pub fn comparable(&self) -> Result<&str, String> {
+        match self {
+            Self::Tagged { schema, digest } if *schema == L2_KEY_SCHEMA => Ok(digest),
+            Self::Tagged { schema, .. } => Err(format!(
+                "was computed under l2 key encoding {schema}, workspace uses {L2_KEY_SCHEMA}"
+            )),
+            Self::Untagged(_) => Err(format!(
+                "predates l2 key encoding tags, workspace uses {L2_KEY_SCHEMA}"
+            )),
+        }
+    }
+}
+
 /// One bucket's winner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordEntry {
@@ -814,7 +866,7 @@ pub struct RecordEntry {
     pub samples: usize,
     /// The winner's persistent-cache (L2) key at tune time, when the caller
     /// recorded one. Enables the strong staleness check at load.
-    pub l2_key: Option<String>,
+    pub l2_key: Option<L2Key>,
 }
 
 /// The provenance the loader checks a record against.
@@ -893,11 +945,12 @@ impl Record {
     /// `l2_key` that differs from the recomputed one (the strong,
     /// dependency-inclusive check).
     ///
-    /// WARNS (returned, never silent) on: toolchain-fingerprint drift (the
-    /// stored l2 keys embed the old fingerprint, so recomputation cannot
-    /// match and is skipped — configs remain valid, timings may not); gate
-    /// tag drift; entries without a stored key; and entries whose key the
-    /// verifier declined to recompute (`Ok(None)`).
+    /// WARNS (returned, never silent) on: toolchain-fingerprint drift and
+    /// stored keys from another l2 key encoding (both make a recomputed key
+    /// incomparable, so the check is skipped rather than read as staleness —
+    /// configs remain valid, timings may not); gate tag drift; entries
+    /// without a stored key; and entries whose key the verifier declined to
+    /// recompute (`Ok(None)`).
     ///
     /// `verify_l2` receives each keyed entry and returns the key the CURRENT
     /// workspace derives for its config — typically
@@ -970,29 +1023,34 @@ impl Record {
                     .to_string(),
             );
         }
-        let fingerprint_matches = record.tileiras_fingerprint == ws.tileiras_fingerprint;
-        if !fingerprint_matches {
-            // The stored keys embed the old fingerprint: recomputing under
-            // the new toolchain CANNOT match, so the strong check is skipped
-            // rather than misread as staleness. Ordering matters here.
+        // The stored keys embed the record's fingerprint: under toolchain
+        // drift recomputation CANNOT match, so the strong check is skipped
+        // record-wide rather than misread as staleness. Ordering matters here.
+        if record.tileiras_fingerprint != ws.tileiras_fingerprint {
             warnings.push(format!(
                 "tuning record was produced by a different tileiras ({} vs {}); configs remain valid but timings may have shifted and per-entry key verification was skipped — consider re-tuning",
                 record.tileiras_fingerprint, ws.tileiras_fingerprint,
             ));
         } else {
             for entry in &record.entries {
-                match &entry.l2_key {
+                // Three outcomes, not two: a key can match, contradict, or
+                // never have been comparable in the first place.
+                match entry.l2_key.as_ref().map(L2Key::comparable) {
                     None => warnings.push(format!(
                         "bucket {:?} carries no l2 key; only source-level staleness checks applied",
                         entry.bucket
                     )),
-                    Some(stored) => match verify_l2(entry)? {
+                    Some(Err(why)) => warnings.push(format!(
+                        "bucket {:?}: stored l2 key {why}; the key check was skipped — configs remain valid, consider re-tuning",
+                        entry.bucket
+                    )),
+                    Some(Ok(stored)) => match verify_l2(entry)? {
                         None => warnings.push(format!(
                             "bucket {:?}: verifier declined to recompute the l2 key; stored key not checked",
                             entry.bucket
                         )),
                         Some(current) => {
-                            if &current != stored {
+                            if current != stored {
                                 return refuse(
                                     &format!("l2 key for bucket {:?}", entry.bucket),
                                     stored,
@@ -1171,12 +1229,14 @@ mod tests {
             config: cfg(64, 8),
             median_ms: 1.25,
             samples: 12,
-            l2_key: Some("f".repeat(64)),
+            l2_key: Some(L2Key::current("f".repeat(64))),
         });
         a.save(&path).unwrap();
 
-        let (loaded, warnings) =
-            Record::load_verified(&path, &ws(), |e| Ok(e.l2_key.clone())).unwrap();
+        let (loaded, warnings) = Record::load_verified(&path, &ws(), |e| {
+            Ok(e.l2_key.as_ref().map(|k| k.digest().to_string()))
+        })
+        .unwrap();
         assert!(warnings.is_empty());
         let entry = loaded.get("tg<=512").unwrap();
         assert_eq!(entry.config.int("BN"), Some(64));
@@ -1248,7 +1308,7 @@ mod tests {
             config: cfg(64, 8),
             median_ms: 1.0,
             samples: 5,
-            l2_key: Some("a".repeat(64)),
+            l2_key: Some(L2Key::current("a".repeat(64))),
         });
         a.save(&path).unwrap();
 
@@ -1263,6 +1323,84 @@ mod tests {
         let (_, warnings) = Record::load_verified(&path, &drifted, |_| Ok(None)).unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("different tileiras"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn key_encoding_drift_skips_l2_verification_instead_of_refusing() {
+        // A cutile upgrade can change the l2 key preimage without touching
+        // the kernel or the toolchain. Such a key is not stale, it is
+        // incomparable, and the strong check steps aside instead of refusing.
+        let path = record_path("keyencoding");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
+            bucket: "older".into(),
+            config: cfg(64, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some(L2Key::Tagged {
+                schema: L2_KEY_SCHEMA - 1,
+                digest: "a".repeat(64),
+            }),
+        });
+        // A key written before encodings were tagged: same treatment.
+        a.insert(RecordEntry {
+            bucket: "untagged".into(),
+            config: cfg(128, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some(L2Key::Untagged("b".repeat(64))),
+        });
+        a.save(&path).unwrap();
+        // Wire compatibility: an untagged key is a bare string on disk, so a
+        // record written before this field existed still parses.
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains(&format!("\"l2_key\": \"{}\"", "b".repeat(64))));
+
+        let mut called = false;
+        let (_, warnings) = Record::load_verified(&path, &ws(), |_| {
+            called = true;
+            Ok(Some("c".repeat(64))) // would refuse if it were consulted
+        })
+        .unwrap();
+        assert!(!called, "verifier must not run on an incomparable key");
+        assert!(warnings[0].contains("l2 key encoding"));
+        assert!(warnings[1].contains("predates l2 key encoding tags"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn per_entry_encoding_keeps_mixed_records_honest() {
+        // Entries are inserted independently, so one record can hold keys
+        // from two encodings — re-tuning a single bucket does exactly that.
+        // Tagging the record as a whole would mis-sentence one of them; the
+        // tag rides with each key, so each is judged on its own.
+        let path = record_path("mixed");
+        let mut a = Record::new(&ws());
+        a.insert(RecordEntry {
+            bucket: "retuned".into(),
+            config: cfg(64, 8),
+            median_ms: 1.0,
+            samples: 5,
+            l2_key: Some(L2Key::current("a".repeat(64))),
+        });
+        a.insert(RecordEntry {
+            bucket: "carried over".into(),
+            config: cfg(128, 8),
+            median_ms: 2.0,
+            samples: 5,
+            l2_key: Some(L2Key::Untagged("b".repeat(64))),
+        });
+        a.save(&path).unwrap();
+
+        let mut checked = Vec::new();
+        let err = Record::load_verified(&path, &ws(), |e| {
+            checked.push(e.bucket.clone());
+            Ok(Some("z".repeat(64)))
+        })
+        .unwrap_err();
+        assert_eq!(checked, ["retuned"], "only the comparable key is verified");
+        assert!(err.to_string().contains("l2 key for bucket \"retuned\""));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1332,7 +1470,7 @@ mod tests {
             config: cfg(64, 8),
             median_ms: 1.0,
             samples: 5,
-            l2_key: Some("a".repeat(64)),
+            l2_key: Some(L2Key::current("a".repeat(64))),
         });
         a.save(&path).unwrap();
         let mut drifted = ws();
