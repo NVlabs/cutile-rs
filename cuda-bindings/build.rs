@@ -30,7 +30,12 @@ struct ApiSpec {
     library_name: &'static str,
     api_type: &'static str,
     loader_fn: &'static str,
-    fallback_expr: &'static str,
+    /// Returned when the library itself could not be loaded.
+    not_loaded_expr: &'static str,
+    /// Returned when the library loaded but this symbol is absent
+    /// (older driver). Matches cuGetProcAddress's own convention of
+    /// reporting absent symbols distinctly.
+    missing_symbol_expr: &'static str,
     function_pattern: &'static str,
 }
 
@@ -43,7 +48,8 @@ const API_SPECS: &[ApiSpec] = &[
         library_name: "CudaDriverApi",
         api_type: "CudaDriverApi",
         loader_fn: "cuda_driver",
-        fallback_expr: "cudaError_enum_CUDA_ERROR_SHARED_OBJECT_INIT_FAILED",
+        not_loaded_expr: "cudaError_enum_CUDA_ERROR_NOT_INITIALIZED",
+        missing_symbol_expr: "cudaError_enum_CUDA_ERROR_NOT_FOUND",
         function_pattern: "^cu.*",
     },
     ApiSpec {
@@ -54,7 +60,9 @@ const API_SPECS: &[ApiSpec] = &[
         library_name: "CurandApi",
         api_type: "CurandApi",
         loader_fn: "curand_api",
-        fallback_expr: "curandStatus_CURAND_STATUS_NOT_INITIALIZED",
+        // curand has no NOT_FOUND analogue; NOT_INITIALIZED covers both.
+        not_loaded_expr: "curandStatus_CURAND_STATUS_NOT_INITIALIZED",
+        missing_symbol_expr: "curandStatus_CURAND_STATUS_NOT_INITIALIZED",
         function_pattern: "^curand.*",
     },
 ];
@@ -322,8 +330,14 @@ fn generate_shims_from_generated_api(
     })?;
 
     let loader_fn = format_ident!("{}", spec.loader_fn);
-    let fallback_expr = syn::parse_str::<Expr>(spec.fallback_expr)?;
-    let shims = generate_field_shims(item_struct, &loader_fn, &fallback_expr);
+    let not_loaded_expr = syn::parse_str::<Expr>(spec.not_loaded_expr)?;
+    let missing_symbol_expr = syn::parse_str::<Expr>(spec.missing_symbol_expr)?;
+    let shims = generate_field_shims(
+        item_struct,
+        &loader_fn,
+        &not_loaded_expr,
+        &missing_symbol_expr,
+    );
     let shim_file = syn::parse2::<File>(quote!(#shims))?;
 
     fs::write(output_path, prettyplease::unparse(&shim_file))?;
@@ -340,7 +354,8 @@ fn find_api_struct<'a>(file: &'a File, api_type: &str) -> Option<&'a ItemStruct>
 fn generate_field_shims(
     item_struct: &ItemStruct,
     loader_fn: &proc_macro2::Ident,
-    fallback_expr: &Expr,
+    not_loaded_expr: &Expr,
+    missing_symbol_expr: &Expr,
 ) -> TokenStream {
     let Fields::Named(fields) = &item_struct.fields else {
         return TokenStream::new();
@@ -370,19 +385,25 @@ fn generate_field_shims(
             ReturnType::Type(_, ty) => quote!(-> #ty),
         };
 
+        // `extern "C"` so a wrapper item coerces to a C function pointer,
+        // matching cuda-oxide's original bindings surface (deliberately not
+        // "C-unwind": that is a different fn-pointer type and breaks the
+        // coercion). Unwinding out of extern "C" aborts, so these bodies
+        // must be panic-free: both failure paths return the API's own
+        // error codes instead.
         Some(quote! {
             #[allow(non_snake_case)]
             #[allow(clippy::missing_safety_doc)]
             #[allow(clippy::too_many_arguments)]
             #[allow(clippy::missing_inline_in_public_items)]
             #[inline]
-            pub unsafe fn #field_name(#(#arg_defs),*) #ret {
+            pub unsafe extern "C" fn #field_name(#(#arg_defs),*) #ret {
                 match #loader_fn() {
                     Ok(api) => match &api.#field_name {
                         Ok(loaded_fn) => unsafe { (*loaded_fn)(#(#arg_names),*) },
-                        Err(_) => #fallback_expr,
+                        Err(_) => #missing_symbol_expr,
                     },
-                    Err(_) => #fallback_expr,
+                    Err(_) => #not_loaded_expr,
                 }
             }
         })
