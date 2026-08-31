@@ -262,6 +262,7 @@ fn process_items(
                         parent_name,
                         function_item,
                         &type_aliases,
+                        tile_rust_crate_root,
                     )?);
                 };
                 concrete_items.push(function(
@@ -736,6 +737,7 @@ pub fn kernel_launcher(
     module_ident: &Ident,
     item: &ItemFn,
     type_aliases: &HashMap<String, ItemType>,
+    tile_rust_crate_root: &Ident,
 ) -> Result<TokenStream2, Error> {
     let module_name = module_ident.to_string();
     let function_name = item.sig.ident.to_string();
@@ -760,6 +762,7 @@ pub fn kernel_launcher(
         function_entry_name.as_str(),
         &launcher_name,
         &launcher_args_name,
+        tile_rust_crate_root,
     )?;
 
     let launcher_ident = Ident::new(launcher_name.as_str(), Span::call_site());
