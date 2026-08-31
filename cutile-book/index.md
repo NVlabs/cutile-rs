@@ -109,4 +109,5 @@ guide/useful-mental-models
 reference/dsl-api
 reference/host-api
 reference/glossary
+reference/about
 ```
