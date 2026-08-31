@@ -620,6 +620,22 @@ pub mod core {
         }
     }
 
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<E: ElementType, const D: [i32; N]> ops::Shl<Tile<E, D>> for Tile<E, D> {
+        type Output = Tile<E, D>;
+        fn shl(self, _rhs: Tile<E, D>) -> Tile<E, D> {
+            unreachable!()
+        }
+    }
+
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<E: ElementType, const D: [i32; N]> ops::Shr<Tile<E, D>> for Tile<E, D> {
+        type Output = Tile<E, D>;
+        fn shr(self, _rhs: Tile<E, D>) -> Tile<E, D> {
+            unreachable!()
+        }
+    }
+
     /// Kernel-side view into GPU global memory. `-1` in `D` marks a dynamic dim.
     #[cuda_tile::ty(name="!cuda_tile.tensor_view",
                     type_params=["{D}xE", "strides"],
@@ -650,13 +666,23 @@ pub mod core {
                 make_partition_view(self, tile, padding::Zero, dim_map, tensor_token);
             p
         }
-        pub unsafe fn partition_mut<'a, const R: [i32; N]>(
+        /// Build a mutable tiled view of this tensor.
+        ///
+        /// Safe: constructing the view is not itself UB — the `&mut self` borrow
+        /// gives exclusive access for the view's lifetime, and *every* store
+        /// through the view is independently gated. The raw unchecked store
+        /// ([`PartitionMut::store`]) is `unsafe`; the proof-carrying stores
+        /// ([`PartitionMut::with_bounds`] → branded/block-id `coord`, and
+        /// [`PartitionMut::store_index`] via a minted `PartitionIndex`) are safe.
+        /// So no *unproven* store is reachable without `unsafe`. Mirrors the
+        /// immutable [`Tensor::partition`], which is likewise safe.
+        pub fn partition_mut<'a, const R: [i32; N]>(
             &'a mut self,
             tile: Shape<R>,
         ) -> PartitionMut<'a, E, R> {
-            // TODO (hme): Bounds checks.
             let tensor_token: Token = get_tensor_token(self);
             let outer_tile: Shape<S> = Shape::<S> { dims: &[] };
+            // TODO (hme): document safety
             let mut p: PartitionMut<E, R> =
                 unsafe { make_nested_partition_view_mut(self, tile, padding::None, tensor_token) };
             set_nested_mutable_partition_access_offset(&mut p, outer_tile);
@@ -704,10 +730,20 @@ pub mod core {
         }
     }
 
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<const D: [i32; N]> StoreIndex for PartitionIndex<D> {}
+
     impl<const D: [i32; 2]> PartitionIndex<D> {
         pub fn components(self) -> (i32, i32) {
             let coords = self.coords();
             (coords[0], coords[1])
+        }
+    }
+
+    impl<const D: [i32; 3]> PartitionIndex<D> {
+        pub fn components(self) -> (i32, i32, i32) {
+            let coords = self.coords();
+            (coords[0], coords[1], coords[2])
         }
     }
 
@@ -719,6 +755,12 @@ pub mod core {
     pub struct Dim {}
 
     impl Dim {
+        #[deprecated(
+            since = "0.3.0",
+            note = "a hand-computed tile count carries no axis provenance. Use \
+                    `num_tiles(&partition, axis)`, which names the axis it counts, \
+                    and iterate it directly as `0..num_tiles(&p, axis)`."
+        )]
         pub fn new(size: i32) -> Dim {
             dim_new(size)
         }
@@ -775,10 +817,45 @@ pub mod core {
         _type: PhantomData<()>,
     }
 
+    /// Proof-carrying 3D coordinate produced from branded dimension indices.
+    #[derive(Copy, Clone)]
+    pub struct Coord3 {
+        _type: PhantomData<()>,
+    }
+
+    /// Tuple of indices convertible into a proof-carrying coordinate.
+    ///
+    /// Each component must either be produced by iterating the `Dim` bound to
+    /// the matching partition axis, or be a constant provably inside the
+    /// axis's statically-known tile grid.
+    pub trait CoordTuple {
+        type Coord;
+    }
+
+    impl CoordTuple for (i32, i32) {
+        type Coord = Coord2;
+    }
+
+    impl CoordTuple for (i32, i32, i32) {
+        type Coord = Coord3;
+    }
+
     #[cuda_tile::compiler_op(name = "coord")]
-    pub fn coord(index: (i32, i32)) -> Coord2 {
+    pub fn coord<C: CoordTuple>(index: C) -> C::Coord {
         unreachable!()
     }
+
+    /// Index forms accepted by [`MappedPartitionMut::store`].
+    ///
+    /// Either the whole minted [`PartitionIndex`] (every axis proven by the
+    /// stream), or a [`coord`]-built composite whose streamed-axis components
+    /// were minted by this partition's `iter_indices()` and whose owned-axis
+    /// (`OWNED` map dim) components carry a `Dim` or constant bounds proof.
+    pub trait StoreIndex {}
+
+    impl StoreIndex for Coord2 {}
+
+    impl StoreIndex for Coord3 {}
 
     /// Iterator marker for mapped partition indices.
     ///
@@ -792,7 +869,8 @@ pub mod core {
         _type: PhantomData<()>,
     }
 
-    impl<const D: [i32; 2], const M: [i32; 2]> Iterator for PartitionIndices<D, M> {
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<const D: [i32; N], const M: [i32; N]> Iterator for PartitionIndices<D, M> {
         type Item = PartitionIndex<D>;
 
         fn next(&mut self) -> Option<Self::Item> {
@@ -814,12 +892,78 @@ pub mod core {
         _type: PhantomData<E>,
     }
 
-    impl<E: ElementType, const D: [i32; 2], const M: [i32; 2]> MappedPartitionMut<E, D, M> {
+    #[cuda_tile::variadic_impl(N = 6)]
+    impl<E: ElementType, const D: [i32; N], const M: [i32; N]> MappedPartitionMut<E, D, M> {
         /// Iterate the private disjoint indices generated by this partition map.
         pub fn iter_indices(&self) -> PartitionIndices<D, M> {
             unreachable!()
         }
 
+        /// Iterate indices accepted by stores into both this partition and `other`.
+        ///
+        /// Multi-output kernels write several tensors at the same logical tile
+        /// index. Both partitions must share the tile and map shapes (enforced
+        /// by the type), and their logical partition grids must match: static
+        /// mismatches are compile errors, dynamic grids are checked at runtime.
+        pub fn iter_indices_with<E2: ElementType>(
+            &self,
+            other: &MappedPartitionMut<E2, D, M>,
+        ) -> PartitionIndices<D, M> {
+            unreachable!()
+        }
+
+        /// Iterate a sub-range of the logical partition grid.
+        ///
+        /// `ranges` gives one `(start_tile, num_tiles)` pair per axis in tile
+        /// units; a **literal** `num_tiles = -1` means "the rest of the axis
+        /// from `start_tile`" — the spelling is resolved at compile time, so
+        /// a runtime value of -1 is a negative length and fails the range
+        /// assert. Only the covered tiles are visited, so a kernel
+        /// updating `seq_len` rows of a `max_seq` cache iterates exactly the
+        /// written tiles instead of the whole grid. Starts and lengths are
+        /// runtime values (a start read from device memory works); each range
+        /// is checked against the grid — statically when provable, otherwise
+        /// with a runtime assert — so minted indices keep the in-bounds store
+        /// proof.
+        pub fn iter_indices_within(&self, ranges: [(i32, i32); N]) -> PartitionIndices<D, M> {
+            unreachable!()
+        }
+
+        /// Sub-range iteration whose indices are also accepted by `other`:
+        /// [`Self::iter_indices_within`] composed with
+        /// [`Self::iter_indices_with`].
+        pub fn iter_indices_within_with<E2: ElementType>(
+            &self,
+            ranges: [(i32, i32); N],
+            other: &MappedPartitionMut<E2, D, M>,
+        ) -> PartitionIndices<D, M> {
+            unreachable!()
+        }
+
+        /// Store `tile` at a proven-disjoint partition index.
+        ///
+        /// Accepts the whole minted [`PartitionIndex`], or — on partitions
+        /// with `OWNED` map axes — a [`coord`]-built composite: streamed-axis
+        /// components must be minted by this partition's `iter_indices()`
+        /// stream; owned-axis components carry a `Dim` or constant bounds
+        /// proof (the stream item owns the whole axis, so bounds suffice).
+        pub fn store<I: StoreIndex>(&mut self, tile: Tile<E, D>, index: I) -> Token {
+            let coords: [i32; N] = validate_partition_store(self, index);
+            unsafe {
+                store_view_tko_mapped_mut(
+                    self,
+                    tile,
+                    coords,
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                )
+            }
+        }
+    }
+
+    impl<E: ElementType, const D: [i32; 2], const M: [i32; 2]> MappedPartitionMut<E, D, M> {
         /// Map a flat persistent tile id into this partition's swizzled index.
         ///
         /// # Safety
@@ -834,22 +978,6 @@ pub mod core {
             num_bid_n: i32,
         ) -> PartitionIndex<D> {
             unsafe { swizzle_partition_index_2d::<D, M>(tile_id, num_bid_m, num_bid_n) }
-        }
-
-        /// Store `tile` at a map-produced disjoint partition index.
-        pub fn store(&mut self, tile: Tile<E, D>, index: PartitionIndex<D>) -> Token {
-            validate_partition_index(self, index);
-            unsafe {
-                store_view_tko_mapped_mut(
-                    self,
-                    tile,
-                    index.coords(),
-                    ordering::Weak,
-                    scope::TileBlock,
-                    None,
-                    tma::Enabled,
-                )
-            }
         }
     }
 
@@ -878,9 +1006,42 @@ pub mod core {
             );
             result
         }
+
+        /// Checked load with a software-pipelining latency hint.
+        ///
+        /// Identical bounds checking to [`Self::load`]; `LATENCY` only feeds
+        /// the Tile IR `optimization_hints.latency` knob and has no safety
+        /// interaction. Use for loads on the critical path of pipelined
+        /// loops, e.g. `part_k.load_pipelined::<4>([i, j])`.
+        ///
+        /// The cost of the bounds check depends on where the compiler can
+        /// place it: see the book's "Bounds-Check Placement" chapter for the
+        /// placement rules and how to inspect them (`CUTILE_JIT_LOG=1`).
+        pub fn load_pipelined<const LATENCY: i32>(&self, index: [i32; N]) -> Tile<E, D> {
+            check_partition_access(self, index);
+            let result: Tile<E, D> = load_view_tko(
+                self,
+                index,
+                ordering::Weak,
+                scope::TileBlock,
+                Some(LATENCY),
+                tma::Enabled,
+            );
+            result
+        }
     }
 
     impl<'a, E: ElementType, const D: [i32; 2]> Partition<'a, E, D> {
+        #[deprecated(
+            since = "0.3.0",
+            note = "iterate `0..num_tiles(&p, axis)` and index with plain arrays; \
+                    the compiler infers the same bounds, and an index walked from \
+                    another tensor's axis is verified against this one at launch \
+                    automatically. Migrate `Dim::new(expr)` loops to `num_tiles` \
+                    rather than just dropping this call: a hand-computed count \
+                    carries no axis provenance, so the access would fall back to \
+                    a runtime check."
+        )]
         pub fn with_bounds<A: IntoDim, B: IntoDim>(
             self,
             bounds: (A, B),
@@ -890,6 +1051,32 @@ pub mod core {
 
         pub fn load_index(&self, index: PartitionIndex<D>) -> Tile<E, D> {
             self.load(index.coords())
+        }
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 3]> Partition<'a, E, D> {
+        #[deprecated(
+            since = "0.3.0",
+            note = "iterate `0..num_tiles(&p, axis)` and index with plain arrays; \
+                    the compiler infers the same bounds, and an index walked from \
+                    another tensor's axis is verified against this one at launch \
+                    automatically. Migrate `Dim::new(expr)` loops to `num_tiles` \
+                    rather than just dropping this call: a hand-computed count \
+                    carries no axis provenance, so the access would fall back to \
+                    a runtime check."
+        )]
+        pub fn with_bounds<A: IntoDim, B: IntoDim, C: IntoDim>(
+            self,
+            bounds: (A, B, C),
+        ) -> BoundedPartition<'a, E, D> {
+            partition_with_bounds3(
+                self,
+                (
+                    bounds.0.into_dim(),
+                    bounds.1.into_dim(),
+                    bounds.2.into_dim(),
+                ),
+            )
         }
     }
 
@@ -910,24 +1097,77 @@ pub mod core {
     impl<'a, E: ElementType, const D: [i32; 2]> BoundedPartition<'a, E, D> {
         pub fn load(&self, index: Coord2) -> Tile<E, D> {
             check_bounded_partition_access(self, index);
-            load_view_tko_bounded(
+            let result: Tile<E, D> = load_view_tko_bounded(
                 self,
                 coord2_as_array(index),
                 ordering::Weak,
                 scope::TileBlock,
                 None,
                 tma::Enabled,
-            )
+            );
+            result
+        }
+
+        /// Checked load with a software-pipelining latency hint.
+        ///
+        /// Identical proof requirements to [`Self::load`]; `LATENCY` only
+        /// feeds the Tile IR `optimization_hints.latency` knob and has no
+        /// safety interaction.
+        pub fn load_pipelined<const LATENCY: i32>(&self, index: Coord2) -> Tile<E, D> {
+            check_bounded_partition_access(self, index);
+            let result: Tile<E, D> = load_view_tko_bounded(
+                self,
+                coord2_as_array(index),
+                ordering::Weak,
+                scope::TileBlock,
+                Some(LATENCY),
+                tma::Enabled,
+            );
+            result
         }
     }
 
-    /// Mutable partition view. Loads/stores are unordered (hence `unsafe`);
-    /// prefer `Tensor::load`/`store` for ordered access.
+    impl<'a, E: ElementType, const D: [i32; 3]> BoundedPartition<'a, E, D> {
+        pub fn load(&self, index: Coord3) -> Tile<E, D> {
+            check_bounded_partition_access3(self, index);
+            let result: Tile<E, D> = load_view_tko_bounded(
+                self,
+                coord3_as_array(index),
+                ordering::Weak,
+                scope::TileBlock,
+                None,
+                tma::Enabled,
+            );
+            result
+        }
+
+        /// Checked load with a software-pipelining latency hint.
+        ///
+        /// Identical proof requirements to [`Self::load`]; `LATENCY` only
+        /// feeds the Tile IR `optimization_hints.latency` knob and has no
+        /// safety interaction.
+        pub fn load_pipelined<const LATENCY: i32>(&self, index: Coord3) -> Tile<E, D> {
+            check_bounded_partition_access3(self, index);
+            let result: Tile<E, D> = load_view_tko_bounded(
+                self,
+                coord3_as_array(index),
+                ordering::Weak,
+                scope::TileBlock,
+                Some(LATENCY),
+                tma::Enabled,
+            );
+            result
+        }
+    }
+
+    /// Mutable partition view. `store` is bounds-checked and safe; `load` is
+    /// unordered and stays `unsafe` (a load may race a store to the same
+    /// region, which bounds checking does not address).
     // TODO (hme): consolidate Partition + PartitionMut into a single type.
     #[cuda_tile::ty(name="!cuda_tile.partition_view",
                     type_params=["tile"],
                     type_params_optional=["padding_value", "tensor_view"],
-                    type_meta=["token"])]
+                    type_meta=["token", "tensor_view.shape()"])]
     #[cuda_tile::variadic_struct(N = 6)]
     pub struct PartitionMut<'a, E: ElementType, const D: [i32; N]> {
         _type: PhantomData<E>,
@@ -953,12 +1193,39 @@ pub mod core {
 
         /// Stores a tile to this mutable partition at the specified index.
         ///
+        /// The index is bounds-checked: the compiler proves it lies inside the
+        /// partition grid, or emits a check that traps if it does not. An
+        /// index the compiler can relate to the axis it indexes — one iterating
+        /// `num_tiles(&p, a)`, or a constant inside a known extent — costs
+        /// nothing at runtime. See the book's "Bounds-Check Placement" chapter
+        /// for the placement rules and how to inspect them (`CUTILE_JIT_LOG=1`).
+        ///
         /// Returns a token representing the completion of the store operation.
+        pub fn store(&mut self, tile: Tile<E, D>, index: [i32; N]) -> Token {
+            check_partition_access_mut(self, index);
+            let token: Token = unsafe {
+                store_view_tko_mut(
+                    self,
+                    tile,
+                    index,
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                )
+            };
+            token
+        }
+
+        /// [`Self::store`] without the bounds check.
         ///
         /// ## Safety
         ///
-        /// This is unsafe because it uses unordered memory operations.
-        pub unsafe fn store(&mut self, tile: Tile<E, D>, index: [i32; N]) -> Token {
+        /// The caller must guarantee `index` is within this partition's grid
+        /// on every axis. An out-of-range index writes memory outside the
+        /// partition. Prefer [`Self::store`], which proves the same property
+        /// and costs nothing when the compiler can discharge it.
+        pub unsafe fn store_unchecked(&mut self, tile: Tile<E, D>, index: [i32; N]) -> Token {
             let token: Token = unsafe {
                 store_view_tko_mut(
                     self,
@@ -976,7 +1243,106 @@ pub mod core {
 
     impl<'a, E: ElementType, const D: [i32; 2]> PartitionMut<'a, E, D> {
         pub fn store_index(&mut self, tile: Tile<E, D>, index: PartitionIndex<D>) -> Token {
-            unsafe { self.store(tile, index.coords()) }
+            self.store(tile, index.coords())
+        }
+    }
+
+    /// Mutable partition whose valid axes have been tied to `Dim` values.
+    ///
+    /// The mutable mirror of [`BoundedPartition`]: safe stores require
+    /// `coord((...))` built from indices produced by those dimensions.
+    #[cuda_tile::ty(name="!cuda_tile.partition_view",
+                    type_params=["tile"],
+                    type_params_optional=["padding_value", "tensor_view", "dim_map"],
+                    type_meta=["token", "tensor_view.shape()"])]
+    #[cuda_tile::variadic_struct(N = 6)]
+    pub struct BoundedPartitionMut<'a, E: ElementType, const D: [i32; N]> {
+        _type: PhantomData<E>,
+        _tensor: PhantomData<&'a mut ()>,
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 2]> PartitionMut<'a, E, D> {
+        /// Tie this mutable partition's axes to `Dim` bounds, mirroring
+        /// [`Partition::with_bounds`]. Stores then require branded coords.
+        #[deprecated(
+            since = "0.3.0",
+            note = "iterate `0..num_tiles(&p, axis)` and index with plain arrays; \
+                    the compiler infers the same bounds, and an index walked from \
+                    another tensor's axis is verified against this one at launch \
+                    automatically. Migrate `Dim::new(expr)` loops to `num_tiles` \
+                    rather than just dropping this call: a hand-computed count \
+                    carries no axis provenance, so the access would fall back to \
+                    a runtime check."
+        )]
+        pub fn with_bounds<A: IntoDim, B: IntoDim>(
+            self,
+            bounds: (A, B),
+        ) -> BoundedPartitionMut<'a, E, D> {
+            partition_with_bounds_mut(self, (bounds.0.into_dim(), bounds.1.into_dim()))
+        }
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 3]> PartitionMut<'a, E, D> {
+        #[deprecated(
+            since = "0.3.0",
+            note = "iterate `0..num_tiles(&p, axis)` and index with plain arrays; \
+                    the compiler infers the same bounds, and an index walked from \
+                    another tensor's axis is verified against this one at launch \
+                    automatically. Migrate `Dim::new(expr)` loops to `num_tiles` \
+                    rather than just dropping this call: a hand-computed count \
+                    carries no axis provenance, so the access would fall back to \
+                    a runtime check."
+        )]
+        pub fn with_bounds<A: IntoDim, B: IntoDim, C: IntoDim>(
+            self,
+            bounds: (A, B, C),
+        ) -> BoundedPartitionMut<'a, E, D> {
+            partition_with_bounds_mut3(
+                self,
+                (
+                    bounds.0.into_dim(),
+                    bounds.1.into_dim(),
+                    bounds.2.into_dim(),
+                ),
+            )
+        }
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 2]> BoundedPartitionMut<'a, E, D> {
+        /// Checked store. Mirrors [`BoundedPartition::load`]: the index must be
+        /// a `coord((...))` branded by this partition's bound `Dim`s.
+        pub fn store(&mut self, tile: Tile<E, D>, index: Coord2) -> Token {
+            check_bounded_partition_access_mut(self, index);
+            let token: Token = unsafe {
+                store_view_tko_bounded(
+                    self,
+                    tile,
+                    coord2_as_array(index),
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                )
+            };
+            token
+        }
+    }
+
+    impl<'a, E: ElementType, const D: [i32; 3]> BoundedPartitionMut<'a, E, D> {
+        pub fn store(&mut self, tile: Tile<E, D>, index: Coord3) -> Token {
+            check_bounded_partition_access_mut3(self, index);
+            let token: Token = unsafe {
+                store_view_tko_bounded(
+                    self,
+                    tile,
+                    coord3_as_array(index),
+                    ordering::Weak,
+                    scope::TileBlock,
+                    None,
+                    tma::Enabled,
+                )
+            };
+            token
         }
     }
 
@@ -1139,6 +1505,18 @@ pub mod core {
         unreachable!()
     }
 
+    /// [`check_partition_access`] for a mutable partition. Same check, same
+    /// compiler handler; a separate declaration only because the view type
+    /// differs.
+    #[cuda_tile::compiler_op(name = "check")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub fn check_partition_access_mut<E: ElementType, const S: [i32; N]>(
+        part: &PartitionMut<E, S>,
+        index: [i32; N],
+    ) {
+        unreachable!()
+    }
+
     #[cuda_tile::compiler_op(name = "dim_new")]
     pub fn dim_new(size: i32) -> Dim {
         unreachable!()
@@ -1159,10 +1537,23 @@ pub mod core {
         unreachable!()
     }
 
+    #[cuda_tile::compiler_op(name = "coord_as_array")]
+    pub fn coord3_as_array(index: Coord3) -> [i32; 3] {
+        unreachable!()
+    }
+
     #[cuda_tile::compiler_op(name = "partition_with_bounds")]
     pub fn partition_with_bounds<'a, E: ElementType, const S: [i32; 2]>(
         part: Partition<'a, E, S>,
         bounds: (Dim, Dim),
+    ) -> BoundedPartition<'a, E, S> {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "partition_with_bounds")]
+    pub fn partition_with_bounds3<'a, E: ElementType, const S: [i32; 3]>(
+        part: Partition<'a, E, S>,
+        bounds: (Dim, Dim, Dim),
     ) -> BoundedPartition<'a, E, S> {
         unreachable!()
     }
@@ -1175,18 +1566,68 @@ pub mod core {
         unreachable!()
     }
 
+    #[cuda_tile::compiler_op(name = "check_bounded_partition_access")]
+    pub fn check_bounded_partition_access3<E: ElementType, const S: [i32; 3]>(
+        part: &BoundedPartition<E, S>,
+        index: Coord3,
+    ) {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "partition_with_bounds")]
+    pub fn partition_with_bounds_mut<'a, E: ElementType, const S: [i32; 2]>(
+        part: PartitionMut<'a, E, S>,
+        bounds: (Dim, Dim),
+    ) -> BoundedPartitionMut<'a, E, S> {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "partition_with_bounds")]
+    pub fn partition_with_bounds_mut3<'a, E: ElementType, const S: [i32; 3]>(
+        part: PartitionMut<'a, E, S>,
+        bounds: (Dim, Dim, Dim),
+    ) -> BoundedPartitionMut<'a, E, S> {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "check_bounded_partition_access")]
+    pub fn check_bounded_partition_access_mut<E: ElementType, const S: [i32; 2]>(
+        part: &BoundedPartitionMut<E, S>,
+        index: Coord2,
+    ) {
+        unreachable!()
+    }
+
+    #[cuda_tile::compiler_op(name = "check_bounded_partition_access")]
+    pub fn check_bounded_partition_access_mut3<E: ElementType, const S: [i32; 3]>(
+        part: &BoundedPartitionMut<E, S>,
+        index: Coord3,
+    ) {
+        unreachable!()
+    }
+
     #[cuda_tile::compiler_op(name = "partition_index_coords")]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn partition_index_coords<const D: [i32; N]>(index: PartitionIndex<D>) -> [i32; N] {
         unreachable!()
     }
 
-    #[cuda_tile::compiler_op(name = "validate_partition_index")]
+    /// Validate a store index against a mapped partition and return its
+    /// coordinates. Whole minted `PartitionIndex` values pass on stream
+    /// provenance; `coord(...)` composites are checked per axis (streamed
+    /// axes need minted components, owned axes need `Dim`/constant bounds
+    /// proofs).
+    #[cuda_tile::compiler_op(name = "validate_partition_store")]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn validate_partition_index<E: ElementType, const D: [i32; N], const M: [i32; N]>(
+    pub fn validate_partition_store<
+        E: ElementType,
+        const D: [i32; N],
+        const M: [i32; N],
+        I: StoreIndex,
+    >(
         view: &MappedPartitionMut<E, D, M>,
-        index: PartitionIndex<D>,
-    ) {
+        index: I,
+    ) -> [i32; N] {
         unreachable!()
     }
 
@@ -1604,7 +2045,7 @@ pub mod core {
 
     /// Element-wise integer divide. `Zero` rounding = truncation;
     /// `PositiveInf` = ceiling div; `NegativeInf` = floor div (signed only).
-    #[cuda_tile::op(name = "cuda_tile.divi", params = ["lhs", "rhs"], static_params = ["rounding={Zero: , NearestEven: rounding=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding=#cuda_tile.rounding<negative_inf>, Approx: rounding=#cuda_tile.rounding<approx>, Full: rounding=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::op(name = "cuda_tile.divi", params = ["lhs", "rhs"], static_params = ["rounding={Zero: rounding=#cuda_tile.rounding<zero>, NearestEven: rounding=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding=#cuda_tile.rounding<negative_inf>, Approx: rounding=#cuda_tile.rounding<approx>, Full: rounding=#cuda_tile.rounding<full>}"], named_attributes = ["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn divi<E: ElementType, const S: [i32; N], R: rounding::Mode>(
         lhs: Tile<E, S>,
@@ -1615,7 +2056,7 @@ pub mod core {
     }
 
     /// Element-wise integer remainder. Result sign matches dividend.
-    #[cuda_tile::op(name = "cuda_tile.remi", params = ["lhs", "rhs"])]
+    #[cuda_tile::op(name = "cuda_tile.remi", params = ["lhs", "rhs"], named_attributes = ["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn remi<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
@@ -2340,15 +2781,16 @@ pub mod core {
 
     /// `load_view_tko` for a proof-bounded read-only partition.
     #[cuda_tile::op(name = "load_view_tko", params = ["view", "index"])]
+    #[cuda_tile::variadic_op(N = 6)]
     pub fn load_view_tko_bounded<
         E: ElementType,
-        const D: [i32; 2],
+        const D: [i32; N],
         O: ordering::LoadMode,
         Sc: scope::Mode,
         T: tma::Mode,
     >(
         view: &BoundedPartition<E, D>,
-        index: [i32; 2],
+        index: [i32; N],
         memory_ordering: O,
         memory_scope: Sc,
         latency: Option<i32>,
@@ -2375,6 +2817,29 @@ pub mod core {
         latency: Option<i32>,
         tma: T,
     ) -> Tile<E, D> {
+        unreachable!()
+    }
+
+    /// Store a tile into a `BoundedPartitionMut` at a branded `index`. The
+    /// mutable mirror of `load_view_tko_bounded`; lowers via the same
+    /// `store_view_tko` op as `store_view_tko_mut`.
+    #[cuda_tile::op(name = "store_view_tko", params = ["view", "tile", "index"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn store_view_tko_bounded<
+        E: ElementType,
+        const D: [i32; N],
+        O: ordering::StoreMode,
+        Sc: scope::Mode,
+        T: tma::Mode,
+    >(
+        view: &mut BoundedPartitionMut<E, D>,
+        tile: Tile<E, D>,
+        index: [i32; N],
+        memory_ordering: O,
+        memory_scope: Sc,
+        latency: Option<i32>,
+        tma: T,
+    ) -> Token {
         unreachable!()
     }
 
@@ -2483,7 +2948,7 @@ pub mod core {
     #[cuda_tile::op(name="cuda_tile.make_partition_view",
                     params=["tensor_view"],
                     output_type_params=["tensor_view", "padding_value"],
-                    output_type_meta=["token"]
+                    output_type_meta=["token", "tensor_view.shape()"]
     )]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn make_partition_view_mut<
@@ -2532,7 +2997,7 @@ pub mod core {
     #[cuda_tile::op(name="cuda_tile.make_partition_view",
                     params=["tensor_view"],
                     output_type_params=["tensor_view", "padding_value"],
-                    output_type_meta=["token"]
+                    output_type_meta=["token", "tensor_view.shape()"]
     )]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn make_nested_partition_view_mut<

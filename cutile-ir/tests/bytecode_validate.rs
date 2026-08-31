@@ -235,6 +235,49 @@ fn for_loop_with_iter_args() {
 }
 
 #[test]
+fn for_loop_with_token_iter_arg() {
+    // Feasibility probe for token-ordering loop-carry: a for-loop that carries a
+    // `!cuda_tile.token` as an iter-arg (seeded by make_token, yielded back). If
+    // this validates through tileiras, a token is a legal loop-carried value —
+    // which is what the mutable-store token threading needs (carry the token, not
+    // the partition_view, which is a restricted iter-arg type).
+    let module = build_kernel("for_token_iter_arg", &[], |m, blk, _args| {
+        let lb = const_i32(m, blk, 0);
+        let ub = const_i32(m, blk, 10);
+        let step = const_i32(m, blk, 1);
+
+        // Seed token.
+        let (tok_op, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
+            .result(token_ty())
+            .build(m);
+        append_op(m, blk, tok_op);
+        let init = tok_res[0];
+
+        // for %iv, %tok = lb to ub step step iter(%init) { continue %tok }
+        // The body threads the carried token straight through (identity), the
+        // minimal shape that puts a token on the loop's block-arg + result.
+        let (body_region, body_blk, body_args) =
+            build_single_block_region(m, &[tile_i32(), token_ty()]); // iv, tok
+
+        let (cont, _) = OpBuilder::new(Opcode::Continue, Location::Unknown)
+            .operand(body_args[1]) // yield the carried token
+            .build(m);
+        append_op(m, body_blk, cont);
+
+        let (for_op, _) = OpBuilder::new(Opcode::For, Location::Unknown)
+            .operand(lb)
+            .operand(ub)
+            .operand(step)
+            .operand(init)
+            .result(token_ty()) // carried token result
+            .region(body_region)
+            .build(m);
+        append_op(m, blk, for_op);
+    });
+    validate_module(&module);
+}
+
+#[test]
 fn nested_for_loops() {
     // Outer for containing an inner for.
     let module = build_kernel("nested_for", &[tile_i32()], |m, blk, args| {
@@ -544,5 +587,553 @@ fn load_store_with_tokens() {
             .build(m);
         append_op(m, blk, store);
     });
+    validate_module(&module);
+}
+
+// ── Debug-location variants: what does tileiras -G accept? ────────────────
+// Bisection scaffolding for the debug section: each variant differs only in
+// the Location structures attached to ops.
+
+fn floc(file: &str, line: u32, col: u32) -> Location {
+    Location::FileLineCol {
+        filename: file.to_string(),
+        line,
+        column: col,
+    }
+}
+
+fn sub(file: &str, line: u32, name: &str, linkage: &str) -> DISubprogram {
+    let f = DIFile {
+        name: file.rsplit('/').next().unwrap().to_string(),
+        directory: "src".to_string(),
+    };
+    DISubprogram {
+        file: f.clone(),
+        line,
+        name: name.to_string(),
+        linkage_name: linkage.to_string(),
+        compile_unit: DICompileUnit { file: f },
+        scope_line: line,
+    }
+}
+
+fn debug_variant(name: &str, op_locs: [Location; 2], entry_loc: Location) -> Module {
+    let mut module = Module::new("test");
+    let func_type = Type::Func(FuncType {
+        inputs: vec![tile_i32(), tile_i32()],
+        results: vec![],
+    });
+    let (region_id, block_id, args) =
+        build_single_block_region(&mut module, &[tile_i32(), tile_i32()]);
+    let [l1, l2] = op_locs;
+    let (add, add_res) = OpBuilder::new(Opcode::AddI, l1)
+        .operand(args[0])
+        .operand(args[1])
+        .attr("overflow", Attribute::Integer(0, i32_ty()))
+        .result(tile_i32())
+        .build(&mut module);
+    append_op(&mut module, block_id, add);
+    let (add2, _) = OpBuilder::new(Opcode::AddI, l2)
+        .operand(add_res[0])
+        .operand(args[1])
+        .attr("overflow", Attribute::Integer(0, i32_ty()))
+        .result(tile_i32())
+        .build(&mut module);
+    append_op(&mut module, block_id, add2);
+    let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
+    append_op(&mut module, block_id, ret);
+    let (entry, _) = OpBuilder::new(Opcode::Entry, entry_loc)
+        .attr("sym_name", Attribute::String(name.into()))
+        .attr("function_type", Attribute::Type(func_type))
+        .region(region_id)
+        .build(&mut module);
+    module.functions.push(entry);
+    module
+}
+
+#[test]
+fn dbg_v1_entry_scoped_lines() {
+    // Pre-S1 shape: bare file:line:col ops scoped to the entry subprogram.
+    let m = debug_variant(
+        "dbg_v1",
+        [floc("src/k.rs", 7, 4), floc("src/k.rs", 8, 4)],
+        floc("src/k.rs", 5, 0),
+    );
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v2_foreign_scope_requires_call_site() {
+    // The toolchain's verifier rule this suite exists to document: an op
+    // scoped to a subprogram other than its function's MUST say where it
+    // was inlined (a call-site chain). Bare foreign scopes are rejected.
+    let helper = sub("src/k.rs", 20, "helper", "helper@k:20:4");
+    let m = debug_variant(
+        "dbg_v2",
+        [
+            Location::DebugInfo(DebugInfoLoc {
+                filename: "src/k.rs".into(),
+                line: 21,
+                column: 8,
+                scope: DebugScope::Subprogram(helper),
+            }),
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    m.verify_dominance().expect("dominance");
+    let bc = cutile_ir::write_bytecode(&m).expect("write");
+    cutile_ir::decode_bytecode(&bc).expect("our decoder accepts it");
+    expect_tileiras_rejects(&bc, "dbg_v2", "debug info scope");
+}
+
+/// Asserts tileiras rejects the bytecode with a message containing
+/// `needle`. Skips silently when tileiras is unavailable (CI without the
+/// toolchain), like `run_tileiras`.
+fn expect_tileiras_rejects(bc: &[u8], name: &str, needle: &str) {
+    let tmp =
+        std::env::temp_dir().join(format!("cutile_ir_reject_{name}_{}.bc", std::process::id()));
+    std::fs::write(&tmp, bc).unwrap();
+    let out = std::process::Command::new(tileiras_binary())
+        .arg("--gpu-name")
+        .arg("sm_120")
+        .arg("-o")
+        .arg(std::env::temp_dir().join(format!("cutile_ir_reject_{name}.cubin")))
+        .arg(&tmp)
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    match out {
+        Ok(out) => {
+            assert!(
+                !out.status.success(),
+                "{name}: tileiras unexpectedly accepted invalid debug info"
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(needle),
+                "{name}: rejection reason changed:\n{stderr}"
+            );
+        }
+        Err(_) => {} // tileiras not installed
+    }
+}
+
+#[test]
+fn dbg_v3_callee_scope_with_callsite() {
+    // The S1 shape: callee-scoped DILoc wrapped in a CallSite.
+    let helper = sub("src/k.rs", 20, "helper", "helper@k:20:4");
+    let m = debug_variant(
+        "dbg_v3",
+        [
+            Location::CallSite {
+                callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+                    filename: "src/k.rs".into(),
+                    line: 21,
+                    column: 8,
+                    scope: DebugScope::Subprogram(helper),
+                })),
+                caller: Box::new(floc("src/k.rs", 7, 4)),
+            },
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v4_callsite_bare_callee() {
+    // Pre-S1 call-site shape: bare FileLineCol callee (entry-scoped).
+    let m = debug_variant(
+        "dbg_v4",
+        [
+            Location::CallSite {
+                callee: Box::new(floc("src/k.rs", 21, 8)),
+                caller: Box::new(floc("src/k.rs", 7, 4)),
+            },
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v5_nested_callsite_chain() {
+    let h1 = sub("src/k.rs", 20, "helper1", "helper1@k:20:4");
+    let h2 = sub("src/k.rs", 30, "helper2", "helper2@k:30:4");
+    let inner = Location::CallSite {
+        callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+            filename: "src/k.rs".into(),
+            line: 31,
+            column: 8,
+            scope: DebugScope::Subprogram(h2),
+        })),
+        caller: Box::new(Location::CallSite {
+            callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+                filename: "src/k.rs".into(),
+                line: 21,
+                column: 8,
+                scope: DebugScope::Subprogram(h1),
+            })),
+            caller: Box::new(floc("src/k.rs", 7, 4)),
+        }),
+    };
+    let m = debug_variant(
+        "dbg_v5",
+        [inner, floc("src/k.rs", 8, 4)],
+        floc("src/k.rs", 5, 0),
+    );
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v6_line_before_decl() {
+    let helper = sub("src/k.rs", 20, "helper", "helper@k:20:4");
+    let m = debug_variant(
+        "dbg_v6",
+        [
+            Location::CallSite {
+                callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+                    filename: "src/k.rs".into(),
+                    line: 10, // before the subprogram's decl line 20
+                    column: 1,
+                    scope: DebugScope::Subprogram(helper),
+                })),
+                caller: Box::new(floc("src/k.rs", 7, 4)),
+            },
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
+        std::fs::write(
+            format!("{dir}/v6.bc"),
+            cutile_ir::write_bytecode(&m).unwrap(),
+        )
+        .unwrap();
+    }
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v7_duplicate_subprogram_name() {
+    // Entry subprogram is named after sym_name ("dbg_v7"); a second
+    // subprogram shares that NAME with a different linkage, like the
+    // generated entry wrapper inlining the user impl of the same kernel.
+    let twin = sub("src/k.rs", 11, "dbg_v7", "dbg_v7@k:11:7");
+    let m = debug_variant(
+        "dbg_v7",
+        [
+            Location::CallSite {
+                callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+                    filename: "src/k.rs".into(),
+                    line: 12,
+                    column: 8,
+                    scope: DebugScope::Subprogram(twin),
+                })),
+                caller: Box::new(floc("src/k.rs", 5, 1)),
+            },
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
+        std::fs::write(
+            format!("{dir}/v7.bc"),
+            cutile_ir::write_bytecode(&m).unwrap(),
+        )
+        .unwrap();
+    }
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v8_cross_file_subprogram() {
+    // The inlined helper lives in a DIFFERENT file: second DIFile + second
+    // DICompileUnit in one function's debug info.
+    let helper = sub("src/other.rs", 20, "helper", "helper@other:20:4");
+    let m = debug_variant(
+        "dbg_v8",
+        [
+            Location::CallSite {
+                callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+                    filename: "src/other.rs".into(),
+                    line: 21,
+                    column: 8,
+                    scope: DebugScope::Subprogram(helper),
+                })),
+                caller: Box::new(floc("src/k.rs", 7, 4)),
+            },
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_dump_variants_for_external_probe() {
+    // Writes each debug-location variant's bytecode to $CUTILE_DBG_DUMP_DIR
+    // for external tool probing (e.g. tileiras --device-debug).
+    let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") else {
+        return;
+    };
+    let h = |n: &str| sub("src/k.rs", 20, n, "h@k:20:4");
+    let di = |line: u32, s: DISubprogram| {
+        Location::DebugInfo(DebugInfoLoc {
+            filename: "src/k.rs".into(),
+            line,
+            column: 8,
+            scope: DebugScope::Subprogram(s),
+        })
+    };
+    let cs = |callee: Location, caller: Location| Location::CallSite {
+        callee: Box::new(callee),
+        caller: Box::new(caller),
+    };
+    let variants: Vec<(&str, [Location; 2])> = vec![
+        ("v1", [floc("src/k.rs", 7, 4), floc("src/k.rs", 8, 4)]),
+        (
+            "v3",
+            [
+                cs(di(21, h("helper")), floc("src/k.rs", 7, 4)),
+                floc("src/k.rs", 8, 4),
+            ],
+        ),
+        (
+            "v5",
+            [
+                cs(
+                    di(31, sub("src/k.rs", 30, "h2", "h2@k:30:4")),
+                    cs(di(21, h("h1")), floc("src/k.rs", 7, 4)),
+                ),
+                floc("src/k.rs", 8, 4),
+            ],
+        ),
+        (
+            "v8",
+            [
+                cs(
+                    Location::DebugInfo(DebugInfoLoc {
+                        filename: "src/other.rs".into(),
+                        line: 21,
+                        column: 8,
+                        scope: DebugScope::Subprogram(sub(
+                            "src/other.rs",
+                            20,
+                            "helper",
+                            "helper@other:20:4",
+                        )),
+                    }),
+                    floc("src/k.rs", 7, 4),
+                ),
+                floc("src/k.rs", 8, 4),
+            ],
+        ),
+    ];
+    for (name, locs) in variants {
+        let m = debug_variant(name, locs, floc("src/k.rs", 5, 0));
+        let bc = cutile_ir::write_bytecode(&m).unwrap();
+        std::fs::write(format!("{dir}/{name}.bc"), bc).unwrap();
+    }
+}
+
+#[test]
+fn dbg_v9_deep_mixed_chain() {
+    // Depth-4 inlined-at chain mixing two files, replicating the real
+    // compiler output shape that fails under --device-debug.
+    let user = sub("src/k.rs", 11, "dbg_v9", "dbg_v9@k:11:7");
+    let store = sub(
+        "src/core.rs",
+        3271,
+        "store_tile_1d",
+        "store_tile_1d@core:3271:7",
+    );
+    let shape = sub("src/core.rs", 706, "shape", "shape@core:706:15");
+    let di = |file: &str, line: u32, s: &DISubprogram| {
+        Location::DebugInfo(DebugInfoLoc {
+            filename: file.into(),
+            line,
+            column: 8,
+            scope: DebugScope::Subprogram(s.clone()),
+        })
+    };
+    let cs = |callee: Location, caller: Location| Location::CallSite {
+        callee: Box::new(callee),
+        caller: Box::new(caller),
+    };
+    // shape() inlined into store_tile_1d, inlined into the user fn,
+    // inlined into the entry.
+    let chain = cs(
+        di("src/core.rs", 260, &shape),
+        cs(
+            di("src/core.rs", 268, &store),
+            cs(di("src/k.rs", 13, &user), floc("src/k.rs", 5, 0)),
+        ),
+    );
+    let m = debug_variant(
+        "dbg_v9",
+        [chain, floc("src/k.rs", 8, 4)],
+        floc("src/k.rs", 5, 0),
+    );
+    let bc = cutile_ir::write_bytecode(&m).unwrap();
+    if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
+        std::fs::write(format!("{dir}/v9.bc"), &bc).unwrap();
+    }
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v11_chain_on_special_ops() {
+    // Deep inlined-at chains attached to ops that dissolve or expand during
+    // lowering (assume, get_tile_block_id). Repro hunt for the -G failure.
+    let user = sub("src/k.rs", 11, "dbg_v11", "dbg_v11@k:11:7");
+    let store = sub(
+        "src/core.rs",
+        3271,
+        "store_tile_1d",
+        "store_tile_1d@core:3271:7",
+    );
+    let di = |file: &str, line: u32, s: &DISubprogram| {
+        Location::DebugInfo(DebugInfoLoc {
+            filename: file.into(),
+            line,
+            column: 8,
+            scope: DebugScope::Subprogram(s.clone()),
+        })
+    };
+    let cs = |callee: Location, caller: Location| Location::CallSite {
+        callee: Box::new(callee),
+        caller: Box::new(caller),
+    };
+    let chain = || {
+        cs(
+            di("src/core.rs", 260, &store),
+            cs(di("src/k.rs", 13, &user), floc("src/k.rs", 5, 0)),
+        )
+    };
+
+    let mut module = Module::new("test");
+    let func_type = Type::Func(FuncType {
+        inputs: vec![tile_i32()],
+        results: vec![],
+    });
+    let (region_id, block_id, args) = build_single_block_region(&mut module, &[tile_i32()]);
+    let (bid, bid_res) = OpBuilder::new(Opcode::GetTileBlockId, chain())
+        .result(tile_i32())
+        .result(tile_i32())
+        .result(tile_i32())
+        .build(&mut module);
+    append_op(&mut module, block_id, bid);
+    let (add, _) = OpBuilder::new(Opcode::AddI, chain())
+        .operand(args[0])
+        .operand(bid_res[0])
+        .attr("overflow", Attribute::Integer(0, i32_ty()))
+        .result(tile_i32())
+        .build(&mut module);
+    append_op(&mut module, block_id, add);
+    let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
+    append_op(&mut module, block_id, ret);
+    let (entry, _) = OpBuilder::new(Opcode::Entry, floc("src/k.rs", 5, 0))
+        .attr("sym_name", Attribute::String("dbg_v11".into()))
+        .attr("function_type", Attribute::Type(func_type))
+        .region(region_id)
+        .build(&mut module);
+    module.functions.push(entry);
+    if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
+        std::fs::write(
+            format!("{dir}/v11.bc"),
+            cutile_ir::write_bytecode(&module).unwrap(),
+        )
+        .unwrap();
+    }
+    validate_module(&module);
+}
+
+#[test]
+fn dbg_v12_caller_equals_function_attr() {
+    // The inlined-at caller location is IDENTICAL to the function's own
+    // record location (same interned attr) — the generated-entry pattern.
+    let helper = sub("src/other.rs", 20, "helper", "helper@other:20:4");
+    let m = debug_variant(
+        "dbg_v12",
+        [
+            Location::CallSite {
+                callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+                    filename: "src/other.rs".into(),
+                    line: 21,
+                    column: 8,
+                    scope: DebugScope::Subprogram(helper),
+                })),
+                caller: Box::new(floc("src/k.rs", 5, 0)), // == entry loc
+            },
+            floc("src/k.rs", 8, 4),
+        ],
+        floc("src/k.rs", 5, 0),
+    );
+    if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
+        std::fs::write(
+            format!("{dir}/v12.bc"),
+            cutile_ir::write_bytecode(&m).unwrap(),
+        )
+        .unwrap();
+    }
+    validate_module(&m);
+}
+
+#[test]
+fn dbg_v13_dissolved_op_with_record_caller() {
+    // get_tile_block_id carrying a call-site whose caller attr equals the
+    // function's own record attr — the exact real-compiler combination.
+    let store = sub(
+        "src/core.rs",
+        3271,
+        "store_tile_1d",
+        "store_tile_1d@core:3271:7",
+    );
+    let chain = Location::CallSite {
+        callee: Box::new(Location::DebugInfo(DebugInfoLoc {
+            filename: "src/core.rs".into(),
+            line: 260,
+            column: 1,
+            scope: DebugScope::Subprogram(store),
+        })),
+        caller: Box::new(floc("src/k.rs", 5, 0)), // == entry loc attr
+    };
+    let mut module = Module::new("test");
+    let func_type = Type::Func(FuncType {
+        inputs: vec![tile_i32()],
+        results: vec![],
+    });
+    let (region_id, block_id, args) = build_single_block_region(&mut module, &[tile_i32()]);
+    let (bid, bid_res) = OpBuilder::new(Opcode::GetTileBlockId, chain)
+        .result(tile_i32())
+        .result(tile_i32())
+        .result(tile_i32())
+        .build(&mut module);
+    append_op(&mut module, block_id, bid);
+    let (add, _) = OpBuilder::new(Opcode::AddI, floc("src/k.rs", 8, 4))
+        .operand(args[0])
+        .operand(bid_res[0])
+        .attr("overflow", Attribute::Integer(0, i32_ty()))
+        .result(tile_i32())
+        .build(&mut module);
+    append_op(&mut module, block_id, add);
+    let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
+    append_op(&mut module, block_id, ret);
+    let (entry, _) = OpBuilder::new(Opcode::Entry, floc("src/k.rs", 5, 0))
+        .attr("sym_name", Attribute::String("dbg_v13".into()))
+        .attr("function_type", Attribute::Type(func_type))
+        .region(region_id)
+        .build(&mut module);
+    module.functions.push(entry);
+    if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
+        std::fs::write(
+            format!("{dir}/v13.bc"),
+            cutile_ir::write_bytecode(&module).unwrap(),
+        )
+        .unwrap();
+    }
     validate_module(&module);
 }
