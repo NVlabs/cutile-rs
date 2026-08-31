@@ -49,16 +49,27 @@ mod my_kernels {
 | Attribute | Type | Description |
 |---|---|---|
 | `print_ir = true` | bool | Print three stages at JIT compile time: (1) the generated entry point wrapper (Rust), (2) the original kernel function, (3) the compiled Tile IR text |
-| `unchecked_accesses` | bool | Disable partition bounds checks. Requires `unsafe fn`. Removes runtime assertions on partition index ranges |
+| `unchecked_accesses` | bool | **Unsafe waiver.** Emit *no* safety checks — no verification in the kernel, at launch, or at compile time. Requires `unsafe fn`. The caller asserts correctness |
+| `deny_in_kernel_checks` | bool | **Safe strict.** Error at compile time if any safety check would remain in the kernel (i.e. cannot be discharged at compile time or hoisted to launch). Checks are still fully verified — this only forbids ones that cost device registers. The diagnostic names the check that could not leave the kernel and why |
+| `preconditions = ( ... )` | expr | Declared shape facts, verified by the generated launcher before the kernel runs and assumed by the compiler when discharging safety checks. Two forms: `dim(a, i) == dim(b, j)` (two axis extents are equal) and `dim(t, k) % d == 0` (an axis extent is a multiple of the integer literal `d`). A launch whose shapes violate a declared fact is rejected with an error naming it |
 | `optimization_hints = expr` | expr | Pass an `OptimizationHints` expression to the compiler for target-specific optimization |
 | `dump_mlir_dir = "path"` | string | Write the compiled Tile IR text to a file in the specified directory |
+
+`unchecked_accesses` and `deny_in_kernel_checks` are opposite poles and are *not*
+interchangeable: `unchecked_accesses` removes verification (unsafe), while
+`deny_in_kernel_checks` demands full verification with zero in-kernel cost (safe).
 
 ```rust
 #[cutile::entry(print_ir = true)]
 fn debug_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
 
+// Unsafe: skip all checks, no verification.
 #[cutile::entry(unchecked_accesses)]
 unsafe fn fast_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
+
+// Safe + strict: fail to compile if any safety check would stay in the kernel.
+#[cutile::entry(deny_in_kernel_checks = true)]
+fn zero_check_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
 
 #[cutile::entry(dump_mlir_dir = "/tmp/cutile-ir")]
 fn traced_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }

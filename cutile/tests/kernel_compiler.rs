@@ -6,7 +6,7 @@
 use cutile;
 use cutile::compile_api::KernelCompiler;
 use cutile::cutile_compiler::cuda_tile_runtime_utils::{
-    serialize_tile_ir_bytecode, tileiras_fingerprint, DEFAULT_OPT_LEVEL,
+    serialize_tile_ir_bytecode, tileiras_fingerprint, TileirasOptions,
 };
 use cutile::jit_cache::l2_key;
 
@@ -92,7 +92,7 @@ fn kernel_compiler_l2_cache_key_matches_runtime_derivation() {
             &bytecode,
             version,
             "sm_120",
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
             tileiras_fingerprint(),
         );
 

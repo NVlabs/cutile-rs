@@ -36,6 +36,18 @@ pub fn get_compiler_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+// The `CUTILE_DISABLE_CHECK_HOISTING` / `CUTILE_FORCE_DEVICE_CHECKS`
+// ablation switches are resolved once per compile into a
+// [`crate::check_optimizations::CheckOptimizations`] (see `from_env` there);
+// the compiler consults that policy, never the environment.
+
+/// `CUTILE_JIT_LOG=1` also reports every bounds check that stays inside a
+/// loop body with the reason it could not hoist.
+pub fn jit_hoist_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env::var("CUTILE_JIT_LOG").is_ok_and(|v| v == "1"))
+}
+
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 ///
 /// Cached per device: the driver is queried once per device and cache hits are
@@ -395,12 +407,145 @@ fn clamp_bytecode_version(version: BytecodeVersion) -> BytecodeVersion {
         .min(BytecodeVersion::CURRENT)
 }
 
+/// Builds the version-probe module: one entry with a pointer parameter, a
+/// token, a tensor/partition view, and a `cuda_tile.for` region whose body
+/// loads through the view. An EMPTY module is not a valid probe — an older
+/// `tileiras` accepted a newer version's empty bytecode while rejecting the
+/// same version's region encoding, so the probe selected a version real
+/// kernels could not compile at (grout B200 evaluation, 2026-08). The probe
+/// must contain the independently versioned encodings a real kernel has:
+/// regions were the construct that caught it, and view/token types are the
+/// other independently versioned family (2026-08-18 review, R1). If a
+/// version-gated encoding is ever added outside these families, extend this
+/// module alongside it.
+fn build_probe_module() -> cutile_ir::Module {
+    use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
+    use cutile_ir::bytecode::Opcode;
+    use cutile_ir::ir::{
+        Attribute, DenseElements, FuncType, Location, Module, PartitionViewType, PointerType,
+        ScalarType, TensorViewType, TileElementType, TileType, Type,
+    };
+
+    let tile_i32 = Type::Tile(TileType {
+        element_type: TileElementType::Scalar(ScalarType::I32),
+        shape: vec![],
+    });
+    let tile_ptr_f32 = Type::Tile(TileType {
+        element_type: TileElementType::Pointer(Box::new(PointerType {
+            pointee: ScalarType::F32,
+        })),
+        shape: vec![],
+    });
+    let tv_ty = Type::TensorView(TensorViewType {
+        element_type: ScalarType::F32,
+        shape: vec![128],
+        strides: vec![1],
+    });
+    let pv_ty = Type::PartitionView(PartitionViewType {
+        tile_shape: vec![16],
+        tensor_view: TensorViewType {
+            element_type: ScalarType::F32,
+            shape: vec![128],
+            strides: vec![1],
+        },
+        dim_map: vec![0],
+        padding_value: None,
+    });
+    let tile_16_f32 = Type::Tile(TileType {
+        element_type: TileElementType::Scalar(ScalarType::F32),
+        shape: vec![16],
+    });
+    let mut module = Module::new("__cutile_probe");
+    let (region_id, block_id, entry_args) =
+        build_single_block_region(&mut module, std::slice::from_ref(&tile_ptr_f32));
+    let const_i32 = |module: &mut Module, val: i32| {
+        let (op, res) = OpBuilder::new(Opcode::Constant, Location::Unknown)
+            .attr(
+                "value",
+                Attribute::DenseElements(DenseElements {
+                    element_type: tile_i32.clone(),
+                    shape: vec![],
+                    data: val.to_le_bytes().to_vec(),
+                }),
+            )
+            .result(tile_i32.clone())
+            .build(module);
+        append_op(module, block_id, op);
+        res[0]
+    };
+    let (tok_op, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
+        .result(Type::Token)
+        .build(&mut module);
+    append_op(&mut module, block_id, tok_op);
+    let seg_i32 = |n: i64| Attribute::Integer(n, tile_i32.clone());
+    let (mtv, mtv_res) = OpBuilder::new(Opcode::MakeTensorView, Location::Unknown)
+        .operand(entry_args[0])
+        .result(tv_ty)
+        .attr(
+            "operandSegmentSizes",
+            Attribute::Array(vec![seg_i32(1), seg_i32(0), seg_i32(0)]),
+        )
+        .build(&mut module);
+    append_op(&mut module, block_id, mtv);
+    let (mpv, mpv_res) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
+        .operand(mtv_res[0])
+        .result(pv_ty)
+        .build(&mut module);
+    append_op(&mut module, block_id, mpv);
+    let lb = const_i32(&mut module, 0);
+    let ub = const_i32(&mut module, 4);
+    let step = const_i32(&mut module, 1);
+    let (body_region, body_blk, body_args) =
+        build_single_block_region(&mut module, &[tile_i32.clone()]);
+    // The load sits INSIDE the region and references parent-scope values
+    // (view, token) plus the block argument — the cross-region encoding a
+    // real kernel exercises.
+    let (load, _) = OpBuilder::new(Opcode::LoadViewTko, Location::Unknown)
+        .operand(mpv_res[0])
+        .operand(body_args[0])
+        .operand(tok_res[0])
+        .attr("memory_ordering_semantics", seg_i32(0))
+        .attr(
+            "operandSegmentSizes",
+            Attribute::Array(vec![seg_i32(1), seg_i32(1), seg_i32(1)]),
+        )
+        .result(tile_16_f32)
+        .result(Type::Token)
+        .build(&mut module);
+    append_op(&mut module, body_blk, load);
+    let (cont, _) = OpBuilder::new(Opcode::Continue, Location::Unknown).build(&mut module);
+    append_op(&mut module, body_blk, cont);
+    let (for_op, _) = OpBuilder::new(Opcode::For, Location::Unknown)
+        .operand(lb)
+        .operand(ub)
+        .operand(step)
+        .region(body_region)
+        .build(&mut module);
+    append_op(&mut module, block_id, for_op);
+    let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
+    append_op(&mut module, block_id, ret);
+    let (entry, _) = OpBuilder::new(Opcode::Entry, Location::Unknown)
+        .attr("sym_name", Attribute::String("__cutile_probe_entry".into()))
+        .attr(
+            "function_type",
+            Attribute::Type(Type::Func(FuncType {
+                inputs: vec![tile_ptr_f32],
+                results: vec![],
+            })),
+        )
+        .region(region_id)
+        .build(&mut module);
+    module.functions.push(entry);
+    module
+}
+
 /// Probes `tileiras` for the newest bytecode version it accepts by compiling a
-/// tiny empty module at each candidate version, newest first.
+/// tiny but REPRESENTATIVE module (an entry with a `for` region) at each
+/// candidate version, newest first.
 fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
     let tmp_dir = env::temp_dir();
     for &version in BytecodeVersion::SUPPORTED.iter().rev() {
-        let module = cutile_ir::Module::new("__cutile_probe");
+        let module = build_probe_module();
         let Ok(bytes) = write_bytecode_version(&module, version) else {
             continue;
         };
@@ -520,11 +665,10 @@ pub(crate) fn current_l2_key_for_bytecode(
     bytecode: &[u8],
     bytecode_version: BytecodeVersion,
     gpu_name: &str,
-    opt_level: u8,
+    opts: &TileirasOptions,
 ) -> (String, &'static str) {
     let tileiras_fp = tileiras_fingerprint();
-    let key =
-        crate::jit_cache::l2_key(bytecode, bytecode_version, gpu_name, opt_level, tileiras_fp);
+    let key = crate::jit_cache::l2_key(bytecode, bytecode_version, gpu_name, opts, tileiras_fp);
     (key, tileiras_fp)
 }
 
@@ -536,20 +680,81 @@ pub(crate) fn current_l2_key_for_bytecode(
 pub(crate) fn current_l2_key_for_module(
     module: &cutile_ir::Module,
     gpu_name: &str,
+    opts: &TileirasOptions,
 ) -> Result<String, JITError> {
     let (bytecode, bytecode_version) = serialize_tile_ir_bytecode(module)?;
-    Ok(current_l2_key_for_bytecode(&bytecode, bytecode_version, gpu_name, DEFAULT_OPT_LEVEL).0)
+    Ok(current_l2_key_for_bytecode(&bytecode, bytecode_version, gpu_name, opts).0)
+}
+
+/// Flags forwarded to the `tileiras` invocation.
+///
+/// These are the complete stage-2 inputs besides the bytecode, the target
+/// GPU, and the binary itself — so they participate in the L2 cache key and
+/// are validated in disk-cache entries. Two compiles that differ in any
+/// field can never share a cubin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TileirasOptions {
+    /// `--opt-level <N>`.
+    pub opt_level: u8,
+    /// `--device-debug`: generate debug information.
+    pub device_debug: bool,
+    /// `--lineinfo`: generate line-number information only.
+    pub lineinfo: bool,
+    /// `--sanitize=memcheck`: instrument memory accesses for the sanitizer.
+    pub sanitize_memcheck: bool,
+}
+
+impl Default for TileirasOptions {
+    fn default() -> Self {
+        Self {
+            opt_level: DEFAULT_OPT_LEVEL,
+            device_debug: false,
+            lineinfo: false,
+            sanitize_memcheck: false,
+        }
+    }
+}
+
+impl TileirasOptions {
+    /// Resolves the launch-facing [`crate::hints::CompileOptions`] into the
+    /// stage-2 flags. `device_debug` implies `--opt-level 0` unless an
+    /// explicit level was requested.
+    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Self {
+        let opt_level = options.opt_level.unwrap_or(if options.device_debug {
+            0
+        } else {
+            DEFAULT_OPT_LEVEL
+        });
+        Self {
+            opt_level,
+            device_debug: options.device_debug,
+            lineinfo: options.lineinfo,
+            sanitize_memcheck: options.sanitize_memcheck,
+        }
+    }
+
+    /// The boolean flags packed into one byte, for the cache-entry header
+    /// and the L2 key material.
+    pub fn flags_byte(&self) -> u8 {
+        (self.device_debug as u8)
+            | ((self.lineinfo as u8) << 1)
+            | ((self.sanitize_memcheck as u8) << 2)
+    }
 }
 
 /// Compiles Tile IR bytecode to a cubin image by spawning `tileiras`.
 ///
-/// `bytecode`, `gpu_name` and `opt_level`, plus the `tileiras` binary itself, are
+/// `bytecode`, `gpu_name` and `opts`, plus the `tileiras` binary itself, are
 /// the complete input to this stage.
 ///
 /// The temporary `.bc` and `.cubin` are removed before returning. The one
 /// exception is a failing `tileiras` run, which leaves the `.bc` on disk because
 /// the error message names it.
-pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Vec<u8>, JITError> {
+pub fn run_tileiras(
+    bytecode: &[u8],
+    gpu_name: &str,
+    opts: &TileirasOptions,
+) -> Result<Vec<u8>, JITError> {
     let base_filename = env::temp_dir().join(Uuid::new_v4().to_string());
     let bc_file = ScopedTempFile::new(base_filename.with_extension("bc"));
     let cubin_file = ScopedTempFile::new(base_filename.with_extension("cubin"));
@@ -561,18 +766,20 @@ pub fn run_tileiras(bytecode: &[u8], gpu_name: &str, opt_level: u8) -> Result<Ve
     })?;
 
     let tileiras = tileiras_binary();
-    let opt_level_arg = opt_level.to_string();
-    let args = [
-        "--gpu-name",
-        gpu_name,
-        "--opt-level",
-        &opt_level_arg,
-        "-o",
-        &cubin_filename,
-        &bc_filename,
-    ];
+    let opt_level_arg = opts.opt_level.to_string();
+    let mut args = vec!["--gpu-name", gpu_name, "--opt-level", &opt_level_arg];
+    if opts.device_debug {
+        args.push("--device-debug");
+    }
+    if opts.lineinfo {
+        args.push("--lineinfo");
+    }
+    if opts.sanitize_memcheck {
+        args.push("--sanitize=memcheck");
+    }
+    args.extend(["-o", &cubin_filename, &bc_filename]);
     let output = Command::new(&tileiras)
-        .args(args)
+        .args(&args)
         .output()
         .map_err(|e| JITError::Generic(tileiras_launch_error(&tileiras, &args, &bc_filename, e)))?;
     if !output.status.success() {
@@ -632,7 +839,7 @@ pub enum Stage2Source {
 /// installed (see [`crate::jit_cache::enable`]).
 ///
 /// The lookup sits exactly between bytecode serialization and the `tileiras`
-/// spawn: `bytecode` plus `gpu_name`, `opt_level` and the resolved `tileiras`
+/// spawn: `bytecode` plus `gpu_name`, `opts` and the resolved `tileiras`
 /// are the subprocess's complete input, so the content-addressed key derived
 /// from them (see [`crate::jit_cache::l2_key`]) is correct by construction.
 ///
@@ -642,24 +849,25 @@ pub fn compile_bytecode_cached(
     bytecode: &[u8],
     bc_version: BytecodeVersion,
     gpu_name: &str,
-    opt_level: u8,
+    opts: &TileirasOptions,
 ) -> Result<(Vec<u8>, Stage2Source), JITError> {
     use crate::jit_cache::{self, EntryParams};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::Ordering;
 
     let Some(store) = jit_cache::installed_store() else {
-        return run_tileiras(bytecode, gpu_name, opt_level).map(|c| (c, Stage2Source::Tileiras));
+        return run_tileiras(bytecode, gpu_name, opts).map(|c| (c, Stage2Source::Tileiras));
     };
 
     // `bc_version` is the version the caller actually serialized into `bytecode`,
     // not a fresh re-resolution — so the key's version field can never disagree
     // with the bytes it sits next to (see #7).
-    let (key, tileiras_fp) = current_l2_key_for_bytecode(bytecode, bc_version, gpu_name, opt_level);
+    let (key, tileiras_fp) = current_l2_key_for_bytecode(bytecode, bc_version, gpu_name, opts);
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,
-        opt_level,
+        opt_level: opts.opt_level,
+        flags: opts.flags_byte(),
         tileiras_fp,
     };
 
@@ -692,7 +900,7 @@ pub fn compile_bytecode_cached(
     }
 
     jit_cache::STATS.misses.fetch_add(1, Ordering::Relaxed);
-    let cubin = run_tileiras(bytecode, gpu_name, opt_level)?;
+    let cubin = run_tileiras(bytecode, gpu_name, opts)?;
 
     match jit_cache::encode_entry(&params, &cubin) {
         Some(entry) => match store.put(&key, &entry) {
@@ -730,7 +938,7 @@ pub fn recompile_after_disk_rejection(
     key: &str,
     bytecode: &[u8],
     gpu_name: &str,
-    opt_level: u8,
+    opts: &TileirasOptions,
 ) -> Result<Vec<u8>, JITError> {
     use std::sync::atomic::Ordering;
 
@@ -740,7 +948,7 @@ pub fn recompile_after_disk_rejection(
             .fetch_add(1, Ordering::Relaxed);
         crate::jit_cache::cache_log(format_args!("failed to evict entry {key}: {e}"));
     }
-    run_tileiras(bytecode, gpu_name, opt_level)
+    run_tileiras(bytecode, gpu_name, opts)
 }
 
 /// Compiles a `cutile_ir::Module` to a cubin image via bytecode serialization and
@@ -753,7 +961,7 @@ pub fn compile_tile_ir_module(
     gpu_name: &str,
 ) -> Result<Vec<u8>, JITError> {
     let (bytecode, bc_version) = serialize_tile_ir_bytecode(module)?;
-    compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL)
+    compile_bytecode_cached(&bytecode, bc_version, gpu_name, &TileirasOptions::default())
         .map(|(cubin, _)| cubin)
 }
 
@@ -926,6 +1134,43 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The probe module must be a valid, encodable kernel at every supported
+    /// version, and it must contain a `for` region — an EMPTY probe passed a
+    /// version the installed tileiras then rejected on real kernels (grout
+    /// B200 evaluation, 2026-08).
+    #[test]
+    fn probe_module_is_representative_and_valid() {
+        // Reads the tileiras env resolution: serialize with the tests that
+        // mutate it.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let module = build_probe_module();
+        module.verify_dominance().expect("probe module dominance");
+        module
+            .verify_bytecode_indices()
+            .expect("probe module bytecode indices");
+        assert!(
+            !module.functions.is_empty() && module.num_values() >= 4,
+            "the probe must carry an entry with real ops (a `for` region), not \
+             be the empty module that once passed a version real kernels failed at"
+        );
+        for &version in BytecodeVersion::SUPPORTED.iter() {
+            write_bytecode_version(&module, version)
+                .unwrap_or_else(|e| panic!("probe must encode at {version}: {e}"));
+        }
+        // When a real tileiras is reachable, the probe must find SOME
+        // accepted version (i.e. real-construct bytecode compiles, not just
+        // an empty module).
+        let tileiras = tileiras_binary();
+        if Command::new(&tileiras).arg("--version").output().is_ok() {
+            let version = probe_max_supported_bytecode_version(&tileiras);
+            assert!(
+                version >= BytecodeVersion::MIN_SUPPORTED,
+                "probe found no accepted version against {}",
+                tileiras.display()
+            );
+        }
+    }
 
     #[test]
     fn tileiras_binary_defaults_to_path_lookup() {
@@ -1216,7 +1461,7 @@ mod tests {
             &bytecode,
             bc_version,
             gpu_name,
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
             tileiras_fp,
         );
 
@@ -1292,7 +1537,7 @@ mod tests {
             &bytecode,
             bc_version,
             gpu_name,
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
             tileiras_fp,
         );
 
@@ -1310,7 +1555,7 @@ mod tests {
             &key,
             &bytecode,
             gpu_name,
-            DEFAULT_OPT_LEVEL,
+            &TileirasOptions::default(),
         )
         .expect("recompile_after_disk_rejection should succeed");
 

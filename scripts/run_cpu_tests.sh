@@ -31,7 +31,7 @@ run_step \
 
 run_step \
     "cutile library tests" \
-    cargo test -p cutile --lib
+    cargo test -p cutile --lib --features experimental-tune
 
 run_step \
     "cutile doc tests" \

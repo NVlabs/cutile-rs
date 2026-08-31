@@ -160,8 +160,10 @@
 //! - **Architecture & Design** - How cutile works under the hood
 
 pub mod _core;
+pub mod _tileir;
 pub mod error;
 pub use _core::core;
+pub use _tileir::tileir;
 
 // LINKING Phase B: register an additional registry entry at the public
 // `cutile::core` path so kernel `use cutile::core::*` statements resolve
@@ -178,12 +180,20 @@ static __CUTILE_REEXPORT_CORE: cutile_compiler::registry::CutileModuleEntry =
         absolute_path: "cutile::core",
         build: _core::core::__module_ast_self,
     };
+#[linkme::distributed_slice(cutile_compiler::registry::CUTILE_MODULES)]
+static __CUTILE_REEXPORT_TILEIR: cutile_compiler::registry::CutileModuleEntry =
+    cutile_compiler::registry::CutileModuleEntry {
+        absolute_path: "cutile::tileir",
+        build: _tileir::tileir::__module_ast_self,
+    };
 pub mod api;
 pub mod bench;
 pub mod kernels;
 pub mod prelude;
 pub mod tensor;
 pub mod tile_kernel;
+#[cfg(feature = "experimental-tune")]
+pub mod tune;
 pub mod utils;
 
 pub use cuda_async;
