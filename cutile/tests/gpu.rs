@@ -32,6 +32,12 @@ mod add_basic;
 #[path = "gpu/add_ptr.rs"]
 mod add_ptr;
 
+#[path = "gpu/const_pointers.rs"]
+mod const_pointers;
+
+#[path = "gpu/program_id.rs"]
+mod program_id;
+
 #[path = "gpu/add_refs.rs"]
 mod add_refs;
 
