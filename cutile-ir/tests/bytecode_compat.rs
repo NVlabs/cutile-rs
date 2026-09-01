@@ -1252,6 +1252,8 @@ fn test_global_section() {
             data: val_data,
         },
         alignment: 0,
+        constant: false,
+        symbol_visibility: SymbolVisibility::Public,
     });
 
     // Global: @val2 alignment = 256 <i32: 42> : tile<1xi32>
@@ -1263,6 +1265,8 @@ fn test_global_section() {
             data: 42i32.to_le_bytes().to_vec(),
         },
         alignment: 256,
+        constant: false,
+        symbol_visibility: SymbolVisibility::Public,
     });
 
     // Entry function: @add_entry()
@@ -1288,6 +1292,8 @@ fn test_global_get_global() {
             data: val_data,
         },
         alignment: 0,
+        constant: false,
+        symbol_visibility: SymbolVisibility::Public,
     });
 
     let ptr_f32_ty = Type::Tile(TileType {

@@ -1,11 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+
 # Configuration file for the Sphinx documentation builder.
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 # -- Project information -----------------------------------------------------
 project = 'cuTile Rust'
-copyright = '2025, NVIDIA Corporation'
-author = 'Nihal Pasham'
-release = '0.1.0'
+copyright = '2025-2026, NVIDIA Corporation'
+author = 'NVIDIA Corporation'
+release = os.environ.get('CUTILE_DOCS_VERSION', '0.1.0')
+version = release
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -80,6 +86,21 @@ html_theme_options = {
     "pygments_dark_style": "monokai",
     "show_prev_next": True,
 }
+
+_docs_version = os.environ.get('CUTILE_DOCS_VERSION')
+if _docs_version:
+    html_theme_options["switcher"] = {
+        "json_url": os.environ.get(
+            "CUTILE_DOCS_SWITCHER_JSON",
+            "/cutile-rs/_static/versions.json",
+        ),
+        "version_match": _docs_version,
+    }
+    html_theme_options["check_switcher"] = False
+    html_theme_options["navbar_center"] = [
+        *html_theme_options.get("navbar_center", []),
+        "version-switcher",
+    ]
 
 # LEFT SIDEBAR configuration
 html_sidebars = {

@@ -3,7 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Thread-local GPU device state, kernel cache, and scheduling policy management.
+//! GPU device state and scheduling policy management.
+//!
+//! ## Architecture
+//!
+//! - **Global (process-wide)**: one [`Device`] per device id, shared across all threads
+//!   via [`OnceLock`].
+//!
+//! - **Per-thread**: Scheduling policy and deallocator stream remain thread-local, since
+//!   different threads may want different stream assignments.
+//!
+//! The compiled-kernel cache and its single-flight dedup live in `cutile::tile_kernel`,
+//! since they key on a type from `cutile-compiler`.
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
@@ -11,7 +22,7 @@ use cuda_core::{Device, Function, MemPool, Module, Stream};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The GPU device used when no explicit device is specified. Device 0 is the first GPU.
 pub const DEFAULT_DEVICE_ID: usize = 0;
@@ -28,7 +39,14 @@ pub const DEFAULT_NUM_DEVICES: usize = 1;
 pub const DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE: usize = 4;
 
 pub trait FunctionKey: Hash {
-    fn get_hash_string(&self) -> String {
+    /// Short human-readable digest of the key, for log lines and dump filenames.
+    ///
+    /// **Not an identity.** It is a 64-bit `DefaultHasher` output, so distinct
+    /// keys collide at a rate that matters once a process caches enough kernels,
+    /// and `DefaultHasher`'s algorithm is unspecified across Rust releases.
+    /// Caches key on the whole `Hash + Eq` value; nothing may key on this string
+    /// or persist it.
+    fn display_hash(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         let hash_value: u64 = hasher.finish();
@@ -64,33 +82,66 @@ pub struct TensorParamType {
 #[derive(Debug, Clone)]
 pub struct Validator {
     pub params: Vec<ValidParamType>,
+    /// Compiler-emitted checks to run at launch, before `cuLaunchKernel`. Each
+    /// is a canonical [`crate::predicate::Predicate`] the compiler hoisted out
+    /// of the device kernel; the host evaluates it against the launched tensors'
+    /// extents. Empty unless a kernel hoists a launch-known safety check.
+    pub launch_checks: Vec<crate::predicate::LaunchCheck>,
 }
 
-type DeviceFunctions = HashMap<String, (Arc<Module>, Arc<Function>)>;
-type DeviceFunctionValidators = HashMap<String, Arc<Validator>>;
+// ── Global Device (process-wide, per-device singleton) ─────────────────────
 
-/// Per-device state: GPU device, scheduling policy, and compiled kernel cache.
+/// Global per-device handles. Shared across all threads so that
+/// `Module`/`Function` loaded against a device can be used from any thread.
+static DEVICES: OnceLock<Mutex<HashMap<usize, Arc<Device>>>> = OnceLock::new();
+
+fn devices() -> &'static Mutex<HashMap<usize, Arc<Device>>> {
+    DEVICES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Get or create the global [`Device`] for a device ordinal.
 ///
-/// Each GPU device has one `AsyncDeviceContext` stored in a thread-local map. It holds:
+/// The first call for a given `device_id` creates the device handle; subsequent
+/// calls return the same `Arc<Device>`.
+fn get_or_init_device(device_id: usize) -> Result<Arc<Device>, DeviceError> {
+    let mut devices = devices()
+        .lock()
+        .map_err(|_| device_error(device_id, "device map lock poisoned"))?;
+    if let Some(device) = devices.get(&device_id) {
+        return Ok(Arc::clone(device));
+    }
+    let device = Device::new(device_id)?;
+    devices.insert(device_id, Arc::clone(&device));
+    Ok(device)
+}
+
+// ── Compiled kernels ────────────────────────────────────────────────────────
+
+/// A compiled kernel: module, function handle, and parameter validator.
 ///
-/// - A [`Device`] for driver API calls.
-/// - A [`SchedulingPolicy`] that decides which stream each operation runs on.
-/// - A cache of already-compiled kernel functions (keyed by [`FunctionKey::get_hash_string()`]).
+/// The cache that holds these lives in `cutile::tile_kernel`, keyed on
+/// `TileFunctionKey` directly. It cannot live here: that key names types from
+/// `cutile-compiler`, which sits downstream of this crate.
+#[derive(Debug)]
+pub struct CompiledKernel {
+    pub module: Arc<Module>,
+    pub function: Arc<Function>,
+    pub validator: Arc<Validator>,
+}
+
+// ── Per-thread device state ──────────────────────────────────────────────────
+
+/// Per-thread, per-device state: scheduling policy, deallocator stream, and
+/// optional memory pool.
 ///
-/// The context is lazily initialized on first use with the default round-robin policy
-/// ([`DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE`] = 4 streams). To customize, call
-/// [`init_device_contexts`] before any GPU work.
-// TODO (hme): None of this needs to be compiled per thread.
+/// The CUDA context is global (see above). This struct only holds thread-local
+/// state.
 pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
     device_id: usize,
-    // TODO: (hme): This will hurt perf due to contention. This should at least be static (OnceLock?).
-    device: Arc<Device>,
     deallocator_stream: Arc<Stream>,
     policy: Arc<dyn SchedulingPolicy>,
     pool: Option<Arc<MemPool>>,
-    functions: DeviceFunctions,
-    validators: DeviceFunctionValidators,
 }
 
 pub struct AsyncDeviceContexts {
@@ -157,16 +208,13 @@ pub fn new_device_context(
     device_id: usize,
     policy: Arc<dyn SchedulingPolicy>,
 ) -> Result<AsyncDeviceContext, DeviceError> {
-    let device = Device::new(device_id)?;
+    let device = get_or_init_device(device_id)?;
     let deallocator_stream = device.new_stream()?;
     Ok(AsyncDeviceContext {
         device_id,
-        device,
         deallocator_stream,
         policy,
         pool: None,
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     })
 }
 
@@ -198,17 +246,14 @@ pub fn init_with_default_policy(
     hashmap: &mut HashMap<usize, AsyncDeviceContext>,
     device_id: usize,
 ) -> Result<(), DeviceError> {
-    let device = Device::new(device_id)?;
+    let device = get_or_init_device(device_id)?;
     let policy = StreamPoolRoundRobin::new(&device, DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE)?;
     let deallocator_stream = device.new_stream()?;
     let device_context = AsyncDeviceContext {
         device_id,
-        device,
         deallocator_stream,
         policy: Arc::new(policy),
         pool: None,
-        functions: HashMap::new(),
-        validators: HashMap::new(),
     };
     let pred = hashmap.insert(device_id, device_context).is_none();
     device_assert(device_id, pred, "Device is already initialized.")
@@ -296,7 +341,8 @@ pub fn with_device<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
 where
     F: FnOnce(&Arc<Device>) -> R,
 {
-    with_global_device_context(device_id, |device_context| f(&device_context.device))
+    let device = get_or_init_device(device_id)?;
+    Ok(f(&device))
 }
 
 // Default device policy.
@@ -413,79 +459,20 @@ pub fn load_module_from_file(filename: &str, device_id: usize) -> Result<Arc<Mod
     })?
 }
 
+/// Load a compiled CUDA module from an in-memory **cubin** image. Not for PTX
+/// (see [`cuda_core::Device::load_module_from_bytes`]); use
+/// [`load_module_from_ptx`] for that.
+pub fn load_module_from_bytes(image: &[u8], device_id: usize) -> Result<Arc<Module>, DeviceError> {
+    with_device(device_id, |device| {
+        let module = device.load_module_from_bytes(image)?;
+        Ok(module)
+    })?
+}
+
 /// JIT-compile a PTX string into a CUDA module for the given device.
 pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Module>, DeviceError> {
     with_device(device_id, |device| {
         let module = device.load_module_from_ptx_src(ptx_src)?;
         Ok(module)
-    })?
-}
-
-/// Store a compiled kernel in the per-device cache so that future calls with the same
-/// [`FunctionKey`] can skip compilation.
-pub fn insert_cuda_function(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-    value: (Arc<Module>, Arc<Function>),
-) -> Result<(), DeviceError> {
-    with_global_device_context_mut(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let res = device_context.functions.insert(key.clone(), value);
-        device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
-    })?
-}
-
-/// Check whether a kernel with the given key has already been compiled and cached.
-pub fn contains_cuda_function(device_id: usize, func_key: &impl FunctionKey) -> bool {
-    with_global_device_context(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        device_context.functions.contains_key(&key)
-    })
-    .is_ok_and(|pred| pred)
-}
-
-/// Retrieve a previously compiled kernel from the cache.
-///
-/// # Panics
-///
-/// Panics if no function with the given key exists. Use [`contains_cuda_function`] to
-/// check first, or rely on the compilation pipeline which always inserts before retrieving.
-pub fn get_cuda_function(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-) -> Result<Arc<Function>, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let entry = device_context
-            .functions
-            .get(&key)
-            .ok_or(device_error(device_id, "Failed to get cuda function."))?;
-        Ok(entry.1.clone())
-    })?
-}
-
-pub fn insert_function_validator(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-    value: Arc<Validator>,
-) -> Result<(), DeviceError> {
-    with_global_device_context_mut(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let res = device_context.validators.insert(key.clone(), value);
-        device_assert(device_id, res.is_none(), "Unexpected cache key collision.")
-    })?
-}
-
-pub fn get_function_validator(
-    device_id: usize,
-    func_key: &impl FunctionKey,
-) -> Result<Arc<Validator>, DeviceError> {
-    with_global_device_context(device_id, |device_context| {
-        let key = func_key.get_hash_string();
-        let entry = device_context
-            .validators
-            .get(&key)
-            .ok_or(device_error(device_id, "Failed to get function validator."))?;
-        Ok(entry.clone())
     })?
 }

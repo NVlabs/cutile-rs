@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -96,26 +94,29 @@ mod reduce_scan_ops_module {
 
 use reduce_scan_ops_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "reduce_scan_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_scan_sum_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "reduce_scan_ops_module",
+        let module_op_str = compile_ir(
             "scan_sum_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== SCAN_SUM MLIR ===\n{}", module_op_str);
 
         // Verify scan operation appears
@@ -143,23 +144,11 @@ fn compile_scan_sum_test() -> () {
 #[test]
 fn compile_reduce_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "reduce_scan_ops_module",
+        let module_op_str = compile_ir(
             "reduce_closure_test_kernel",
             &[128.to_string()],
             &[("input", &[1]), ("result", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== REDUCE WITH CLOSURE (SUM) MLIR ===\n{}",
             module_op_str
@@ -190,23 +179,11 @@ fn compile_reduce_closure_test() -> () {
 #[test]
 fn compile_reduce_product_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "reduce_scan_ops_module",
+        let module_op_str = compile_ir(
             "reduce_product_closure_test_kernel",
             &[128.to_string()],
             &[("input", &[1]), ("result", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== REDUCE WITH CLOSURE (PRODUCT) MLIR ===\n{}",
             module_op_str
@@ -237,23 +214,11 @@ fn compile_reduce_product_closure_test() -> () {
 #[test]
 fn compile_reduce_max_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "reduce_scan_ops_module",
+        let module_op_str = compile_ir(
             "reduce_max_closure_test_kernel",
             &[128.to_string()],
             &[("input", &[1]), ("result", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== REDUCE WITH CLOSURE (MAX) MLIR ===\n{}",
             module_op_str
@@ -284,23 +249,11 @@ fn compile_reduce_max_closure_test() -> () {
 #[test]
 fn compile_scan_closure_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "reduce_scan_ops_module",
+        let module_op_str = compile_ir(
             "scan_closure_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== SCAN WITH CLOSURE (PREFIX PRODUCT) MLIR ===\n{}",
             module_op_str

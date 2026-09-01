@@ -58,6 +58,40 @@ The primary processing unit on an NVIDIA GPU. Each SM has its own registers, sha
 
 Specialized hardware units (available on Volta architecture and later) that perform small matrix multiply-accumulate operations in a single instruction. The `mma()` intrinsic in cuTile Rust maps to Tensor Core instructions. Tensor Cores impose alignment requirements on tile dimensions (e.g., dimensions must typically be multiples of 8 or 16 depending on the element type).
 
+## Block Scaling
+
+A low-precision matrix multiply layout where one scale value is shared by a
+fixed-size group of input values, usually along the K dimension. In the NVFP4
+E4M3-scale layout used in this book, that ratio is one FP8 scale value per 16
+logical FP4 values. cuTile Rust's `mmaf_scaled()` operation consumes logical
+low-precision operand tiles plus their scale tiles, then accumulates into `f32`.
+
+## FP4 E2M1FN
+
+The 4-bit floating-point encoding named `f4e2m1fn` in cuTile Rust and
+`f4E2M1FN` in Tile IR. The four bits encode one sign bit, two exponent bits,
+and one mantissa bit. This is the logical FP4 operand type used by
+`mmaf_scaled()`.
+
+## Packed FP4 Pair
+
+The byte-addressable storage representation for two `f4e2m1fn` values. In
+cuTile Rust this is `f4e2m1fnx2`; kernels unpack it to logical `f4e2m1fn`
+tiles before calling `mmaf_scaled()`.
+
+## Nibble
+
+A 4-bit half-byte. Packed FP4 storage uses two nibbles per byte: cuTile Rust's
+`f4e2m1fnx2` stores the first logical FP4 value in the low nibble and the second
+logical FP4 value in the high nibble.
+
+## NVFP4
+
+An NVIDIA FP4 inference format based on 4-bit E2M1 values plus block scale
+tensors. The FP4 payload is commonly exchanged as byte-addressable data with two
+values per byte. In cuTile Rust, that storage is represented by `f4e2m1fnx2`;
+kernels unpack it to logical `f4e2m1fn` tiles before using block-scaled MMA.
+
 ## Global Memory (HBM)
 
 The GPU's main memory — High Bandwidth Memory. Global memory has the highest capacity but is slower than shared memory and registers. `Tensor` data resides in global memory.
@@ -72,7 +106,7 @@ On-chip memory shared among all threads within a tile block. Shared memory is sl
 
 ## Const Generics
 
-Compile-time constant parameters on kernel functions, such as `const BM: i32`. Const generics enable the compiler to optimize register allocation, unroll loops, and generate architecture-specific code. Changing a const generic value triggers JIT recompilation. See also [Const Generic Arrays](#const-generic-arrays).
+Compile-time constant parameters on kernel functions, such as `const BM: i32`. Const generics enable the compiler to optimize register allocation, unroll loops, and generate architecture-specific code. Changing a const generic value creates a new compiled variant. See also [Const Generic Arrays](#const-generic-arrays).
 
 ## Const Generic Arrays
 
@@ -89,15 +123,15 @@ fn add<const S: [i32; 2]>(
 ) { ... }
 ```
 
-Here `S` is inferred from the host-side partition shape passed at launch time. Because `S` is a compile-time constant, the compiler can specialize the generated code for each distinct shape. A new value of `S` triggers JIT recompilation, just like scalar const generics.
+Here `S` is inferred from the host-side partition shape passed at launch time. Because `S` is a compile-time constant, the compiler can specialize the generated code for each distinct shape. A new value of `S` creates a new compiled variant, just like scalar const generics.
 
 ## Dynamic Dimensions
 
-Tensor shape dimensions specified as `-1` in the kernel signature (e.g., `Tensor<f32, {[-1, -1]}>`). Dynamic dimensions can vary across kernel launches without triggering recompilation. They carry no compile-time optimization benefit but provide flexibility for problem sizes that change often.
+Tensor shape dimensions specified as `-1` in the kernel signature (e.g., `Tensor<f32, {[-1, -1]}>`). Dynamic dimensions can vary across kernel launches without creating a new compiled variant. They carry no compile-time optimization benefit but provide flexibility for problem sizes that change often.
 
 ## JIT Compilation
 
-cuTile Rust compiles kernels at first invocation through a multi-stage pipeline: Rust AST → MLIR → cubin. The compiled binary is cached in memory (in a thread-local `HashMap`) so subsequent launches with the same generics are instant. A new combination of const generics or type parameters produces a new compilation.
+cuTile Rust normally compiles a kernel entry function at first launch through a multi-stage pipeline: Rust AST → Tile IR bytecode → cubin. The generated launcher caches compiled kernels in memory using the active device and resolved kernel specialization. The specialization includes the entry function identity, type and const generics, compile options, optional constant grid, and tensor or scalar specialization hints. See [Compilation](../guide/jit-compilation.md) for the full cache behavior and the compile-only API.
 
 ## DeviceOp
 

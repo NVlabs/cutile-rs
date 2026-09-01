@@ -1,16 +1,18 @@
 # Interoperability
 
-cuTile Rust is designed to coexist with existing CUDA infrastructure. This chapter covers three common interop concerns:
+cuTile Rust is designed to coexist with existing CUDA infrastructure. The main interop paths are:
 
-- **Integrating custom CUDA C++ kernels** — for algorithms that need warp-level primitives (`__shfl_sync`, `__ballot_sync`, cooperative groups) or irregular access patterns the tile model doesn't cover.
+- **Integrating external PTX or CUBIN kernels** — for CUDA C++ kernels, cuda-oxide-generated PTX, or other CUDA module artifacts that you want to launch alongside cuTile kernels.
 - **Borrowing foreign CUDA handles** — wrap a `CUcontext` / `CUstream` from another Rust binding crate (cudarc, Candle, hand-rolled FFI) so cuTile kernels can run on handles you already own.
 - **Migrating from other tile DSLs** — conceptual mapping from Triton and cuTile Python.
 
-Custom CUDA kernels participate in the same `DeviceOp` execution model as tile kernels — sharing streams, chaining with `.then()`, and avoiding unnecessary synchronization.
+External CUDA kernels participate in the same `DeviceOp` execution model as tile kernels — sharing streams, chaining with `.then()`, and avoiding unnecessary synchronization.
 
 ---
 
-## Integrating a CUDA C++ Kernel
+## Integrating External PTX or CUBIN Kernels
+
+### From CUDA C++
 
 Compile your CUDA C++ kernel to PTX (portable) or a `.cubin` (architecture-specific):
 
@@ -23,6 +25,14 @@ nvcc -cubin -arch=sm_80 my_kernel.cu -o my_kernel.cubin
 ```
 
 > **Architecture portability:** A `.cubin` file only runs on the exact SM architecture it was compiled for. Code compiled with `-arch=sm_80` will not load on an `sm_100` GPU. PTX avoids this problem — the CUDA driver JIT-compiles it for the target GPU at load time, at the cost of a one-time compilation delay. Prefer PTX unless you need to eliminate JIT overhead.
+
+### From cuda-oxide
+
+[cuda-oxide](https://github.com/NVlabs/cuda-oxide) is an NVlabs experimental Rust-to-CUDA compiler for SIMT-style kernels. Its documented output path is PTX: build or inspect the generated PTX with `cargo oxide build` or `cargo oxide pipeline`, then load that PTX with `load_module_from_ptx` and wrap the entry function in an `AsyncKernelLaunch` or typed `DeviceOp`.
+
+If you need a CUBIN, compile the PTX through the normal CUDA toolchain as a separate step.
+
+### Loading and Launching
 
 Load the compiled module and get a handle to the entry function:
 
@@ -248,7 +258,7 @@ Borrowed wrappers skip destruction on drop: `Stream` does not call `cuStreamDest
 |-----------------|------------------------|
 | Assign producer warps to prefetch tiles from global → shared memory | Compiler generates shared memory staging for `load_tile` operations |
 | Assign consumer warps to compute on shared memory tiles | Compiler maps tile arithmetic to Tensor Cores and registers |
-| Software pipeline with `warp_specialize` in `tl.range` | Compiler uses TMA for hardware-assisted pipelining on supported architectures |
+| Software pipeline with `warp_specialize` in `tl.range` | Compiler uses Tensor Memory Accelerator (TMA) instructions for hardware-assisted pipelining on supported architectures |
 | Manual `tl.dot` placement across warps | `mma()` maps directly to Tensor Core instructions; thread/warp assignment is compiler-managed |
 | Tune `num_warps` and `num_stages` for occupancy | `occupancy` and `num_cta_in_cga` optimization hints guide the compiler |
 
@@ -273,4 +283,4 @@ Both front-ends use the same underlying Tile IR compilation pipeline and generat
 
 ---
 
-Continue to [Debugging and Profiling](debugging.md) for troubleshooting. This chapter builds on the `DeviceOp` model introduced in [Device Operations](device-operations.md).
+Continue to [Debugging and Profiling](debugging-and-profiling.md) for troubleshooting. Interop kernels use the `DeviceOp` model described in [Device Operations](device-operations.md).

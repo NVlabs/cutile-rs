@@ -165,8 +165,8 @@ fn my_kernel(...) {
 |---------|---------------|
 | **Host-side partitioning** | `.partition([M, N])` on the host — required for `&mut Tensor` to ensure exclusive write access and determine the launch grid |
 | **Device-side partitioning** | `.partition(const_shape![M, N])` inside the kernel — available for `&Tensor`, flexible access patterns |
-| **Static shape `S`** | The tile shape, static during JIT compilation |
-| **Dynamic shape `[-1, -1]`** | Dynamic tensor shape; does not trigger JIT recompilation when tensor shape changes |
+| **Static shape `S`** | The tile shape carried in the compiled variant |
+| **Dynamic shape `[-1, -1]`** | Dynamic tensor shape; does not create a new compiled variant when tensor shape changes |
 | **load_tile_like** | Convenience for element-wise ops: loads from input using the same partitioning and mapping as the output |
 | **Load/Store pattern** | Load → Compute → Store is the GPU kernel idiom |
 
@@ -208,6 +208,6 @@ Try `partition([4, 8])` — rectangular tiles. Does it still work?
 
 ## See also
 
-- [Thinking in Tiles](../guide/thinking-in-tiles.md) — tile blocks, partitioning, and the grid
-- [Writing Computations](../guide/writing-computations.md) — arithmetic and load/store operations
+- [Tensors and Tiles](../guide/tensors-and-tiles.md) — partitioning, load/store, and tile arithmetic
+- [Useful Mental Models](../guide/useful-mental-models.md) — tile blocks and grid geometry
 - [DSL API](../reference/dsl-api.md) — full signatures for `load_tile_like`, `store`, and the arithmetic operators used here

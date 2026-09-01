@@ -50,7 +50,7 @@ use syn::ItemMod;
 /// A concrete source location: file path + 1-indexed line + 0-indexed column.
 ///
 /// This is independent of `proc_macro2::Span` and can be stored, displayed and
-/// passed to MLIR's `Location::new(ctx, file, line, col)`.
+/// attached to Tile IR locations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceLocation {
     /// Source file path as reported by the compiler (`Span::file()`).

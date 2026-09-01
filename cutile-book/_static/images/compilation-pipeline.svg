@@ -115,12 +115,12 @@
   <!-- Arrow 2 -->
   <path d="M 375 202 L 411 202" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow-dark)"/>
 
-  <!-- Stage 3: MLIR -->
+  <!-- Stage 3: Tile IR -->
   <g transform="translate(420, 150)">
     <rect width="160" height="105" rx="10" fill="#ffffff" filter="url(#shadow)"/>
     <rect width="160" height="105" rx="10" fill="none" stroke="#6366f1" stroke-width="2"/>
     <rect x="2" y="2" width="156" height="28" rx="8" fill="#eef2ff"/>
-    <text x="80" y="21" text-anchor="middle" font-size="13" font-weight="600" fill="#4f46e5">MLIR (cuda_tile)</text>
+    <text x="80" y="21" text-anchor="middle" font-size="13" font-weight="600" fill="#4f46e5">Tile IR</text>
     
     <g transform="translate(10, 42)" font-family="'RobotoMono', monospace" font-size="9" fill="#374151">
       <text fill="#2563eb">cuda_tile.module</text>
@@ -268,7 +268,7 @@
         <rect x="0" y="0" width="4" height="22" rx="1" fill="#6366f1"/>
         <text x="18" y="17" font-size="15" font-weight="400" letter-spacing="0.2">
           <tspan font-family="'RobotoMono', monospace" font-size="13" fill="#4f46e5" font-weight="500">CUDATileFunctionCompiler</tspan>
-          <tspan fill="#374151"> translates AST → MLIR → cubin at </tspan>
+          <tspan fill="#374151"> translates AST → Tile IR → cubin at </tspan>
           <tspan font-family="'RobotoMono', monospace" font-size="13" fill="#ea580c" font-weight="500">first runtime</tspan>
         </text>
       </g>

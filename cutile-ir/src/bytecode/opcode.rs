@@ -108,6 +108,13 @@ pub enum Opcode {
     XOrI = 0x6C,
     Yield = 0x6D,
     Atan2 = 0x6E,
+    Pack = 0x6F,
+    Unpack = 0x70,
+    Alloca = 0x71,
+    MmaFScaled = 0x72,
+    MakeGatherScatterView = 0x73,
+    MakeStridedView = 0x74,
+    AtomicRedViewTko = 0x75,
 }
 
 impl Opcode {
@@ -134,19 +141,84 @@ impl Opcode {
             // 0 results
             Assert | Global | Module => Some(0),
             // 1 result
-            AbsF | AbsI | AddF | AddI | AndI | Assume | Atan2 | Bitcast | Broadcast | Cat
-            | Ceil | CmpF | CmpI | Constant | Cos | CosH | DivF | DivI | Exp | Exp2 | ExtI
-            | Floor | Fma | FToF | FToI | GetGlobal | IntToPtr | Iota | IToF | Log | Log2
-            | MakePartitionView | MakeToken | MaxF | MaxI | MinF | MinI | MmaF | MmaI | MulF
-            | MulhiI | MulI | NegF | NegI | Offset | OrI | Permute | Pow | PtrToInt | PtrToPtr
-            | Reshape | RemF | RemI | Rsqrt | Select | ShLI | ShRI | Sin | SinH | Sqrt | SubF
-            | SubI | Tan | TanH | TruncI | XOrI => Some(1),
+            AbsF
+            | AbsI
+            | AddF
+            | AddI
+            | AndI
+            | Assume
+            | Atan2
+            | Bitcast
+            | Broadcast
+            | Cat
+            | Ceil
+            | CmpF
+            | CmpI
+            | Constant
+            | Cos
+            | CosH
+            | DivF
+            | DivI
+            | Exp
+            | Exp2
+            | ExtI
+            | Floor
+            | Fma
+            | FToF
+            | FToI
+            | GetGlobal
+            | IntToPtr
+            | Iota
+            | IToF
+            | Log
+            | Log2
+            | MakeGatherScatterView
+            | MakePartitionView
+            | MakeStridedView
+            | MakeToken
+            | MaxF
+            | MaxI
+            | MinF
+            | MinI
+            | MmaF
+            | MmaFScaled
+            | MmaI
+            | MulF
+            | MulhiI
+            | MulI
+            | NegF
+            | NegI
+            | Offset
+            | OrI
+            | Pack
+            | Permute
+            | Pow
+            | PtrToInt
+            | PtrToPtr
+            | Reshape
+            | RemF
+            | RemI
+            | Rsqrt
+            | Select
+            | ShLI
+            | ShRI
+            | Sin
+            | SinH
+            | Sqrt
+            | SubF
+            | SubI
+            | Tan
+            | TanH
+            | TruncI
+            | Unpack
+            | XOrI => Some(1),
             // 2 results
             AtomicCAS | AtomicRMW | LoadPtrTko => Some(2),
             // 1 result (token)
-            StorePtrTko => Some(1),
+            AtomicRedViewTko | StorePtrTko => Some(1),
             // 3 results
             GetTileBlockId | GetNumTileBlocks => Some(3),
+            Alloca => Some(1),
             // Entry has 0 results but is function-like (handled in func section, not here)
             Entry => Some(0),
         }

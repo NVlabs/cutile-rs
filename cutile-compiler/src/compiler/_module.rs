@@ -278,8 +278,8 @@ impl CUDATileModules {
         let mut use_catalog: UseCatalog = HashMap::new();
 
         // Each queue entry pairs a (name, use-path) import with the
-        // absolute path of the module it appeared in, so `crate::*` paths
-        // can be resolved against the right crate root.
+        // absolute path of the module it appeared in, so relative paths can
+        // be resolved against the right module before registry lookup.
         struct Pending {
             name: Option<String>,
             path: String,
@@ -295,8 +295,7 @@ impl CUDATileModules {
             .collect();
 
         while let Some(pending) = queue.pop() {
-            let resolved =
-                resolve_crate_prefix(&pending.path, crate_root_of(&pending.owning_module));
+            let resolved = resolve_relative_use_path(&pending.path, &pending.owning_module);
             // `appears_in_kernel_module` is true when the use statement
             // we're processing was written in the kernel module itself —
             // i.e. `pending.owning_module` is the same module that was
@@ -352,26 +351,42 @@ impl CUDATileModules {
     }
 }
 
-/// Extract the crate-root segment from an absolute module path. For
-/// `"cutile::core"` returns `"cutile"`; for `""` returns `""`.
-fn crate_root_of(absolute_path: &str) -> &str {
-    absolute_path.split("::").next().unwrap_or("")
+/// Resolve leading `crate`, `self`, and `super` segments in a `use` path
+/// against the absolute path of the module containing that use.
+fn resolve_relative_use_path(use_path: &str, owning_module: &str) -> String {
+    let mut path_segments = use_path.split("::");
+    let Some(first) = path_segments.next() else {
+        return use_path.to_string();
+    };
+
+    match first {
+        "crate" => {
+            let Some(crate_root) = owning_module.split("::").next() else {
+                return use_path.to_string();
+            };
+            join_segments([crate_root].into_iter().chain(path_segments))
+        }
+        "self" => join_segments(owning_module.split("::").chain(path_segments)),
+        "super" => {
+            let mut base = owning_module.split("::").collect::<Vec<_>>();
+            base.pop();
+            while let Some("super") = path_segments.clone().next() {
+                path_segments.next();
+                if base.pop().is_none() {
+                    return use_path.to_string();
+                }
+            }
+            join_segments(base.into_iter().chain(path_segments))
+        }
+        _ => use_path.to_string(),
+    }
 }
 
-/// Replace a leading `crate::` segment in `use_path` with `crate_root`.
-/// Pass-through if the path doesn't start with `crate::`.
-fn resolve_crate_prefix(use_path: &str, crate_root: &str) -> String {
-    if let Some(rest) = use_path.strip_prefix("crate::") {
-        if crate_root.is_empty() {
-            use_path.to_string()
-        } else {
-            format!("{crate_root}::{rest}")
-        }
-    } else if use_path == "crate" {
-        crate_root.to_string()
-    } else {
-        use_path.to_string()
-    }
+fn join_segments<'a>(segments: impl Iterator<Item = &'a str>) -> String {
+    segments
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +438,66 @@ fn find_impl_method<'a>(item_impl: &'a ItemImpl, method_name: &str) -> Option<&'
     })
 }
 
-fn instantiate_type_for_lookup(
+/// Returns `false` only when an impl provably cannot apply to the receiver:
+/// an impl const generic declared with a literal array rank (`const D: [i32; 2]`)
+/// appears in the impl self type at a position where the receiver's resolved
+/// const-generic array has a different rank. Variadic impls (`[i32; N]`) and
+/// anything unresolved stay compatible, preserving the permissive name-based
+/// lookup. This disambiguates same-named methods defined per rank, like
+/// `PartitionIndex::components` for rank 2 and rank 3.
+pub(crate) fn impl_self_type_rank_matches(
+    item_impl: &ItemImpl,
+    receiver_ty: &Type,
+    generic_vars: &GenericVars,
+) -> bool {
+    let mut const_ranks: HashMap<String, usize> = HashMap::new();
+    for param in &item_impl.generics.params {
+        if let syn::GenericParam::Const(const_param) = param {
+            if let Type::Array(type_array) = &const_param.ty {
+                if let syn::Expr::Lit(len_lit) = &type_array.len {
+                    if let syn::Lit::Int(len_int) = &len_lit.lit {
+                        if let Ok(rank) = len_int.base10_parse::<usize>() {
+                            const_ranks.insert(const_param.ident.to_string(), rank);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if const_ranks.is_empty() {
+        return true;
+    }
+    let Some(impl_args) = maybe_generic_args(&item_impl.self_ty) else {
+        return true;
+    };
+    let Some(receiver_args) = maybe_generic_args(receiver_ty) else {
+        return true;
+    };
+    for (impl_arg, receiver_arg) in impl_args.args.iter().zip(receiver_args.args.iter()) {
+        let param_ident = match impl_arg {
+            syn::GenericArgument::Const(syn::Expr::Path(path)) => path.path.get_ident(),
+            syn::GenericArgument::Type(Type::Path(type_path)) => type_path.path.get_ident(),
+            _ => None,
+        };
+        let Some(param_ident) = param_ident else {
+            continue;
+        };
+        let Some(&expected_rank) = const_ranks.get(&param_ident.to_string()) else {
+            continue;
+        };
+        let Some(receiver_cga) =
+            crate::generics::get_cga_from_generic_argument(receiver_arg, generic_vars)
+        else {
+            continue;
+        };
+        if receiver_cga.len() != expected_rank {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn instantiate_type_for_lookup(
     ty: &Type,
     generic_vars: &GenericVars,
     primitives: &HashMap<(String, String), ItemImpl>,
@@ -815,6 +889,9 @@ impl CUDATileModules {
         if let Some(receiver_type_str) = receiver_type_str.as_deref() {
             if let Some(impls_vec) = self.name_resolver.struct_impls().get(receiver_type_str) {
                 for (module_name, item_impl) in impls_vec {
+                    if !impl_self_type_rank_matches(item_impl, &receiver_lookup_ty, generic_vars) {
+                        continue;
+                    }
                     if let Some(impl_method) = find_impl_method(item_impl, &method_name) {
                         return Ok(Some((
                             module_name.clone(),
@@ -915,6 +992,26 @@ mod tests {
                 .get_span_base("my_crate::my_module")
                 .map(|base| base.file.as_str()),
             Some("source.rs")
+        );
+    }
+
+    #[test]
+    fn relative_use_paths_resolve_against_owning_module() {
+        assert_eq!(
+            resolve_relative_use_path("super::activations::relu", "gpu::inter_module::my_kernels"),
+            "gpu::inter_module::activations::relu"
+        );
+        assert_eq!(
+            resolve_relative_use_path("self::helpers::relu", "gpu::inter_module::my_kernels"),
+            "gpu::inter_module::my_kernels::helpers::relu"
+        );
+        assert_eq!(
+            resolve_relative_use_path("crate::core::Tile", "cutile::core"),
+            "cutile::core::Tile"
+        );
+        assert_eq!(
+            resolve_relative_use_path("cutile::core::Tile", "gpu::inter_module::my_kernels"),
+            "cutile::core::Tile"
         );
     }
 

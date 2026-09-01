@@ -6,7 +6,6 @@ use cutile;
 use cutile::api;
 use cutile::tile_kernel::{DeviceOp, TileKernel};
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -77,11 +76,8 @@ fn compile_kernel(
     scalar_hints: &[(&str, &DivHint)],
     options: &CompileOptions,
 ) -> String {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
-    let gpu_name = "sm_120".to_string();
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    let result = common::compile_to_ir(
+        __module_ast_self,
         "spec_test_module",
         name,
         function_generic_args,
@@ -89,14 +85,9 @@ fn compile_kernel(
         specs,
         scalar_hints,
         None,
-        gpu_name,
         options,
     )
-    .expect("Failed to create compiler");
-    let module_op = compiler.compile().expect("Failed to compile");
-    let result = module_op.to_string();
-    drop(module_op);
-    drop(compiler);
+    .expect("Failed to compile");
     result
 }
 
@@ -192,36 +183,15 @@ fn different_spec_bits_different_cache_keys() {
         elements_disjoint: true,
     };
 
-    let key_a = TileFunctionKey::new(
-        "m".into(),
-        "f".into(),
-        vec![],
-        vec![],
-        vec![("output".into(), spec_a.clone())],
-        vec![],
-        None,
-        CompileOptions::default(),
-    );
-    let key_b = TileFunctionKey::new(
-        "m".into(),
-        "f".into(),
-        vec![],
-        vec![],
-        vec![("output".into(), spec_b.clone())],
-        vec![],
-        None,
-        CompileOptions::default(),
-    );
-    let key_a2 = TileFunctionKey::new(
-        "m".into(),
-        "f".into(),
-        vec![],
-        vec![],
-        vec![("output".into(), spec_a)],
-        vec![],
-        None,
-        CompileOptions::default(),
-    );
+    let key_a = TileFunctionKey::builder("m", "f")
+        .spec_args(vec![("output".into(), spec_a.clone())])
+        .build();
+    let key_b = TileFunctionKey::builder("m", "f")
+        .spec_args(vec![("output".into(), spec_b.clone())])
+        .build();
+    let key_a2 = TileFunctionKey::builder("m", "f")
+        .spec_args(vec![("output".into(), spec_a)])
+        .build();
 
     assert_ne!(
         key_a, key_b,

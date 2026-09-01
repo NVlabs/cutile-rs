@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Generates CUDA Tile MLIR entry-point functions from Rust kernel signatures.
+//! Generates CUDA Tile IR entry-point functions from Rust kernel signatures.
 //! Handles tensor argument unpacking, validation, and shape/stride boilerplate.
 
 use crate::ast::SourceLocation;
@@ -120,9 +120,12 @@ impl TensorInput {
 
     pub fn validate(&self) -> Result<(), JITError> {
         if let TensorParamKind::MappedPartitionMut { .. } = &self.param_kind {
-            if self.rank != 2 {
+            // Mutable partitions are capped at rank 3 below; rank-1 and rank-2
+            // mapped partitions traverse linearly or with a grouped 2-D
+            // swizzle, rank-3 adds a linear leading axis.
+            if self.rank < 1 || self.rank > 3 {
                 return SourceLocation::unknown()
-                    .jit_error_result("swizzled MappedPartitionMut parameters must have rank 2.");
+                    .jit_error_result("MappedPartitionMut parameters must have rank 1 through 3.");
             }
         }
         if self.mutable {
@@ -451,7 +454,7 @@ fn generic_arg_to_const_array_string(arg: &GenericArgument) -> Result<String, JI
     }
 }
 
-/// Generates an MLIR entry-point wrapper for a kernel function, including tensor argument unpacking.
+/// Generates a Tile IR entry-point wrapper for a kernel function, including tensor argument unpacking.
 pub fn generate_entry_point(
     modules: &CUDATileModules,
     fn_item: &ItemFn,
@@ -659,6 +662,7 @@ pub fn generate_entry_point(
         fn_entry,
         Validator {
             params: fn_params_concrete_types,
+            launch_checks: Vec::new(),
         },
     ))
 }

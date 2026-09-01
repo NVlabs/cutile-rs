@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * CUDA graphs example — scoped capture with borrowed buffers.
  *
  * Demonstrates scope(...).graph(stream), which captures a CUDA graph
@@ -55,7 +60,7 @@ mod kernels {
         for j in 0i32..tiles {
             let t: Tile<f32, { [1, BS] }> = x_part.load([row, j]);
             let tw: Tile<f32, { [1, BS] }> = w_part.load([j]).reshape(shape);
-            unsafe { out_part.store(t * scale * tw, [0i32, j]) };
+            out_part.store(t * scale * tw, [0i32, j]);
         }
     }
 
@@ -69,13 +74,10 @@ mod kernels {
         let x_part = x.partition(const_shape![1, BK]);
         let w_part = w.partition(const_shape![BN, BK]);
         let mut acc = out.load().reshape(const_shape![BN, 1]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
         for k in 0i32..(K / BK) {
             let tx = x_part.load([0i32, k]).reshape(const_shape![1, BK]);
             let tw = w_part.load([pid.0, k]);
-            let txt: Tile<f32, { [BK, 1] }> = permute(tx, transpose);
+            let txt: Tile<f32, { [BK, 1] }> = tx.transpose();
             acc = mma(tw, txt, acc);
         }
         out.store(acc.reshape(const_shape![BN]));

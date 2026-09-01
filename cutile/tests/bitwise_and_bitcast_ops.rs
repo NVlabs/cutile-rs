@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -51,26 +49,29 @@ mod bitwise_and_bitcast_ops_module {
 
 use bitwise_and_bitcast_ops_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "bitwise_and_bitcast_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_bitwise_ops() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "bitwise_and_bitcast_ops_module",
+        let module_op_str = compile_ir(
             "bitwise_ops_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== BITWISE OPS MLIR ===\n{}", module_op_str);
 
         let expected_ops = ["andi", "ori", "xori", "shli", "shri"];
@@ -92,23 +93,7 @@ fn compile_bitwise_ops() -> () {
 #[test]
 fn compile_bitcast() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "bitwise_and_bitcast_ops_module",
-            "bitcast_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("bitcast_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== BITCAST MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -123,23 +108,11 @@ fn compile_bitcast() -> () {
 #[test]
 fn compile_shri_unsigned() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "bitwise_and_bitcast_ops_module",
+        let module_op_str = compile_ir(
             "shri_unsigned_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== SHRI UNSIGNED MLIR ===\n{}", module_op_str);
 
         assert!(

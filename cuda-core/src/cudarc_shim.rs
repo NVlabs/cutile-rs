@@ -8,6 +8,9 @@
 //\!
 //\! Thin `pub(crate)` modules around `cuda_bindings` calls. The public API
 //\! lives in [`crate::runtime`].
+//\!
+//\! CUDA driver flag bindings have platform-dependent integer types, so FFI
+//\! calls cast them as `_`.
 
 use crate::error::*;
 
@@ -181,7 +184,7 @@ pub(crate) mod ctx {
 
     /// Sets flags on the current context.
     pub fn set_flags(flags: cuda_bindings::CUctx_flags) -> Result<(), DriverError> {
-        unsafe { cuda_bindings::cuCtxSetFlags(flags).result() }
+        unsafe { cuda_bindings::cuCtxSetFlags(flags as _).result() }
     }
 
     /// Blocks until all work in the current context is complete.
@@ -228,7 +231,7 @@ pub(crate) mod stream {
     pub fn create(kind: StreamKind) -> Result<cuda_bindings::CUstream, DriverError> {
         let mut stream = MaybeUninit::uninit();
         unsafe {
-            cuda_bindings::cuStreamCreate(stream.as_mut_ptr(), kind.flags()).result()?;
+            cuda_bindings::cuStreamCreate(stream.as_mut_ptr(), kind.flags() as _).result()?;
             Ok(stream.assume_init())
         }
     }
@@ -239,6 +242,23 @@ pub(crate) mod stream {
     /// `stream` must be a valid stream handle.
     pub unsafe fn synchronize(stream: cuda_bindings::CUstream) -> Result<(), DriverError> {
         cuda_bindings::cuStreamSynchronize(stream).result()
+    }
+
+    /// Queries stream completion without blocking: `Ok(true)` when all prior
+    /// work has completed, `Ok(false)` when work is still in flight
+    /// (`CUDA_ERROR_NOT_READY`).
+    ///
+    /// # Safety
+    /// `stream` must be a valid stream handle.
+    pub unsafe fn query(stream: cuda_bindings::CUstream) -> Result<bool, DriverError> {
+        match cuda_bindings::cuStreamQuery(stream) {
+            cuda_bindings::cudaError_enum_CUDA_SUCCESS => Ok(true),
+            cuda_bindings::cudaError_enum_CUDA_ERROR_NOT_READY => Ok(false),
+            code => {
+                code.result()?;
+                unreachable!("non-error CUresult handled above")
+            }
+        }
     }
 
     /// Destroys a CUDA stream.
@@ -258,7 +278,7 @@ pub(crate) mod stream {
         event: cuda_bindings::CUevent,
         flags: cuda_bindings::CUevent_wait_flags,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuStreamWaitEvent(stream, event, flags).result()
+        cuda_bindings::cuStreamWaitEvent(stream, event, flags as _).result()
     }
 
     /// Attaches memory to a stream for managed memory visibility.
@@ -271,7 +291,7 @@ pub(crate) mod stream {
         num_bytes: usize,
         flags: cuda_bindings::CUmemAttach_flags,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuStreamAttachMemAsync(stream, dptr, num_bytes, flags).result()
+        cuda_bindings::cuStreamAttachMemAsync(stream, dptr, num_bytes, flags as _).result()
     }
 
     /// Enqueues a host function callback on the stream.
@@ -284,6 +304,23 @@ pub(crate) mod stream {
         arg: *mut c_void,
     ) -> Result<(), DriverError> {
         cuda_bindings::cuLaunchHostFunc(stream, Some(func), arg).result()
+    }
+
+    /// Enqueues a host function on the stream with an explicit sync mode.
+    ///
+    /// `sync_mode` is `CU_HOST_TASK_BLOCKING` or `CU_HOST_TASK_SPINWAIT`;
+    /// spin-wait keeps the driver's host-task thread hot for lower callback
+    /// latency at the cost of a busy core.
+    ///
+    /// # Safety
+    /// `func` and `arg` must remain valid until the callback executes.
+    pub unsafe fn launch_host_function_v2(
+        stream: cuda_bindings::CUstream,
+        func: unsafe extern "C" fn(*mut ::core::ffi::c_void),
+        arg: *mut c_void,
+        sync_mode: ::core::ffi::c_uint,
+    ) -> Result<(), DriverError> {
+        cuda_bindings::cuLaunchHostFunc_v2(stream, Some(func), arg, sync_mode).result()
     }
 
     /// Begins stream capture for graph construction.
@@ -399,7 +436,7 @@ pub(crate) mod event {
     ) -> Result<cuda_bindings::CUevent, DriverError> {
         let mut event = MaybeUninit::uninit();
         unsafe {
-            cuda_bindings::cuEventCreate(event.as_mut_ptr(), flags).result()?;
+            cuda_bindings::cuEventCreate(event.as_mut_ptr(), flags as _).result()?;
             Ok(event.assume_init())
         }
     }
@@ -636,7 +673,7 @@ pub(crate) mod memory {
         flags: sys::CUmemAttach_flags,
     ) -> Result<sys::CUdeviceptr, DriverError> {
         let mut dev_ptr = MaybeUninit::uninit();
-        sys::cuMemAllocManaged(dev_ptr.as_mut_ptr(), num_bytes, flags).result()?;
+        sys::cuMemAllocManaged(dev_ptr.as_mut_ptr(), num_bytes, flags as _).result()?;
         Ok(dev_ptr.assume_init())
     }
 

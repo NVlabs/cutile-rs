@@ -215,6 +215,6 @@ You can fuse this too.
 
 ## See also
 
-- [Writing Computations](../guide/writing-computations.md#numerically-stable-softmax) — `reduce_max`, `reduce_sum`, and broadcasting patterns
-- [Tuning for Performance](../guide/performance-tuning.md) — kernel fusion and arithmetic intensity
+- [Tensors and Tiles](../guide/tensors-and-tiles.md#numerically-stable-softmax) — `reduce_max`, `reduce_sum`, and broadcasting patterns
+- [Performance](../guide/performance.md) — kernel fusion and arithmetic intensity
 - [DSL API](../reference/dsl-api.md#reduction-and-scan) — reduction operator signatures

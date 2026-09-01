@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -25,7 +23,7 @@ mod basics_and_inlining_module {
         reshape(y, shape)
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     fn inlining_kernel<E: ElementType, const X: i32, const S: [i32; 3], const Y: i32>(
         x: f32,
         y: &mut Tensor<E, S>,
@@ -36,7 +34,7 @@ mod basics_and_inlining_module {
         other_function(tile_x, shape);
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     fn scalar_bool_condition_kernel<const CAUSAL: i32, const EVEN_K: i32>(
         output: &mut Tensor<i32, { [1] }>,
         mask_start: i32,
@@ -79,12 +77,12 @@ mod basics_and_inlining_module {
         make_tensor_view(ptr_tile, shape, strides, new_token_unordered())
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     unsafe fn inline_tensor_from_ptr_kernel<T: ElementType>(ptr: *mut T, len: i32) {
         let _tensor: Tensor<T, { [-1] }> = tensor_from_ptr(ptr, len);
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     unsafe fn ptr_partition_load_kernel<T: ElementType>(ptr: *mut T, len: i32) {
         let tensor: Tensor<T, { [-1] }> = tensor_from_ptr(ptr, len);
         let pid: (i32, i32, i32) = get_tile_block_id();
@@ -92,7 +90,20 @@ mod basics_and_inlining_module {
         let _tile = tensor.partition(tile_shape).load([pid.0]);
     }
 
-    #[cutile::entry()]
+    /// Nibble unpacking shape: shifts and masks on integer tiles and scalars.
+    #[cutile::entry]
+    unsafe fn shift_ops_kernel(x: &Tensor<i32, { [-1] }>, z: &mut Tensor<i32, { [-1] }>, s: i32) {
+        let tile: Tile<i32, { [64] }> = x.partition(const_shape![64]).load([0]);
+        let four: Tile<i32, { [64] }> = constant(4i32, const_shape![64]);
+        let mask: Tile<i32, { [64] }> = constant(0xFi32, const_shape![64]);
+        let lo = tile & mask;
+        let hi = (tile >> four) & mask;
+        let scaled = lo << four;
+        let _scalar_shift: i32 = s >> 1;
+        z.partition_mut(const_shape![64]).store(hi + scaled, [0]);
+    }
+
+    #[cutile::entry]
     unsafe fn ptr_partition_mut_store_kernel(ptr: *mut f32, len: i32) {
         let mut tensor: Tensor<f32, { [-1] }> = tensor_from_ptr(ptr, len);
         let pid: (i32, i32, i32) = get_tile_block_id();
@@ -101,18 +112,21 @@ mod basics_and_inlining_module {
         tensor.partition_mut(tile_shape).store(tile, [pid.0]);
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     unsafe fn partition_mut_store_rank3_loop_kernel<const S: [i32; 3]>(out: &mut Tensor<f32, S>) {
-        let tile_shape = const_shape![1i32, 4i32, 8i32];
-        let mut out_part: PartitionMut<f32, { [1, 4, 8] }> =
-            unsafe { out.partition_mut(tile_shape) };
+        // The tile is one slice of the `[1, 4, 8]` slab along axis 1, so the
+        // loop below sweeps that axis's four tiles exactly. Tiling by the whole
+        // slab (as this kernel once did) makes the same sweep write four times
+        // past it — silently, until stores became checked.
+        let tile_shape = const_shape![1i32, 1i32, 8i32];
+        let mut out_part: PartitionMut<f32, { [1, 1, 8] }> = out.partition_mut(tile_shape);
         for s_local in 0i32..4i32 {
-            let tile: Tile<f32, { [1, 4, 8] }> = constant(1.0, tile_shape);
-            unsafe { out_part.store(tile, [0i32, s_local, 0i32]) };
+            let tile: Tile<f32, { [1, 1, 8] }> = constant(1.0, tile_shape);
+            out_part.store(tile, [0i32, s_local, 0i32]);
         }
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     unsafe fn partition_mut_store_loaded_rank3_loop_kernel<
         const BLOCK_SIZE: i32,
         const BM_S: i32,
@@ -127,7 +141,7 @@ mod basics_and_inlining_module {
         let d_block = pid.2;
 
         let source_part = source.partition(const_shape![1, 1, BLOCK_SIZE]);
-        let mut out_part = unsafe { out.partition_mut(const_shape![1, 1, BLOCK_SIZE]) };
+        let mut out_part = out.partition_mut(const_shape![1, 1, BLOCK_SIZE]);
 
         let s_start: i32 = s_tile_idx * BM_S;
         if s_start < seq_len {
@@ -137,13 +151,13 @@ mod basics_and_inlining_module {
                     let tile = source_part
                         .load([s_global, head, d_block])
                         .reshape(const_shape![1, 1, BLOCK_SIZE]);
-                    unsafe { out_part.store(tile, [0i32, s_local, 0i32]) };
+                    out_part.store(tile, [0i32, s_local, 0i32]);
                 }
             }
         }
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     unsafe fn basics_kernel<const S: [i32; 3]>(
         y: &mut Tensor<f32, { [128, -1] }>,
         #[allow(unused_variables)] w: &Tensor<f32, S>,
@@ -391,7 +405,7 @@ mod basics_and_inlining_module {
         }
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     unsafe fn ptr_tile_reshape_kernel(ptr: *mut f32) {
         let ptr_tile: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
         let offset_ptr_tile: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr).offset(1);
@@ -401,36 +415,79 @@ mod basics_and_inlining_module {
         let _broadcast: PointerTile<*mut f32, { [128] }> = reshaped.broadcast(const_shape![128]);
     }
 
-    #[cutile::entry()]
+    #[cutile::entry]
     fn negative_constant_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let shape = output.shape();
         let _neg_float: Tile<f32, S> = constant(-1.0, shape);
         let _neg_int: Tile<i32, S> = constant(-42i32, shape);
         let _neg_suffixed: Tile<f32, S> = constant(-2.5f32, shape);
     }
+
+    // Distilled from grout's fmha_prefill_causal_mapped: `mma` unifies its
+    // shared shape params against a mix of annotation-typed values (symbolic
+    // `D`) and op-computed values (substituted `128`). Inline inference must
+    // normalize both forms of the same dimension before unifying.
+    #[cutile::entry]
+    fn symbolic_dim_mma_kernel<
+        const BM: i32,
+        const BN: i32,
+        const D: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut out: MappedPartitionMut<f16, { [BM, 1, D] }, MAP_SHAPE>,
+        q: &Tensor<f16, { [-1, -1, D] }>,
+        k: &Tensor<f16, { [-1, -1, D] }>,
+    ) {
+        let q_part: Partition<f16, { [BM, 1, D] }> = q.partition(const_shape![BM, 1, D]);
+        let k_part = k.partition(const_shape![1, BN, D]);
+        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+            dims: &[1i32, 0i32],
+        };
+        for index in out.iter_indices() {
+            let [q_m_idx, q_head_idx, _d0] = index.coords();
+            let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, const_shape![BM, D]);
+            let tq_raw: Tile<f16, { [BM, 1, D] }> = q_part.load([q_m_idx, q_head_idx, 0i32]);
+            let tq: Tile<f16, { [BM, D] }> = tq_raw.reshape(const_shape![BM, D]);
+            for j in 0i32..2i32 {
+                let k_tile: Tile<f16, { [1, BN, D] }> = k_part.load([q_head_idx, j, 0i32]);
+                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                let mut qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+                qk = mma(tq, k_trans, qk);
+                let p: Tile<f16, { [BM, BN] }> = convert_tile(qk);
+                let v_tile: Tile<f16, { [BN, D] }> = k_part
+                    .load([q_head_idx, j, 0i32])
+                    .reshape(const_shape![BN, D]);
+                acc = mma(p, v_tile, acc);
+            }
+            let out_tile: Tile<f16, { [BM, 1, D] }> =
+                convert_tile(acc.reshape(const_shape![BM, 1, D]));
+            out.store(out_tile, index);
+        }
+    }
 }
 
 use basics_and_inlining_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "basics_and_inlining_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_inline_tensor_from_ptr_helper() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "inline_tensor_from_ptr_kernel",
-            &["f32".to_string()],
-            &[],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("inline_tensor_from_ptr_kernel", &["f32".to_string()], &[]);
         assert!(
             module_op_str.contains("make_tensor_view"),
             "Expected inlined pointer helper to emit make_tensor_view.\n{module_op_str}"
@@ -442,22 +499,7 @@ fn compile_inline_tensor_from_ptr_helper() -> () {
 #[test]
 fn compile_ptr_partition_load_helper() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "ptr_partition_load_kernel",
-            &["f32".to_string()],
-            &[],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("ptr_partition_load_kernel", &["f32".to_string()], &[]);
         assert!(
             module_op_str.contains("make_partition_view"),
             "Expected partition helper to emit make_partition_view.\n{module_op_str}"
@@ -470,24 +512,25 @@ fn compile_ptr_partition_load_helper() -> () {
 }
 
 #[test]
+fn compile_shift_ops_kernel() -> () {
+    common::with_test_stack(|| {
+        let module_op_str =
+            compile_ir("shift_ops_kernel", &[], &[("x", &[1][..]), ("z", &[1][..])]);
+        assert!(
+            module_op_str.contains("shri"),
+            "Expected `>>` to lower to shri.\n{module_op_str}"
+        );
+        assert!(
+            module_op_str.contains("shli"),
+            "Expected `<<` to lower to shli.\n{module_op_str}"
+        );
+    });
+}
+
+#[test]
 fn compile_ptr_partition_mut_store_helper() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "ptr_partition_mut_store_kernel",
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("ptr_partition_mut_store_kernel", &[], &[]);
         assert!(
             module_op_str.contains("make_partition_view"),
             "Expected mutable partition helper to emit make_partition_view.\n{module_op_str}"
@@ -502,22 +545,11 @@ fn compile_ptr_partition_mut_store_helper() -> () {
 #[test]
 fn compile_partition_mut_store_rank3_loop() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "partition_mut_store_rank3_loop_kernel",
             &[1.to_string(), 4.to_string(), 8.to_string()],
             &[("out", &[1, 4, 8])],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         assert!(
             module_op_str.contains("store_view_tko"),
             "Expected partition store helper to emit store_view_tko.\n{module_op_str}"
@@ -528,22 +560,11 @@ fn compile_partition_mut_store_rank3_loop() -> () {
 #[test]
 fn compile_partition_mut_store_loaded_rank3_loop() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "partition_mut_store_loaded_rank3_loop_kernel",
             &[8.to_string(), 4.to_string()],
             &[("source", &[16, 16, 8]), ("out", &[1, 4, 8])],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         assert!(
             module_op_str.contains("store_view_tko"),
             "Expected partition store helper to emit store_view_tko.\n{module_op_str}"
@@ -554,11 +575,7 @@ fn compile_partition_mut_store_loaded_rank3_loop() -> () {
 #[test]
 fn compile_inlining() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "inlining_kernel",
             &[
                 "f32".to_string(),
@@ -569,14 +586,7 @@ fn compile_inlining() -> () {
                 2.to_string(),
             ],
             &[("y", &[1024, 1, 1])],
-            &[],
-            &[],
-            None,
-            "sm_120".to_string(),
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("{module_op_str}");
     });
 }
@@ -584,23 +594,11 @@ fn compile_inlining() -> () {
 #[test]
 fn compile_scalar_bool_condition() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "scalar_bool_condition_kernel",
             &[1.to_string(), 0.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("{module_op_str}");
     });
 }
@@ -608,23 +606,11 @@ fn compile_scalar_bool_condition() -> () {
 #[test]
 fn compile_basics() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "basics_kernel",
             &[128.to_string(), 256.to_string(), 512.to_string()],
             &[("y", &[1024, 1]), ("w", &[1, 2, 3])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("{module_op_str}");
     });
 }
@@ -632,26 +618,11 @@ fn compile_basics() -> () {
 #[test]
 fn compile_negative_constant() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
+        let module_op_str = compile_ir(
             "negative_constant_kernel",
             &[128.to_string()],
             &[("output", &[1024])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler
-            .compile()
-            .expect("Failed to compile negative constant kernel.")
-            .to_string();
+        );
         assert!(module_op_str.contains("-1.0"));
         println!("{module_op_str}");
     });
@@ -660,23 +631,7 @@ fn compile_negative_constant() -> () {
 #[test]
 fn compile_ptr_tile_reshape() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "basics_and_inlining_module",
-            "ptr_tile_reshape_kernel",
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("ptr_tile_reshape_kernel", &[], &[]);
         println!("{module_op_str}");
         assert!(
             module_op_str.contains("reshape") && module_op_str.contains("tile<ptr<f32>>"),
@@ -685,6 +640,83 @@ fn compile_ptr_tile_reshape() -> () {
         assert!(
             module_op_str.contains("broadcast"),
             "Expected broadcast operation on pointer tile type"
+        );
+    });
+}
+
+#[test]
+fn symbolic_dim_mma_unifies_substituted_and_symbolic_shapes() {
+    common::with_test_stack(|| {
+        let mlir = compile_ir(
+            "symbolic_dim_mma_kernel",
+            &[
+                "16".to_string(),
+                "32".to_string(),
+                "128".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ],
+            &[
+                ("out", &[128, 128, 1]),
+                ("q", &[512, 128, 1]),
+                ("k", &[512, 128, 1]),
+            ],
+        );
+        assert!(
+            mlir.contains("mma"),
+            "expected an mma op in the symbolic-dim kernel:\n{mlir}"
+        );
+    });
+}
+
+// The bytecode debug section must chain "inlined at" info: ops compiled
+// from other_function's body carry a CallSite linking their own source
+// line to the call expression inside inlining_kernel.
+#[test]
+fn inlined_ops_carry_call_site_debug_info() {
+    common::with_test_stack(|| {
+        let artifacts = cutile_compiler::compile_api::KernelCompiler::new(
+            __module_ast_self,
+            "basics_and_inlining_module",
+            "inlining_kernel",
+        )
+        .target("sm_120")
+        .generics(vec![
+            "f32".into(),
+            "1".into(),
+            "128".into(),
+            "256".into(),
+            "512".into(),
+            "2".into(),
+        ])
+        .strides(&[("y", &[1024, 1, 1])])
+        .compile()
+        .expect("compile inlining_kernel");
+        let bytecode = artifacts.bytecode().expect("bytecode");
+        let dump =
+            cutile_ir::bytecode::decoder::decode_bytecode(&bytecode).expect("decode bytecode");
+
+        assert!(
+            dump.contains("CallSite(callee=di["),
+            "inlined ops must carry a call-site chain:\n{dump}"
+        );
+        // Both frames name this test file: the callee op (reshape inside
+        // other_function) and the caller (the call in inlining_kernel).
+        assert!(
+            dump.contains("basics_and_inlining.rs"),
+            "debug locations must name the source file:\n{dump}"
+        );
+        assert!(
+            dump.contains(r#"name="inlining_kernel", linkage="inlining_kernel_entry""#),
+            "subprogram must pair user name with the entry symbol:\n{dump}"
+        );
+        // The inlined callee gets its OWN subprogram (with a synthetic
+        // linkage name — it has no symbol), so inline debug frames name
+        // other_function, not the kernel entry.
+        assert!(
+            dump.contains(r#"name="other_function", linkage="other_function@"#),
+            "inlined ops must be scoped to the callee's subprogram:\n{dump}"
         );
     });
 }

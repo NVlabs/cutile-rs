@@ -204,7 +204,7 @@ use crate::api::{copy_device_to_host_vec, copy_host_vec_to_device};
 use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
-use cuda_async::device_buffer::{DeviceBuffer, DevicePointer};
+use cuda_async::device_buffer::{DeviceAllocation, DeviceBuffer, DevicePointer};
 use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
 use cuda_core::sys::CUdeviceptr;
@@ -253,9 +253,30 @@ pub struct Partition<T> {
     pub(crate) object: T,
     pub partition_shape: Vec<usize>,
     pub partition_strides: Vec<usize>,
+    /// `true` iff this binding opted into partial coverage
+    /// ([`IntoPartition::partition_prefix`]): the launch grid may be a
+    /// per-axis PREFIX of this partition's block grid instead of equal to
+    /// it. Launched blocks embed identically; blocks beyond the launch grid
+    /// are simply never visited (they keep their prior contents).
+    pub(crate) prefix_coverage: bool,
 }
 
 impl<T> Partition<T> {
+    /// Opts this binding into partial coverage: the launch grid may be a
+    /// per-axis PREFIX of the inferred block grid (`launch <= inferred` on
+    /// every axis) instead of equal to it. Launched blocks map to exactly
+    /// the blocks they would under full coverage — a per-axis prefix is the
+    /// identity embedding into the block grid, so exclusivity and
+    /// disjointness are unchanged — and blocks beyond the launch grid are
+    /// never visited, keeping their prior contents. Exceeding the inferred
+    /// grid on ANY axis remains a hard launch error: that direction is
+    /// genuine out-of-bounds. Prefer the [`IntoPartition::partition_prefix`]
+    /// spelling at call sites.
+    pub fn prefix(mut self) -> Self {
+        self.prefix_coverage = true;
+        self
+    }
+
     /// Unwraps the partition to retrieve the underlying object.
     ///
     /// This consumes the partition and returns the original tensor or value.
@@ -279,11 +300,27 @@ impl<T> Partition<T> {
     /// // Launch 8 tile blocks to traverse the mapped output tiles.
     /// let output = z.partition([32, 64]).map([4, 1], 8);
     /// ```
+    ///
+    /// A map dimension of [`OWNED`] marks an owned axis: the axis is not
+    /// traversed by the work-item stream; each stream item owns the axis's
+    /// full extent (subtensor-per-CTA exclusivity). `iter_indices()` then
+    /// yields one item per streamed-axes coordinate, and the owned axes are
+    /// traversed by in-kernel loops:
+    ///
+    /// ```rust,ignore
+    /// // One stream item per axis-0 tile; each item owns all of axis 1.
+    /// let output = z.partition([1, 2048]).map([1, OWNED], rows);
+    /// ```
     pub fn map<const RANK: usize>(
         self,
         map_shape: [usize; RANK],
         num_tile_blocks: u32,
     ) -> MappedLaunchPartition<Self> {
+        assert!(
+            !self.prefix_coverage,
+            "a partial-coverage (prefix) partition cannot be mapped: a mapped \
+             schedule covers its full index space by construction"
+        );
         MappedLaunchPartition {
             partition: self,
             map_shape: map_shape.to_vec(),
@@ -291,6 +328,14 @@ impl<T> Partition<T> {
         }
     }
 }
+
+/// Map-shape sentinel marking an owned axis.
+///
+/// An owned axis is not traversed by the mapped work-item stream: each stream
+/// item owns the axis's full extent, so in-kernel loops traverse it with
+/// plain (`Dim`-bounded) indices while the minted stream index proves
+/// disjointness on the streamed axes only.
+pub const OWNED: usize = 0;
 
 /// Host-side mapped partition launch argument.
 ///
@@ -310,29 +355,45 @@ impl<P> MappedLaunchPartition<P> {
         partition_grid: (u32, u32, u32),
         num_tile_blocks: u32,
     ) -> Result<(u32, u32, u32), Error> {
-        if self.map_shape.len() != 2 {
-            return tensor_error_result("mapped partitions currently require a 2D map shape.");
-        }
-        if self.map_shape.iter().any(|&dim| dim == 0) {
-            return tensor_error_result("mapped partition requires positive map dimensions.");
-        }
-        if partition_grid.0 == 0 || partition_grid.1 == 0 || partition_grid.2 != 1 {
+        let map_rank = self.map_shape.len();
+        if map_rank == 0 || map_rank > 3 {
             return tensor_error_result(
-                "mapped partition requires a non-empty 2D logical partition grid.",
+                "mapped partitions require a rank-1 through rank-3 map shape.",
             );
         }
-        let total_tiles = partition_grid
-            .0
-            .checked_mul(partition_grid.1)
+        // A map dimension of OWNED (0) marks an owned axis: not traversed by
+        // the stream, so it contributes nothing to the streamed tile count.
+        if self.map_shape.iter().all(|&dim| dim == OWNED) {
+            return tensor_error_result(
+                "mapped partition requires at least one streamed (non-OWNED) map axis.",
+            );
+        }
+        let grid_axes = [partition_grid.0, partition_grid.1, partition_grid.2];
+        if grid_axes.iter().take(map_rank).any(|&axis| axis == 0) {
+            return tensor_error_result(
+                "mapped partition requires a non-empty logical partition grid.",
+            );
+        }
+        if grid_axes.iter().skip(map_rank).any(|&axis| axis != 1) {
+            return tensor_error_result(
+                "mapped partition map rank must match the logical partition grid rank.",
+            );
+        }
+        let streamed_tiles = grid_axes
+            .iter()
+            .zip(self.map_shape.iter())
+            .filter(|&(_, &map_dim)| map_dim != OWNED)
+            .map(|(&axis, _)| axis)
+            .try_fold(1u32, |total, axis| total.checked_mul(axis))
             .ok_or_else(|| {
                 crate::error::tensor_error("mapped partition logical grid is too large")
             })?;
         if num_tile_blocks == 0 {
             return tensor_error_result("mapped partition requires num_tile_blocks > 0.");
         }
-        if num_tile_blocks > total_tiles {
+        if num_tile_blocks > streamed_tiles {
             return tensor_error_result(
-                "mapped partition num_tile_blocks cannot exceed the logical partition tile count.",
+                "mapped partition num_tile_blocks cannot exceed the streamed logical tile count.",
             );
         }
         Ok((num_tile_blocks, 1, 1))
@@ -429,6 +490,19 @@ pub trait IntoPartition {
     fn partition<const RANK: usize>(self, partition_shape: [usize; RANK]) -> Partition<Self>
     where
         Self: Sized;
+
+    /// Partitions with PARTIAL coverage: the launch grid may be a per-axis
+    /// prefix of the block grid instead of equal to it (see
+    /// [`Partition::prefix`] for the contract). The strict-equality
+    /// diagnostic of [`Self::partition`] remains the default; this spelling
+    /// is the explicit opt-in for kernels that deliberately cover only an
+    /// aligned prefix and leave the remainder to another kernel.
+    fn partition_prefix<const RANK: usize>(self, partition_shape: [usize; RANK]) -> Partition<Self>
+    where
+        Self: Sized,
+    {
+        self.partition(partition_shape).prefix()
+    }
 }
 
 /// Enables partitioning an `Arc`-wrapped value into tiles.
@@ -499,9 +573,81 @@ pub trait IntoPartitionArc {
 /// ```
 pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
 
+/// Backing storage for a [`Tensor`].
+///
+/// A tensor is normally backed by a real GPU allocation (`Device`). The `Meta`
+/// variant carries only the byte length and device id — no device memory — and
+/// is produced by [`crate::api::meta`] for kernel warmup: it lets `.compile()`
+/// build the cache key from shape/stride/spec metadata without allocating.
+///
+/// Reading the device pointer of a `Meta` tensor panics. `cu_deviceptr` is only
+/// reached on real execution paths (kernel launch arg push, host copies), so a
+/// meta tensor is accepted by `.compile()` (metadata only) yet rejected the
+/// moment anything tries to actually run it. Reshape/view/slice recompute spec
+/// through `spec_ptr` instead, which never dereferences.
+#[derive(Debug)]
+pub(crate) enum Storage {
+    /// A real, owned GPU allocation.
+    Device(DeviceBuffer),
+    /// Metadata-only placeholder: valid shape/stride/spec, no device memory.
+    Meta { len_bytes: usize, device_id: usize },
+}
+
+impl Storage {
+    /// 16-aligned sentinel address fed to [`compute_spec`] for meta tensors.
+    ///
+    /// `DivHint::from_ptr` clamps pointer alignment to 16, and every
+    /// cutile-owned device allocation is >=16-byte aligned, so this yields
+    /// the exact same `base_ptr_div` an owned tensor would — keeping the
+    /// warmup cache key byte-identical to the launch key. Foreign/borrowed
+    /// pointers (`from_foreign`, `borrow_raw_parts`) may be less aligned;
+    /// they get their own measured `base_ptr_div` and therefore their own
+    /// specialization — a warmup-key mismatch at worst, never wrong code —
+    /// so the sentinel deliberately reflects only the owned common case.
+    const META_SPEC_PTR: u64 = 16;
+
+    fn len_bytes(&self) -> usize {
+        match self {
+            Storage::Device(b) => b.len_bytes(),
+            Storage::Meta { len_bytes, .. } => *len_bytes,
+        }
+    }
+
+    fn device_id(&self) -> usize {
+        match self {
+            Storage::Device(b) => b.device_id(),
+            Storage::Meta { device_id, .. } => *device_id,
+        }
+    }
+
+    fn cu_deviceptr(&self) -> CUdeviceptr {
+        match self {
+            Storage::Device(b) => b.cu_deviceptr(),
+            Storage::Meta { .. } => panic!(
+                "cutile: read of a meta tensor's device pointer. Meta tensors \
+                 (api::meta) carry only shape/stride metadata for warmup via \
+                 `.compile()`; they have no device memory and cannot be launched \
+                 or copied. Use a real tensor (api::zeros/ones/...) on `.sync()` \
+                 / `.await` paths."
+            ),
+        }
+    }
+
+    /// Pointer for recomputing [`compute_spec`] on reshape/view/slice — never
+    /// dereferenced, so unlike [`cu_deviceptr`](Self::cu_deviceptr) it doesn't
+    /// panic on `Meta`. Meta returns the sentinel, keeping warmup of reshaping
+    /// kernels on the meta path with a `base_ptr_div` that matches a real tensor's.
+    fn spec_ptr(&self) -> CUdeviceptr {
+        match self {
+            Storage::Device(b) => b.cu_deviceptr(),
+            Storage::Meta { .. } => Storage::META_SPEC_PTR,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
-    pub(crate) storage: Arc<DeviceBuffer>,
+    pub(crate) storage: Arc<Storage>,
     pub(crate) shape: Vec<i32>,
     pub(crate) strides: Vec<i32>,
     pub(crate) spec: SpecializationBits,
@@ -552,6 +698,41 @@ fn checked_num_bytes_i32<T>(shape: &[i32]) -> Result<usize, Error> {
         .ok_or_else(|| crate::error::tensor_error("Tensor byte size overflowed usize."))
 }
 
+// Largest byte extent any element of `(shape, strides)` addresses from the base
+// pointer: `(1 + Σ (shape[i]-1) * strides[i]) * size_of::<T>()`. Strides can
+// push this beyond `product(shape) * size_of::<T>()`, so it — not the logical
+// size — is what a backing allocation must cover. Assumes non-negative strides
+// (a negative stride would place addresses below the base, which the safe
+// `from_foreign` cannot bound; empty shapes address nothing).
+fn addressable_bytes<T>(shape: &[i32], strides: &[i32]) -> usize {
+    assert_eq!(
+        shape.len(),
+        strides.len(),
+        "Tensor shape/stride rank mismatch."
+    );
+    if shape.iter().any(|&d| d <= 0) {
+        return 0;
+    }
+    // Checked throughout: shape/strides are caller-supplied metadata, and a
+    // wrap here would UNDERSTATE the extent — admitting an out-of-bounds
+    // borrow through the safe validation this function exists to provide.
+    let mut max_elem_offset: usize = 0;
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        assert!(
+            stride >= 0,
+            "from_foreign requires non-negative strides; use borrow_raw_parts for negative-stride views."
+        );
+        max_elem_offset = (dim as usize - 1)
+            .checked_mul(stride as usize)
+            .and_then(|off| max_elem_offset.checked_add(off))
+            .expect("Tensor addressable extent overflowed usize.");
+    }
+    max_elem_offset
+        .checked_add(1)
+        .and_then(|elems| elems.checked_mul(size_of::<T>()))
+        .expect("Tensor addressable extent overflowed usize.")
+}
+
 impl<T: DType> Tensor<T> {
     // Enforces the core tensor invariant: shape/stride ranks must agree and the logical
     // typed byte size must exactly match the backing storage byte length.
@@ -570,15 +751,16 @@ impl<T: DType> Tensor<T> {
         );
     }
 
-    /// Wraps an owned byte allocation as a tensor after validating that the supplied
-    /// shape/stride metadata is consistent with the allocation size.
+    /// Wraps a byte allocation (owned, foreign, or raw-borrowed) as a tensor after
+    /// validating that the supplied shape/stride metadata is consistent with the
+    /// allocation's logical size.
     pub(crate) fn from_device_buffer(
         device_buffer: DeviceBuffer,
         shape: Vec<i32>,
         strides: Vec<i32>,
     ) -> Self {
         Self::assert_valid_metadata(&shape, &strides, device_buffer.len_bytes());
-        let storage = Arc::new(device_buffer);
+        let storage = Arc::new(Storage::Device(device_buffer));
         let spec = compute_spec(
             storage.cu_deviceptr(),
             &shape,
@@ -609,6 +791,148 @@ impl<T: DType> Tensor<T> {
             shape,
             strides,
         )
+    }
+
+    /// Low-level, `unsafe` borrow of a bare device pointer as a tensor, without
+    /// taking ownership: dropping the returned tensor — or any tensor sharing
+    /// its storage — never frees `dptr`. The byte length is derived from `shape`
+    /// and `T`.
+    ///
+    /// **Prefer [`from_foreign`](Self::from_foreign)** when the memory has an
+    /// owner object (a cudarc buffer, a torch storage, ...): it holds that
+    /// owner alive, so validity and liveness are verified at construction and
+    /// only the aliasing obligation remains. Reach for `borrow_raw_parts` only
+    /// when you hold a bare pointer with no owner to hand over, and can uphold
+    /// every obligation below yourself.
+    ///
+    /// # Safety
+    /// Unlike `Vec::from_raw_parts`, this does **not** transfer ownership of
+    /// `dptr` to cutile — it is a borrow. The caller keeps ownership and must
+    /// uphold all of the following for the entire lifetime of the returned
+    /// tensor *and everything derived from it* (clones, partitions,
+    /// `TensorView`s, and any `DeviceOp` built from them):
+    ///
+    /// - **Validity.** `dptr` points to device memory on `device_id` valid for
+    ///   every byte the view can address. With non-negative strides that is
+    ///   `(1 + Σ (shape[i]-1)·strides[i]) · size_of::<T>()` bytes from `dptr`,
+    ///   which strides can push well past `product(shape) · size_of::<T>()`.
+    ///   A negative stride additionally addresses BELOW `dptr`; bounding that
+    ///   region is entirely the caller's problem (the safe `from_foreign`
+    ///   refuses negative strides for exactly this reason).
+    /// - **Liveness.** The allocation stays mapped at `dptr` — never freed,
+    ///   reallocated, or resized by its owner — until *every* cutile operation
+    ///   referencing it has completed. Launches are asynchronous, so
+    ///   "completed" means past the final stream synchronize / `.await`, not
+    ///   the return of the builder call.
+    /// - **Aliasing.** While this tensor (or a partition of it) is used as a
+    ///   mutable output, the owner must not read or write the same memory
+    ///   through any other path — its own kernels, copies, or host access —
+    ///   until that work completes. An immutable (`&Tensor`) use only requires
+    ///   that the owner not mutate the memory concurrently. cutile cannot see
+    ///   the foreign owner, so this aliasing-XOR-mutability obligation is the
+    ///   caller's to enforce.
+    /// - **Freeing.** cutile never frees a borrowed allocation; the owner frees
+    ///   it exactly once, after all cutile work above has completed.
+    ///
+    /// [`Device::borrow_raw`]: cuda_core::Device::borrow_raw
+    /// [`Stream::borrow_raw`]: cuda_core::Stream::borrow_raw
+    pub unsafe fn borrow_raw_parts(
+        dptr: CUdeviceptr,
+        device_id: usize,
+        shape: Vec<i32>,
+        strides: Vec<i32>,
+    ) -> Self {
+        let len_bytes = checked_num_bytes_i32::<T>(&shape)
+            .expect("Tensor shape contains invalid dimensions or overflows.");
+        Self::from_device_buffer(
+            DeviceBuffer::borrowed_from_raw_parts(dptr, len_bytes, device_id),
+            shape,
+            strides,
+        )
+    }
+
+    /// Wraps device memory owned by an external framework (cudarc, torch, a VMM
+    /// allocation, ...) as a tensor, holding the owner alive so the memory
+    /// provably outlives every use — **no copy, no ownership transfer**.
+    ///
+    /// This is the preferred interop entry point: compared to
+    /// [`borrow_raw_parts`](Self::borrow_raw_parts) (a bare pointer, every
+    /// obligation on the caller), almost everything here is verified at
+    /// construction. `owner` implements [`DeviceAllocation`] — the one-time
+    /// pointer-validity assertion — and holding it keeps the allocation mapped
+    /// for the whole life of this tensor and everything derived from it
+    /// (clones, partitions, `DeviceOp`s). Liveness is therefore a refcount
+    /// fact established at construction, not an ongoing obligation; only the
+    /// aliasing clause below remains, which is why the function is `unsafe`.
+    ///
+    /// # Safety
+    /// Everything positional is verified at construction: the pointer, length,
+    /// and device ordinal come from `owner`'s one-time
+    /// [`DeviceAllocation`] assertion; liveness is the held refcount; and the
+    /// shape/stride addressable extent is checked (overflow-checked) against
+    /// `owner.len_bytes()` right here. What cannot be verified at any call
+    /// boundary is the TEMPORAL obligation, and it is why this function is
+    /// `unsafe` — the same line `std` draws for `slice::from_raw_parts`, which
+    /// stays `unsafe` even with a known-good pointer because
+    /// aliasing-for-the-duration is not checkable at construction:
+    ///
+    /// - While any cutile work launched from this tensor (or anything derived
+    ///   from it) **writes** the borrowed bytes, no other party — the owner,
+    ///   another `from_foreign` tensor over the same memory, host copies —
+    ///   may read or write them; while cutile work **reads** them, no other
+    ///   party may write them. "Until the work completes" means past the
+    ///   final stream synchronize / `.await`, not the builder-call return.
+    ///
+    /// Constructing two tensors over the same allocation and using either as
+    /// a mutable output is a data race the type system cannot see: distinct
+    /// storages defeat the unique-storage check that protects owned tensors.
+    pub unsafe fn from_foreign(
+        owner: Arc<dyn DeviceAllocation>,
+        shape: Vec<i32>,
+        strides: Vec<i32>,
+    ) -> Self {
+        let len_bytes = checked_num_bytes_i32::<T>(&shape)
+            .expect("Tensor shape contains invalid dimensions or overflows.");
+        // Validate the *addressable* extent (which strides can grow beyond the
+        // shape product), not just the logical size — otherwise a strided borrow
+        // could address past `owner`'s allocation from safe code.
+        let extent_bytes = addressable_bytes::<T>(&shape, &strides);
+        assert!(
+            owner.len_bytes() >= extent_bytes,
+            "foreign allocation ({} bytes) is smaller than the tensor's addressable extent \
+             ({extent_bytes} bytes for the given shape/strides)",
+            owner.len_bytes(),
+        );
+        Self::from_device_buffer(DeviceBuffer::foreign(owner, len_bytes), shape, strides)
+    }
+
+    /// Builds a metadata-only tensor (no GPU allocation) with contiguous strides.
+    ///
+    /// Backed by [`Storage::Meta`]. The spec is computed against a fixed
+    /// 16-aligned sentinel pointer so the resulting cache key matches a real
+    /// allocation's. Only usable for warmup via `.compile()`; any launch or copy
+    /// panics when it reads the (absent) device pointer.
+    pub(crate) fn from_meta(shape: Vec<i32>, device_id: usize) -> Self {
+        let strides = contiguous_strides(&shape);
+        let len_bytes = checked_num_bytes_i32::<T>(&shape)
+            .expect("Tensor shape contains invalid dimensions or overflows.");
+        Self::assert_valid_metadata(&shape, &strides, len_bytes);
+        let spec = compute_spec(
+            Storage::META_SPEC_PTR,
+            &shape,
+            &strides,
+            size_of::<T>() as i32,
+        );
+        Self {
+            storage: Arc::new(Storage::Meta {
+                len_bytes,
+                device_id,
+            }),
+            shape,
+            strides,
+            spec,
+            _dtype: PhantomData,
+        }
     }
 
     // Returns the physical byte length of the shared backing allocation.
@@ -651,8 +975,10 @@ impl<T: DType> Tensor<T> {
         if target_num_bytes != self.typed_num_bytes() {
             return tensor_error_result("Reinterpret shape must preserve total byte size.");
         }
+        // spec_ptr, not cu_deviceptr: the sentinel satisfies every DType's
+        // alignment (like a real >=256-aligned allocation) without panicking on meta.
         let alignment = align_of::<U>() as u64;
-        if alignment > 1 && self.cu_deviceptr() % alignment != 0 {
+        if alignment > 1 && self.storage.spec_ptr() % alignment != 0 {
             return tensor_error_result(
                 "Tensor storage alignment is incompatible with reinterpret target type.",
             );
@@ -782,7 +1108,7 @@ impl<T: DType> Tensor<T> {
         let shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         self.strides = contiguous_strides(&shape);
         self.spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &shape,
             &self.strides,
             size_of::<T>() as i32,
@@ -798,7 +1124,7 @@ impl<T: DType> Tensor<T> {
         let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -824,7 +1150,7 @@ impl<T: DType> Tensor<T> {
         let new_shape: Vec<i32> = shape.iter().map(|x| *x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<U>() as i32,
@@ -957,7 +1283,7 @@ impl<'a, T: DType> TensorView<'a, T> {
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.base.storage.cu_deviceptr(),
+            self.base.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -991,7 +1317,7 @@ impl<'a, T: DType> TensorView<'a, T> {
         }
         let new_strides = self.strides.clone();
         let spec = compute_spec(
-            self.base.storage.cu_deviceptr()
+            self.base.storage.spec_ptr()
                 + (self.offset_bytes + offset_elems * size_of::<T>()) as u64,
             &new_shape,
             &new_strides,
@@ -1021,7 +1347,7 @@ impl<T: DType> Tensor<T> {
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
-            self.storage.cu_deviceptr(),
+            self.storage.spec_ptr(),
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -1055,7 +1381,7 @@ impl<T: DType> Tensor<T> {
         }
         let new_strides = self.strides.clone();
         let spec = compute_spec(
-            self.storage.cu_deviceptr() + (offset_elems * size_of::<T>()) as u64,
+            self.storage.spec_ptr() + (offset_elems * size_of::<T>()) as u64,
             &new_shape,
             &new_strides,
             size_of::<T>() as i32,
@@ -1083,6 +1409,7 @@ impl<T: DType> IntoPartitionArc for Tensor<T> {
             object: tensor,
             partition_shape,
             partition_strides,
+            prefix_coverage: false,
         }
     }
 }
@@ -1096,6 +1423,7 @@ impl<T: DType> IntoPartition for Tensor<T> {
             object: self,
             partition_shape,
             partition_strides,
+            prefix_coverage: false,
         }
     }
 }
@@ -1109,6 +1437,18 @@ pub trait PartitionMut<'a, T: DType> {
         self,
         partition_shape: [usize; RANK],
     ) -> Partition<&'a mut Tensor<T>>;
+
+    /// Partial-coverage variant of [`Self::partition`]; see
+    /// [`IntoPartition::partition_prefix`].
+    fn partition_prefix<const RANK: usize>(
+        self,
+        partition_shape: [usize; RANK],
+    ) -> Partition<&'a mut Tensor<T>>
+    where
+        Self: Sized,
+    {
+        self.partition(partition_shape).prefix()
+    }
 }
 
 impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
@@ -1122,6 +1462,7 @@ impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
             object: self,
             partition_shape,
             partition_strides,
+            prefix_coverage: false,
         }
     }
 }
@@ -1331,9 +1672,27 @@ use cuda_async::launch::AsyncKernelLaunch;
 /// |---|---|---|
 /// | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` |
 /// | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` |
+/// A partition binding's constraint on the launch grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridBound {
+    /// The launch grid must EQUAL this per axis — full coverage, the
+    /// default, and the diagnostic that catches accidental mismatches.
+    Exact((u32, u32, u32)),
+    /// The launch grid may be a per-axis PREFIX of this (opt-in via
+    /// `partition_prefix`). `launch > bound` on any axis is a launch error:
+    /// that direction is genuine out-of-bounds.
+    AtMost((u32, u32, u32)),
+}
+
 pub trait KernelOutputStored<T: DType>: Send {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn grid(&self) -> Result<(u32, u32, u32), Error>;
+    /// This binding's launch-grid constraint. Defaults to exact coverage;
+    /// only bindings that explicitly opted into partial coverage return
+    /// [`GridBound::AtMost`].
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        Ok(GridBound::Exact(self.grid()?))
+    }
     fn map_shape_as_i32(&self) -> Option<Vec<i32>> {
         None
     }
@@ -1352,6 +1711,15 @@ pub trait KernelOutput<T: DType>: Send + Sized {
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        let grid = KernelOutputStored::grid(self)?;
+        Ok(if self.prefix_coverage {
+            GridBound::AtMost(grid)
+        } else {
+            GridBound::Exact(grid)
+        })
+    }
+
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());
@@ -1414,6 +1782,15 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
 }
 
 impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        let grid = KernelOutputStored::grid(self)?;
+        Ok(if self.prefix_coverage {
+            GridBound::AtMost(grid)
+        } else {
+            GridBound::Exact(grid)
+        })
+    }
+
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());
@@ -1764,6 +2141,66 @@ impl<'a, T: DType + Sync> IntoDeviceOp<&'a TensorView<'a, T>> for &'a TensorView
 mod tests {
     use super::*;
 
+    // A fake foreign allocation with a caller-chosen byte length; the pointer is
+    // never dereferenced on the metadata-only paths exercised here.
+    struct FakeAlloc {
+        len_bytes: usize,
+    }
+    unsafe impl DeviceAllocation for FakeAlloc {
+        fn device_ptr(&self) -> CUdeviceptr {
+            16 // 16-aligned sentinel; not dereferenced in from_foreign's spec calc
+        }
+        fn len_bytes(&self) -> usize {
+            self.len_bytes
+        }
+        fn device_id(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn addressable_bytes_accounts_for_strides() {
+        // Contiguous 4-element f32: extent == logical size.
+        assert_eq!(addressable_bytes::<f32>(&[4], &[1]), 4 * 4);
+        // Strided: last element at offset (4-1)*10 = 30, extent 31 elements.
+        assert_eq!(addressable_bytes::<f32>(&[4], &[10]), 31 * 4);
+        // Empty shape addresses nothing.
+        assert_eq!(addressable_bytes::<f32>(&[0], &[1]), 0);
+    }
+
+    #[test]
+    fn from_foreign_accepts_allocation_covering_strided_extent() {
+        // 4 elements at stride 10 → needs 31 f32 = 124 bytes.
+        let owner: Arc<dyn DeviceAllocation> = Arc::new(FakeAlloc { len_bytes: 124 });
+        // SAFETY: metadata-only test; the pointer is never dereferenced and
+        // nothing else aliases the fake allocation.
+        let _t = unsafe { Tensor::<f32>::from_foreign(owner, vec![4], vec![10]) };
+    }
+
+    #[test]
+    #[should_panic(expected = "addressable extent")]
+    fn from_foreign_rejects_strides_overrunning_allocation() {
+        // Logical size is 16 bytes, but stride 10 addresses 124 bytes; an owner
+        // that only covers the logical size must be rejected at construction.
+        let owner: Arc<dyn DeviceAllocation> = Arc::new(FakeAlloc { len_bytes: 16 });
+        // SAFETY: as above — construction panics before any use.
+        let _t = unsafe { Tensor::<f32>::from_foreign(owner, vec![4], vec![10]) };
+    }
+
+    #[test]
+    #[should_panic(expected = "addressable extent overflowed")]
+    fn from_foreign_rejects_extent_overflow_instead_of_wrapping() {
+        // Two i32::MAX-by-i32::MAX axes: the element offset sum (~2^63) fits
+        // usize, but ×size_of::<f32>() wraps past 2^64. Unchecked arithmetic
+        // would wrap to a tiny extent and ACCEPT this against a 16-byte owner
+        // — an out-of-bounds borrow through the constructed-time validation.
+        let owner: Arc<dyn DeviceAllocation> = Arc::new(FakeAlloc { len_bytes: 16 });
+        // SAFETY: construction panics before any use.
+        let _t = unsafe {
+            Tensor::<f32>::from_foreign(owner, vec![i32::MAX, i32::MAX], vec![i32::MAX, i32::MAX])
+        };
+    }
+
     #[test]
     fn swizzle_accepts_tile_block_count() {
         let partition = MappedLaunchPartition {
@@ -1785,7 +2222,55 @@ mod tests {
         let err = partition.validate((2, 3, 1), 7).unwrap_err();
         assert!(err
             .to_string()
-            .contains("num_tile_blocks cannot exceed the logical partition tile count"));
+            .contains("num_tile_blocks cannot exceed the streamed logical tile count"));
+    }
+
+    #[test]
+    fn owned_axis_excluded_from_streamed_tile_count() {
+        // Axis 1 is OWNED: only the 2-tile axis 0 is streamed, so
+        // num_tile_blocks is capped at 2 rather than 2*3.
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, OWNED],
+            num_tile_blocks: 2,
+        };
+        let launch_grid = partition.validate((2, 3, 1), 2).unwrap();
+        assert_eq!(launch_grid, (2, 1, 1));
+
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, OWNED],
+            num_tile_blocks: 3,
+        };
+        let err = partition.validate((2, 3, 1), 3).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("num_tile_blocks cannot exceed the streamed logical tile count"));
+    }
+
+    #[test]
+    fn owned_axis_rejects_all_owned_map() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![OWNED, OWNED],
+            num_tile_blocks: 1,
+        };
+        let err = partition.validate((2, 3, 1), 1).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("at least one streamed (non-OWNED) map axis"));
+    }
+
+    #[test]
+    fn owned_axis_accepts_leading_owned() {
+        // Owned axes may sit at any position: axis 0 owned, axis 1 streamed.
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![OWNED, 1],
+            num_tile_blocks: 3,
+        };
+        let launch_grid = partition.validate((2, 3, 1), 3).unwrap();
+        assert_eq!(launch_grid, (3, 1, 1));
     }
 
     #[test]
@@ -1800,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn swizzle_rejects_non_2d_partition_grid() {
+    fn swizzle_rejects_grid_rank_above_map_rank() {
         let partition = MappedLaunchPartition {
             partition: (),
             map_shape: vec![4, 1],
@@ -1809,6 +2294,52 @@ mod tests {
         let err = partition.validate((2, 3, 4), 3).unwrap_err();
         assert!(err
             .to_string()
-            .contains("requires a non-empty 2D logical partition grid"));
+            .contains("map rank must match the logical partition grid rank"));
+    }
+
+    #[test]
+    fn swizzle_accepts_rank1_map() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1],
+            num_tile_blocks: 4,
+        };
+        let launch_grid = partition.validate((8, 1, 1), 4).unwrap();
+        assert_eq!(launch_grid, (4, 1, 1));
+    }
+
+    #[test]
+    fn swizzle_accepts_rank3_map() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, 4, 1],
+            num_tile_blocks: 6,
+        };
+        let launch_grid = partition.validate((2, 3, 4), 6).unwrap();
+        assert_eq!(launch_grid, (6, 1, 1));
+    }
+
+    #[test]
+    fn swizzle_rejects_rank1_map_with_2d_grid() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1],
+            num_tile_blocks: 2,
+        };
+        let err = partition.validate((2, 3, 1), 2).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("map rank must match the logical partition grid rank"));
+    }
+
+    #[test]
+    fn swizzle_rejects_map_rank_above_3() {
+        let partition = MappedLaunchPartition {
+            partition: (),
+            map_shape: vec![1, 1, 1, 1],
+            num_tile_blocks: 2,
+        };
+        let err = partition.validate((2, 3, 4), 2).unwrap_err();
+        assert!(err.to_string().contains("rank-1 through rank-3 map shape"));
     }
 }

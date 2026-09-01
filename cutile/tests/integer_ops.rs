@@ -4,8 +4,6 @@
  */
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -75,26 +73,25 @@ mod integer_ops_module {
 
 use integer_ops_module::__module_ast_self;
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "integer_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_maxi() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "integer_ops_module",
-            "maxi_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("maxi_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MAXI MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -113,23 +110,7 @@ fn compile_maxi() -> () {
 #[test]
 fn compile_mini() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "integer_ops_module",
-            "mini_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("mini_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MINI MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -146,23 +127,7 @@ fn compile_mini() -> () {
 #[test]
 fn compile_mulhii() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "integer_ops_module",
-            "mulhii_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("mulhii_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MULHII MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -177,23 +142,11 @@ fn compile_mulhii() -> () {
 #[test]
 fn compile_maxi_unsigned() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "integer_ops_module",
+        let module_op_str = compile_ir(
             "maxi_unsigned_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== MAXI UNSIGNED MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -212,23 +165,11 @@ fn compile_maxi_unsigned() -> () {
 #[test]
 fn compile_named_integer_arithmetic() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "integer_ops_module",
+        let module_op_str = compile_ir(
             "named_integer_arithmetic_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== NAMED INTEGER ARITHMETIC MLIR ===\n{}", module_op_str);
 
         for op in ["addi", "subi", "muli", "divi", "remi"] {
@@ -247,23 +188,7 @@ fn compile_named_integer_arithmetic() -> () {
 #[test]
 fn compile_cmpi() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "integer_ops_module",
-            "cmpi_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str = compile_ir("cmpi_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== CMPI MLIR ===\n{}", module_op_str);
 
         assert!(

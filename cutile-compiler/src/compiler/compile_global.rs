@@ -82,6 +82,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     data,
                 },
                 alignment: scalar_alignment(scalar),
+                constant: false,
+                symbol_visibility: cutile_ir::ir::SymbolVisibility::Public,
             });
         }
         Ok(())
@@ -570,7 +572,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         })
     }
 
-    fn token_type(&self, generic_vars: &GenericVars) -> Result<TileRustType, JITError> {
+    pub(crate) fn token_type(&self, generic_vars: &GenericVars) -> Result<TileRustType, JITError> {
         let token_ty: Type = syn::parse_quote!(Token);
         self.compile_type(&token_ty, generic_vars, &HashMap::new())?
             .ok_or_else(|| self.jit_error(&token_ty.span(), "failed to compile Token type"))
@@ -681,11 +683,16 @@ fn global_symbol_name(module_name: &str, name: &str) -> String {
 
 fn scalar_alignment(scalar: ScalarType) -> u64 {
     match scalar {
-        ScalarType::I1 | ScalarType::I8 => 1,
+        ScalarType::I1
+        | ScalarType::I4
+        | ScalarType::I8
+        | ScalarType::F4E2M1FN
+        | ScalarType::F8E4M3FN
+        | ScalarType::F8E5M2
+        | ScalarType::F8E8M0FNU => 1,
         ScalarType::I16 | ScalarType::F16 | ScalarType::BF16 => 2,
         ScalarType::I32 | ScalarType::F32 | ScalarType::TF32 => 4,
         ScalarType::I64 | ScalarType::F64 => 8,
-        _ => 4,
     }
 }
 

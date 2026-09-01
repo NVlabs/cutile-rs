@@ -5,8 +5,6 @@
 use cutile;
 use cutile::{api::*, tensor::*, tile_kernel::*};
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use half::bf16;
 use std::sync::Arc;
 
@@ -102,6 +100,21 @@ mod type_conversion_ops_module {
 }
 
 use type_conversion_ops_module::__module_ast_self;
+
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "type_conversion_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
 use type_conversion_ops_module::bf16_conversion_kernel;
 use type_conversion_ops_module::bf16_to_f32_conversion_kernel;
 use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
@@ -109,23 +122,11 @@ use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
 #[test]
 fn compile_conversion_ops() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "conversion_ops_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== CONVERSION OPS MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -148,23 +149,11 @@ fn compile_conversion_ops() -> () {
 #[test]
 fn compile_ptr_conversion() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "ptr_conversion_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== PTR CONVERSION MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -187,23 +176,11 @@ fn compile_ptr_conversion() -> () {
 #[test]
 fn compile_exti_unsigned() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "exti_unsigned_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== EXTI UNSIGNED MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -222,23 +199,11 @@ fn compile_exti_unsigned() -> () {
 #[test]
 fn compile_bf16_conversion() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "bf16_conversion_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== BF16 CONVERSION MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -255,23 +220,11 @@ fn compile_bf16_conversion() -> () {
 #[test]
 fn compile_bf16_to_f32_load_tile_like() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = "sm_120".to_string();
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "bf16_to_f32_conversion_kernel",
             &[128.to_string()],
             &[("output", &[1]), ("input", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== BF16 -> F32 LOAD TILE LIKE MLIR ===\n{}",
             module_op_str
@@ -295,23 +248,11 @@ fn compile_bf16_to_f32_load_tile_like() -> () {
 #[test]
 fn compile_unannotated_load_tile_like() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = "sm_120".to_string();
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "unannotated_load_tile_like_kernel",
             &[128.to_string()],
             &[("output", &[1]), ("input", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!(
             "\n=== UNANNOTATED LOAD TILE LIKE MLIR ===\n{}",
             module_op_str
@@ -335,23 +276,11 @@ fn compile_unannotated_load_tile_like() -> () {
 #[test]
 fn compile_explicit_conversion_ops() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "type_conversion_ops_module",
+        let module_op_str = compile_ir(
             "explicit_conversion_ops_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== EXPLICIT CONVERSION OPS MLIR ===\n{}", module_op_str);
 
         assert!(
