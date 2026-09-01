@@ -877,11 +877,34 @@ pub fn generate_kernel_launcher(
 
     // Emit scalar_hints (populated for integer scalar and raw pointer params).
     let scalar_hints_stmt = parse_stmt(format!(
-        "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
+        "let mut scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
     ));
     launcher_method.block.stmts.push(scalar_hints_stmt.clone());
     specialization_method.block.stmts.push(scalar_hints_stmt);
+
+    // Scalar specialization overrides replace or extend inferred hints on both
+    // the launch and the specialization path.
+    let scalar_override_stmt = parse_stmt(
+        r#"
+        for (name, hint) in self._scalar_hint_overrides.drain(..) {
+            if let Some((_, inferred)) = scalar_hints
+                .iter_mut()
+                .find(|entry| entry.0 == name)
+            {
+                *inferred = hint;
+            } else {
+                scalar_hints.push((name, hint));
+            }
+        }
+        "#
+        .to_string(),
+    );
+    launcher_method
+        .block
+        .stmts
+        .push(scalar_override_stmt.clone());
+    specialization_method.block.stmts.push(scalar_override_stmt);
 
     let specialization_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
