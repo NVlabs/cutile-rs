@@ -146,11 +146,11 @@ mod fmha_module {
         v: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, N, D)
         qk_scale: f32,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid0 = program_id(0);
         let h = q.shape()[1];
-        let batch_idx = pid.0 / h;
-        let head_idx = pid.0 % h;
-        let q_m_idx = pid.1;
+        let batch_idx = pid0 / h;
+        let head_idx = pid0 % h;
+        let q_m_idx = program_id(1);
 
         // Convert to exp2-friendly scale (exp2 is faster than exp on GPU)
         let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);

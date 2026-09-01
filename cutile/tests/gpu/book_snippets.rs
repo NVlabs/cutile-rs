@@ -26,16 +26,20 @@ mod hello_world_module {
 
     #[cutile::entry()]
     fn hello_world_kernel() {
-        let pids: (i32, i32, i32) = get_tile_block_id();
-        let npids: (i32, i32, i32) = get_num_tile_blocks();
+        let pid0 = program_id(0);
+        let pid1 = program_id(1);
+        let pid2 = program_id(2);
+        let n0 = num_programs(0);
+        let n1 = num_programs(1);
+        let n2 = num_programs(2);
         cuda_tile_print!(
-            "Hello from tile <{}, {}, {}> in a grid of <{}, {}, {}> tiles!\n",
-            pids.0,
-            pids.1,
-            pids.2,
-            npids.0,
-            npids.1,
-            npids.2
+            "Hello from program <{}, {}, {}> in a grid of <{}, {}, {}> programs!\n",
+            pid0,
+            pid1,
+            pid2,
+            n0,
+            n1,
+            n2
         );
     }
 }
@@ -151,11 +155,12 @@ mod gemm_module {
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK, BN]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid_m = program_id(0);
+        let pid_n = program_id(1);
         let mut tile_z = load_tile_mut(z);
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid.0, i]);
-            let tile_y = part_y.load([i, pid.1]);
+            let tile_x = part_x.load([pid_m, i]);
+            let tile_y = part_y.load([i, pid_n]);
             tile_z = mma(tile_x, tile_y, tile_z);
         }
         z.store(tile_z);
@@ -265,11 +270,11 @@ mod fmha_module {
         out: &mut Tensor<f32, { [1, BM, D] }>,
         qk_scale: f32,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid0 = program_id(0);
         let h = q.shape()[1];
-        let batch_idx = pid.0 / h;
-        let head_idx = pid.0 % h;
-        let q_m_idx = pid.1;
+        let batch_idx = pid0 / h;
+        let head_idx = pid0 % h;
+        let q_m_idx = program_id(1);
 
         let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
         let log2: f32 = tile_to_scalar(log(two));
@@ -417,11 +422,12 @@ mod mlp_module {
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK, BN]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid_m = program_id(0);
+        let pid_n = program_id(1);
         let mut tile_z = load_tile_mut(z);
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid.0, i]);
-            let tile_y = part_y.load([i, pid.1]);
+            let tile_x = part_x.load([pid_m, i]);
+            let tile_y = part_y.load([i, pid_n]);
             tile_z = mma(tile_x, tile_y, tile_z);
         }
         z.store(tile_z);
@@ -435,10 +441,10 @@ mod mlp_module {
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid = program_id(0);
         let mut tile_z = z.load().reshape(const_shape![BM, 1]);
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid.0, i]);
+            let tile_x = part_x.load([pid, i]);
             let tile_y = part_y.load([i]).reshape(const_shape![BK, 1]);
             tile_z = mma(tile_x, tile_y, tile_z);
         }
@@ -524,13 +530,13 @@ mod pointer_add_module {
         let mut z_tensor: Tensor<T, { [-1] }> = get_tensor(z_ptr, len);
         let x_tensor: Tensor<T, { [-1] }> = get_tensor(x_ptr, len);
         let y_tensor: Tensor<T, { [-1] }> = get_tensor(y_ptr, len);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid = program_id(0);
         let tile_shape = const_shape![4i32];
-        let tile_x = x_tensor.partition(tile_shape).load([pid.0]);
-        let tile_y = y_tensor.partition(tile_shape).load([pid.0]);
+        let tile_x = x_tensor.partition(tile_shape).load([pid]);
+        let tile_y = y_tensor.partition(tile_shape).load([pid]);
         z_tensor
             .partition_mut(tile_shape)
-            .store(tile_x + tile_y, [pid.0]);
+            .store(tile_x + tile_y, [pid]);
     }
 }
 

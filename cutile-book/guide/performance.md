@@ -67,8 +67,8 @@ Use `mma` and `mmaf_scaled` for matrix multiply paths. The compiler lowers suppo
 ```rust
 let mut acc = constant(0.0f32, const_shape![BM, BN]);
 for k_tile in 0i32..k_tiles {
-    let tile_x = part_x.load([pid.0, k_tile]);
-    let tile_y = part_y.load([k_tile, pid.1]);
+    let tile_x = part_x.load([pid_m, k_tile]);
+    let tile_y = part_y.load([k_tile, pid_n]);
     acc = mma(tile_x, tile_y, acc);
 }
 z.store(acc);
