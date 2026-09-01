@@ -9,7 +9,7 @@ import os
 # -- Project information -----------------------------------------------------
 project = 'cuTile Rust'
 copyright = '2025-2026, NVIDIA Corporation'
-author = 'Melih Elibol and Nihal Pasham'
+author = 'NVIDIA Corporation'
 release = os.environ.get('CUTILE_DOCS_VERSION', '0.1.0')
 version = release
 
