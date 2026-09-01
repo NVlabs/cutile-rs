@@ -6,11 +6,11 @@ This crate is intentionally low level. Most code should depend on `cuda-core` in
 
 # Notes
 
-- The bindings are generated at build time from a CUDA 12.8+ toolkit.
+- The bindings are generated at build time from a CUDA 13.0+ toolkit.
 - The toolkit root is the first set variable among `CUDA_TOOLKIT_PATH` and
   `CUDA_HOME`; when neither is set, the build searches the standard install
   locations (on Linux `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
-  `/usr/local/cuda-13`, `/usr/local/cuda-12`, `/usr/local/cuda`; on Windows
+  `/usr/local/cuda-13`, `/usr/local/cuda`; on Windows
   `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3` and `v13.2`).
 - Within the toolkit, both the standard `include/` layout and the
   redistributable `targets/<dir>/include/` layouts (Jetson/Tegra, sbsa,

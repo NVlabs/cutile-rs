@@ -18,7 +18,7 @@ use syn::{
     TypeBareFn,
 };
 
-const MIN_CUDA_VERSION: u32 = 12080;
+const MIN_CUDA_VERSION: u32 = 13000;
 /// Environment variables consulted (in order) to locate the CUDA toolkit
 /// root. `CUDA_HOME` is the conventional name used by nvcc wrappers and CI
 /// images.
@@ -148,7 +148,7 @@ fn resolve_cuda_toolkit() -> Result<ResolvedToolkit, Box<dyn Error>> {
         };
         if value.is_empty() {
             return Err(format!(
-                "{var} is set to an empty string. Set it to a CUDA 12.8+ toolkit directory."
+                "{var} is set to an empty string. Set it to a CUDA 13.0+ toolkit directory."
             )
             .into());
         }
@@ -198,7 +198,7 @@ fn find_default_cuda_toolkit() -> Result<ResolvedToolkit, Box<dyn Error>> {
     }
 
     Err(format!(
-        "Neither CUDA_TOOLKIT_PATH nor CUDA_HOME is set, and no CUDA 12.8+ toolkit was found in default locations:\n{}\nSet CUDA_TOOLKIT_PATH or CUDA_HOME to a CUDA 12.8+ toolkit directory.",
+        "Neither CUDA_TOOLKIT_PATH nor CUDA_HOME is set, and no CUDA 13.0+ toolkit was found in default locations:\n{}\nSet CUDA_TOOLKIT_PATH or CUDA_HOME to a CUDA 13.0+ toolkit directory.",
         rejected.join("\n")
     )
     .into())
@@ -233,7 +233,6 @@ fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
             "/usr/local/cuda-13.3",
             "/usr/local/cuda-13.2",
             "/usr/local/cuda-13",
-            "/usr/local/cuda-12",
             "/usr/local/cuda",
         ];
 
@@ -268,7 +267,7 @@ fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<(u32, PathBuf), String> 
     let version = cuda_version_from_header(&cuda_h).map_err(|error| error.to_string())?;
     if version < MIN_CUDA_VERSION {
         return Err(format!(
-            "CUDA toolkit {} is too old. The CUDA host-side crates require CUDA 12.8+ (the Tile compiler needs 13.2+)",
+            "CUDA toolkit {} is too old. The CUDA host-side crates require CUDA 13.0+ (the Tile compiler needs 13.2+)",
             format_cuda_version(version)
         ));
     }
@@ -289,7 +288,7 @@ fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, Box<dyn Error>> {
         })
         .ok_or_else(|| {
             format!(
-                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH or CUDA_HOME to a CUDA 12.8+ toolkit directory.",
+                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH or CUDA_HOME to a CUDA 13.0+ toolkit directory.",
                 cuda_h.display()
             )
             .into()

@@ -14,7 +14,7 @@
 //!
 //! Toolkit discovery matches `cuda-bindings/build.rs`: the first set
 //! variable among `CUDA_TOOLKIT_PATH` and `CUDA_HOME`, else the same
-//! default candidate list with the same CUDA 12.8 floor, with both the
+//! default candidate list with the same CUDA 13.0 floor, with both the
 //! standard `include/` and the redistributable `targets/<dir>/include/`
 //! layouts probed (a non-blank `CUDA_TOOLKIT_TARGET_DIR` names the single
 //! `targets/` tree to probe). A missing or unreadable `cuda.h` leaves the
@@ -46,10 +46,9 @@ const DEFAULT_TOOLKIT_DIRS: &[&str] = &[
     "/usr/local/cuda-13.3",
     "/usr/local/cuda-13.2",
     "/usr/local/cuda-13",
-    "/usr/local/cuda-12",
     "/usr/local/cuda",
 ];
-const MIN_CUDA_VERSION: u32 = 12080;
+const MIN_CUDA_VERSION: u32 = 13000;
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(cuda_has_multicast)");
