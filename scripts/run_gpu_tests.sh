@@ -11,6 +11,8 @@ print_header "Running GPU tests"
 
 for test_target in \
     arange \
+    autotune \
+    do_bench \
     dtype_float_ops \
     gpu_execution_ops \
     nested_partition_mut \
@@ -20,7 +22,7 @@ for test_target in \
 do
     run_step \
         "cutile GPU integration test ${test_target}" \
-        cargo test -p cutile --test "$test_target"
+        cargo test -p cutile --features experimental-tune --test "$test_target"
 done
 
 run_step \
@@ -40,8 +42,20 @@ run_step \
     cargo test -p cutile --test specialization_bits raw_pointer_launch
 
 run_step \
+    "cutile GPU warmup and disk-cache tests" \
+    cargo test -p cutile --test warmup_suite
+
+run_step \
     "cutile GPU aggregate tests" \
     cargo test -p cutile --test gpu
+
+run_step \
+    "cuda-core GPU integration test vmm" \
+    cargo test -p cuda-core --test vmm
+
+run_step \
+    "cuda-core GPU integration test vmm_multicast" \
+    cargo test -p cuda-core --test vmm_multicast
 
 for test_target in \
     concurrent_capture \

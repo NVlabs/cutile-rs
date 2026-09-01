@@ -11,7 +11,6 @@
 //! source-level predicates directly.
 
 use crate::ast::SourceLocation;
-use crate::compiler::_value::PartitionAxisOrigin;
 use crate::compiler::shared_types::EntryAttrs;
 use crate::error::{JITError, SpannedJITError};
 use syn::{BinOp, Expr, ExprBinary, ExprCall};
@@ -22,9 +21,21 @@ pub(crate) enum MetadataExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct MetadataFact {
-    pub(crate) lhs: MetadataExpr,
-    pub(crate) rhs: MetadataExpr,
+pub(crate) enum MetadataFact {
+    /// `dim(a, i) == dim(b, j)` — two axis extents are equal.
+    DimEq {
+        lhs: MetadataExpr,
+        rhs: MetadataExpr,
+    },
+    /// `dim(t, k) % divisor == 0` — an axis extent is a multiple of a constant.
+    /// The divisor must be a positive integer literal: it is embedded in the
+    /// generated launcher's verification, which runs before any const-generic
+    /// value exists.
+    DimDivisible {
+        tensor: String,
+        axis: usize,
+        divisor: i64,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -42,42 +53,6 @@ impl ProofResults {
             metadata_facts.push(parse_metadata_fact(expr)?);
         }
         Ok(Self { metadata_facts })
-    }
-
-    pub(crate) fn has_dim_equality(
-        &self,
-        lhs: &str,
-        lhs_axis: usize,
-        rhs: &str,
-        rhs_axis: usize,
-    ) -> bool {
-        let lhs = MetadataExpr::Dim {
-            tensor: lhs.to_string(),
-            axis: lhs_axis,
-        };
-        let rhs = MetadataExpr::Dim {
-            tensor: rhs.to_string(),
-            axis: rhs_axis,
-        };
-        self.metadata_facts.iter().any(|fact| {
-            (fact.lhs == lhs && fact.rhs == rhs) || (fact.lhs == rhs && fact.rhs == lhs)
-        })
-    }
-
-    pub(crate) fn proves_partition_axis_access(
-        &self,
-        index_origin: &PartitionAxisOrigin,
-        target_tensor: &str,
-        target_axis: usize,
-        target_tile_dim: i32,
-    ) -> bool {
-        index_origin.tile_dim == target_tile_dim
-            && self.has_dim_equality(
-                &index_origin.tensor,
-                index_origin.axis,
-                target_tensor,
-                target_axis,
-            )
     }
 }
 
@@ -112,10 +87,59 @@ fn parse_metadata_equality(binary: &ExprBinary) -> Result<MetadataFact, JITError
     if !matches!(binary.op, BinOp::Eq(_)) {
         return SourceLocation::unknown().jit_error_result("precondition predicates must use `==`");
     }
-    Ok(MetadataFact {
+    // Divisibility spelling: `dim(t, k) % divisor == 0`.
+    if let Expr::Binary(rem) = binary.left.as_ref() {
+        if matches!(rem.op, BinOp::Rem(_)) {
+            if !is_zero_literal(&binary.right) {
+                return SourceLocation::unknown().jit_error_result(
+                    "a `%` precondition must compare against literal `0`: `dim(t, k) % d == 0`",
+                );
+            }
+            let MetadataExpr::Dim { tensor, axis } = parse_metadata_expr(&rem.left)?;
+            let divisor = parse_divisor_literal(&rem.right)?;
+            return Ok(MetadataFact::DimDivisible {
+                tensor,
+                axis,
+                divisor,
+            });
+        }
+    }
+    Ok(MetadataFact::DimEq {
         lhs: parse_metadata_expr(&binary.left)?,
         rhs: parse_metadata_expr(&binary.right)?,
     })
+}
+
+fn is_zero_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Int(i) => i.base10_parse::<i64>().map(|v| v == 0).unwrap_or(false),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn parse_divisor_literal(expr: &Expr) -> Result<i64, JITError> {
+    let Expr::Lit(lit) = expr else {
+        return SourceLocation::unknown().jit_error_result(
+            "a `%` precondition divisor must be a positive integer literal (a const generic \
+             cannot be verified by the launcher, which runs before monomorphization)",
+        );
+    };
+    let syn::Lit::Int(int_lit) = &lit.lit else {
+        return SourceLocation::unknown()
+            .jit_error_result("a `%` precondition divisor must be a positive integer literal");
+    };
+    let divisor = int_lit.base10_parse::<i64>().map_err(|err| {
+        SourceLocation::unknown().jit_error(&format!("invalid `%` precondition divisor: {err}"))
+    })?;
+    if divisor < 1 {
+        return SourceLocation::unknown().jit_error_result(&format!(
+            "a `%` precondition divisor must be >= 1, got {divisor}"
+        ));
+    }
+    Ok(divisor)
 }
 
 fn parse_metadata_expr(expr: &Expr) -> Result<MetadataExpr, JITError> {

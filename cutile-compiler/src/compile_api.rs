@@ -23,11 +23,33 @@
 //! println!("{}", artifacts.ir_text());
 //! let bc = artifacts.bytecode()?;
 //! ```
+//!
+//! The persistent JIT-cache key can be derived without compiling a cubin:
+//!
+//! ```rust,ignore
+//! let key = KernelCompiler::new(my_module::__module_ast_self, "my_module", "add")
+//!     .generics(vec!["32".into()])
+//!     .strides(&[("c", &[1])])
+//!     .target("sm_120")
+//!     .l2_cache_key()?;
+//! assert_eq!(key.len(), 64);
+//! ```
 
 use crate::compiler::{CUDATileFunctionCompiler, CUDATileModules};
+use crate::cuda_tile_runtime_utils::current_l2_key_for_module;
 use crate::error::JITError;
 use crate::hints::CompileOptions;
 use crate::specialization::{DivHint, SpecializationBits};
+
+/// Where each checked partition access's bounds check ended up: proven at
+/// compile time (nothing emitted), hoisted to a loop preheader, or emitted
+/// in place at the access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CheckPlacementCounts {
+    pub discharged: u32,
+    pub hoisted: u32,
+    pub in_place: u32,
+}
 
 /// Compiled kernel artifacts: IR and bytecode.
 ///
@@ -35,12 +57,27 @@ use crate::specialization::{DivHint, SpecializationBits};
 /// do not require a GPU or CUDA driver.
 pub struct CompileArtifacts {
     module: cutile_ir::Module,
+    check_counts: CheckPlacementCounts,
+    launch_checks: Vec<cuda_async::predicate::LaunchCheck>,
 }
 
 impl CompileArtifacts {
     /// Returns the human-readable Tile IR text (MLIR-like syntax).
     pub fn ir_text(&self) -> String {
         self.module.to_mlir_text()
+    }
+
+    /// Bounds-check placement counters for the compiled kernel — the same
+    /// numbers reported on the `CUTILE_JIT_TIMING` line.
+    pub fn check_counts(&self) -> CheckPlacementCounts {
+        self.check_counts
+    }
+
+    /// Safety checks the compiler hoisted out of the kernel to launch time. The
+    /// host runs these (via `validate_launch_checks`) before each launch; here
+    /// they let a compile-only test inspect exactly what was evacuated.
+    pub fn launch_checks(&self) -> &[cuda_async::predicate::LaunchCheck] {
+        &self.launch_checks
     }
 
     /// Serializes the compiled module to bytecode.
@@ -160,6 +197,24 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         self
     }
 
+    /// Returns the persistent JIT-cache key for this specialization.
+    ///
+    /// This runs the compiler frontend and serializes its Tile IR output using
+    /// the bytecode version selected for the currently resolved `tileiras`
+    /// toolchain. It does not consult a JIT store, compile a cubin, initialize
+    /// the CUDA driver, or require a GPU.
+    ///
+    /// The returned string is the same 64-character lowercase SHA-256 key that
+    /// the runtime's L2 cache lookup would use for this specialization.
+    pub fn l2_cache_key(self) -> Result<String, JITError> {
+        let gpu_name = self.gpu_name.clone();
+        let tileiras_opts = crate::cuda_tile_runtime_utils::TileirasOptions::from_compile_options(
+            &self.compile_options,
+        );
+        let artifacts = self.compile()?;
+        current_l2_key_for_module(artifacts.module(), &gpu_name, &tileiras_opts)
+    }
+
     /// Compiles the kernel and returns the artifacts.
     ///
     /// This is a pure compilation step — no GPU or CUDA driver is needed.
@@ -198,6 +253,16 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         )?;
 
         let module = compiler.compile()?;
-        Ok(CompileArtifacts { module })
+        let check_counts = CheckPlacementCounts {
+            discharged: compiler.check_stats.discharged.get(),
+            hoisted: compiler.check_stats.hoisted.get(),
+            in_place: compiler.check_stats.in_place.get(),
+        };
+        let launch_checks = compiler.launch_checks.borrow().clone();
+        Ok(CompileArtifacts {
+            module,
+            check_counts,
+            launch_checks,
+        })
     }
 }

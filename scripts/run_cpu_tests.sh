@@ -26,8 +26,12 @@ run_step \
     cargo test -p cutile-compiler --test compiler2_e2e
 
 run_step \
+    "cutile-compiler JIT disk store tests" \
+    cargo test -p cutile-compiler --test jit_cache
+
+run_step \
     "cutile library tests" \
-    cargo test -p cutile --lib
+    cargo test -p cutile --lib --features experimental-tune
 
 run_step \
     "cutile doc tests" \

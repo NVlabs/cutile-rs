@@ -14,6 +14,12 @@ mod tensor;
 #[path = "gpu/num_tiles.rs"]
 mod num_tiles;
 
+#[path = "gpu/partial_coverage.rs"]
+mod partial_coverage;
+
+#[path = "gpu/launch_preconditions.rs"]
+mod launch_preconditions;
+
 // ---------------------------------------------------------------------------
 // Migrated from cutile-examples (smoke tests for kernel patterns that were
 // previously exposed as runnable examples but don't teach a pattern worth
@@ -49,3 +55,18 @@ mod book_snippets;
 
 #[path = "gpu/tensor_permute.rs"]
 mod tensor_permute;
+
+#[path = "gpu/mapped_partition_values.rs"]
+mod mapped_partition_values;
+
+#[path = "gpu/mapped_partition_schedule_matrix.rs"]
+mod mapped_partition_schedule_matrix;
+
+#[path = "gpu/atomic_red_view.rs"]
+mod atomic_red_view;
+
+#[path = "gpu/borrow_raw_parts.rs"]
+mod borrow_raw_parts;
+
+#[path = "gpu/device_debug.rs"]
+mod device_debug;
