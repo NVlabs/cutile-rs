@@ -63,9 +63,9 @@ The partition shape becomes the static shape seen by the kernel. A `[1024, 1024]
 Read-only inputs do not need host-side partitioning. Inside the kernel, partition them with the shape needed by the algorithm:
 
 ```rust
-let pid: (i32, i32, i32) = get_tile_block_id();
+let pid_m = program_id(0);
 let part_x = x.partition(const_shape![BM, BK]);
-let tile_x = part_x.load([pid.0, i]);
+let tile_x = part_x.load([pid_m, i]);
 ```
 
 The same read-only tensor can be partitioned multiple ways inside one kernel. This is common in matrix multiplication, where the left-hand side and right-hand side are loaded with different tile shapes.
@@ -103,7 +103,7 @@ Const generic arrays such as `const S: [i32; 2]` and `const_shape![BM, BK]` carr
 
 ```rust
 let part_x = x.partition(const_shape![BM, BK]);
-let tile_x = part_x.load([pid.0, k_tile]);
+let tile_x = part_x.load([pid_m, k_tile]);
 ```
 
 Writable tensors store tile results:
@@ -186,7 +186,8 @@ fn tiled_gemm<
     x: &Tensor<E, { [-1, -1] }>,
     y: &Tensor<E, { [-1, -1] }>,
 ) {
-    let pid: (i32, i32, i32) = get_tile_block_id();
+    let pid_m = program_id(0);
+    let pid_n = program_id(1);
     let k_tiles = x.shape()[1] / BK;
 
     let part_x = x.partition(const_shape![BM, BK]);
@@ -194,8 +195,8 @@ fn tiled_gemm<
 
     let mut acc = constant(0.0f32, const_shape![BM, BN]);
     for k_tile in 0i32..k_tiles {
-        let tile_x = part_x.load([pid.0, k_tile]);
-        let tile_y = part_y.load([k_tile, pid.1]);
+        let tile_x = part_x.load([pid_m, k_tile]);
+        let tile_y = part_y.load([k_tile, pid_n]);
         acc = mma(tile_x, tile_y, acc);
     }
 

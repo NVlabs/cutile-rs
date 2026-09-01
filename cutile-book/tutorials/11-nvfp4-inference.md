@@ -253,7 +253,8 @@ mod nvfp4_linear {
         y_scales: &Tensor<f8e4m3fn, { [-1, -1] }>,
         alpha: f32,
     ) {
-        let pid = get_tile_block_id();
+        let pid_m = program_id(0);
+        let pid_n = program_id(1);
         let k_tiles = Dim::new(x.shape()[1] / BK_PACKED);
 
         let part_x = x.partition(const_shape![BM, BK_PACKED]);
@@ -264,14 +265,14 @@ mod nvfp4_linear {
         let mut tile_z = constant(0.0f32, const_shape![BM, BN]);
 
         for k_tile in k_tiles {
-            let tile_x_packed = part_x.load([pid.0, k_tile]);
-            let tile_y_packed = part_y.load([pid.1, k_tile]);
+            let tile_x_packed = part_x.load([pid_m, k_tile]);
+            let tile_y_packed = part_y.load([pid_n, k_tile]);
 
             let tile_x = tile_x_packed.unpack(const_shape![BM, BK]);
             let tile_y = tile_y_packed.unpack(const_shape![BN, BK]).transpose();
 
-            let tile_x_scales = part_x_scales.load([pid.0, k_tile]);
-            let tile_y_scales = part_y_scales.load([pid.1, k_tile]).transpose();
+            let tile_x_scales = part_x_scales.load([pid_m, k_tile]);
+            let tile_y_scales = part_y_scales.load([pid_n, k_tile]).transpose();
 
             tile_z = mmaf_scaled(tile_x, tile_y, tile_z, tile_x_scales, tile_y_scales);
         }
@@ -392,10 +393,10 @@ Inside the kernel, load the FP8 tiles directly, load the E8M0 scale tiles, and
 call `mmaf_scaled`:
 
 ```rust
-let tile_x = part_x.load([pid.0, k_tile]);
-let tile_y = part_y.load([pid.1, k_tile]).transpose();
-let tile_x_scales = part_x_scales.load([pid.0, k_tile]);
-let tile_y_scales = part_y_scales.load([pid.1, k_tile]).transpose();
+let tile_x = part_x.load([pid_m, k_tile]);
+let tile_y = part_y.load([pid_n, k_tile]).transpose();
+let tile_x_scales = part_x_scales.load([pid_m, k_tile]);
+let tile_y_scales = part_y_scales.load([pid_n, k_tile]).transpose();
 
 tile_z = mmaf_scaled(tile_x, tile_y, tile_z, tile_x_scales, tile_y_scales);
 ```

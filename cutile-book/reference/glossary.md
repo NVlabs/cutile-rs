@@ -30,13 +30,17 @@ The generated launcher code accepts `Partition<Tensor<T>>` for every `&mut Tenso
 
 **Launch grid inference.** At kernel launch time, the launcher calls `.grid()` on each mutable output argument's host-side wrapper and collects the resulting grids. For ordinary `&mut Tensor` parameters, this is the host-side `Partition` grid. For `MappedPartitionMut` parameters, this is the mapped physical tile-block grid. If no explicit grid is specified via `.grid()` or `.const_grid()`, the launch grid is **inferred** from these grids. When multiple mutable output parameters are present, all inferred grids must match or the launch will fail with an error. This is how partitioning a tensor on the host side determines how many tile blocks the kernel runs.
 
+## Tile Program
+
+The basic unit of concurrent execution on the GPU — one instance of the kernel function, running once as a single logical thread of execution and operating on one partition of the data. This is the entity you write: a tile program has no visible internal threads; it loads tiles, computes on them, and stores results. Each tile program is identified by its per-axis grid index, `program_id(axis)`, with grid extents from `num_programs(axis)` (following Triton's `tl.program_id` / `tl.num_programs`); the tuple forms `get_tile_block_id()` and `get_num_tile_blocks()` return all three axes at once. Also called a *tile block* (emphasizing its place in the launch grid and its mapping onto hardware) or a *tile thread* (emphasizing the single-threaded programming model).
+
 ## Tile Block
 
-A logical tile thread and the basic unit of concurrent execution on the GPU. Each tile block runs the kernel function once as a single logical thread of execution, operating on one partition of the data. A tile block is identified by its coordinates, obtained via `get_tile_block_id()`. The cuTile Rust compiler maps each tile block to one or more underlying CUDA execution units (thread blocks, clusters, or warps) depending on the target architecture — but from the programmer's perspective, a tile block is simply a single-threaded context that processes one tile of data.
+The same unit as a [Tile Program](#tile-program), viewed from the launch-grid and hardware side: the launch grid is a 3-dimensional arrangement of tile blocks, and the cuTile Rust compiler maps each one to one or more underlying CUDA execution units (thread blocks, clusters, or warps) depending on the target architecture. From the programmer's perspective, a tile block remains a single-threaded context that processes one tile of data.
 
 ## Tile Thread
 
-An alias for [Tile Block](#tile-block), used throughout this book to emphasize the single-threaded programming model. Each tile thread executes the kernel function once as a single logical thread of execution. The terms "tile thread" and "tile block" are interchangeable — the API uses `get_tile_block_id()` and `get_num_tile_blocks()`, while the guides often say "tile thread" for clarity.
+An alias for [Tile Program](#tile-program), emphasizing the single-threaded programming model: each tile thread executes the kernel function once as a single logical thread of execution.
 
 ## Concurrent Execution
 

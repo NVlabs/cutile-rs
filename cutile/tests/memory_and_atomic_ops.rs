@@ -56,29 +56,33 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         // Load from pointer tile with relaxed/device semantics, no optional params
-        let (loaded_values, _load_token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            Some(scope::Device),
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _load_token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         // Modify the values
         let modified: Tile<f32, S> = loaded_values + constant(1.0, output.shape());
 
         // Store back to pointer tile with relaxed/device semantics, no optional params
-        let _store_token: Token = store_ptr_tko(
-            ptrs,
-            modified,
-            ordering::Relaxed,
-            Some(scope::Device),
-            None,
-            None,
-            Latency::<0>,
-        );
+        let _store_token: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                modified,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         // Store result using regular tensor API
         output.store(modified);
@@ -91,15 +95,17 @@ mod memory_and_atomic_ops_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -111,15 +117,17 @@ mod memory_and_atomic_ops_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Acquire,
-            Some(scope::System),
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Acquire,
+                Some(scope::System),
+                None,
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -132,15 +140,17 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         let input_token = new_token_unordered();
-        let (loaded_values, _result_token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            Some(scope::Device),
-            None,
-            None,
-            Some(input_token),
-            Latency::<0>,
-        );
+        let (loaded_values, _result_token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                None,
+                Some(input_token),
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -156,15 +166,17 @@ mod memory_and_atomic_ops_module {
         let mask: Tile<bool, S> = constant(true, output.shape());
         let padding = 0.0f32;
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            Some(scope::Device),
-            Some(mask),
-            Some(padding),
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                Some(mask),
+                Some(padding),
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -180,15 +192,17 @@ mod memory_and_atomic_ops_module {
         let values: Tile<f32, S> = constant(42.0f32, output.shape());
 
         // Store with release semantics and sys scope
-        let _store_token: Token = store_ptr_tko(
-            ptrs,
-            values,
-            ordering::Release,
-            Some(scope::System),
-            None,
-            None,
-            Latency::<0>,
-        );
+        let _store_token: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                values,
+                ordering::Release,
+                Some(scope::System),
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(values);
     }
@@ -207,15 +221,17 @@ mod memory_and_atomic_ops_module {
         let mask: Tile<bool, S> = constant(true, output.shape());
 
         // Store with mask, relaxed semantics, and device scope
-        let _store_token: Token = store_ptr_tko(
-            ptrs,
-            values,
-            ordering::Relaxed,
-            Some(scope::Device),
-            Some(mask),
-            None,
-            Latency::<0>,
-        );
+        let _store_token: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                values,
+                ordering::Relaxed,
+                Some(scope::Device),
+                Some(mask),
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(values);
     }

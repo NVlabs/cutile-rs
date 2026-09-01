@@ -16,16 +16,20 @@ mod hello_world_module {
 
     #[cutile::entry(print_ir = true)]
     fn hello_world_kernel() {
-        let pids: (i32, i32, i32) = get_tile_block_id();
-        let npids: (i32, i32, i32) = get_num_tile_blocks();
+        let pid0 = program_id(0);
+        let pid1 = program_id(1);
+        let pid2 = program_id(2);
+        let n0 = num_programs(0);
+        let n1 = num_programs(1);
+        let n2 = num_programs(2);
         cuda_tile_print!(
-            "Hello, I am tile <{}, {}, {}> in a kernel with <{}, {}, {}> tiles.\n",
-            pids.0,
-            pids.1,
-            pids.2,
-            npids.0,
-            npids.1,
-            npids.2
+            "Hello, I am program <{}, {}, {}> in a kernel with <{}, {}, {}> programs.\n",
+            pid0,
+            pid1,
+            pid2,
+            n0,
+            n1,
+            n2
         );
     }
 }

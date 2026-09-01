@@ -21,15 +21,17 @@ mod opt_hints_module {
         let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
-        let (loaded, _tok): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            None,
-            Latency::<4>,
-        );
+        let (loaded, _tok): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                None,
+                Latency::<4>,
+            )
+        };
         output.store(loaded);
     }
 
@@ -39,15 +41,17 @@ mod opt_hints_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
         let vals: Tile<f32, S> = constant(1.0f32, output.shape());
-        let _tok: Token = store_ptr_tko(
-            ptrs,
-            vals,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            Latency::<2>,
-        );
+        let _tok: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                vals,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                Latency::<2>,
+            )
+        };
         output.store(vals);
     }
 
@@ -63,28 +67,32 @@ mod opt_hints_module {
         let mask_opt: Option<Tile<bool, S>> = None;
         let padding_opt: Option<f32> = None;
         let token_none: Option<Token> = None;
-        let (loaded, _tok): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            scope_opt,
-            mask_opt,
-            padding_opt,
-            token_none,
-            Latency::<0>,
-        );
+        let (loaded, _tok): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                scope_opt,
+                mask_opt,
+                padding_opt,
+                token_none,
+                Latency::<0>,
+            )
+        };
 
         let token: Token = new_token_unordered();
         let token_some: Option<Token> = Some(token);
         let scope_none: Option<scope::TileBlock> = None;
-        let _store_tok: Token = store_ptr_tko(
-            ptrs,
-            loaded,
-            ordering::Weak,
-            scope_none,
-            None,
-            token_some,
-            Latency::<0>,
-        );
+        let _store_tok: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                loaded,
+                ordering::Weak,
+                scope_none,
+                None,
+                token_some,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded);
     }
