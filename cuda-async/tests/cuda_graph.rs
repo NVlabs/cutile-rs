@@ -5,7 +5,7 @@
 
 //! Tests for `CudaGraph::scope` — scoped CUDA graph capture.
 
-use cuda_async::cuda_graph::CudaGraph;
+use cuda_async::cuda_graph::{CaptureMode, CudaGraph};
 use cuda_async::device_operation::{value, DeviceOp};
 use cuda_async::error::DeviceError;
 
@@ -30,6 +30,47 @@ fn scope_empty_closure() {
 
         let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
         graph.launch().sync_on(&stream).unwrap();
+    });
+}
+
+#[test]
+fn scope_supports_all_capture_modes() {
+    if !has_gpu() {
+        return;
+    }
+    on_fresh_thread(|| {
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
+
+        for mode in [
+            CaptureMode::Global,
+            CaptureMode::ThreadLocal,
+            CaptureMode::Relaxed,
+        ] {
+            let graph = CudaGraph::scope_with_mode(&stream, mode, |_s| Ok(())).unwrap();
+            graph.launch().sync_on(&stream).unwrap();
+        }
+    });
+}
+
+#[test]
+fn capture_supports_all_capture_modes() {
+    if !has_gpu() {
+        return;
+    }
+    on_fresh_thread(|| {
+        let device = cuda_core::Device::new(0).unwrap();
+        let stream = device.new_stream().unwrap();
+
+        for mode in [
+            CaptureMode::Global,
+            CaptureMode::ThreadLocal,
+            CaptureMode::Relaxed,
+        ] {
+            let mut graph = CudaGraph::capture_with_mode(stream.clone(), mode, value(42)).unwrap();
+            assert_eq!(graph.take_output(), Some(42));
+            graph.launch().sync_on(&stream).unwrap();
+        }
     });
 }
 
