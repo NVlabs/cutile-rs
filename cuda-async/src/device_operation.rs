@@ -334,6 +334,14 @@ pub trait DeviceOp:
         let stream = with_default_device_policy(|policy| policy.next_stream())??;
         self.graph_on(stream)
     }
+    /// Capture this operation using `mode` and the default device's scheduling policy.
+    fn graph_with_mode(
+        self,
+        mode: crate::cuda_graph::CaptureMode,
+    ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
+        let stream = with_default_device_policy(|policy| policy.next_stream())??;
+        self.graph_on_with_mode(stream, mode)
+    }
     /// Capture this operation into a replayable [`CudaGraph`](crate::cuda_graph::CudaGraph)
     /// on an **explicit stream**.
     ///
@@ -345,6 +353,14 @@ pub trait DeviceOp:
         stream: Arc<Stream>,
     ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
         crate::cuda_graph::CudaGraph::capture(stream, self)
+    }
+    /// Capture this operation on an explicit stream using `mode`.
+    fn graph_on_with_mode(
+        self,
+        stream: Arc<Stream>,
+        mode: crate::cuda_graph::CaptureMode,
+    ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
+        crate::cuda_graph::CudaGraph::capture_with_mode(stream, mode, self)
     }
     /// Execute synchronously using the default device's scheduling policy.
     ///

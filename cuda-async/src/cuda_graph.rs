@@ -12,7 +12,31 @@ use std::future::IntoFuture;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
-const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
+/// Controls which potentially unsafe CUDA API calls invalidate stream capture.
+///
+/// [`Relaxed`](Self::Relaxed) preserves the mode used by [`CudaGraph::capture`]
+/// and [`CudaGraph::scope`]. The stricter modes are useful when graph capture
+/// must detect interfering CUDA work from the current thread or process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Invalidates capture when any thread makes an unsafe CUDA call.
+    Global,
+    /// Invalidates capture when the capturing thread makes an unsafe CUDA call.
+    ThreadLocal,
+    /// Only invalidates capture for calls that conflict with the capture graph.
+    #[default]
+    Relaxed,
+}
+
+impl CaptureMode {
+    fn as_raw(self) -> sys::CUstreamCaptureMode {
+        match self {
+            Self::Global => sys::CUstreamCaptureMode_enum_CU_STREAM_CAPTURE_MODE_GLOBAL,
+            Self::ThreadLocal => sys::CUstreamCaptureMode_enum_CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+            Self::Relaxed => sys::CUstreamCaptureMode_enum_CU_STREAM_CAPTURE_MODE_RELAXED,
+        }
+    }
+}
 
 /// A captured and instantiated CUDA graph, ready for replay.
 ///
@@ -62,12 +86,21 @@ impl<T: Send> CudaGraph<T> {
         stream: Arc<Stream>,
         op: impl DeviceOp<Output = T>,
     ) -> Result<Self, DeviceError> {
+        Self::capture_with_mode(stream, CaptureMode::Relaxed, op)
+    }
+
+    /// Capture a [`DeviceOp`] using an explicit stream capture mode.
+    pub fn capture_with_mode(
+        stream: Arc<Stream>,
+        mode: CaptureMode,
+        op: impl DeviceOp<Output = T>,
+    ) -> Result<Self, DeviceError> {
         let device = stream.device().clone();
         device.bind_to_thread()?;
 
         // Begin capture.
         unsafe {
-            stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
+            stream.begin_capture(mode.as_raw())?;
         }
 
         // Execute the operation on the capture stream.
@@ -401,10 +434,22 @@ impl CudaGraph<()> {
     where
         F: FnOnce(&Scope) -> Result<(), DeviceError>,
     {
+        Self::scope_with_mode(stream, CaptureMode::Relaxed, f)
+    }
+
+    /// Capture a scoped sequence using an explicit stream capture mode.
+    pub fn scope_with_mode<F>(
+        stream: &Arc<Stream>,
+        mode: CaptureMode,
+        f: F,
+    ) -> Result<Self, DeviceError>
+    where
+        F: FnOnce(&Scope) -> Result<(), DeviceError>,
+    {
         crate::device_operation::acquire_execution_lock()?;
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::scope_inner(stream, f)
+            Self::scope_inner(stream, mode, f)
         }));
 
         crate::device_operation::release_execution_lock();
@@ -415,7 +460,7 @@ impl CudaGraph<()> {
         }
     }
 
-    fn scope_inner<F>(stream: &Arc<Stream>, f: F) -> Result<Self, DeviceError>
+    fn scope_inner<F>(stream: &Arc<Stream>, mode: CaptureMode, f: F) -> Result<Self, DeviceError>
     where
         F: FnOnce(&Scope) -> Result<(), DeviceError>,
     {
@@ -424,7 +469,7 @@ impl CudaGraph<()> {
 
         // Begin capture.
         unsafe {
-            stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
+            stream.begin_capture(mode.as_raw())?;
         }
 
         let scope = Scope {
