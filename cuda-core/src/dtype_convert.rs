@@ -1,20 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Host-side conversions between `f32` and the narrow float storage types.
+//! Host-side conversions for narrow floating-point storage formats.
 //!
-//! The narrow types in [`crate::dtype`] name their formats all the way through
-//! to Tile IR, but nothing could produce or read their bytes on the host. These
-//! conversions close that: anyone quantizing weights or checking a kernel's
-//! output against a reference needs to turn `f32` into fp8/fp4 and back.
-//!
-//! All conversions round to nearest, ties to even, matching what the hardware
-//! `cvt` instructions do. Formats without infinities saturate to their largest
-//! finite value rather than producing NaN.
+//! The conversion methods operate on the raw E4M3FN, E5M2, E2M1FN, and
+//! E8M0FNU encodings used by the corresponding storage types. Every finite
+//! narrow value is exactly representable in `f32`. Narrowing to E4M3FN, E5M2,
+//! and E2M1FN uses round-to-nearest, ties-to-even; overflow and NaN behavior is
+//! documented on each method.
 
 use crate::dtype::{f4e2m1fn, f8e4m3fn, f8e5m2, f8e8m0fnu};
 
-/// How a narrow format spends its all-ones exponent.
+/// Interpretation of bit patterns with an all-ones exponent.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Specials {
     /// IEEE-like: all-ones exponent is infinity (mantissa 0) or NaN.
@@ -96,8 +93,8 @@ fn exp2i(exp: i32) -> f32 {
 
 /// Decodes a narrow float bit pattern to `f32`.
 ///
-/// Every value in these formats is exactly representable in `f32`, so this is
-/// lossless.
+/// Finite values are represented exactly. NaN encodings produce `f32::NAN`
+/// without preserving their sign or payload.
 #[inline]
 fn decode(bits: u8, fmt: &Format) -> f32 {
     let negative = (bits >> fmt.sign_shift()) & 1 == 1;
@@ -153,7 +150,7 @@ fn encode(value: f32, fmt: &Format) -> u8 {
             Specials::InfAndNan | Specials::NanOnAllOnesMantissa => {
                 ((fmt.max_exp() as u8) << fmt.mant_bits) | fmt.mant_mask()
             }
-            // No NaN encoding exists. CUDA canonicalizes it to positive max.
+            // Formats without a NaN encoding use positive max as the canonical result.
             Specials::Finite => saturated & !sign,
         };
     }
@@ -234,17 +231,19 @@ fn encode(value: f32, fmt: &Format) -> u8 {
 }
 
 impl f8e4m3fn {
-    /// Converts to `f32`. Lossless: every E4M3FN value fits exactly in `f32`.
+    /// Converts this E4M3FN encoding to `f32`.
+    ///
+    /// Every finite E4M3FN value is represented exactly.
     #[inline]
     pub fn to_f32(self) -> f32 {
         decode(self.0, &E4M3FN)
     }
 
-    /// Converts from `f32`, rounding to nearest with ties to even.
+    /// Converts `value` to E4M3FN using round-to-nearest, ties-to-even.
     ///
     /// This format has no infinities, so infinite and out-of-range inputs
-    /// saturate to +/-448 rather than becoming NaN. Any NaN payload converts
-    /// to the canonical positive NaN encoding, `0x7F`.
+    /// saturate to ±448 rather than becoming NaN. Every NaN input produces the
+    /// canonical encoding `0x7F`.
     #[inline]
     pub fn from_f32(value: f32) -> Self {
         Self(encode(value, &E4M3FN))
@@ -252,16 +251,18 @@ impl f8e4m3fn {
 }
 
 impl f8e5m2 {
-    /// Converts to `f32`. Lossless: every E5M2 value fits exactly in `f32`.
+    /// Converts this E5M2 encoding to `f32`.
+    ///
+    /// Every finite E5M2 value is represented exactly.
     #[inline]
     pub fn to_f32(self) -> f32 {
         decode(self.0, &E5M2)
     }
 
-    /// Converts from `f32`, rounding to nearest with ties to even.
+    /// Converts `value` to E5M2 using round-to-nearest, ties-to-even.
     ///
-    /// This format is IEEE-like: overflow produces infinity. Any NaN payload
-    /// converts to the canonical positive NaN encoding, `0x7F`.
+    /// This format is IEEE-like: finite overflow produces infinity. Every NaN
+    /// input produces the canonical positive encoding `0x7F`.
     #[inline]
     pub fn from_f32(value: f32) -> Self {
         Self(encode(value, &E5M2))
@@ -269,17 +270,18 @@ impl f8e5m2 {
 }
 
 impl f4e2m1fn {
-    /// Converts to `f32`. Lossless; the format holds only
-    /// +/-{0, 0.5, 1, 1.5, 2, 3, 4, 6}.
+    /// Converts this E2M1FN encoding to `f32`.
+    ///
+    /// The format represents exactly ±{0, 0.5, 1, 1.5, 2, 3, 4, 6}.
     #[inline]
     pub fn to_f32(self) -> f32 {
         decode(self.0 & 0x0F, &E2M1FN)
     }
 
-    /// Converts from `f32`, rounding to nearest with ties to even.
+    /// Converts `value` to E2M1FN using round-to-nearest, ties-to-even.
     ///
     /// This format has neither infinities nor NaN. Infinities and out-of-range
-    /// inputs saturate to +/-6; any NaN payload converts to positive 6.
+    /// inputs saturate to ±6; every NaN input produces positive 6.
     #[inline]
     pub fn from_f32(value: f32) -> Self {
         Self(encode(value, &E2M1FN))
@@ -295,8 +297,8 @@ impl f8e8m0fnu {
 
     /// Converts to `f32`, returning NaN for the reserved pattern.
     ///
-    /// This format is a bare power of two: no sign, no mantissa. It exists to
-    /// carry the per-block scale of an MX tensor.
+    /// This format is a bare power of two with no sign or mantissa and is used
+    /// for per-block MX tensor scales.
     #[inline]
     pub fn to_f32(self) -> f32 {
         if self.0 == 0xFF {
@@ -315,34 +317,16 @@ impl f8e8m0fnu {
         }
     }
 
-    /// Returns the smallest representable scale that is greater than or equal
-    /// to `magnitude`: the power of two that *covers* it.
+    /// Rounds `magnitude` upward to an E8M0 scale.
     ///
-    /// # Why this rounds up
+    /// For a positive finite input in the representable range, the result is
+    /// `2^ceil(log2(magnitude))`; exact powers of two are unchanged. This upward
+    /// rounding is suitable for block scaling because the encoded scale does not
+    /// undershoot the requested magnitude.
     ///
-    /// This is the primitive for choosing an MX block scale, and the rounding
-    /// direction is not a free choice. A block is encoded by dividing its
-    /// elements by the scale, so the scale must be at least as large as the
-    /// block's maximum magnitude divided by the element format's maximum. Round
-    /// *down* and the scale is too small, the largest elements exceed what the
-    /// element format can hold, and they silently saturate.
-    ///
-    /// That failure is quiet and costly: it degrades accuracy across the whole
-    /// block while every individual conversion still looks correct. Measured on
-    /// a real corpus, using floor here made MXFP8 land at 6x the error of plain
-    /// per-row E4M3 - an impossible-looking result, since MXFP8 has strictly
-    /// more information, which is what exposed the bug.
-    ///
-    /// Rounding up cannot saturate. It costs at most one exponent of dynamic
-    /// range, which is why this function exists rather than a general
-    /// `from_f32`: naming the intent removes the chance to get it backwards.
-    ///
-    /// The covering guarantee holds for magnitudes up to `2^127`. Larger
-    /// finite magnitudes cannot be covered by this format, so they clamp to
-    /// the largest scale, `2^127`.
-    ///
-    /// NaN gives [`Self::NAN`], positive infinity clamps to the largest scale,
-    /// and non-positive inputs give the smallest scale.
+    /// Positive values below `2^-127` return `2^-127`. Values above `2^127` and
+    /// positive infinity return `2^127`. NaN returns [`Self::NAN`], and
+    /// non-positive inputs return `2^-127`.
     #[inline]
     pub fn scale_covering(magnitude: f32) -> Self {
         if magnitude.is_nan() {
@@ -607,7 +591,7 @@ mod tests {
     fn tiny_inputs_underflow_to_signed_zero() {
         assert_eq!(f8e4m3fn::from_f32(1.0e-30).0, 0x00);
         assert_eq!(f8e4m3fn::from_f32(-1.0e-30).0, 0x80);
-        // An f32 subnormal must not panic or alias a large value.
+        // The smallest f32 subnormal rounds to zero.
         assert_eq!(f8e4m3fn::from_f32(f32::from_bits(1)).0, 0x00);
     }
 
@@ -639,8 +623,7 @@ mod tests {
 
     #[test]
     fn scale_covering_never_rounds_down() {
-        // This is the property that prevents silent saturation: the chosen
-        // scale must always be >= the magnitude it has to cover.
+        // A covering scale is never smaller than an in-range magnitude.
         let mut value = 1.0e-30f32;
         while value < 1.0e30 {
             let scale = f8e8m0fnu::scale_covering(value).to_f32();
@@ -727,9 +710,8 @@ mod tests {
             largest_scale
         );
 
-        // Beyond the format's range, clamping necessarily means the returned
-        // scale no longer covers the input. It must still stay at the largest
-        // scale instead of wrapping into a wildly wrong exponent.
+        // Above the format's range, the result remains at the largest scale and
+        // no longer covers the input.
         let huge = f8e8m0fnu::scale_covering(f32::MAX);
         assert_eq!(huge.exponent(), Some(127));
         assert_eq!(huge.to_f32(), largest_scale);
