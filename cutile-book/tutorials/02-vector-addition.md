@@ -1,6 +1,6 @@
 # 2. Vector Addition
 
-In cutile, tile programs run concurrently and each program knows its grid coordinates via `program_id(axis)`. To make programs process different pieces of data, we use **partitioning** — dividing the output tensor into sub-tensors so that each tile program reads from and writes to a distinct region.
+In cutile, tile threads run concurrently and each tile knows its coordinates via `get_tile_block_id()`. To make tiles process different pieces of data, we use **partitioning** — dividing the output tensor into sub-tensors so that each tile thread reads from and writes to a distinct region.
 
 ![Partitioning divides data among tile threads](../_static/images/vector-addition-partitioning.svg)
 

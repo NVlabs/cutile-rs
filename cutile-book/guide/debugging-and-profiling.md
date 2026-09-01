@@ -12,11 +12,10 @@ fn debug_kernel<const S: [i32; 2]>(
     z: &mut Tensor<f32, S>,
     x: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let pid0 = program_id(0);
-    let pid1 = program_id(1);
+    let pid: (i32, i32, i32) = get_tile_block_id();
     let tile = load_tile_like(x, z);
 
-    cuda_tile_print!("Program ({}, {}): loaded tile\n", pid0, pid1);
+    cuda_tile_print!("Block ({}, {}): loaded tile\n", pid.0, pid.1);
     z.store(tile);
 }
 ```

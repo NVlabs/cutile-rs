@@ -1884,7 +1884,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 }
                 let mut new_value = args[0].clone();
-                let old_type = new_value.ty.rust_ty.clone();
+                let old_type = new_value.ty.rust_ty;
                 match compiler_op_function.as_str() {
                     "scalar_to_tile" => {
                         let element_type = get_rust_element_type_primitive(&old_type);
@@ -1917,20 +1917,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 .unwrap();
                     }
                     "pointer_to_tile" => {
-                        // Wrapping preserves the pointer's constness: a
-                        // `*const E` wraps into `PointerTile<*const E, {[]}>`.
-                        let old_ty_str = old_type.to_token_stream().to_string();
-                        let (is_mutable, element_type) =
-                            match crate::types::get_ptr_type(&old_ty_str) {
-                                Some((is_mutable, element)) => (is_mutable, element),
-                                None => (true, get_rust_element_type_primitive(&old_type)),
-                            };
-                        if let Some(t) = TileRustType::from_scalar_ptr(&element_type, is_mutable) {
+                        let element_type = get_rust_element_type_primitive(&old_type);
+                        if let Some(t) = TileRustType::from_scalar_ptr(&element_type) {
                             new_value.ty = t;
                         } else {
                             new_value.ty.rust_ty = syn::parse_str::<syn::Type>(&format!(
-                                "PointerTile<{} {element_type}, {{[]}}>",
-                                crate::types::ptr_prefix(is_mutable)
+                                "PointerTile<* mut {element_type}, {{[]}}>"
                             ))
                             .unwrap();
                         }
@@ -1950,21 +1942,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 ),
                             );
                         };
-                        // Unwrapping preserves the tile's constness.
-                        let is_mutable =
-                            !old_type.to_token_stream().to_string().contains("* const");
                         new_value.ty.rust_ty = syn::parse2::<syn::Type>(
-                            format!("{} {element_type}", crate::types::ptr_prefix(is_mutable))
-                                .parse()
-                                .unwrap(),
+                            format!("* mut {element_type}").parse().unwrap(),
                         )
                         .unwrap();
-                    }
-                    "cast_const" | "cast_tile_const" => {
-                        new_value.ty.set_pointer_constness(false);
-                    }
-                    "cast_mut" | "cast_tile_mut" => {
-                        new_value.ty.set_pointer_constness(true);
                     }
                     _ => {
                         return self.jit_error_result(

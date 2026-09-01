@@ -95,6 +95,7 @@ guide/tensors-and-tiles
 guide/jit-compilation
 guide/device-operations
 guide/performance
+guide/autotuning
 guide/bounds-check-placement
 guide/interoperability
 guide/debugging-and-profiling

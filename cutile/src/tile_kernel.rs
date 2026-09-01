@@ -213,6 +213,16 @@ impl TileFunctionKeyBuilder {
 }
 
 impl TileFunctionKey {
+    /// The kernel's module name.
+    pub fn module_name(&self) -> &str {
+        &self.module_name
+    }
+
+    /// The kernel's function name.
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
+
     /// Start building a key with required `module_name` and `function_name`.
     /// All other fields default to empty / `None` / `default()`.
     pub fn builder(
@@ -371,8 +381,100 @@ pub fn _specialization_from_context<F: Fn() -> Module>(
 static KERNEL_CACHE: OnceLock<DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>> =
     OnceLock::new();
 
-pub fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>> {
+/// The process-global L1 cache. Crate-internal ONLY: exposing the raw
+/// `DashMap` publicly would hand out safe `.clear()`/`.remove()`/`.retain()`,
+/// which bypass the `unsafe` eviction gate below — safe code could unload a
+/// `Module` mid-launch (the exact UAF the gate prevents) or re-create the
+/// re-entrant `.retain()` deadlock. All external mutation must go through the
+/// `unsafe` eviction APIs.
+pub(crate) fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>
+{
     KERNEL_CACHE.get_or_init(DashMap::new)
+}
+
+/// Clears L1. Test-support only — `#[doc(hidden)]`, not public API, and
+/// `unsafe` for the same reason as the eviction APIs: it can unload a
+/// `Module` still executing on the GPU, so the caller must quiesce first.
+/// Tests control launch timing, so they satisfy that obligation.
+///
+/// # Safety
+/// See [`clear_kernel_cache`]: quiesce every stream that may run a cached
+/// kernel before calling.
+#[doc(hidden)]
+pub unsafe fn clear_kernel_cache_for_tests() {
+    get_kernel_cache().clear();
+}
+
+/// Removes every kernel from the process-global in-memory cache.
+///
+/// Entries removed here drop the cache's reference; the underlying CUDA
+/// module unloads (releasing its device memory) when the LAST holder
+/// drops, so host-side users are protected by refcount. What refcounts
+/// cannot see is the GPU: a launched kernel executes after the launch
+/// call returns. A tuning objective between trials is exactly the
+/// situation this API exists for: sweeps churn specializations by design,
+/// each holding device memory, while the cache is intentionally unbounded
+/// for steady-state engines (capacity policy lives in the L2 disk cache).
+///
+/// In-flight compiles are unaffected: a thread mid-compile holds its own
+/// `Arc` to its single-flight slot and completes into it; the next
+/// request for that key recompiles (or is served by the disk cache).
+///
+/// Returns the number of entries removed. Freed device bytes are not
+/// tracked host-side; per-module sizes are not observable through the
+/// driver's module API.
+///
+/// # Safety
+/// The caller must quiesce first: synchronize every stream that may still
+/// be running any cached kernel before calling. Unloading a `Module` whose
+/// grid is still executing on the device is undefined behavior, and host
+/// refcounts cannot observe in-flight GPU work — only the caller knows
+/// which streams are idle. This is why the eviction APIs are `unsafe`.
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn clear_kernel_cache() -> usize {
+    unsafe { retain_kernels(|_| false) }
+}
+
+/// Removes one specialization from the in-memory cache; returns whether
+/// it was present.
+///
+/// # Safety
+/// Same quiesce obligation as [`clear_kernel_cache`]: the caller must
+/// ensure no stream is still running this kernel before evicting it.
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn evict_kernel(key: &TileFunctionKey) -> bool {
+    get_kernel_cache().remove(key).is_some()
+}
+
+/// Keeps only specializations whose key satisfies `pred`; returns the
+/// number of entries removed.
+///
+/// `pred` may freely query the cache (`contains_cuda_function`,
+/// `evict_kernel`, or even trigger a compile): it runs with no cache lock
+/// held. Use the [`TileFunctionKey::module_name`]/
+/// [`TileFunctionKey::function_name`] accessors to scope a predicate to
+/// your own kernel.
+///
+/// # Safety
+/// Same quiesce obligation as [`clear_kernel_cache`].
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn retain_kernels(mut pred: impl FnMut(&TileFunctionKey) -> bool) -> usize {
+    let cache = get_kernel_cache();
+    // Snapshot every key first, fully draining the iterator so no shard lock
+    // is held, THEN evaluate `pred` and remove. Evaluating `pred` inside
+    // `DashMap::retain` (or during iteration) holds a shard lock, so the
+    // instant the predicate re-enters the cache — a lookup, an evict, a
+    // compile — it self-deadlocks that shard, wedging every subsequent JIT
+    // lookup in the process. Useful predicates ("evict only my kernel's
+    // specializations") want exactly that re-entry.
+    let keys: Vec<TileFunctionKey> = cache.iter().map(|entry| entry.key().clone()).collect();
+    let mut removed = 0;
+    for key in keys {
+        if !pred(&key) && cache.remove(&key).is_some() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Get (or create) the single-flight compilation slot for `key`.

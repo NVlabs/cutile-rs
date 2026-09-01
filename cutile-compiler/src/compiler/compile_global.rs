@@ -414,7 +414,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         method_call: &ExprMethodCall,
         info: &GlobalInfo,
     ) -> Result<cutile_ir::ir::Value, JITError> {
-        let ptr_ty = TileRustType::from_scalar_ptr(&info.element_name, true).ok_or_else(|| {
+        let ptr_ty = TileRustType::from_scalar_ptr(&info.element_name).ok_or_else(|| {
             self.jit_error(
                 &method_call.receiver.span(),
                 &format!(
