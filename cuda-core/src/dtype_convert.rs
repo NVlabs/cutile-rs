@@ -80,13 +80,17 @@ impl Format {
     }
 }
 
-/// Returns `2^exp` as an `f32`, for `exp` within the normal range.
+/// Returns `2^exp` as an `f32` for every exactly representable power of two.
 fn exp2i(exp: i32) -> f32 {
     debug_assert!(
-        (-126..=127).contains(&exp),
+        (-149..=127).contains(&exp),
         "exponent {exp} out of f32 range"
     );
-    f32::from_bits(((exp + 127) as u32) << 23)
+    if exp >= -126 {
+        f32::from_bits(((exp + 127) as u32) << 23)
+    } else {
+        f32::from_bits(1 << (exp + 149))
+    }
 }
 
 /// Decodes a narrow float bit pattern to `f32`.
@@ -322,6 +326,10 @@ impl f8e8m0fnu {
     /// range, which is why this function exists rather than a general
     /// `from_f32`: naming the intent removes the chance to get it backwards.
     ///
+    /// The covering guarantee holds for magnitudes up to `2^127`. Larger
+    /// finite magnitudes cannot be covered by this format, so they clamp to
+    /// the largest scale, `2^127`.
+    ///
     /// Non-finite or non-positive inputs give [`Self::NAN`] and the smallest
     /// scale respectively.
     pub fn scale_covering(magnitude: f32) -> Self {
@@ -362,6 +370,47 @@ mod tests {
     /// Every bit pattern of a 1+exp+mant format, given its total width.
     fn all_patterns(width: u32) -> impl Iterator<Item = u8> {
         0..=((1u16 << width) - 1) as u8
+    }
+
+    fn exact_power_of_two(exponent: i32) -> f32 {
+        assert!((-149..=127).contains(&exponent));
+        if exponent >= -126 {
+            f32::from_bits(((exponent + 127) as u32) << 23)
+        } else {
+            f32::from_bits(1 << (exponent + 149))
+        }
+    }
+
+    fn assert_rne_boundaries(
+        positive_patterns: impl IntoIterator<Item = u8>,
+        decode: impl Fn(u8) -> f32,
+        encode: impl Fn(f32) -> u8,
+        sign_bit: u8,
+    ) {
+        let patterns: Vec<_> = positive_patterns.into_iter().collect();
+        for pair in patterns.windows(2) {
+            let [lower_bits, upper_bits] = pair else {
+                unreachable!()
+            };
+            let lower = decode(*lower_bits);
+            let upper = decode(*upper_bits);
+            let midpoint = (lower + upper) / 2.0;
+            let below_midpoint = f32::from_bits(midpoint.to_bits() - 1);
+            let above_midpoint = f32::from_bits(midpoint.to_bits() + 1);
+            let tie_winner = if lower_bits & 1 == 0 {
+                *lower_bits
+            } else {
+                *upper_bits
+            };
+
+            assert_eq!(encode(below_midpoint), *lower_bits);
+            assert_eq!(encode(midpoint), tie_winner);
+            assert_eq!(encode(above_midpoint), *upper_bits);
+
+            assert_eq!(encode(-below_midpoint), sign_bit | *lower_bits);
+            assert_eq!(encode(-midpoint), sign_bit | tie_winner);
+            assert_eq!(encode(-above_midpoint), sign_bit | *upper_bits);
+        }
     }
 
     #[test]
@@ -451,6 +500,37 @@ mod tests {
     }
 
     #[test]
+    fn every_finite_rounding_boundary_uses_ties_to_even() {
+        assert_rne_boundaries(
+            0x00..=0x7E,
+            |bits| f8e4m3fn(bits).to_f32(),
+            |value| f8e4m3fn::from_f32(value).0,
+            0x80,
+        );
+        assert_rne_boundaries(
+            0x00..=0x7B,
+            |bits| f8e5m2(bits).to_f32(),
+            |value| f8e5m2::from_f32(value).0,
+            0x80,
+        );
+        assert_rne_boundaries(
+            0x00..=0x07,
+            |bits| f4e2m1fn(bits).to_f32(),
+            |value| f4e2m1fn::from_f32(value).0,
+            0x08,
+        );
+
+        // E5M2's final rounding boundary is between its largest finite value
+        // and infinity. The exact tie rounds to the even infinity encoding.
+        let overflow_midpoint = 61_440.0f32;
+        assert_eq!(
+            f8e5m2::from_f32(f32::from_bits(overflow_midpoint.to_bits() - 1)).0,
+            0x7B
+        );
+        assert_eq!(f8e5m2::from_f32(overflow_midpoint).0, 0x7C);
+    }
+
+    #[test]
     fn signed_zero_is_preserved() {
         assert_eq!(f8e4m3fn::from_f32(0.0).0, 0x00);
         assert_eq!(f8e4m3fn::from_f32(-0.0).0, 0x80);
@@ -460,7 +540,7 @@ mod tests {
     #[test]
     fn subnormals_are_gradual_not_flushed() {
         // E4M3FN smallest subnormal is 2^-9; smallest normal is 2^-6.
-        let smallest_subnormal = 2.0f32.powi(-9);
+        let smallest_subnormal = exact_power_of_two(-9);
         assert_eq!(f8e4m3fn::from_f32(smallest_subnormal).0, 0x01);
         assert_eq!(f8e4m3fn(0x01).to_f32(), smallest_subnormal);
         // Half of it rounds to even, which is zero.
@@ -479,12 +559,28 @@ mod tests {
 
     #[test]
     fn e8m0_scale_is_a_bare_power_of_two() {
+        assert_eq!(f8e8m0fnu(0).to_f32(), f32::from_bits(1 << 22));
+        assert_eq!(f8e8m0fnu(0).to_f32(), exact_power_of_two(-127));
         assert_eq!(f8e8m0fnu(127).to_f32(), 1.0);
         assert_eq!(f8e8m0fnu(128).to_f32(), 2.0);
         assert_eq!(f8e8m0fnu(126).to_f32(), 0.5);
+        assert_eq!(f8e8m0fnu(0).exponent(), Some(-127));
         assert_eq!(f8e8m0fnu(127).exponent(), Some(0));
         assert!(f8e8m0fnu::NAN.to_f32().is_nan());
         assert_eq!(f8e8m0fnu::NAN.exponent(), None);
+    }
+
+    #[test]
+    fn e8m0_decodes_every_non_nan_pattern() {
+        for bits in 0..=0xFE {
+            let exponent = bits as i32 - f8e8m0fnu::BIAS;
+            let expected = exact_power_of_two(exponent);
+            assert_eq!(
+                f8e8m0fnu(bits).to_f32().to_bits(),
+                expected.to_bits(),
+                "byte 0x{bits:02X} should decode to 2^{exponent}"
+            );
+        }
     }
 
     #[test]
@@ -507,7 +603,7 @@ mod tests {
         // A power of two covers itself; rounding up here would waste a whole
         // exponent of range on every block whose max is already a power of two.
         for exp in -100..=100 {
-            let value = 2.0f32.powi(exp);
+            let value = exact_power_of_two(exp);
             assert_eq!(
                 f8e8m0fnu::scale_covering(value).exponent(),
                 Some(exp),
@@ -533,12 +629,21 @@ mod tests {
 
     #[test]
     fn scale_covering_clamps_rather_than_wrapping() {
-        // Beyond the format's range the byte must stay in range, not wrap into
-        // a wildly wrong exponent.
+        let largest_scale = exact_power_of_two(127);
+        assert_eq!(
+            f8e8m0fnu::scale_covering(largest_scale).to_f32(),
+            largest_scale
+        );
+
+        // Beyond the format's range, clamping necessarily means the returned
+        // scale no longer covers the input. It must still stay at the largest
+        // scale instead of wrapping into a wildly wrong exponent.
         let huge = f8e8m0fnu::scale_covering(f32::MAX);
-        assert!(huge.0 != 0xFF, "f32::MAX is finite and must not become NaN");
-        assert!(huge.exponent().unwrap() <= 127);
+        assert_eq!(huge.exponent(), Some(127));
+        assert_eq!(huge.to_f32(), largest_scale);
+        assert!(huge.to_f32() < f32::MAX);
+
         let tiny = f8e8m0fnu::scale_covering(f32::from_bits(1));
-        assert!(tiny.exponent().unwrap() >= -127);
+        assert_eq!(tiny.exponent(), Some(-127));
     }
 }
