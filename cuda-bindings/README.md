@@ -6,7 +6,16 @@ This crate is intentionally low level. Most code should depend on `cuda-core` in
 
 # Notes
 
-- The bindings are generated at build time.
-- `CUDA_TOOLKIT_PATH` can point at the local CUDA toolkit installation. If it
-  is unset, the build searches standard CUDA 13.3/13.2 install locations.
+- The bindings are generated at build time from a CUDA 12.8+ toolkit.
+- The toolkit root is the first set variable among `CUDA_TOOLKIT_PATH` and
+  `CUDA_HOME`; when neither is set, the build searches the standard install
+  locations (on Linux `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
+  `/usr/local/cuda-13`, `/usr/local/cuda-12`, `/usr/local/cuda`; on Windows
+  `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3` and `v13.2`).
+- Within the toolkit, both the standard `include/` layout and the
+  redistributable `targets/<dir>/include/` layouts (Jetson/Tegra, sbsa,
+  cross-builds, extracted redistributables) are probed for `cuda.h`.
+  `CUDA_TOOLKIT_TARGET_DIR` names one `targets/` directory by hand, like
+  nvcc's `-target-dir` flag; when set, that tree is the only candidate
+  probed.
 - Set `CUTILE_SETUP_DIAGNOSTICS=1` to print CUDA toolkit discovery decisions.
