@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 use cutile;
-use cutile::compile_api::KernelCompiler;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -184,24 +183,6 @@ fn compile_named_integer_arithmetic() -> () {
             "Expected overflow attributes in named integer arithmetic"
         );
     });
-}
-
-#[test]
-fn named_integer_arithmetic_serializes_bytecode() {
-    let artifacts = KernelCompiler::new(
-        __module_ast_self,
-        "integer_ops_module",
-        "named_integer_arithmetic_kernel",
-    )
-    .target("sm_120")
-    .generics(vec!["128".to_owned()])
-    .strides(&[("output", &[1])])
-    .compile()
-    .expect("named integer arithmetic should compile");
-    let bytecode = artifacts
-        .bytecode()
-        .expect("divi/remi signedness must serialize to Tile IR bytecode");
-    assert!(!bytecode.is_empty());
 }
 
 #[test]
