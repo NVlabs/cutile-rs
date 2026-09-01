@@ -16,3 +16,4 @@ pub use cuda_bindings as sys;
 pub use dtype::*;
 pub use error::*;
 pub use runtime::*;
+pub mod vmm;

@@ -65,10 +65,28 @@ fn tile_f32() -> Type {
         element_type: TileElementType::Scalar(ScalarType::F32),
     })
 }
+fn tile_f32_64x64() -> Type {
+    Type::Tile(TileType {
+        shape: vec![64, 64],
+        element_type: TileElementType::Scalar(ScalarType::F32),
+    })
+}
 fn tile_i32() -> Type {
     Type::Tile(TileType {
         shape: vec![128],
         element_type: TileElementType::Scalar(ScalarType::I32),
+    })
+}
+fn tile_i8_32() -> Type {
+    Type::Tile(TileType {
+        shape: vec![32],
+        element_type: TileElementType::Scalar(ScalarType::I8),
+    })
+}
+fn tile_f4_64() -> Type {
+    Type::Tile(TileType {
+        shape: vec![64],
+        element_type: TileElementType::Scalar(ScalarType::F4E2M1FN),
     })
 }
 fn scalar_i32() -> Type {
@@ -113,6 +131,33 @@ fn tile_ptr_f32() -> Type {
 }
 fn token() -> Type {
     Type::Token
+}
+
+fn tensor_view_f32_2d() -> TensorViewType {
+    TensorViewType {
+        element_type: ScalarType::F32,
+        shape: vec![8192, 128],
+        strides: vec![128, 1],
+    }
+}
+
+fn gather_scatter_view_f32_2d() -> Type {
+    Type::GatherScatterView(GatherScatterViewType {
+        tile_shape: vec![64, 64],
+        tensor_view: tensor_view_f32_2d(),
+        sparse_dim: 0,
+        padding_value: None,
+    })
+}
+
+fn strided_view_f32_2d() -> Type {
+    Type::StridedView(StridedViewType {
+        tile_shape: vec![64, 64],
+        traversal_strides: vec![2, 1],
+        tensor_view: tensor_view_f32_2d(),
+        dim_map: vec![0, 1],
+        padding_value: None,
+    })
 }
 
 // =========================================================================
@@ -732,6 +777,72 @@ fn roundtrip_mmaf() {
     assert_roundtrip(&module);
 }
 
+#[test]
+fn roundtrip_pack_unpack() {
+    let packed = tile_i8_32();
+    let unpacked = tile_f4_64();
+    let module = build_kernel(
+        "pack_unpack",
+        &[unpacked.clone(), packed.clone()],
+        |m, b, args| {
+            let (pack_op, _) = OpBuilder::new(Opcode::Pack, Location::Unknown)
+                .operand(args[0])
+                .result(packed.clone())
+                .build(m);
+            append_op(m, b, pack_op);
+
+            let (unpack_op, _) = OpBuilder::new(Opcode::Unpack, Location::Unknown)
+                .operand(args[1])
+                .result(unpacked.clone())
+                .build(m);
+            append_op(m, b, unpack_op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn roundtrip_mmaf_scaled() {
+    let ty_in = Type::Tile(TileType {
+        shape: vec![16, 16],
+        element_type: TileElementType::Scalar(ScalarType::F4E2M1FN),
+    });
+    let ty_acc = Type::Tile(TileType {
+        shape: vec![16, 16],
+        element_type: TileElementType::Scalar(ScalarType::F32),
+    });
+    let lhs_scale = Type::Tile(TileType {
+        shape: vec![16, 1],
+        element_type: TileElementType::Scalar(ScalarType::F8E8M0FNU),
+    });
+    let rhs_scale = Type::Tile(TileType {
+        shape: vec![1, 16],
+        element_type: TileElementType::Scalar(ScalarType::F8E8M0FNU),
+    });
+    let module = build_kernel(
+        "mmaf_scaled",
+        &[
+            ty_in.clone(),
+            ty_in.clone(),
+            ty_acc.clone(),
+            lhs_scale.clone(),
+            rhs_scale.clone(),
+        ],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::MmaFScaled, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .operand(args[2])
+                .operand(args[3])
+                .operand(args[4])
+                .result(ty_acc.clone())
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
 // --- Conversion ops ---
 
 #[test]
@@ -909,6 +1020,48 @@ fn roundtrip_get_index_space_shape() {
 // --- Memory ops ---
 
 #[test]
+fn roundtrip_alloca() {
+    let module = build_kernel("alloca", &[], |m, b, _| {
+        let (op, _) = OpBuilder::new(Opcode::Alloca, Location::Unknown)
+            .result(ptr_f32())
+            .attr("num_elem", Attribute::i32(64))
+            .attr("alignment", Attribute::i32(128))
+            .attr("global", Attribute::Bool(true))
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn roundtrip_make_gather_scatter_view() {
+    let tv = Type::TensorView(tensor_view_f32_2d());
+    let gsv = gather_scatter_view_f32_2d();
+    let module = build_kernel("make_gather_scatter_view", &[tv], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::MakeGatherScatterView, Location::Unknown)
+            .operand(args[0])
+            .result(gsv)
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn roundtrip_make_strided_view() {
+    let tv = Type::TensorView(tensor_view_f32_2d());
+    let sv = strided_view_f32_2d();
+    let module = build_kernel("make_strided_view", &[tv], |m, b, args| {
+        let (op, _) = OpBuilder::new(Opcode::MakeStridedView, Location::Unknown)
+            .operand(args[0])
+            .result(sv)
+            .build(m);
+        append_op(m, b, op);
+    });
+    assert_roundtrip(&module);
+}
+
+#[test]
 fn roundtrip_load_ptr_tko_minimal() {
     let module = build_kernel("lpt_min", &[tile_ptr_f32()], |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::LoadPtrTko, Location::Unknown)
@@ -1061,6 +1214,66 @@ fn roundtrip_store_view_tko() {
     assert_roundtrip(&module);
 }
 
+#[test]
+fn roundtrip_gather_scatter_view_load_store_tko() {
+    let gsv = gather_scatter_view_f32_2d();
+    let sparse_index = Type::Tile(TileType {
+        shape: vec![8],
+        element_type: TileElementType::Scalar(ScalarType::I32),
+    });
+    let module = build_kernel(
+        "gsv_load_store",
+        &[
+            gsv.clone(),
+            sparse_index,
+            scalar_i32(),
+            tile_f32_64x64(),
+            token(),
+        ],
+        |m, b, args| {
+            let (load, load_res) = OpBuilder::new(Opcode::LoadViewTko, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .operand(args[2])
+                .operand(args[4])
+                .result(tile_f32_64x64())
+                .result(token())
+                .attr("memory_ordering_semantics", Attribute::i32(0))
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![
+                        Attribute::i32(1),
+                        Attribute::i32(2),
+                        Attribute::i32(1),
+                    ]),
+                )
+                .build(m);
+            append_op(m, b, load);
+
+            let (store, _) = OpBuilder::new(Opcode::StoreViewTko, Location::Unknown)
+                .operand(args[3])
+                .operand(args[0])
+                .operand(args[1])
+                .operand(args[2])
+                .operand(load_res[1])
+                .result(token())
+                .attr("memory_ordering_semantics", Attribute::i32(0))
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![
+                        Attribute::i32(1),
+                        Attribute::i32(1),
+                        Attribute::i32(2),
+                        Attribute::i32(1),
+                    ]),
+                )
+                .build(m);
+            append_op(m, b, store);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
 // --- Atomic ops ---
 
 #[test]
@@ -1111,6 +1324,43 @@ fn roundtrip_atomic_cas() {
                         Attribute::i32(1),
                         Attribute::i32(0),
                         Attribute::i32(0),
+                    ]),
+                )
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
+    assert_roundtrip(&module);
+}
+
+#[test]
+fn roundtrip_atomic_red_view_tko() {
+    let gsv = gather_scatter_view_f32_2d();
+    let sparse_index = Type::Tile(TileType {
+        shape: vec![8],
+        element_type: TileElementType::Scalar(ScalarType::I32),
+    });
+    let module = build_kernel(
+        "atomic_red_view_tko",
+        &[gsv, sparse_index, scalar_i32(), tile_f32_64x64(), token()],
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::AtomicRedViewTko, Location::Unknown)
+                .operand(args[0])
+                .operand(args[1])
+                .operand(args[2])
+                .operand(args[3])
+                .operand(args[4])
+                .result(token())
+                .attr("memory_ordering_semantics", Attribute::i32(1))
+                .attr("memory_scope", Attribute::i32(1))
+                .attr("mode", Attribute::i32(0))
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![
+                        Attribute::i32(1),
+                        Attribute::i32(2),
+                        Attribute::i32(1),
+                        Attribute::i32(1),
                     ]),
                 )
                 .build(m);

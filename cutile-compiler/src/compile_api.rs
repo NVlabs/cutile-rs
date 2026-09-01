@@ -17,30 +17,67 @@
 //! let artifacts = KernelCompiler::new(my_module::__module_ast_self, "my_module", "add")
 //!     .generics(vec!["32".into()])
 //!     .strides(&[("c", &[1])])
-//!     .target("sm_80")
+//!     .target("sm_120")
 //!     .compile()?;
 //!
 //! println!("{}", artifacts.ir_text());
 //! let bc = artifacts.bytecode()?;
 //! ```
+//!
+//! The persistent JIT-cache key can be derived without compiling a cubin:
+//!
+//! ```rust,ignore
+//! let key = KernelCompiler::new(my_module::__module_ast_self, "my_module", "add")
+//!     .generics(vec!["32".into()])
+//!     .strides(&[("c", &[1])])
+//!     .target("sm_120")
+//!     .l2_cache_key()?;
+//! assert_eq!(key.len(), 64);
+//! ```
 
 use crate::compiler::{CUDATileFunctionCompiler, CUDATileModules};
+use crate::cuda_tile_runtime_utils::current_l2_key_for_module;
 use crate::error::JITError;
 use crate::hints::CompileOptions;
-use crate::specialization::SpecializationBits;
+use crate::specialization::{DivHint, SpecializationBits};
 
-/// Compiled kernel artifacts: IR, bytecode, and optional cubin.
+/// Where each checked partition access's bounds check ended up: proven at
+/// compile time (nothing emitted), hoisted to a loop preheader, or emitted
+/// in place at the access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CheckPlacementCounts {
+    pub discharged: u32,
+    pub hoisted: u32,
+    pub in_place: u32,
+}
+
+/// Compiled kernel artifacts: IR and bytecode.
 ///
 /// Produced by [`KernelCompiler::compile`]. All methods are pure Rust and
 /// do not require a GPU or CUDA driver.
 pub struct CompileArtifacts {
     module: cutile_ir::Module,
+    check_counts: CheckPlacementCounts,
+    launch_checks: Vec<cuda_async::predicate::LaunchCheck>,
 }
 
 impl CompileArtifacts {
     /// Returns the human-readable Tile IR text (MLIR-like syntax).
     pub fn ir_text(&self) -> String {
         self.module.to_mlir_text()
+    }
+
+    /// Bounds-check placement counters for the compiled kernel — the same
+    /// numbers reported on the `CUTILE_JIT_TIMING` line.
+    pub fn check_counts(&self) -> CheckPlacementCounts {
+        self.check_counts
+    }
+
+    /// Safety checks the compiler hoisted out of the kernel to launch time. The
+    /// host runs these (via `validate_launch_checks`) before each launch; here
+    /// they let a compile-only test inspect exactly what was evacuated.
+    pub fn launch_checks(&self) -> &[cuda_async::predicate::LaunchCheck] {
+        &self.launch_checks
     }
 
     /// Serializes the compiled module to bytecode.
@@ -71,7 +108,7 @@ impl CompileArtifacts {
 /// let artifacts = KernelCompiler::new(my_module::__module_ast_self, "my_module", "tile_math")
 ///     .generics(vec!["32".into()])
 ///     .strides(&[("output", &[1])])
-///     .target("sm_80")
+///     .target("sm_120")
 ///     .compile()?;
 /// ```
 pub struct KernelCompiler<F: Fn() -> crate::ast::Module> {
@@ -82,6 +119,7 @@ pub struct KernelCompiler<F: Fn() -> crate::ast::Module> {
     generics: Vec<String>,
     stride_args: Vec<(String, Vec<i32>)>,
     spec_args: Vec<(String, SpecializationBits)>,
+    scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
 }
@@ -97,17 +135,18 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             module_ast_fn,
             module_name: module_name.to_string(),
             function_name: function_name.to_string(),
-            gpu_name: "sm_80".to_string(),
+            gpu_name: "sm_120".to_string(),
             generics: Vec::new(),
             stride_args: Vec::new(),
             spec_args: Vec::new(),
+            scalar_hints: Vec::new(),
             const_grid: None,
             compile_options: CompileOptions::default(),
         }
     }
 
-    /// Sets the target GPU architecture (e.g. `"sm_80"`, `"sm_100"`).
-    /// Defaults to `"sm_80"`.
+    /// Sets the target GPU architecture (e.g. `"sm_80"`, `"sm_120"`).
+    /// Defaults to `"sm_120"`.
     pub fn target(mut self, gpu_name: &str) -> Self {
         self.gpu_name = gpu_name.to_string();
         self
@@ -137,6 +176,15 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         self
     }
 
+    /// Sets scalar specialization hints for integer scalar and raw pointer parameters.
+    pub fn scalar_hints(mut self, hints: &[(&str, DivHint)]) -> Self {
+        self.scalar_hints = hints
+            .iter()
+            .map(|(name, hint)| (name.to_string(), *hint))
+            .collect();
+        self
+    }
+
     /// Sets a constant grid size for the kernel launch configuration.
     pub fn grid(mut self, grid: (u32, u32, u32)) -> Self {
         self.const_grid = Some(grid);
@@ -147,6 +195,24 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
     pub fn options(mut self, options: CompileOptions) -> Self {
         self.compile_options = options;
         self
+    }
+
+    /// Returns the persistent JIT-cache key for this specialization.
+    ///
+    /// This runs the compiler frontend and serializes its Tile IR output using
+    /// the bytecode version selected for the currently resolved `tileiras`
+    /// toolchain. It does not consult a JIT store, compile a cubin, initialize
+    /// the CUDA driver, or require a GPU.
+    ///
+    /// The returned string is the same 64-character lowercase SHA-256 key that
+    /// the runtime's L2 cache lookup would use for this specialization.
+    pub fn l2_cache_key(self) -> Result<String, JITError> {
+        let gpu_name = self.gpu_name.clone();
+        let tileiras_opts = crate::cuda_tile_runtime_utils::TileirasOptions::from_compile_options(
+            &self.compile_options,
+        );
+        let artifacts = self.compile()?;
+        current_l2_key_for_module(artifacts.module(), &gpu_name, &tileiras_opts)
     }
 
     /// Compiles the kernel and returns the artifacts.
@@ -167,6 +233,11 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             .iter()
             .map(|(name, s)| (name.as_str(), s))
             .collect();
+        let scalar_hint_refs: Vec<(&str, &DivHint)> = self
+            .scalar_hints
+            .iter()
+            .map(|(name, hint)| (name.as_str(), hint))
+            .collect();
 
         let compiler = CUDATileFunctionCompiler::new(
             &modules,
@@ -175,13 +246,23 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             &self.generics,
             &stride_refs,
             &spec_refs,
-            &[],
+            &scalar_hint_refs,
             self.const_grid,
             self.gpu_name,
             &self.compile_options,
         )?;
 
         let module = compiler.compile()?;
-        Ok(CompileArtifacts { module })
+        let check_counts = CheckPlacementCounts {
+            discharged: compiler.check_stats.discharged.get(),
+            hoisted: compiler.check_stats.hoisted.get(),
+            in_place: compiler.check_stats.in_place.get(),
+        };
+        let launch_checks = compiler.launch_checks.borrow().clone();
+        Ok(CompileArtifacts {
+            module,
+            check_counts,
+            launch_checks,
+        })
     }
 }

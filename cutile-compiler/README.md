@@ -4,13 +4,24 @@ This crate compiles Rust DSL kernels into Tile IR bytecode for GPU execution
 via `tileiras`. Most users interact with it indirectly through `cutile` and
 `cutile-macro`.
 
-By default, the runtime invokes `tileiras` through normal `PATH` lookup. Set
-`CUTILE_TILEIRAS_PATH` to use a specific binary:
+The runtime resolves `tileiras` in this order:
+
+1. `CUTILE_TILEIRAS_PATH`, when set.
+2. `$CUDA_TOOLKIT_PATH/bin/tileiras`, when `CUDA_TOOLKIT_PATH` is set and the
+   binary exists there.
+3. Standard CUDA 13.3/13.2 install locations, when they contain
+   `bin/tileiras`.
+4. `tileiras` through normal `PATH` lookup.
+
+Set `CUTILE_TILEIRAS_PATH` to force a specific binary:
 
 ```bash
 CUTILE_TILEIRAS_PATH=/opt/cuda-tile/bin/tileiras \
     cargo test -p cutile-compiler
 ```
+
+Set `CUTILE_SETUP_DIAGNOSTICS=1` to print CUDA toolkit and `tileiras` discovery
+decisions during setup.
 
 ## Testing
 

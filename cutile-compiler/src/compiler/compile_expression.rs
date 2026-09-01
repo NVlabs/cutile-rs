@@ -11,14 +11,14 @@
 
 use super::_function::CUDATileFunctionCompiler;
 use super::_value::{
-    BlockTerminator, CompilerContext, DimOrigin, PartitionAxisOrigin, TileRustValue,
+    BlockTerminator, CompilerContext, DimOrigin, LoopFrame, PartitionAxisOrigin, TileRustValue,
 };
 use super::shared_types::Kind;
 use super::shared_utils::{
     collect_mutated_variables, collect_mutated_variables_from_block,
     collect_mutated_variables_from_expr, collect_mutated_variables_loop,
     collect_mutated_variables_while, dedup, update_outer_block_type_meta, TileBinaryOp,
-    STACK_GROW_SIZE, STACK_RED_ZONE,
+    MAX_MAPPED_PARTITION_RANK, OWNED_MAP_DIM, STACK_GROW_SIZE, STACK_RED_ZONE,
 };
 use super::tile_rust_type::TileRustType;
 use crate::bounds::Bounds;
@@ -43,6 +43,31 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{parse_quote, Expr, ExprForLoop, ExprMacro, Lit, Member, Pat, Token, UnOp};
+
+/// A per-tensor ordering-token accumulator threaded through a loop. The loop
+/// carries the tensor's token (a bare `token`, never the view); each store in
+/// the body joins its output into it; the loop result is published to the tensor
+/// at exit. Orders any later access to the tensor after all of the loop's writes.
+pub(crate) struct LoopTokenAcc {
+    /// Synthetic carry-var name holding the accumulator token.
+    acc_var: String,
+    /// The root tensor whose token the accumulator publishes.
+    root: String,
+    /// Views written in the body that root at `root`; rebound to the published
+    /// token after the loop so a trailing store through them stays ordered.
+    receivers: Vec<String>,
+    /// True if this loop created the accumulator; false if it inherited one from
+    /// an enclosing loop (nested loops writing the same tensor). Only the owner
+    /// publishes the result to the tensor and drops the carry variable — a
+    /// non-owner's result is left for the enclosing loop to carry further.
+    owner: bool,
+    /// True if some store to this tensor has a non-distinct index (a
+    /// constant/repeated address, not varying with the loop variable). Those
+    /// writes overlap, so the views are rebound to read the carried accumulator
+    /// token — the stores serialize (each ordered after the previous). Distinct
+    /// (branded) writes keep reading their invariant view token and fork.
+    serialize: bool,
+}
 
 impl<'m> CUDATileFunctionCompiler<'m> {
     /// Construct a ZST marker type placeholder from a path expression.
@@ -265,7 +290,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         format!("{{ [{dims}] }}")
     }
 
-    fn mapped_partition_type_shapes(
+    pub(crate) fn mapped_partition_type_shapes(
         &self,
         value: &TileRustValue,
         generic_vars: &GenericVars,
@@ -308,13 +333,22 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "failed to resolve MappedPartitionMut map-shape const generic array",
             );
         };
-        if tile_shape.len() != 2 || map_shape.len() != 2 {
+        if tile_shape.len() != map_shape.len() {
             return self.jit_error_result(
                 span,
                 &format!(
-                    "`iter_indices()` currently supports rank-2 MappedPartitionMut values, got tile rank {} and map rank {}",
+                    "`iter_indices()` requires matching tile and map ranks, got tile rank {} and map rank {}",
                     tile_shape.len(),
                     map_shape.len()
+                ),
+            );
+        }
+        if tile_shape.is_empty() || tile_shape.len() > MAX_MAPPED_PARTITION_RANK {
+            return self.jit_error_result(
+                span,
+                &format!(
+                    "`iter_indices()` supports rank-1 through rank-{MAX_MAPPED_PARTITION_RANK} MappedPartitionMut values, got rank {}",
+                    tile_shape.len(),
                 ),
             );
         }
@@ -373,7 +407,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         None
                     }
                 });
-                TileRustValue::new_primitive(value, i32_ty.clone(), bounds)
+                let mut result = TileRustValue::new_primitive(value, i32_ty.clone(), bounds);
+                // Tag the special-register value with its canonical atom so a
+                // partition-access obligation can discharge against the universal
+                // `TileBlockId(k) < NumTileBlocks(k)` hardware axiom.
+                if is_tile_block_id {
+                    result.term = Some(cuda_async::predicate::Term::atom(
+                        cuda_async::predicate::Atom::TileBlockId(axis),
+                    ));
+                } else if is_num_tile_blocks {
+                    result.term = Some(cuda_async::predicate::Term::atom(
+                        cuda_async::predicate::Atom::NumTileBlocks(axis),
+                    ));
+                }
+                result
             })
             .collect()
     }
@@ -400,10 +447,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
         let rank = pv.tile_shape.len();
-        if rank != 2 {
+        if rank == 0 || rank > MAX_MAPPED_PARTITION_RANK {
             return self.jit_error_result(
                 span,
-                &format!("`iter_indices()` currently supports rank-2 partitions, got rank {rank}"),
+                &format!(
+                    "`iter_indices()` supports rank-1 through rank-{MAX_MAPPED_PARTITION_RANK} partitions, got rank {rank}"
+                ),
             );
         }
 
@@ -633,7 +682,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "`Partition::with_bounds` expects exactly one tuple argument",
             );
         }
-        let mut partition = self
+        let partition = self
             .compile_expression(
                 module,
                 block_id,
@@ -666,29 +715,81 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let Some(bound_values) = bounds.values else {
             return self.jit_error_result(
                 &method_call.args[0].span(),
-                "`Partition::with_bounds` expects a rank-2 tuple",
+                "`Partition::with_bounds` expects a tuple of dimensions",
             );
         };
-        if bound_values.len() != 2 {
+        self.apply_with_bounds(
+            module,
+            block_id,
+            partition,
+            bound_values,
+            return_type,
+            generic_vars,
+            ctx,
+            &method_call.args[0].span(),
+        )
+        .map(Some)
+    }
+
+    /// Bind a `Dim` per axis to `partition`, verifying each binding and
+    /// retyping the result as the matching `Bounded*` partition.
+    ///
+    /// `with_bounds` is reachable two ways — as a method call, intercepted
+    /// before inlining, and as the `partition_with_bounds` compiler op, which
+    /// is `pub` and so callable directly. Both spellings must mean exactly the
+    /// same thing, so both route here. They previously carried separate copies
+    /// of this logic that had already drifted (differing diagnostics, and only
+    /// one of them was ever exercised).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_with_bounds(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        mut partition: TileRustValue,
+        bound_values: Vec<TileRustValue>,
+        return_type: Option<TileRustType>,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        span: &proc_macro2::Span,
+    ) -> Result<TileRustValue, JITError> {
+        let (static_tile, _, _) = self.partition_static_geometry(&partition, span)?;
+        if bound_values.len() != static_tile.len() {
             return self.jit_error_result(
-                &method_call.args[0].span(),
+                span,
                 &format!(
-                    "`Partition::with_bounds` expects rank-2 bounds, got rank {}",
+                    "`Partition::with_bounds` expects rank-{} bounds for this partition, got rank {}",
+                    static_tile.len(),
                     bound_values.len()
                 ),
             );
         }
         let mut dim_origins = Vec::with_capacity(bound_values.len());
+        // The partition's index-space shape is one op serving every axis. Built
+        // on first use (a binding that folds at JIT never needs it) and shared
+        // across the rest, so a rank-n `with_bounds` costs at most one query
+        // rather than n.
+        let mut index_space_shape: Option<Vec<cutile_ir::ir::Value>> = None;
         for (axis, value) in bound_values.into_iter().enumerate() {
-            let origin = Self::value_dim_origin(&value);
-            let Some(origin) = origin else {
+            let Some(origin) = Self::value_dim_origin(&value) else {
                 return self.jit_error_result(
-                    &method_call.args[0].span(),
+                    span,
                     &format!(
                         "`Partition::with_bounds` bound {axis} must come from `num_tiles`, `Dim::new`, or `IntoDim::into_dim`"
                     ),
                 );
             };
+            // The binding is a claim; verify it (see the helper's doc).
+            self.emit_with_bounds_binding_check(
+                module,
+                block_id,
+                &partition,
+                &value,
+                axis,
+                generic_vars,
+                ctx,
+                &mut index_space_shape,
+                span,
+            )?;
             dim_origins.push(origin);
         }
         let return_type = match return_type {
@@ -697,17 +798,21 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let mut bounded_ty = partition.ty.rust_ty.clone();
                 let syn::Type::Path(path_ty) = &mut bounded_ty else {
                     return self.jit_error_result(
-                        &method_call.receiver.span(),
+                        span,
                         "expected a partition type for `Partition::with_bounds`",
                     );
                 };
                 let Some(segment) = path_ty.path.segments.last_mut() else {
                     return self.jit_error_result(
-                        &method_call.receiver.span(),
+                        span,
                         "expected a partition type path for `Partition::with_bounds`",
                     );
                 };
-                segment.ident = syn::Ident::new("BoundedPartition", segment.ident.span());
+                // Derive the bounded name from the receiver's own ident rather
+                // than naming one target: `PartitionMut` must become
+                // `BoundedPartitionMut`, not `BoundedPartition`.
+                segment.ident =
+                    syn::Ident::new(&format!("Bounded{}", segment.ident), segment.ident.span());
                 let mut return_type = partition.ty.clone();
                 return_type.rust_ty = bounded_ty;
                 return_type
@@ -715,7 +820,321 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         partition.ty = return_type;
         partition.bounded_axes = Some(dim_origins);
-        Ok(Some(partition))
+        Ok(partition)
+    }
+
+    /// Reduce a `with_bounds` binding to a divisibility predicate, when the
+    /// bound `Dim` is `floor(e / t)` over exactly the extent and tile extent
+    /// this axis is partitioned by.
+    ///
+    /// The binding obliges `val(m) == tiles(P, axis) == ceil(e / t)`. With
+    /// `val(m) == floor(e / t)`, the two agree precisely when `t` divides `e`,
+    /// so the whole obligation collapses to `divisible_by(e, t)` — stated over
+    /// the extent atom that already exists, with no new vocabulary.
+    ///
+    /// Returns `None` whenever any part of that shape is not established: a
+    /// different divisor, an unlabelled extent, or a numerator the compiler
+    /// cannot relate to this axis's extent. The caller then falls through to
+    /// the device assert — fail closed (SC4). The extent atom's frame comes
+    /// from [`Self::extent_atom`] (SC1).
+    fn with_bounds_divisibility(
+        &self,
+        partition: &TileRustValue,
+        bound: &TileRustValue,
+        dim_map: &[i32],
+        axis: usize,
+        tile_dim: i64,
+    ) -> Option<cuda_async::predicate::Predicate> {
+        use crate::passes::obligation::{resolve, Obligation, Resolution};
+        use cuda_async::predicate::{Predicate, Term};
+        // The `Dim`'s scalar lives in a `size` field; look there too.
+        let floor_div = bound.floor_div.as_ref().or_else(|| {
+            bound
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("size"))
+                .and_then(|size| size.floor_div.as_ref())
+        })?;
+        // The division must be by this axis's tile extent, or it says nothing
+        // about this axis's tile count.
+        if floor_div.divisor != tile_dim {
+            return None;
+        }
+        // ...and the numerator must be this axis's extent.
+        let param = *self.param_index.get(partition.tensor_origin.as_ref()?)?;
+        let tensor_axis = *dim_map.get(axis).filter(|&&d| d >= 0)? as usize;
+        let expected = Term::atom(self.extent_atom(param, tensor_axis));
+        if floor_div.numerator == expected {
+            return Predicate::divisible_by(expected, tile_dim);
+        }
+        // Cross-tensor binding (Theorem 2): the `Dim` divides a *different*
+        // tensor's extent — the GEMM contraction pattern, `k` derived from `x`
+        // but also bound to an axis of `y`. The reduction still applies when
+        // the two extents are equal, and that equality is precisely what a
+        // declared `preconditions` dim fact states — already verified by the
+        // launcher before the kernel runs. So the binding discharges from the
+        // *declared* equality plus the numerator's own divisibility check (the
+        // very predicate the sibling binding emits): one check decides both.
+        //
+        // Entailed-only, deliberately. An *unproven* equality here also ranges
+        // over launch-known operands, so `resolve` would happily hoist it — but
+        // extent equality is strictly stronger than tile-count equality
+        // (`ceil(100/64) == ceil(128/64)` with unequal extents), so hoisting it
+        // unasked would reject launches today's device assert accepts. The
+        // kernel must opt in by declaring the fact; otherwise fail closed.
+        let equality = Obligation::new(
+            Predicate::eq(&floor_div.numerator, &expected)?,
+            "with_bounds shared-extent binding",
+        );
+        if matches!(resolve(&equality, &self.assumptions), Resolution::Jit) {
+            return Predicate::divisible_by(floor_div.numerator.clone(), tile_dim);
+        }
+        None
+    }
+
+    /// Verify one `with_bounds` binding at run time: the declared `Dim` must
+    /// equal this partition's tile count for `axis`.
+    ///
+    /// `with_bounds` binds a symbolic extent (a `Dim`) to `(partition, axis)`.
+    /// Binding the *same* `Dim` to several partitions is how a kernel states
+    /// that those axes share an extent — a GEMM binds one `Dim` to `x`'s axis 1
+    /// and `y`'s axis 0 to name the contraction dimension. So a binding is a
+    /// **claim**, and nothing else verifies it: unchecked, a wrong `Dim`
+    /// discharges every branded access on that axis and admits an out-of-bounds
+    /// access from safe code (both on stores and on loads).
+    ///
+    /// Emitted once per binding at the `with_bounds` site — loop-invariant in
+    /// practice — never per access. The cost is therefore O(bindings), not
+    /// O(accesses): the per-access checks stay discharged by the brand, so the
+    /// register win on hot loops is unaffected.
+    ///
+    /// Static and launch-resolvable bindings are handled before this fallback.
+    /// The remaining dynamic forms deliberately keep this device comparison:
+    /// `with_bounds` is deprecated, and preserving its safety is more valuable
+    /// than expanding the solver solely to optimize its residual cases.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_with_bounds_binding_check(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        partition: &TileRustValue,
+        bound: &TileRustValue,
+        axis: usize,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        index_space_shape: &mut Option<Vec<cutile_ir::ir::Value>>,
+        span: &proc_macro2::Span,
+    ) -> Result<(), JITError> {
+        // The declared extent: the `Dim`'s runtime value.
+        let declared = bound.value.or_else(|| {
+            bound
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("size"))
+                .and_then(|size| size.value)
+        });
+        let (Some(declared), Some(view_value)) = (declared, partition.value) else {
+            return Ok(());
+        };
+        let view_ty = module.value_type(view_value).clone();
+        let cutile_ir::ir::Type::PartitionView(pv) = &view_ty else {
+            return Ok(());
+        };
+        let rank = pv.tile_shape.len();
+        if axis >= rank {
+            return Ok(());
+        }
+        // Discharge at JIT where possible — this is the zero-cost path.
+        //
+        // FRAME INVARIANT (SC2, and the reason this is sound): the declared
+        // parameter shape may stand in for the view extent only for parameter
+        // kinds where the two coincide. That holds for every kind that can reach
+        // here, because `with_bounds` exists solely on `Partition` and
+        // `PartitionMut`: an immutable `&Tensor` has view == root, and a
+        // `&mut Tensor`'s declared shape *is* its per-CTA slab. It does NOT hold
+        // for a `MappedPartitionMut`, whose declared shape is the *tile* shape —
+        // if `with_bounds` is ever added to that type, this fold becomes wrong
+        // and must first gate on the parameter kind. See
+        // `.internal/tasks/in_progress/check_hoisting/BOUNDS_HOISTING_ANALYSIS.md` §SC1 amendment.
+        //
+        // The *declared* parameter shape is enforced at launch (the generated
+        // launcher asserts `valid_shape == given_shape`), so the compiler may
+        // trust it as this view's extent. That matters because the partition
+        // view type carries `-1` for a `&mut Tensor` param by design, while the
+        // validator still knows the declared shape. If both that extent and the
+        // declared `Dim` are known, the binding is decided at compile time and
+        // costs nothing at run time.
+        let tile_dim = pv.tile_shape[axis] as i64;
+        let declared_extent = self.declared_view_extent(partition, &pv.dim_map, axis);
+        let declared_const = bound
+            .bounds
+            .filter(|b| b.is_exact())
+            .map(|b| b.start)
+            .or_else(|| {
+                bound
+                    .fields
+                    .as_ref()
+                    .and_then(|fields| fields.get("size"))
+                    .and_then(|size| size.bounds)
+                    .filter(|b| b.is_exact())
+                    .map(|b| b.start)
+            });
+        if let (Some(extent), Some(dim_value)) = (declared_extent, declared_const) {
+            if extent >= 0 && tile_dim > 0 {
+                let expected = (extent as i64 + tile_dim - 1) / tile_dim;
+                if dim_value == expected {
+                    return Ok(());
+                }
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "`with_bounds` bound {axis} is {dim_value}, but this partition has {expected} tiles on axis {axis}"
+                    ),
+                );
+            }
+        }
+        // Launch rung. Neither side folded, so the binding is about to cost a
+        // device assert. But when the bound `Dim` is `floor(e / t)` for the very
+        // extent and tile this axis is partitioned by, the obligation
+        // `val(m) == ceil(e / t)` is exactly `t` divides `e` — a predicate the
+        // existing vocabulary can state over the extent atom itself.
+        //
+        // Reducing to divisibility rather than naming the division as an atom is
+        // what keeps this discharge-able: a declared `preconditions` fact
+        // asserting the divisibility entails it, so `resolve` can settle it at
+        // `Jit` and emit nothing. An opaque division atom would be evaluable but
+        // unrelatable, forcing a host check even for a kernel that proved the
+        // fact. (Same lever MLIR uses to simplify floordiv/ceildiv.)
+        //
+        // FRAME (SC1): the extent atom resolves against the host's *root* shape
+        // array, and `label_param_extents` only labels immutable parameters, so
+        // a slabbed `&mut Tensor` never reaches here — its `floor_div` carries
+        // no term. Fail closed to the device assert below (SC4).
+        if let Some(divisibility) =
+            self.with_bounds_divisibility(partition, bound, &pv.dim_map, axis, tile_dim)
+        {
+            let cause = format!(
+                "`with_bounds` bound {axis}: the partitioned extent must be divisible by the tile \
+                 extent {tile_dim}, or the declared bound undercounts the tiles on axis {axis}"
+            );
+            if self.lower_obligation(divisibility, cause) {
+                return Ok(());
+            }
+        }
+        // Constant rung, launch tier: a constant bound `c` on a dynamic-extent
+        // axis obliges `ceil(e / t) == c`, which is the pair of linear
+        // inequalities `(c-1)·t < e ≤ c·t` — both over the extent atom, both
+        // launch-known. The atom's frame comes from `extent_atom` (SC1): the
+        // root extent for an immutable param, the slab extent for a `&mut`.
+        if let (Some(c), Some(&param)) = (
+            declared_const,
+            partition
+                .tensor_origin
+                .as_ref()
+                .and_then(|name| self.param_index.get(name)),
+        ) {
+            let tensor_axis = pv.dim_map.get(axis).copied().filter(|&d| d >= 0);
+            if let (Some(tensor_axis), true, true) = (tensor_axis, c >= 1, tile_dim >= 1) {
+                use cuda_async::predicate::{Predicate, Term};
+                let e = Term::atom(self.extent_atom(param, tensor_axis as usize));
+                // `(c-1)·t < e` and `e < c·t + 1`; bail to the device assert on
+                // arithmetic overflow rather than weaken either side (the upper
+                // bound must stay ≤-inclusive or the exact-fit extent — the
+                // common case — would be rejected).
+                let bounds_pair = (|| {
+                    let lower = (c - 1).checked_mul(tile_dim)?;
+                    let upper_plus_one = c.checked_mul(tile_dim)?.checked_add(1)?;
+                    let above = Predicate::lt(&Term::constant(lower), &e)?;
+                    let not_above = Predicate::lt(&e, &Term::constant(upper_plus_one))?;
+                    Some((above, not_above))
+                })();
+                if let Some((above, not_above)) = bounds_pair {
+                    let cause = format!(
+                        "`with_bounds` bound {axis} declares {c} tiles of extent {tile_dim}, so \
+                         axis {axis}'s extent must be in ({}, {}]",
+                        (c - 1) * tile_dim,
+                        c * tile_dim
+                    );
+                    if self.lower_obligation(above, cause.clone())
+                        && self.lower_obligation(not_above, cause)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        // This partition's real tile count on `axis`, read off the one
+        // index-space query shared by every axis of this binding.
+        let shape_results = match index_space_shape {
+            Some(cached) => cached,
+            slot => {
+                let i32_scalar_ty = cutile_ir::ir::Type::Tile(TileType {
+                    shape: vec![],
+                    element_type: TileElementType::Scalar(ScalarType::I32),
+                });
+                let mut op_builder =
+                    OpBuilder::new(Opcode::GetIndexSpaceShape, self.ir_location(span))
+                        .operand(view_value);
+                for _ in 0..rank {
+                    op_builder = op_builder.result(i32_scalar_ty.clone());
+                }
+                let (shape_op, results) = op_builder.build(module);
+                append_op(module, block_id, shape_op);
+                slot.insert(results)
+            }
+        };
+        let actual = shape_results[axis];
+
+        let i32_tr_type = self
+            .compile_type(&syn::parse_quote!(i32), generic_vars, &HashMap::new())?
+            .ok_or_else(|| self.jit_error(span, "failed to synthesize `i32` type"))?;
+        let eq = self.compile_binary_op_from_values(
+            module,
+            block_id,
+            TileRustValue::new_primitive(declared, i32_tr_type.clone(), None),
+            TileRustValue::new_primitive(actual, i32_tr_type, None),
+            &TileBinaryOp::Eq,
+            generic_vars,
+            ctx,
+            None,
+            span,
+        )?;
+        // Statically decidable: discharge at JIT and emit nothing (the common
+        // case when the view's extent and the declared `Dim` are both known), or
+        // reject outright when the bound is provably wrong.
+        if let Some(bounds) = eq.bounds {
+            if bounds.is_exact() {
+                if bounds.start != 0 {
+                    return Ok(());
+                }
+                return self.jit_error_result(
+                    span,
+                    &format!(
+                        "`with_bounds` bound {axis} does not equal this partition's tile count on axis {axis}"
+                    ),
+                );
+            }
+        }
+        let Some(eq_result) = eq.value else {
+            return Ok(());
+        };
+        self.deny_residual_check(
+            &format!("the `with_bounds` binding check for axis {axis}"),
+            "Declare the extent statically in the signature, or bind a `Dim` the \
+             compiler can relate to this partition's tile count",
+            span,
+        )?;
+        let (assert_op, _) = OpBuilder::new(Opcode::Assert, self.ir_location(span))
+            .attr(
+                "message",
+                Attribute::String(format!(
+                    "`with_bounds` bound {axis} does not equal this partition's tile count on axis {axis}"
+                )),
+            )
+            .operand(eq_result)
+            .build(module);
+        append_op(module, block_id, assert_op);
+        Ok(())
     }
 
     fn value_dim_origin(value: &TileRustValue) -> Option<DimOrigin> {
@@ -725,6 +1144,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .as_ref()
                 .and_then(|fields| fields.get("size"))
                 .and_then(|size| size.dim_origin.clone())
+        })
+    }
+
+    /// The tensor-named axis provenance of a loop bound, looking through a
+    /// `Dim` wrapper to the scalar it wraps (mirroring
+    /// [`Self::value_dim_origin`], which does the same for the view-valued
+    /// form).
+    fn value_partition_axis_origin(value: &TileRustValue) -> Option<PartitionAxisOrigin> {
+        value.partition_axis_origin.clone().or_else(|| {
+            value
+                .fields
+                .as_ref()
+                .and_then(|fields| fields.get("size"))
+                .and_then(|size| size.partition_axis_origin.clone())
         })
     }
 
@@ -764,15 +1197,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let Expr::MethodCall(method_call) = &*for_expr.expr else {
             return Ok(false);
         };
-        if method_call.method != "iter_indices" {
-            return Ok(false);
-        }
-        if !method_call.args.is_empty() {
+        let method_name = method_call.method.to_string();
+        let (has_ranges, is_shared) = match method_name.as_str() {
+            "iter_indices" => (false, false),
+            "iter_indices_with" => (false, true),
+            "iter_indices_within" => (true, false),
+            "iter_indices_within_with" => (true, true),
+            _ => return Ok(false),
+        };
+        let expected_args = usize::from(has_ranges) + usize::from(is_shared);
+        if method_call.args.len() != expected_args {
             return self.jit_error_result(
                 &method_call.args.span(),
-                "MappedPartitionMut::iter_indices does not take arguments",
+                &format!(
+                    "MappedPartitionMut::{method_name} expects {expected_args} argument(s), got {}",
+                    method_call.args.len()
+                ),
             );
         }
+        let ranges_arg = has_ranges.then(|| &method_call.args[0]);
+        let other_arg_index = usize::from(has_ranges);
         let Pat::Ident(iterand_ident) = &*for_expr.pat else {
             return self.jit_error_result(
                 &for_expr.pat.span(),
@@ -806,6 +1250,37 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             generic_vars,
             &method_call.receiver.span(),
         )?;
+        let rank = tile_shape.len();
+        // Owned axes (map dim OWNED = 0) are not traversed by the stream: each
+        // stream item owns the axis's full extent (subtensor-per-CTA
+        // exclusivity), and in-kernel loops traverse it with bounds-proven
+        // indices. Only the streamed axes participate in the flat tile-id
+        // schedule.
+        if let Some(axis) = map_shape.iter().position(|&dim| dim < 0) {
+            return self.jit_error_result(
+                &method_call.receiver.span(),
+                &format!(
+                    "mapped partition map dimensions must be OWNED (0) or positive: axis {axis} is {}",
+                    map_shape[axis]
+                ),
+            );
+        }
+        let streamed_axes: Vec<usize> = (0..rank)
+            .filter(|&axis| map_shape[axis] != OWNED_MAP_DIM)
+            .collect();
+        if streamed_axes.is_empty() {
+            return self.jit_error_result(
+                &method_call.receiver.span(),
+                "mapped partition requires at least one streamed (non-OWNED) map axis",
+            );
+        }
+        let has_owned_axes = streamed_axes.len() != rank;
+        if has_owned_axes && has_ranges {
+            return self.jit_error_result(
+                &method_call.args.span(),
+                "sub-range iteration over a map with OWNED axes is not supported yet",
+            );
+        }
         let i32_ty = self.compile_i32_type(generic_vars, &for_expr.span())?;
         let index_space = self.compile_index_space_shape_values(
             module,
@@ -814,19 +1289,400 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             &i32_ty,
             &method_call.receiver.span(),
         )?;
-        let num_bid_m = index_space[0].clone();
-        let num_bid_n = index_space[1].clone();
-        let total_tiles = self.compile_binary_op_from_values(
-            module,
-            block_id,
-            num_bid_m.clone(),
-            num_bid_n.clone(),
-            &TileBinaryOp::Mul,
-            generic_vars,
-            ctx,
-            None,
-            &for_expr.span(),
-        )?;
+
+        // Shared maps: a second mapped partition whose stores accept the same
+        // indices. The type already forces equal tile/map shapes; the logical
+        // partition grids must also match so every minted index is in bounds
+        // for both partitions. Static grids are compared here; dynamic grids
+        // get a runtime assert per axis.
+        let mut extra_origins: Vec<cutile_ir::ir::Value> = vec![];
+        if is_shared {
+            let other_arg = &method_call.args[other_arg_index];
+            let other_expr: &Expr = match other_arg {
+                Expr::Reference(reference) => &reference.expr,
+                other => other,
+            };
+            let other_value = self
+                .compile_expression(module, block_id, other_expr, generic_vars, ctx, None)?
+                .ok_or_else(|| {
+                    self.jit_error(
+                        &other_arg.span(),
+                        "failed to compile shared mapped partition argument",
+                    )
+                })?;
+            let other_origin = other_value.value.ok_or_else(|| {
+                self.jit_error(
+                    &other_arg.span(),
+                    "shared mapped partition argument did not produce a direct value",
+                )
+            })?;
+            let (other_tile_shape, other_map_shape) =
+                self.mapped_partition_type_shapes(&other_value, generic_vars, &other_arg.span())?;
+            if other_tile_shape != tile_shape || other_map_shape != map_shape {
+                return self.jit_error_result(
+                    &other_arg.span(),
+                    "iter_indices_with requires both mapped partitions to share tile and map shapes",
+                );
+            }
+            let other_index_space = self.compile_index_space_shape_values(
+                module,
+                block_id,
+                &other_value,
+                &i32_ty,
+                &other_arg.span(),
+            )?;
+            // Declared `dim(a, i) == dim(b, i)` preconditions discharge the
+            // per-axis grid-equality asserts: equal tensor extents with
+            // type-equal tile shapes (checked above) give equal tile grids.
+            let receiver_name = Self::simple_path_name(&method_call.receiver)
+                .or_else(|| partition_value.tensor_origin.clone());
+            let other_name =
+                Self::simple_path_name(other_expr).or_else(|| other_value.tensor_origin.clone());
+            for axis in 0..rank {
+                let lhs = &index_space[axis];
+                let rhs = &other_index_space[axis];
+                if let (Some(lhs_bounds), Some(rhs_bounds)) = (lhs.bounds, rhs.bounds) {
+                    if lhs_bounds.is_exact() && rhs_bounds.is_exact() {
+                        if lhs_bounds.start != rhs_bounds.start {
+                            return self.jit_error_result(
+                                &other_arg.span(),
+                                &format!(
+                                    "iter_indices_with requires equal logical partition grids: axis {axis} has {} vs {} tiles",
+                                    lhs_bounds.start, rhs_bounds.start
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+                }
+                if let (Some(receiver_name), Some(other_name)) = (&receiver_name, &other_name) {
+                    if self.resolve_dim_eq(receiver_name, axis, other_name, axis) {
+                        self.check_stats
+                            .discharged
+                            .set(self.check_stats.discharged.get() + 1);
+                        continue;
+                    }
+                }
+                let eq_value = self.compile_binary_op_from_values(
+                    module,
+                    block_id,
+                    lhs.clone(),
+                    rhs.clone(),
+                    &TileBinaryOp::Eq,
+                    generic_vars,
+                    ctx,
+                    None,
+                    &other_arg.span(),
+                )?;
+                let eq_result = eq_value.value.ok_or_else(|| {
+                    self.jit_error(
+                        &other_arg.span(),
+                        "failed to compile shared mapped partition grid comparison",
+                    )
+                })?;
+                let message = format!(
+                    "shared mapped partitions require equal logical partition grids: axis {axis}"
+                );
+                self.deny_residual_check(
+                    &format!("the shared mapped-partition grid check for axis {axis}"),
+                    "Declare the two tensors' extents equal with a `preconditions` fact so \
+                     the equality discharges at compile time or at launch",
+                    &other_arg.span(),
+                )?;
+                let (assert_op_id, _) =
+                    OpBuilder::new(Opcode::Assert, self.ir_location(&other_arg.span()))
+                        .attr("message", Attribute::String(message))
+                        .operand(eq_result)
+                        .build(module);
+                append_op(module, block_id, assert_op_id);
+            }
+            extra_origins.push(other_origin);
+        }
+
+        // Sub-range iteration: per-axis (start_tile, num_tiles) pairs narrow
+        // the traversed grid. The schedule below runs over the effective
+        // lengths and the axis starts are added to the minted coordinates.
+        // Each range is validated against the grid — statically when bounds
+        // prove it, otherwise with a runtime assert — so indices keep the
+        // in-bounds store proof.
+        let mut axis_starts: Vec<Option<TileRustValue>> = vec![None; rank];
+        let mut axis_lens: Vec<TileRustValue> = index_space.clone();
+        // Tensor-axis provenance means "this coordinate ranges over the
+        // source tensor's whole axis" and can therefore justify a
+        // cross-tensor `tiles(source) <= tiles(target)` obligation. A
+        // validated sub-range still proves stores into its mapped partition,
+        // but its coordinates range over only `[start, start + len)`: using
+        // the full source axis there is conservative yet needlessly rejects
+        // consumers such as a `[heads, max_seq, d]` cache updated from a
+        // `[seq, heads, d]` source. Track the two proofs separately.
+        let mut axis_covers_full_grid = vec![true; rank];
+        if let Some(ranges_expr) = ranges_arg {
+            let ranges_value = self
+                .compile_expression(module, block_id, ranges_expr, generic_vars, ctx, None)?
+                .ok_or_else(|| {
+                    self.jit_error(
+                        &ranges_expr.span(),
+                        "failed to compile mapped partition sub-range argument",
+                    )
+                })?;
+            let Some(range_tuples) = &ranges_value.values else {
+                return self.jit_error_result(
+                    &ranges_expr.span(),
+                    "sub-range iteration expects an array of (start_tile, num_tiles) pairs",
+                );
+            };
+            if range_tuples.len() != rank {
+                return self.jit_error_result(
+                    &ranges_expr.span(),
+                    &format!(
+                        "sub-range iteration expects {rank} (start_tile, num_tiles) pairs, got {}",
+                        range_tuples.len()
+                    ),
+                );
+            }
+            for axis in 0..rank {
+                let Some(parts) = &range_tuples[axis].values else {
+                    return self.jit_error_result(
+                        &ranges_expr.span(),
+                        &format!("sub-range axis {axis} must be a (start_tile, num_tiles) pair"),
+                    );
+                };
+                if parts.len() != 2 {
+                    return self.jit_error_result(
+                        &ranges_expr.span(),
+                        &format!("sub-range axis {axis} must be a (start_tile, num_tiles) pair"),
+                    );
+                }
+                let start = parts[0].clone();
+                let len = parts[1].clone();
+                let num_bid = index_space[axis].clone();
+
+                let start_exact = start.bounds.filter(|bounds| bounds.is_exact());
+                let len_exact = len.bounds.filter(|bounds| bounds.is_exact());
+                let grid_exact = num_bid.bounds.filter(|bounds| bounds.is_exact());
+
+                // Reject provably-bad ranges at compile time.
+                if let Some(bounds) = start_exact {
+                    if bounds.start < 0 {
+                        return self.jit_error_result(
+                            &ranges_expr.span(),
+                            &format!("sub-range axis {axis} start {} is negative", bounds.start),
+                        );
+                    }
+                }
+                if let Some(bounds) = len_exact {
+                    if bounds.start < -1 {
+                        return self.jit_error_result(
+                            &ranges_expr.span(),
+                            &format!(
+                                "sub-range axis {axis} length {} is negative (-1 means the rest of the axis)",
+                                bounds.start
+                            ),
+                        );
+                    }
+                }
+
+                // `num_tiles = -1`: the rest of the axis from `start_tile`.
+                // The resulting length is in bounds by construction, so only
+                // the start needs validation.
+                let is_remainder = len_exact.is_some_and(|bounds| bounds.start == -1);
+                axis_covers_full_grid[axis] = start_exact.is_some_and(|bounds| bounds.start == 0)
+                    && (is_remainder
+                        || matches!(
+                            (len_exact, grid_exact),
+                            (Some(len_bounds), Some(grid_bounds))
+                                if len_bounds.start == grid_bounds.start
+                        ));
+                let len = if is_remainder {
+                    self.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        num_bid.clone(),
+                        start.clone(),
+                        &TileBinaryOp::Sub,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &ranges_expr.span(),
+                    )?
+                } else {
+                    len
+                };
+
+                let emit_range_assert = |compiler: &Self,
+                                         module: &mut Module,
+                                         ctx: &mut CompilerContext,
+                                         lhs: TileRustValue,
+                                         rhs: TileRustValue,
+                                         op: TileBinaryOp,
+                                         detail: &str|
+                 -> Result<(), JITError> {
+                    let cmp = compiler.compile_binary_op_from_values(
+                        module,
+                        block_id,
+                        lhs,
+                        rhs,
+                        &op,
+                        generic_vars,
+                        ctx,
+                        None,
+                        &ranges_expr.span(),
+                    )?;
+                    let cmp_value = cmp.value.ok_or_else(|| {
+                        compiler.jit_error(
+                            &ranges_expr.span(),
+                            "failed to compile sub-range bounds comparison",
+                        )
+                    })?;
+                    let message =
+                        format!("mapped partition sub-range out of bounds: axis {axis}: {detail}");
+                    compiler.deny_residual_check(
+                        &format!("the mapped-partition sub-range check for axis {axis} ({detail})"),
+                        "Use compile-time-constant sub-range bounds so the check discharges \
+                         at compile time",
+                        &ranges_expr.span(),
+                    )?;
+                    let (assert_op_id, _) =
+                        OpBuilder::new(Opcode::Assert, compiler.ir_location(&ranges_expr.span()))
+                            .attr("message", Attribute::String(message))
+                            .operand(cmp_value)
+                            .build(module);
+                    append_op(module, block_id, assert_op_id);
+                    Ok(())
+                };
+
+                // start >= 0, unless proven above.
+                if start_exact.is_none() {
+                    let zero = self.compile_constant(module, block_id, generic_vars, 0)?;
+                    emit_range_assert(
+                        self,
+                        module,
+                        ctx,
+                        start.clone(),
+                        zero,
+                        TileBinaryOp::Ge,
+                        "start is negative",
+                    )?;
+                }
+                if is_remainder {
+                    // Remainder length: assert start <= grid so the length is
+                    // non-negative, unless both are static.
+                    let statically_ok = match (start_exact, grid_exact) {
+                        (Some(start_bounds), Some(grid_bounds)) => {
+                            if start_bounds.start > grid_bounds.start {
+                                return self.jit_error_result(
+                                    &ranges_expr.span(),
+                                    &format!(
+                                        "sub-range axis {axis} start {} exceeds the {}-tile grid",
+                                        start_bounds.start, grid_bounds.start
+                                    ),
+                                );
+                            }
+                            true
+                        }
+                        // `(0, -1)` spells "the whole axis": in bounds for any
+                        // grid, no assert needed.
+                        (Some(start_bounds), None) => start_bounds.start == 0,
+                        _ => false,
+                    };
+                    if !statically_ok {
+                        emit_range_assert(
+                            self,
+                            module,
+                            ctx,
+                            start.clone(),
+                            num_bid.clone(),
+                            TileBinaryOp::Le,
+                            "start exceeds the logical grid",
+                        )?;
+                    }
+                } else {
+                    // Explicit length: len >= 0 and start + len <= grid,
+                    // unless both are static.
+                    if len_exact.is_none() {
+                        let zero = self.compile_constant(module, block_id, generic_vars, 0)?;
+                        emit_range_assert(
+                            self,
+                            module,
+                            ctx,
+                            len.clone(),
+                            zero,
+                            TileBinaryOp::Ge,
+                            "length is negative (the -1 rest-of-axis spelling must be a literal)",
+                        )?;
+                    }
+                    let statically_ok = match (start_exact, len_exact, grid_exact) {
+                        (Some(start_bounds), Some(len_bounds), Some(grid_bounds)) => {
+                            if start_bounds.start + len_bounds.start > grid_bounds.start {
+                                return self.jit_error_result(
+                                    &ranges_expr.span(),
+                                    &format!(
+                                        "sub-range axis {axis} [{}, {}) exceeds the {}-tile grid",
+                                        start_bounds.start,
+                                        start_bounds.start + len_bounds.start,
+                                        grid_bounds.start
+                                    ),
+                                );
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !statically_ok {
+                        // Overflow-free form of `start + len <= grid`:
+                        // `start <= grid - len`. Both operands of the
+                        // subtraction are asserted nonnegative above, so the
+                        // difference is representable in i32, whereas the sum
+                        // wraps for `start = i32::MAX, len = 1` — and the
+                        // wrapped value passed this assert and got the
+                        // resulting coordinate branded as proven (issue #214).
+                        let grid_minus_len = self.compile_binary_op_from_values(
+                            module,
+                            block_id,
+                            num_bid.clone(),
+                            len.clone(),
+                            &TileBinaryOp::Sub,
+                            generic_vars,
+                            ctx,
+                            None,
+                            &ranges_expr.span(),
+                        )?;
+                        emit_range_assert(
+                            self,
+                            module,
+                            ctx,
+                            start.clone(),
+                            grid_minus_len,
+                            TileBinaryOp::Le,
+                            "range end exceeds the logical grid",
+                        )?;
+                    }
+                }
+
+                // A statically-zero start needs no coordinate offset.
+                if start_exact.is_none_or(|bounds| bounds.start != 0) {
+                    axis_starts[axis] = Some(start);
+                }
+                axis_lens[axis] = len;
+            }
+        }
+
+        // The persistent loop runs over the streamed tile count only; owned
+        // axes contribute no work items.
+        let mut total_tiles = axis_lens[streamed_axes[0]].clone();
+        for &axis in streamed_axes.iter().skip(1) {
+            total_tiles = self.compile_binary_op_from_values(
+                module,
+                block_id,
+                total_tiles,
+                axis_lens[axis].clone(),
+                &TileBinaryOp::Mul,
+                generic_vars,
+                ctx,
+                None,
+                &for_expr.span(),
+            )?;
+        }
         let total_tiles_value = total_tiles.value.ok_or_else(|| {
             self.jit_error(
                 &for_expr.span(),
@@ -855,9 +1711,25 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             self.jit_error(&for_expr.span(), "failed to compute tile-block grid size")
         })?;
 
-        let loop_carry_vars = collect_mutated_variables(for_expr)?
+        let mut loop_carry_vars = collect_mutated_variables(for_expr)?
             .into_iter()
             .collect::<Vec<_>>();
+        // Thread each written tensor's ordering token across the loop boundary.
+        // The iterand (a branded `PartitionIndex`) makes every mapped store
+        // distinct per iteration, so these fork.
+        let persistent_loop_var = match &*for_expr.pat {
+            syn::Pat::Ident(p) => Some(p.ident.to_string()),
+            _ => None,
+        };
+        let token_accumulators = self.setup_loop_token_accumulators(
+            &for_expr.body,
+            persistent_loop_var.as_deref(),
+            ctx,
+            generic_vars,
+        )?;
+        for acc in &token_accumulators {
+            loop_carry_vars.push(acc.acc_var.clone());
+        }
         let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
         let loop_carry_arg_tys = loop_carry_args
             .iter()
@@ -866,28 +1738,34 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let for_iterand_type = Self::scalar_i32_ir_type();
         let loop_block_arg_tys = [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+        let value_watermark = module.num_values() as u32;
         let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
 
         let mut for_variables = ctx.clone();
         let block_args: Vec<cutile_ir::ir::Value> = loop_block_args[1..].to_vec();
         for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+        self.bind_serialized_views(&token_accumulators, &mut for_variables);
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
+        // Persistent tile-id loop: the step is the physical grid size, so
+        // induction-substitution hoisting stays off (unit_step = false), but
+        // loop-invariant checks in the body can still move to the preheader.
+        for_variables.loop_frames.push(LoopFrame {
+            preheader_block: block_id,
+            body_block: loop_block_id,
+            value_watermark,
+            induction_values: vec![loop_block_args[0]],
+            lower: lower_bound,
+            upper: total_tiles_value,
+            unit_step: false,
+            // Non-unit step: `[lower, upper - 1]` is not the induction range.
+            induction_range: None,
+            known_non_empty: false,
+        });
 
-        let tile_id_name = "__cutile_mapped_partition_tile_id";
-        let num_bid_m_name = "__cutile_mapped_partition_num_bid_m";
-        let num_bid_n_name = "__cutile_mapped_partition_num_bid_n";
         let tile_id = TileRustValue::new_primitive(loop_block_args[0], i32_ty.clone(), None);
-        for_variables.vars.insert(tile_id_name.to_string(), tile_id);
-        for_variables
-            .vars
-            .insert(num_bid_m_name.to_string(), num_bid_m);
-        for_variables
-            .vars
-            .insert(num_bid_n_name.to_string(), num_bid_n);
 
         let tile_shape_arg = Self::cga_type_arg(&tile_shape);
-        let map_shape_arg = Self::cga_type_arg(&map_shape);
         let index_ty: syn::Type = syn::parse_str(&format!("PartitionIndex<{tile_shape_arg}>"))
             .map_err(|err| {
                 self.jit_error(
@@ -900,47 +1778,95 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .ok_or_else(|| {
                 self.jit_error(&for_expr.span(), "failed to compile PartitionIndex type")
             })?;
-        let swizzle_expr: Expr = syn::parse_str(&format!(
-            "swizzle_partition_index_2d::<{tile_shape_arg}, {map_shape_arg}>({tile_id_name}, {num_bid_m_name}, {num_bid_n_name})"
-        ))
-        .map_err(|err| {
-            self.jit_error(
-                &for_expr.span(),
-                &format!("failed to build mapped partition index expression: {err}"),
-            )
-        })?;
-        let mut index_value = self
-            .compile_expression(
+        // The schedule decomposes the flat tile id over the streamed axes
+        // only; owned axes take a constant 0 coordinate (the base of the
+        // owned subtensor), so the all-minted store path remains valid.
+        let streamed_lens: Vec<TileRustValue> = streamed_axes
+            .iter()
+            .map(|&axis| axis_lens[axis].clone())
+            .collect();
+        let streamed_map: Vec<i32> = streamed_axes.iter().map(|&axis| map_shape[axis]).collect();
+        let streamed_bids = self.emit_mapped_partition_schedule(
+            module,
+            loop_block_id,
+            &tile_id,
+            &streamed_lens,
+            &streamed_map,
+            generic_vars,
+            &mut for_variables,
+            &for_expr.span(),
+        )?;
+        let mut streamed_bids = streamed_bids.into_iter();
+        let mut bids: Vec<TileRustValue> = Vec::with_capacity(rank);
+        for axis in 0..rank {
+            if map_shape[axis] != OWNED_MAP_DIM {
+                bids.push(streamed_bids.next().ok_or_else(|| {
+                    self.jit_error(
+                        &for_expr.span(),
+                        "mapped partition schedule produced too few streamed coordinates",
+                    )
+                })?);
+            } else {
+                let zero = self.compile_constant(module, loop_block_id, generic_vars, 0i32)?;
+                bids.push(zero);
+            }
+        }
+        // Sub-range iteration: offset the minted coordinates by the axis
+        // starts. Bounds propagate through the add, so downstream proofs see
+        // [start, start + len - 1].
+        for (axis, start) in axis_starts.iter().enumerate() {
+            let Some(start) = start else {
+                continue;
+            };
+            bids[axis] = self.compile_binary_op_from_values(
                 module,
                 loop_block_id,
-                &swizzle_expr,
+                start.clone(),
+                bids[axis].clone(),
+                &TileBinaryOp::Add,
                 generic_vars,
                 &mut for_variables,
-                Some(index_return_ty),
-            )?
-            .ok_or_else(|| {
-                self.jit_error(&for_expr.span(), "failed to compile mapped partition index")
-            })?;
-        index_value.partition_origin = Some(partition_origin);
+                None,
+                &for_expr.span(),
+            )?;
+        }
+        let coords_ty = self.array_i32_type(rank, generic_vars, &for_expr.span())?;
+        let coords = TileRustValue::new_compound(bids, coords_ty);
+        let mut index_fields = BTreeMap::new();
+        index_fields.insert("coords".to_string(), coords);
+        let mut index_value = TileRustValue::new_struct(index_fields, index_return_ty);
+        let mut origins = vec![partition_origin];
+        origins.extend(extra_origins);
+        index_value.partition_origins = Some(origins.clone());
         let index_tensor_origin = Self::simple_path_name(&method_call.receiver)
             .or_else(|| partition_value.tensor_origin.clone());
-        if let (Some(tensor_origin), Some(fields)) =
-            (index_tensor_origin, index_value.fields.as_mut())
-        {
+        if let Some(fields) = index_value.fields.as_mut() {
             if let Some(coords) = fields.get_mut("coords") {
                 if let Some(values) = coords.values.as_mut() {
                     for (axis, value) in values.iter_mut().enumerate() {
-                        let dim_origin = DimOrigin::PartitionAxis {
+                        // Per-axis branding: each projected component records
+                        // the minting stream (all shared origins) and its
+                        // axis, so composite store indices can prove
+                        // streamed-axis provenance component-wise.
+                        value.index_origin = Some(DimOrigin::PartitionAxis {
                             view: partition_origin,
                             axis,
                             tile_dim: tile_shape[axis],
-                        };
-                        value.partition_axis_origin = Some(PartitionAxisOrigin {
-                            tensor: tensor_origin.clone(),
-                            axis,
-                            tile_dim: tile_shape[axis],
                         });
-                        value.index_origin = Some(dim_origin);
+                        value.partition_origins = Some(origins.clone());
+                        // Whole-axis provenance is stronger than the private
+                        // mapped-store brand above. A narrowed axis cannot
+                        // inherit it: downstream cross-tensor loads must test
+                        // the actual sub-range coordinate instead.
+                        if axis_covers_full_grid[axis] {
+                            if let Some(tensor_origin) = &index_tensor_origin {
+                                value.partition_axis_origin = Some(PartitionAxisOrigin {
+                                    tensor: tensor_origin.clone(),
+                                    axis,
+                                    tile_dim: tile_shape[axis],
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -981,6 +1907,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         }
         ctx.repack_some_vars(&loop_carry_vars, &result_values, true)?;
+        self.finish_loop_token_accumulators(&token_accumulators, ctx);
         Ok(true)
     }
 
@@ -990,6 +1917,193 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// to `for idx in 0..dim`, while the loop variable is tagged as an index
     /// produced by that dimension. Plain `i32` values, including `num_tiles`
     /// results, continue through normal range lowering.
+    /// Set up per-tensor ordering-token accumulators for a loop body: for each
+    /// tensor written in the body, a synthetic carry variable holding the
+    /// tensor's token, seeded from its current value. Threaded as a loop iter-arg
+    /// (a bare `token`, never the view — a `partition_view` is not a valid
+    /// iter-arg), joined per store (see `accumulate_loop_token`), and published
+    /// to the tensor at exit (see `finish_loop_token_accumulators`). This is the
+    /// loop-scope case of resource token threading: a view roots at its tensor,
+    /// and the tensor's token must survive the loop boundary so a later access
+    /// (a second `partition_mut`, a store after the loop) is ordered after the
+    /// loop's writes.
+    fn setup_loop_token_accumulators(
+        &self,
+        body: &syn::Block,
+        loop_var: Option<&str>,
+        ctx: &mut CompilerContext,
+        generic_vars: &GenericVars,
+    ) -> Result<Vec<LoopTokenAcc>, JITError> {
+        use std::collections::BTreeMap;
+        let stores = super::shared_utils::collect_store_calls(body, loop_var);
+        // Group the written views by the root tensor they store to, tracking
+        // whether every store to that tensor is distinct per iteration.
+        struct RootInfo {
+            receivers: Vec<String>,
+            all_distinct: bool,
+        }
+        let mut by_root: BTreeMap<String, RootInfo> = BTreeMap::new();
+        for store in &stores {
+            let Some(view) = ctx.vars.get(&store.receiver) else {
+                continue;
+            };
+            let Some(root) = view.tensor_origin.clone() else {
+                continue;
+            };
+            let has_token = ctx
+                .vars
+                .get(&root)
+                .and_then(|t| t.type_meta.as_ref())
+                .and_then(|m| m.fields.get("token"))
+                .and_then(|f| f.value)
+                .is_some();
+            if has_token {
+                let entry = by_root.entry(root).or_insert(RootInfo {
+                    receivers: Vec::new(),
+                    all_distinct: true,
+                });
+                if !entry.receivers.contains(&store.receiver) {
+                    entry.receivers.push(store.receiver.clone());
+                }
+                entry.all_distinct &= store.index_distinct;
+            }
+        }
+        if by_root.is_empty() {
+            return Ok(vec![]);
+        }
+        let token_ty = self.token_type(generic_vars)?;
+        let mut accumulators = Vec::new();
+        for (root, info) in by_root {
+            let acc_var = format!("__loop_token_acc__{root}");
+            let serialize = !info.all_distinct;
+            if ctx.vars.contains_key(&acc_var) {
+                // An enclosing loop already threads this tensor's token; carry
+                // the same accumulator through this loop so its writes compose
+                // into it. The enclosing (owner) loop publishes the final result.
+                accumulators.push(LoopTokenAcc {
+                    acc_var,
+                    root,
+                    receivers: info.receivers,
+                    owner: false,
+                    serialize,
+                });
+            } else {
+                let seed = ctx.vars[&root]
+                    .type_meta
+                    .as_ref()
+                    .and_then(|m| m.fields.get("token"))
+                    .and_then(|f| f.value)
+                    .expect("root tensor token checked above");
+                ctx.vars.insert(
+                    acc_var.clone(),
+                    TileRustValue::new_primitive(seed, token_ty.clone(), None),
+                );
+                accumulators.push(LoopTokenAcc {
+                    acc_var,
+                    root,
+                    receivers: info.receivers,
+                    owner: true,
+                    serialize,
+                });
+            }
+        }
+        Ok(accumulators)
+    }
+
+    /// For accumulators whose writes overlap (serialize), rebind the receiver
+    /// views' tokens to the carried accumulator so the stores read it and chain
+    /// (each ordered after the previous). Called after the loop block args are
+    /// bound. Distinct (fork) accumulators are left alone — their stores keep
+    /// reading their invariant view token.
+    fn bind_serialized_views(
+        &self,
+        accumulators: &[LoopTokenAcc],
+        for_variables: &mut CompilerContext,
+    ) {
+        for acc in accumulators {
+            if !acc.serialize {
+                continue;
+            }
+            let Some(acc_token) = for_variables.vars.get(&acc.acc_var).and_then(|v| v.value) else {
+                continue;
+            };
+            for receiver in &acc.receivers {
+                super::shared_utils::set_view_token(receiver, acc_token, for_variables);
+            }
+        }
+    }
+
+    /// Join a store's output token into its tensor's loop accumulator, if the
+    /// enclosing loop is threading one. Called at the method-inline boundary
+    /// after the store advanced the view's token. The stores themselves keep
+    /// reading their (loop-invariant) view token — they fork, disjoint writes
+    /// stay parallel — while the accumulator collects `join(acc, output)` so the
+    /// loop result dominates every write.
+    pub(crate) fn accumulate_loop_token(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        ctx: &mut CompilerContext,
+        view_var: &str,
+        generic_vars: &GenericVars,
+    ) -> Result<(), JITError> {
+        let Some(view) = ctx.vars.get(view_var) else {
+            return Ok(());
+        };
+        let Some(root) = view.tensor_origin.clone() else {
+            return Ok(());
+        };
+        let acc_var = format!("__loop_token_acc__{root}");
+        let Some(acc_token) = ctx.vars.get(&acc_var).and_then(|v| v.value) else {
+            return Ok(());
+        };
+        let Some(view_token) = view
+            .type_meta
+            .as_ref()
+            .and_then(|m| m.fields.get("token"))
+            .and_then(|f| f.value)
+        else {
+            return Ok(());
+        };
+        let token_ty = self.token_type(generic_vars)?;
+        let (op_id, results) = OpBuilder::new(Opcode::JoinTokens, Location::Unknown)
+            .result(TileIrType::Token)
+            .operand(acc_token)
+            .operand(view_token)
+            .build(module);
+        append_op(module, block_id, op_id);
+        ctx.vars.insert(
+            acc_var,
+            TileRustValue::new_primitive(results[0], token_ty, None),
+        );
+        Ok(())
+    }
+
+    /// Publish each loop accumulator's result (repacked from the loop op) to its
+    /// tensor and to the views written in the body, then drop the synthetic
+    /// carry variables. After this, a later `partition_mut` of the tensor or a
+    /// store through one of those views is ordered after the loop's writes.
+    fn finish_loop_token_accumulators(
+        &self,
+        accumulators: &[LoopTokenAcc],
+        ctx: &mut CompilerContext,
+    ) {
+        for acc in accumulators {
+            // A non-owner inherited the accumulator from an enclosing loop: leave
+            // its result in place for that loop to carry and publish.
+            if !acc.owner {
+                continue;
+            }
+            if let Some(result_token) = ctx.vars.get(&acc.acc_var).and_then(|v| v.value) {
+                super::shared_utils::set_view_token(&acc.root, result_token, ctx);
+                for receiver in &acc.receivers {
+                    super::shared_utils::set_view_token(receiver, result_token, ctx);
+                }
+            }
+            ctx.vars.remove(&acc.acc_var);
+        }
+    }
+
     fn try_compile_dim_for_loop(
         &self,
         module: &mut Module,
@@ -1035,9 +2149,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             self.jit_error(&for_expr.span(), "failed to compile dimension loop step")
         })?;
 
-        let loop_carry_vars = collect_mutated_variables(for_expr)?
+        let mut loop_carry_vars = collect_mutated_variables(for_expr)?
             .into_iter()
             .collect::<Vec<_>>();
+        // Thread each written tensor's ordering token across the loop boundary.
+        let loop_var_name = maybe_iterand_ident.map(|p| p.ident.to_string());
+        let token_accumulators = self.setup_loop_token_accumulators(
+            &for_expr.body,
+            loop_var_name.as_deref(),
+            ctx,
+            generic_vars,
+        )?;
+        for acc in &token_accumulators {
+            loop_carry_vars.push(acc.acc_var.clone());
+        }
         let loop_carry_args = ctx.unpack_some_vars(&loop_carry_vars)?;
         let loop_carry_arg_tys = loop_carry_args
             .iter()
@@ -1051,6 +2176,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut for_variables = ctx.clone();
         let block_args: Vec<cutile_ir::ir::Value> = loop_block_args[1..].to_vec();
         for_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
+        self.bind_serialized_views(&token_accumulators, &mut for_variables);
         if let Some(iterand_ident) = maybe_iterand_ident {
             let iterand_name = iterand_ident.ident.to_string();
             let i32_type = self
@@ -1085,6 +2211,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 TileRustValue::new_value_kind_like(loop_block_args[0], i32_type.clone())
             };
             iterand_val.index_origin = Some(dim_origin);
+            iterand_val.partition_axis_origin = Self::value_partition_axis_origin(&dim_value);
             for_variables.vars.insert(iterand_name, iterand_val);
         }
         for_variables.carry_vars = Some(loop_carry_vars.clone());
@@ -1122,6 +2249,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         }
         ctx.repack_some_vars(&loop_carry_vars, &result_values, true)?;
+        self.finish_loop_token_accumulators(&token_accumulators, ctx);
         Ok(true)
     }
 
@@ -1298,6 +2426,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // Add iterand as first argument.
                     let loop_block_arg_tys =
                         [&[for_iterand_type][..], loop_carry_arg_tys.as_slice()].concat();
+                    let value_watermark = module.num_values() as u32;
                     let (loop_block_id, loop_block_args) = build_block(module, &loop_block_arg_tys);
 
                     let mut for_variables = ctx.clone();
@@ -1355,13 +2484,71 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 start_val.ty.clone(),
                             ),
                         };
+                        // A loop from exactly 0 up to a partition-axis count
+                        // ranges over precisely that axis's tiles, so the
+                        // iterand inherits the bound's axis provenance in both
+                        // its forms. This is what makes `for i in 0..num_tiles(
+                        // &p, a)` prove its own accesses safe, with no
+                        // `with_bounds` annotation: an ordinary integer loop
+                        // over a count the compiler minted carries the same
+                        // evidence the annotation used to supply by hand.
                         if start_val
                             .bounds
                             .as_ref()
                             .is_some_and(|bounds| bounds.is_exact() && bounds.start == 0)
                         {
                             iterand_val.index_origin = Self::value_dim_origin(&end_val);
+                            iterand_val.partition_axis_origin =
+                                Self::value_partition_axis_origin(&end_val);
                         }
+                        let mut induction_values = vec![loop_block_args[0]];
+                        if let Some(alias) = iterand_val.value {
+                            induction_values.push(alias);
+                        }
+                        // Static bounds prove the loop non-empty when the
+                        // largest possible lower bound is below the smallest
+                        // possible upper bound.
+                        let known_non_empty = match (&start_val.bounds, &end_val.bounds) {
+                            (Some(lower), Some(upper)) => lower.end < upper.start,
+                            _ => false,
+                        };
+                        if let Some(alias) = iterand_val.value {
+                            // Seed the induction variable's symbolic form: `1 *
+                            // iv + 0`. Term arithmetic propagates it through the
+                            // loop body (replaces the former AffineForm seed).
+                            iterand_val.term = Some(cuda_async::predicate::Term::atom(
+                                cuda_async::predicate::Atom::Iv(alias.index()),
+                            ));
+                        }
+                        let unit_step = maybe_step_expr.is_none();
+                        // When both bounds are compile-time constants and the
+                        // step is unit, the induction variable's inclusive range
+                        // is `[lower, upper - 1]` — used to derive an affine
+                        // index's static range from its term.
+                        let induction_range = if unit_step {
+                            match (&start_val.bounds, &end_val.bounds) {
+                                (Some(lo), Some(hi)) if lo.is_exact() && hi.is_exact() => {
+                                    hi.start.checked_sub(1).map(|max| crate::bounds::Bounds {
+                                        start: lo.start,
+                                        end: max,
+                                    })
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        for_variables.loop_frames.push(LoopFrame {
+                            preheader_block: block_id,
+                            body_block: loop_block_id,
+                            value_watermark,
+                            induction_values,
+                            lower: lower_bound,
+                            upper: upper_bound,
+                            unit_step,
+                            induction_range,
+                            known_non_empty,
+                        });
                         for_variables.vars.insert(iterand_name, iterand_val);
                     }
                     for_variables.carry_vars = Some(loop_carry_vars.clone());
@@ -1630,8 +2817,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     return Ok(None);
                                 }
                             };
-                            let result_values = block_vars.unpack_some_vars(&carry_vars)?;
-                            ctx.repack_some_vars(&carry_vars, &result_values, true)?;
+                            // The exact condition was inlined into this block,
+                            // so there is no join and no competing definition.
+                            // Publish the taken path's complete values —
+                            // including facts established by its RHS — instead
+                            // of reconstructing from the pre-branch templates
+                            // and invalidating them (2026-08-12 review, P1).
+                            ctx.replace_some_vars_from(&carry_vars, &block_vars)?;
                             return Ok(res);
                         }
                     }
@@ -2633,7 +3825,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                 }
                 Expr::Cast(cast_expr) => {
-                    let src_expr = self
+                    let mut src_expr = self
                         .compile_expression(
                             module,
                             block_id,
@@ -2660,6 +3852,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     "unsupported cast from `{src_elem_ty}` to `{dst_elem_ty}`"
                                 ),
                             )
+                        }
+                    }
+                    // The cast is a relabel — same bits, new value domain. An
+                    // interval is a claim about the machine value under the
+                    // NEW interpretation, so it survives only if it fits the
+                    // destination's domain (e.g. a possibly-negative `i32`
+                    // range says nothing about the value read as `u32`).
+                    if let Some(b) = src_expr.bounds {
+                        let keep = crate::value_facts::int_value_domain(&dst_elem_ty)
+                            .is_some_and(|d| d.start <= b.start && b.end <= d.end);
+                        if !keep {
+                            src_expr.bounds = None;
                         }
                     }
                     Ok(Some(src_expr))
@@ -2706,7 +3910,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 as i64;
                             (str, Some(Bounds::exact(val)))
                         }
-                        Lit::Bool(bool_lit) => (format!("{}", bool_lit.value as i32), None),
+                        Lit::Bool(bool_lit) => (
+                            format!("{}", bool_lit.value as i32),
+                            Some(Bounds::exact(bool_lit.value as i64)),
+                        ),
                         _ => {
                             return self.jit_error_result(
                                 &lit_expr.span(),
@@ -2990,6 +4197,10 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
     let scalar = super::_type::scalar_from_name(cuda_tile_ty).unwrap_or(ScalarType::I32);
     match scalar {
         ScalarType::I1 => vec![if lit_string != "0" { 0xFF } else { 0x00 }],
+        ScalarType::I4 => {
+            let v: i8 = lit_string.parse().unwrap_or(0);
+            vec![(v as u8) & 0x0F]
+        }
         ScalarType::I8 => {
             let v: i8 = lit_string.parse().unwrap_or(0);
             v.to_le_bytes().to_vec()
@@ -3022,9 +4233,13 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
             let v = parse_float_or_hex(lit_string);
             v.to_le_bytes().to_vec()
         }
-        _ => {
-            let v: i32 = lit_string.parse().unwrap_or(0);
-            v.to_le_bytes().to_vec()
+        ScalarType::F8E4M3FN | ScalarType::F8E5M2 | ScalarType::F8E8M0FNU => {
+            let v: u8 = lit_string.parse().unwrap_or(0);
+            vec![v]
+        }
+        ScalarType::F4E2M1FN => {
+            let v: u8 = lit_string.parse().unwrap_or(0);
+            vec![v & 0x0F]
         }
     }
 }

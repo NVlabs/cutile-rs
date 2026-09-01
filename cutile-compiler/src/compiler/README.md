@@ -3,10 +3,10 @@
 compiler2 translates Rust AST into tile-ir ops and emits bytecode directly —
 no LLVM/MLIR dependency. Self-sufficient for type compilation and generic resolution.
 
-## Bytecode Version: 13.2
+## Bytecode Version: 13.3
 
-The tile-ir writer emits v13.2 bytecode. This section documents what changed
-relative to v13.1 (which the old C++ compiler emits).
+The tile-ir writer emits v13.3 bytecode. This section documents the versioned
+fields the Rust writer handles.
 
 ### v13.2 Changes (vs v13.1)
 
@@ -17,13 +17,25 @@ relative to v13.1 (which the old C++ compiler emits).
 | `PrintTkoOp` | Added result token + token operand | Always 1 result (Token type). Flag bit 0 = has token operand. |
 | `TanHOp` | Added `rounding_mode` attribute | `RoundingMode` enum (varint). Default `FULL` (5). |
 
-### v13.3 Changes (not yet targeted)
+### v13.3 Changes
 
 | Op | Change | Details |
 |----|--------|---------|
+| `AllocaOp` | New op | Automatic allocation with `num_elem`, `alignment`, and `global` flag. |
+| `AtomicRedViewTkoOp` | New op | View-based atomic reduction: result token + `view`, variadic `index`, `value`, optional `token`. |
 | `ExpOp` | Added `rounding_mode` attribute | `RoundingMode` enum. Default `FULL` (5). |
+| `LoadViewTkoOp` / `StoreViewTkoOp` | Index operands generalized | Gather/scatter views can use a 1D tensor index at the sparse dimension. |
+| `MakeGatherScatterViewOp` | New op | Builds `gather_scatter_view` from a tensor view. |
+| `MakeStridedViewOp` | New op | Builds `strided_view` from a tensor view. |
+| `MmaFOp` | Added `fast_acc` flag bit | Bit 0 of flags field. Default 0. |
+| `MmaFScaledOp` | New op | Result type + `lhs`, `rhs`, `acc`, `lhs_scale`, `rhs_scale`. |
+| `PackOp` / `UnpackOp` | New ops | Rank-1 tile byte packing/unpacking for sub-byte types such as `f4E2M1FN`. |
 | `GlobalOp` | Added `constant` flag + `symbol_visibility` attribute | Flag bit for constant; `SymbolVisibility` enum. Default `Public`. |
 | `ModuleOp` | Added optional `producer` attribute | String attribute with flag bit. |
+
+New 13.3 type tags covered by the writer/decoder include `f4E2M1FN`, `i4`,
+`gather_scatter_view`, and `strided_view`; `f8E8M0FNU` is used as the FP8 scale
+type for scaled MMA.
 
 ## Builder API Examples
 

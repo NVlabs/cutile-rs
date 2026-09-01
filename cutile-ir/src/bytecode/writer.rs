@@ -51,6 +51,7 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
         types: TypeManager::new(),
         constants: ConstantManager::new(),
         debug: DebugInfoCollector::new(),
+        version,
     };
 
     // Pre-scan: register all types, strings, constants used by globals and functions.
@@ -80,11 +81,11 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
     // 4. Constant section
     write_constant_section(&mut out, &ctx.constants)?;
 
-    // 5. Debug section (omitted when no non-unknown locations).
-    write_debug_section(&mut out, &ctx)?;
+    // 5. Debug section (always present, like the reference emitter).
+    write_debug_section(&mut out, &mut ctx)?;
 
     // 6. Type section
-    write_type_section(&mut out, &ctx.types)?;
+    write_type_section(&mut out, &ctx.types, version)?;
 
     // 7. String section
     write_string_section(&mut out, &ctx.strings)?;
@@ -277,6 +278,12 @@ impl TypeManager {
             Type::PartitionView(pv) => {
                 self.get_or_insert(&Type::TensorView(pv.tensor_view.clone()));
             }
+            Type::GatherScatterView(gsv) => {
+                self.get_or_insert(&Type::TensorView(gsv.tensor_view.clone()));
+            }
+            Type::StridedView(sv) => {
+                self.get_or_insert(&Type::TensorView(sv.tensor_view.clone()));
+            }
             Type::Func(f) => {
                 for inp in &f.inputs {
                     self.get_or_insert(inp);
@@ -290,7 +297,12 @@ impl TypeManager {
     }
 }
 
-fn serialize_type(ty: &Type, types: &mut TypeManager, w: &mut EncodingWriter) -> Result<()> {
+fn serialize_type(
+    ty: &Type,
+    types: &mut TypeManager,
+    w: &mut EncodingWriter,
+    version: BytecodeVersion,
+) -> Result<()> {
     match ty {
         Type::Scalar(s) => {
             w.write_varint(s.type_tag() as u64);
@@ -319,14 +331,51 @@ fn serialize_type(ty: &Type, types: &mut TypeManager, w: &mut EncodingWriter) ->
         }
         Type::PartitionView(pv) => {
             w.write_varint(TypeTag::PartitionView as u64);
+            if version >= BytecodeVersion::V13_3 {
+                let flags = if pv.padding_value.is_some() {
+                    1u64
+                } else {
+                    0u64
+                };
+                w.write_varint(flags);
+            }
             w.write_le_var_size_i32(&pv.tile_shape);
             let idx = types.get_or_insert(&Type::TensorView(pv.tensor_view.clone()));
             w.write_varint(idx);
             w.write_le_var_size_i32(&pv.dim_map);
-            let has_padding = pv.padding_value.is_some();
-            w.write_byte(has_padding as u8);
-            if let Some(pv_val) = pv.padding_value {
-                w.write_varint(pv_val as u64);
+            if version >= BytecodeVersion::V13_3 {
+                if let Some(pv_val) = pv.padding_value {
+                    w.write_byte(pv_val as u8);
+                }
+            } else {
+                let has_padding = pv.padding_value.is_some();
+                w.write_byte(has_padding as u8);
+                if let Some(pv_val) = pv.padding_value {
+                    w.write_varint(pv_val as u64);
+                }
+            }
+        }
+        Type::GatherScatterView(gsv) => {
+            w.write_varint(TypeTag::GatherScatterView as u64);
+            w.write_varint(if gsv.padding_value.is_some() { 1 } else { 0 });
+            w.write_le_var_size_i32(&gsv.tile_shape);
+            let idx = types.get_or_insert(&Type::TensorView(gsv.tensor_view.clone()));
+            w.write_varint(idx);
+            w.write_varint(gsv.sparse_dim as u64);
+            if let Some(padding_value) = gsv.padding_value {
+                w.write_byte(padding_value as u8);
+            }
+        }
+        Type::StridedView(sv) => {
+            w.write_varint(TypeTag::StridedView as u64);
+            w.write_varint(if sv.padding_value.is_some() { 1 } else { 0 });
+            w.write_le_var_size_i32(&sv.tile_shape);
+            w.write_le_var_size_i32(&sv.traversal_strides);
+            let idx = types.get_or_insert(&Type::TensorView(sv.tensor_view.clone()));
+            w.write_varint(idx);
+            w.write_le_var_size_i32(&sv.dim_map);
+            if let Some(padding_value) = sv.padding_value {
+                w.write_byte(padding_value as u8);
             }
         }
         Type::Func(f) => {
@@ -349,7 +398,11 @@ fn serialize_type(ty: &Type, types: &mut TypeManager, w: &mut EncodingWriter) ->
     Ok(())
 }
 
-fn write_type_section(out: &mut Vec<u8>, types: &TypeManager) -> Result<()> {
+fn write_type_section(
+    out: &mut Vec<u8>,
+    types: &TypeManager,
+    version: BytecodeVersion,
+) -> Result<()> {
     if types.list.is_empty() {
         return Ok(());
     }
@@ -376,7 +429,7 @@ fn write_type_section(out: &mut Vec<u8>, types: &TypeManager) -> Result<()> {
     for ty in &type_list {
         offsets.push(running);
         let before = w.tell();
-        serialize_type(ty, &mut types_mut, &mut w)?;
+        serialize_type(ty, &mut types_mut, &mut w, version)?;
         running += (w.tell() - before) as u32;
     }
 
@@ -477,6 +530,11 @@ fn write_global_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> {
 
         // 4. Alignment.
         w.write_varint(global.alignment);
+
+        if ctx.version >= BytecodeVersion::V13_3 {
+            w.write_byte(global.symbol_visibility as u8);
+            w.write_varint(global.constant as u64);
+        }
     }
 
     let buf = w.into_bytes();
@@ -489,120 +547,59 @@ fn write_global_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> {
 // Debug info section
 // =========================================================================
 
-use super::enums::DebugTag;
-
-/// Serialize a single debug info entry.
-fn write_debug_entry(loc: &crate::ir::Location, w: &mut EncodingWriter, strings: &StringManager) {
-    use crate::ir::Location;
-    match loc {
-        Location::Unknown => {
-            w.write_varint(DebugTag::Unknown as u64);
-        }
-        Location::FileLineCol { .. } => {
-            // FileLineCol without scope → serialize as Unknown (reserved index)
-            w.write_varint(DebugTag::Unknown as u64);
-        }
-        Location::DebugInfo(di) => {
-            // DILoc: tag, scope_index, filename_index, line, column
-            w.write_varint(DebugTag::DILoc as u64);
-            // Scope index — would need interning; use 0 (unknown) placeholder.
-            w.write_varint(0);
-            // Filename string index — look up or 0.
-            if let Some(&idx) = strings.map.get(&di.filename) {
-                w.write_varint(idx);
-            } else {
-                w.write_varint(0);
-            }
-            w.write_varint(di.line as u64);
-            w.write_varint(di.column as u64);
-        }
-        Location::CallSite { .. } => {
-            w.write_varint(DebugTag::CallSite as u64);
-            // Callee and caller indices — would need interning; use 0 placeholder.
-            w.write_varint(0);
-            w.write_varint(0);
-        }
-    }
-}
-
-fn write_debug_section(out: &mut Vec<u8>, ctx: &WriterCtx) -> Result<()> {
-    if !ctx.debug.has_debug_info() {
-        return Ok(());
-    }
-
-    // For now, write an empty debug section structure.
-    // Full debug info interning (scope chains, per-op indices) will be
-    // implemented when the compiler starts propagating source locations.
-    //
-    // The section format is:
-    //   diOpsNum[varint]
-    //   padding[align 4]
-    //   diIndexOffsets[u32*]
-    //   diIndicesNum[varint]
-    //   padding[align 8]
-    //   diIndices[u64*]
-    //   diAttrNum[varint]
-    //   padding[align 4]
-    //   diOffsets[u32*]
-    //   diData[bytes]
-
+/// Writes the Debug section in the reference layout:
+///
+/// ```text
+///   numFunctions[varint]
+///   padding[align 4]
+///   indexOffsets[u32 x numFunctions]   // start of each function's ids
+///   numIndices[varint]                 // total ids across functions
+///   padding[align 8]
+///   attrIds[u64 x numIndices]          // [0] = function attr, then per op
+///   attrCount[varint]                  // interned attribute table
+///   padding[align 4]
+///   attrOffsets[u32 x attrCount]
+///   attrData[bytes]                    // tag byte + varint fields each
+/// ```
+///
+/// The section is always written (like the reference emitter): a bytecode
+/// consumer treats a missing id as "no debug info", and the empty-table
+/// workaround keeps decoders that reject zero-length tables working.
+fn write_debug_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> {
     let mut w = EncodingWriter::new();
 
-    // Number of operations with debug info.
-    let num_ops = ctx.debug.op_locations.len();
-    w.write_varint(num_ops as u64);
+    let per_function = ctx.debug.per_function();
+    w.write_varint(per_function.len() as u64);
     w.align_to(4);
 
-    // Per-op offset into debug info indices (each op has one index).
-    for i in 0..num_ops {
-        w.write_le_u32(i as u32);
+    // Per-function offsets into the flattened id array.
+    let mut index_offset: u32 = 0;
+    for func_ids in per_function {
+        w.write_le_u32(index_offset);
+        index_offset += func_ids.len() as u32;
     }
 
-    // Total number of debug info indices = num_ops (one per op).
-    w.write_varint(num_ops as u64);
+    w.write_varint(index_offset as u64);
     w.align_to(8);
 
-    // Each op maps to a single debug info entry (indexed sequentially).
-    // Offset by DebugReserved::Size (1) to skip the reserved UnknownLoc slot.
-    for i in 0..num_ops {
-        let (_, ref loc) = ctx.debug.op_locations[i];
-        if matches!(loc, crate::ir::Location::Unknown) {
-            w.write_le_u64(0); // Reserved UnknownLoc index.
-        } else {
-            w.write_le_u64((i as u64) + 1); // +1 for reserved slot.
+    for func_ids in per_function {
+        for &attr_id in func_ids {
+            w.write_le_u64(attr_id);
         }
     }
 
-    // Collect non-unknown locations as debug info entries.
-    let entries: Vec<_> = ctx
-        .debug
-        .op_locations
-        .iter()
-        .filter(|(_, loc)| !matches!(loc, crate::ir::Location::Unknown))
-        .map(|(_, loc)| loc)
-        .collect();
+    ctx.debug.attrs.ensure_non_empty();
+    let entries = ctx.debug.attrs.entries();
 
     w.write_varint(entries.len() as u64);
     w.align_to(4);
-
-    // Reserve offset table.
-    let offsets_pos = w.tell();
-    for _ in 0..entries.len() {
-        w.write_le_u32(0);
+    let mut offset: u32 = 0;
+    for encoded in entries {
+        w.write_le_u32(offset);
+        offset += encoded.len() as u32;
     }
-
-    // Serialize each debug info entry.
-    let mut running: u32 = 0;
-    let mut offsets = Vec::with_capacity(entries.len());
-    for loc in &entries {
-        offsets.push(running);
-        let before = w.tell();
-        write_debug_entry(loc, &mut w, &ctx.strings);
-        running += (w.tell() - before) as u32;
-    }
-
-    for (i, offset) in offsets.iter().enumerate() {
-        patch_u32(w.buf_mut(), offsets_pos + i * 4, *offset);
+    for encoded in entries {
+        w.write_bytes(encoded);
     }
 
     let buf = w.into_bytes();
@@ -739,7 +736,27 @@ fn write_function_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> 
 
         // Entry flag.
         let is_entry = op.opcode == Opcode::Entry;
-        let has_hints = find_attr(&op.attributes, "optimization_hints").is_some();
+        let hints_attr = if is_entry {
+            find_attr(&op.attributes, "optimization_hints").cloned()
+        } else {
+            None
+        };
+        if ctx.version < BytecodeVersion::V13_3 {
+            if let Some(Attribute::OptimizationHints(hints)) = &hints_attr {
+                for (_, arch_hints) in &hints.entries {
+                    if arch_hints
+                        .iter()
+                        .any(|(name, _)| name == "num_worker_warps_per_cta")
+                    {
+                        return Err(Error::BytecodeWrite(format!(
+                            "optimization hint 'num_worker_warps_per_cta' requires bytecode version 13.3 or newer, requested {}",
+                            ctx.version
+                        )));
+                    }
+                }
+            }
+        }
+        let has_hints = hints_attr.is_some();
         let mut flags: u8 = 0;
         if is_entry {
             flags |= FunctionFlag::KindKernel as u8;
@@ -749,20 +766,25 @@ fn write_function_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> 
         }
         w.write_byte(flags);
 
-        // Function location index (placeholder 0 for now — debug section TODO).
-        w.write_varint(0);
+        // Function debug-info index: 1-based into the Debug section's
+        // per-function attribute lists. The DI name is the user-facing
+        // kernel name when the frontend provided one; the linkage name is
+        // the emitted symbol.
+        let di_name = find_string_attr(&op.attributes, "di_name");
+        let di_idx =
+            ctx.debug
+                .begin_function(&mut ctx.strings, &name, di_name.as_deref(), &op.location);
+        w.write_varint(di_idx);
 
         // Write optimization hints if present.
-        if is_entry && has_hints {
-            if let Some(hints_attr) = find_attr(&op.attributes, "optimization_hints").cloned() {
-                write_self_contained_attribute(
-                    &hints_attr,
-                    &mut w,
-                    &mut ctx.strings,
-                    &mut ctx.types,
-                    &mut ctx.constants,
-                )?;
-            }
+        if let Some(hints_attr) = hints_attr {
+            write_self_contained_attribute(
+                &hints_attr,
+                &mut w,
+                &mut ctx.strings,
+                &mut ctx.types,
+                &mut ctx.constants,
+            )?;
         }
 
         // Write function body.
@@ -813,6 +835,7 @@ fn write_function_body(ctx: &mut WriterCtx, func_op: OpId) -> Result<Vec<u8>> {
 /// `&mut` to per-op writers and recursive region/block writers.
 pub(super) struct WriterCtx<'a> {
     pub module: &'a Module,
+    pub version: BytecodeVersion,
     pub value_map: HashMap<Value, u64>,
     pub next_idx: u64,
     pub strings: StringManager,
@@ -821,51 +844,183 @@ pub(super) struct WriterCtx<'a> {
     pub debug: DebugInfoCollector,
 }
 
-/// Collects debug info (source locations) during operation serialization.
-///
-/// Operations are tracked by a sequential index. Each function gets a
-/// function-level location index, and each operation within that function
-/// contributes its location to the debug info attribute pool.
-#[allow(dead_code)]
+/// Collects debug info during serialization, mirroring the reference
+/// frontend emitter: a content-addressed attribute table plus one
+/// attribute-id list per function, whose first element is the function's own
+/// location attribute and whose remaining elements are one id per operation
+/// in body-serialization order.
 pub(super) struct DebugInfoCollector {
-    /// Per-function location index (maps function OpId to debug index).
-    func_loc_indices: HashMap<OpId, u64>,
-    /// Per-operation debug info: (function_loc_index, op_location).
-    /// Collected during function body serialization.
-    op_locations: Vec<(u64, crate::ir::Location)>,
+    pub(super) attrs: super::debug_info::DebugAttrTable,
+    /// One list per function, in Func-section order.
+    per_function: Vec<Vec<u64>>,
+    /// Subprogram attribute of the function currently being serialized;
+    /// scopes bare `FileLineCol` op locations. 0 = none.
+    current_scope: u64,
 }
 
-#[allow(dead_code)]
 impl DebugInfoCollector {
     fn new() -> Self {
         Self {
-            func_loc_indices: HashMap::new(),
-            op_locations: Vec::new(),
+            attrs: super::debug_info::DebugAttrTable::default(),
+            per_function: Vec::new(),
+            current_scope: 0,
         }
     }
 
-    /// Register a function's location and return its debug index.
-    pub fn register_function(&mut self, func_id: OpId) -> u64 {
-        let idx = self.func_loc_indices.len() as u64 + 1; // 0 is reserved for UnknownLoc
-        self.func_loc_indices.insert(func_id, idx);
-        idx
+    pub fn per_function(&self) -> &[Vec<u64>] {
+        &self.per_function
     }
 
-    /// Record an operation's location during serialization.
-    pub fn record_op_location(&mut self, func_loc_idx: u64, loc: crate::ir::Location) {
-        self.op_locations.push((func_loc_idx, loc));
+    fn subprogram_attr(
+        &mut self,
+        strings: &mut StringManager,
+        sp: &crate::ir::DISubprogram,
+    ) -> u64 {
+        let file = self.attrs.file(strings, &sp.file.name, &sp.file.directory);
+        let cu_file = self.attrs.file(
+            strings,
+            &sp.compile_unit.file.name,
+            &sp.compile_unit.file.directory,
+        );
+        let cu = self.attrs.compile_unit(cu_file);
+        self.attrs.subprogram(
+            strings,
+            file,
+            sp.line as u64,
+            &sp.name,
+            &sp.linkage_name,
+            cu,
+            sp.scope_line as u64,
+        )
     }
 
-    /// Returns true if any non-unknown locations were collected.
-    pub fn has_debug_info(&self) -> bool {
-        self.op_locations
-            .iter()
-            .any(|(_, loc)| !matches!(loc, crate::ir::Location::Unknown))
+    fn scope_attr(&mut self, strings: &mut StringManager, scope: &crate::ir::DebugScope) -> u64 {
+        match scope {
+            crate::ir::DebugScope::Subprogram(sp) => self.subprogram_attr(strings, sp),
+            crate::ir::DebugScope::LexicalBlock(lb) => {
+                let parent = self.scope_attr(strings, &lb.scope);
+                let file = self.attrs.file(strings, &lb.file.name, &lb.file.directory);
+                self.attrs
+                    .lexical_block(parent, file, lb.line as u64, lb.column as u64)
+            }
+        }
+    }
+
+    /// Converts a location into an interned attribute id (0 = no info).
+    ///
+    /// Known consumer limitation: the current `tileiras` accepts this
+    /// section everywhere (verifier and `--lineinfo` line tables, both
+    /// files/lines correct), but its full `--device-debug` DWARF emission
+    /// can reject real programs whose inline chains reference multiple
+    /// subprogram scopes (probed in `tests/bytecode_validate.rs` `dbg_v*`;
+    /// every isolated shape passes, whole programs can fail). Being raised
+    /// upstream; emission stays reference-conformant rather than degrading
+    /// the data.
+    fn attr_for(&mut self, strings: &mut StringManager, loc: &crate::ir::Location) -> u64 {
+        use crate::ir::Location;
+        match loc {
+            Location::Unknown => super::debug_info::MISSING_DEBUG_ATTR_ID,
+            Location::FileLineCol {
+                filename,
+                line,
+                column,
+            } => {
+                // A bare file:line:col is scoped to the enclosing function's
+                // subprogram. Without one there is nothing valid to emit.
+                if self.current_scope == super::debug_info::MISSING_DEBUG_ATTR_ID {
+                    return super::debug_info::MISSING_DEBUG_ATTR_ID;
+                }
+                let scope = self.current_scope;
+                self.attrs
+                    .loc(strings, scope, filename, *line as u64, *column as u64)
+            }
+            Location::DebugInfo(di) => {
+                let scope = self.scope_attr(strings, &di.scope);
+                self.attrs.loc(
+                    strings,
+                    scope,
+                    &di.filename,
+                    di.line as u64,
+                    di.column as u64,
+                )
+            }
+            Location::CallSite { callee, caller } => {
+                let callee_attr = self.attr_for(strings, callee);
+                if callee_attr == super::debug_info::MISSING_DEBUG_ATTR_ID {
+                    return super::debug_info::MISSING_DEBUG_ATTR_ID;
+                }
+                let caller_attr = self.attr_for(strings, caller);
+                self.attrs.call_site(callee_attr, caller_attr)
+            }
+        }
+    }
+
+    /// Starts a new function's debug list and returns its 1-based index for
+    /// the Func-section record. `di_name` is the user-facing kernel name;
+    /// `sym_name` is the emitted symbol (the DI linkage name).
+    pub fn begin_function(
+        &mut self,
+        strings: &mut StringManager,
+        sym_name: &str,
+        di_name: Option<&str>,
+        loc: &crate::ir::Location,
+    ) -> u64 {
+        use crate::ir::Location;
+        self.current_scope = match loc {
+            Location::FileLineCol { filename, line, .. } => {
+                let (dir, base) = split_file_path(filename);
+                let file = self.attrs.file(strings, base, dir);
+                let cu = self.attrs.compile_unit(file);
+                self.attrs.subprogram(
+                    strings,
+                    file,
+                    *line as u64,
+                    di_name.unwrap_or(sym_name),
+                    sym_name,
+                    cu,
+                    *line as u64,
+                )
+            }
+            Location::DebugInfo(di) => self.scope_attr(strings, &di.scope.clone()),
+            _ => super::debug_info::MISSING_DEBUG_ATTR_ID,
+        };
+        let func_attr = self.attr_for(strings, loc);
+        self.per_function.push(vec![func_attr]);
+        self.per_function.len() as u64
+    }
+
+    /// Records one operation's attribute id, in serialization order.
+    pub fn record_op(&mut self, strings: &mut StringManager, loc: &crate::ir::Location) {
+        let attr = self.attr_for(strings, loc);
+        // Ops are only ever serialized inside a function; recording one
+        // outside would silently desync every subsequent per-op index.
+        debug_assert!(
+            !self.per_function.is_empty(),
+            "op serialized before any begin_function"
+        );
+        if let Some(list) = self.per_function.last_mut() {
+            list.push(attr);
+        }
+    }
+}
+
+/// Splits a path into (directory, basename) for DIFile encoding.
+fn split_file_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => ("", path),
     }
 }
 
 impl<'a> WriterCtx<'a> {
     pub fn write_operation(&mut self, op_id: OpId, w: &mut EncodingWriter) -> Result<()> {
+        let op = self.module.op(op_id);
+
+        // Record the op's debug attribute, in serialization order — the
+        // Debug section's per-op ids must line up with the ops as decoded.
+        let loc = op.location.clone();
+        self.debug.record_op(&mut self.strings, &loc);
+
         let op = self.module.op(op_id);
 
         // Write opcode.

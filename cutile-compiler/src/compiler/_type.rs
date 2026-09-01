@@ -5,7 +5,7 @@
 
 //! Type conversion: maps the old compiler's type info to tile-ir types.
 //!
-//! The primary conversion is `convert_type`, which parses the MLIR-dialect
+//! The primary conversion is `convert_type`, which parses the Tile IR
 //! type string stored in `TileRustType.cuda_tile_ty_str` via
 //! `cutile_ir::ir::Type::parse()`. This is a transitional pattern — ideally
 //! `TileRustType` would store `cutile_ir::ir::Type` directly.
@@ -19,6 +19,7 @@ use syn::FnArg;
 pub fn scalar_from_name(name: &str) -> Option<ScalarType> {
     match name {
         "i1" => Some(ScalarType::I1),
+        "i4" => Some(ScalarType::I4),
         "i8" => Some(ScalarType::I8),
         "i16" => Some(ScalarType::I16),
         "i32" => Some(ScalarType::I32),
@@ -30,6 +31,9 @@ pub fn scalar_from_name(name: &str) -> Option<ScalarType> {
         "f64" => Some(ScalarType::F64),
         "f8e4m3fn" | "f8E4M3FN" => Some(ScalarType::F8E4M3FN),
         "f8e5m2" | "f8E5M2" => Some(ScalarType::F8E5M2),
+        "f8e8m0fnu" | "f8E8M0FNU" => Some(ScalarType::F8E8M0FNU),
+        "f4e2m1fn" | "f4E2M1FN" => Some(ScalarType::F4E2M1FN),
+        "f4e2m1fnx2" => Some(ScalarType::I8),
         // Rust-facing names (unsigned maps to signed CUDA types)
         "bool" => Some(ScalarType::I1),
         "u8" => Some(ScalarType::I8),
@@ -123,6 +127,10 @@ fn rust_scalar_type(name: &str) -> Option<ScalarType> {
         "bf16" => Some(ScalarType::BF16),
         "f32" => Some(ScalarType::F32),
         "f64" => Some(ScalarType::F64),
+        "f8e8m0fnu" => Some(ScalarType::F8E8M0FNU),
+        "f4e2m1fn" => Some(ScalarType::F4E2M1FN),
+        "f4e2m1fnx2" => Some(ScalarType::I8),
+        "i4" => Some(ScalarType::I4),
         _ => None,
     }
 }

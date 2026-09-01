@@ -80,10 +80,6 @@ fn main() {
     // 1. Resolve build+install tree location (default: $OUT_DIR; opt-in cache
     //    under ~/.cache/cuda-tile-rs/<key>/).
     let build_root = resolve_build_root(&submodule, &out_dir);
-    println!(
-        "cargo:warning=cuda-tile-rs build tree: {}",
-        build_root.display()
-    );
     fs::create_dir_all(&build_root).expect("failed to create build root");
 
     // 2. Build cuda-tile + LLVM via cmake. We don't ask for the combined

@@ -12,8 +12,6 @@
 
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -109,11 +107,8 @@ mod num_tiles_kernels {
 use num_tiles_kernels::__module_ast_self;
 
 fn compile(kernel: &str, gen_args: &[String], strides: &[(&str, &[i32])]) -> String {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
-    let gpu_name = get_gpu_name(0);
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    let mlir = common::compile_to_ir(
+        __module_ast_self,
         "num_tiles_kernels",
         kernel,
         gen_args,
@@ -121,11 +116,9 @@ fn compile(kernel: &str, gen_args: &[String], strides: &[(&str, &[i32])]) -> Str
         &[],
         &[],
         None,
-        gpu_name,
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler");
-    let mlir = compiler.compile().expect("Failed to compile").to_string();
+    .expect("Failed to compile");
     println!("=== MLIR for {kernel} ===\n{mlir}");
     mlir
 }

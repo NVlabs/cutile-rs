@@ -34,8 +34,6 @@
 
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use cutile_compiler::error::JITError;
 
 mod common;
@@ -67,11 +65,8 @@ mod span_error_module {
 #[test]
 fn untyped_literal_error_has_correct_source_location() {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(span_error_module::__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
+        let compile_result = common::compile_to_ir(
+            span_error_module::__module_ast_self,
             "span_error_module",
             "untyped_literal_kernel",
             &[128.to_string()],
@@ -79,12 +74,8 @@ fn untyped_literal_error_has_correct_source_location() {
             &[],
             &[],
             None,
-            gpu_name,
             &CompileOptions::default(),
-        )
-        .expect("Compiler construction should succeed");
-
-        let compile_result = compiler.compile();
+        );
 
         // Extract the error — we cannot use unwrap_err() because
         // ModuleOperation does not implement Debug.
@@ -211,11 +202,8 @@ mod span_comments_module {
 #[test]
 fn comments_do_not_break_span_tracking() {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(span_comments_module::__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
+        let compile_result = common::compile_to_ir(
+            span_comments_module::__module_ast_self,
             "span_comments_module",
             "commented_kernel",
             &[128.to_string()],
@@ -223,12 +211,8 @@ fn comments_do_not_break_span_tracking() {
             &[],
             &[],
             None,
-            gpu_name,
             &CompileOptions::default(),
-        )
-        .expect("Compiler construction should succeed");
-
-        let compile_result = compiler.compile();
+        );
 
         let err = match compile_result {
             Err(e) => e,

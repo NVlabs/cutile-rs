@@ -40,11 +40,65 @@ pub(super) fn write_op_body(
     use Opcode::*;
     match op.opcode {
         // ----- Simple: result types + operands (no size) -----
-        AbsF | AbsI | AndI | Atan2 | Bitcast | Broadcast | Ceil | Cos | CosH | Exp | Floor
-        | IntToPtr | Log | Log2 | MmaF | MulhiI | NegF | Offset | OrI | Pow | PtrToInt
-        | PtrToPtr | RemF | Reshape | Select | Sin | SinH | Tan | XOrI => {
+        AbsF
+        | AbsI
+        | AndI
+        | Atan2
+        | Bitcast
+        | Broadcast
+        | Ceil
+        | Cos
+        | CosH
+        | Floor
+        | IntToPtr
+        | Log
+        | Log2
+        | MakeGatherScatterView
+        | MakeStridedView
+        | MmaFScaled
+        | MulhiI
+        | NegF
+        | Offset
+        | OrI
+        | Pack
+        | Pow
+        | PtrToInt
+        | PtrToPtr
+        | RemF
+        | Reshape
+        | Select
+        | Sin
+        | SinH
+        | Tan
+        | Unpack
+        | XOrI => {
             write_result_types(op, w, ctx)?;
             write_operands(op, w, ctx, false)?;
+        }
+
+        Exp => {
+            write_result_types(op, w, ctx)?;
+            if ctx.version >= super::enums::BytecodeVersion::V13_3 {
+                write_inline_attr_or_default(op, "rounding_mode", 5, w, ctx)?;
+            }
+            write_operands(op, w, ctx, false)?;
+        }
+
+        MmaF => {
+            write_result_types(op, w, ctx)?;
+            if ctx.version >= super::enums::BytecodeVersion::V13_3 {
+                let flags = flag_if_bool_true(op, "fast_acc", 0);
+                w.write_varint(flags);
+            }
+            write_operands(op, w, ctx, false)?;
+        }
+
+        Alloca => {
+            write_result_types(op, w, ctx)?;
+            let flags = flag_if_bool_true(op, "global", 0);
+            w.write_varint(flags);
+            write_inline_attr(op, "num_elem", w, ctx)?;
+            write_inline_attr(op, "alignment", w, ctx)?;
         }
 
         // ----- v13.2: NegI gains overflow attr -----
@@ -237,15 +291,31 @@ pub(super) fn write_op_body(
         // ----- Global: result types + attrs (handled in global section, but also as op) -----
         Global => {
             write_result_types(op, w, ctx)?;
+            if ctx.version >= super::enums::BytecodeVersion::V13_3 {
+                let flags = flag_if_bool_true(op, "constant", 0);
+                w.write_varint(flags);
+            }
             write_inline_attr(op, "sym_name", w, ctx)?;
             write_inline_attr(op, "value", w, ctx)?;
             write_inline_attr(op, "alignment", w, ctx)?;
+            if ctx.version >= super::enums::BytecodeVersion::V13_3 {
+                write_inline_attr_or_default(op, "symbol_visibility", 0, w, ctx)?;
+            }
         }
 
         // ----- Module: result types + attr + regions -----
         Module => {
             write_result_types(op, w, ctx)?;
+            if ctx.version >= super::enums::BytecodeVersion::V13_3 {
+                let flags = flag_if_present(op, "producer", 0);
+                w.write_varint(flags);
+            }
             write_inline_attr(op, "sym_name", w, ctx)?;
+            if ctx.version >= super::enums::BytecodeVersion::V13_3
+                && find_op_attr(op, "producer").is_some()
+            {
+                write_inline_attr(op, "producer", w, ctx)?;
+            }
             write_regions(op, w, ctx)?;
         }
 
@@ -342,6 +412,21 @@ pub(super) fn write_op_body(
                 write_operand_group(op, w, ctx, 2, 1)?;
             }
             if flags & (1 << 1) != 0 {
+                write_operand_group(op, w, ctx, 3, 1)?;
+            }
+        }
+        AtomicRedViewTko => {
+            w.write_varint(op.result_types.len() as u64);
+            write_result_types(op, w, ctx)?;
+            let flags = flag_if_operand_group(op, 3, 0);
+            w.write_varint(flags);
+            write_inline_attr(op, "memory_ordering_semantics", w, ctx)?;
+            write_inline_attr(op, "memory_scope", w, ctx)?;
+            write_inline_attr(op, "mode", w, ctx)?;
+            write_operand_group(op, w, ctx, 0, 1)?;
+            write_variadic_operand_group(op, w, ctx, 1)?;
+            write_operand_group(op, w, ctx, 2, 1)?;
+            if flags & (1 << 0) != 0 {
                 write_operand_group(op, w, ctx, 3, 1)?;
             }
         }
@@ -731,6 +816,14 @@ fn flag_if_present(op: &Operation, attr_name: &str, bit: u32) -> u64 {
         1u64 << bit
     } else {
         0
+    }
+}
+
+fn flag_if_bool_true(op: &Operation, attr_name: &str, bit: u32) -> u64 {
+    match find_op_attr(op, attr_name) {
+        Some(Attribute::Bool(true)) => 1u64 << bit,
+        Some(Attribute::Integer(v, _)) if *v != 0 => 1u64 << bit,
+        _ => 0,
     }
 }
 

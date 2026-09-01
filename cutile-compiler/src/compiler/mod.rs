@@ -13,6 +13,7 @@ pub mod _function;
 pub mod _module;
 pub mod _type;
 pub(crate) mod _value;
+mod checks;
 mod compile_assume;
 mod compile_binary_op;
 mod compile_block;

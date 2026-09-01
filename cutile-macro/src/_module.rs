@@ -57,6 +57,7 @@ use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use proc_macro2::{LineColumn, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::{env, fs};
@@ -261,6 +262,7 @@ fn process_items(
                         parent_name,
                         function_item,
                         &type_aliases,
+                        tile_rust_crate_root,
                     )?);
                 };
                 concrete_items.push(function(
@@ -340,8 +342,30 @@ fn module_inner(
     let ast_module_tokens = emit_module_ast_self_and_registry_entry(
         ast_module_item,
         tile_rust_crate_root,
-        raw_item_source,
+        raw_item_source.clone(),
     );
+
+    // Compute SHA-256 source hash at macro expansion time.
+    let source_hash = format!("{:x}", Sha256::digest(raw_item_source.as_bytes()));
+
+    // Per-module source hash, used by the launch/compile path for cache keying.
+    // Warmup no longer needs generated entry metadata: pre-compilation is done
+    // per kernel via the `.compile()` terminal (see `TileKernel`).
+    let source_hash_const = quote! {
+        /// SHA-256 hash of the module source, computed at compile time.
+        /// Changes whenever any kernel source in this module changes.
+        ///
+        /// **Covers this module only.** The JIT walks the use-graph and links in
+        /// the dependency modules a kernel calls, so editing one of those changes
+        /// the generated cubin while this constant stays put.
+        ///
+        /// That makes it unsound as a persistent cache key on its own. Within a
+        /// process it is fine: reaching an edited helper requires a rebuild, which
+        /// restarts the process. The on-disk cache instead keys on the serialized
+        /// Tile IR bytecode, which already has every dependency inlined.
+        pub const _SOURCE_HASH: &str = #source_hash;
+    };
+
     let res = if entry_functions.is_empty() {
         quote! {
             pub mod #name {
@@ -352,6 +376,8 @@ fn module_inner(
                 use #ast_path;
                 #ast_module_tokens
                 #(#concrete_items)*
+                // Warmup metadata.
+                #source_hash_const
             }
         }
     } else {
@@ -378,6 +404,8 @@ fn module_inner(
                 #(#concrete_items)*
                 // Entry point code.
                 #(#entry_functions)*
+                // Warmup metadata.
+                #source_hash_const
             }
         }
     };
@@ -709,6 +737,7 @@ pub fn kernel_launcher(
     module_ident: &Ident,
     item: &ItemFn,
     type_aliases: &HashMap<String, ItemType>,
+    tile_rust_crate_root: &Ident,
 ) -> Result<TokenStream2, Error> {
     let module_name = module_ident.to_string();
     let function_name = item.sig.ident.to_string();
@@ -733,6 +762,7 @@ pub fn kernel_launcher(
         function_entry_name.as_str(),
         &launcher_name,
         &launcher_args_name,
+        tile_rust_crate_root,
     )?;
 
     let launcher_ident = Ident::new(launcher_name.as_str(), Span::call_site());
@@ -805,6 +835,8 @@ pub fn kernel_launcher(
             function_generics: Option<Vec<String>>,
             _phantom: std::marker::PhantomData<( #(#ki_phantom_types,)* )>,
             _compile_options: CompileOptions,
+            // When true, `execute` skips its launch block (set by `.compile()`).
+            _compile_only: bool,
         }
 
         impl #tile_kernel_impl_type_params #launcher_ident #struct_args {
@@ -816,7 +848,56 @@ pub fn kernel_launcher(
                     function_generics: None,
                     _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
+                    _compile_only: false,
                 }
+            }
+
+            // JIT-compiles and caches this specialization without launching.
+            pub fn compile(mut self) -> Result<(), DeviceError> {
+                self._compile_only = true;
+                let stream = with_default_device_policy(|policy| policy.next_stream())??;
+                let ctx = ExecutionContext::new(stream);
+                unsafe { self.execute(&ctx)?; }
+                Ok(())
+            }
+
+            pub fn compile_on(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
+                self._compile_only = true;
+                let ctx = ExecutionContext::new(stream.clone());
+                unsafe { self.execute(&ctx)?; }
+                Ok(())
+            }
+
+            /// Resolves the specialization identity for this launch without compiling or launching the kernel.
+            pub fn specialize(self) -> Result<Specialization<ModuleAstFn>, DeviceError> {
+                let stream = with_default_device_policy(|policy| policy.next_stream())??;
+                self.specialize_on(&stream)
+            }
+
+            /// Resolves the specialization identity for this launch on `stream` without compiling or launching the kernel.
+            pub fn specialize_on(self, stream: &Arc<Stream>) -> Result<Specialization<ModuleAstFn>, DeviceError> {
+                let ctx = ExecutionContext::new(stream.clone());
+                unsafe { self._resolve_specialization(&ctx) }
+            }
+
+            pub fn l1_cache_key(self) -> Result<TileFunctionKey, DeviceError> {
+                Ok(self.specialize()?.into_l1_cache_key())
+            }
+
+            pub fn l1_cache_key_on(self, stream: &Arc<Stream>) -> Result<TileFunctionKey, DeviceError> {
+                Ok(self.specialize_on(stream)?.into_l1_cache_key())
+            }
+
+            pub fn l2_cache_key(self) -> Result<String, DeviceError> {
+                self.specialize()?
+                    .l2_cache_key()
+                    .map_err(|error| DeviceError::from(Error::from(error)))
+            }
+
+            pub fn l2_cache_key_on(self, stream: &Arc<Stream>) -> Result<String, DeviceError> {
+                self.specialize_on(stream)?
+                    .l2_cache_key()
+                    .map_err(|error| DeviceError::from(Error::from(error)))
             }
         }
 

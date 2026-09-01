@@ -4,9 +4,6 @@ name: pages
 on:
   push:
     branches: [main]
-    paths:
-      - "cutile-book/**"
-      - ".github/workflows/pages.yml"
 
 permissions:
   contents: read
@@ -23,10 +20,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch docs refs
+        run: git fetch origin main --tags
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -34,12 +36,15 @@ jobs:
         run: pip install -r cutile-book/requirements.txt
 
       - name: Build book
-        run: sphinx-build -b html cutile-book cutile-book/_build/html
+        env:
+          CUTILE_DOCS_MAIN_REF: origin/main
+          CUTILE_DOCS_BASE_URL: /cutile-rs/
+        run: scripts/build_versioned_book.sh
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: cutile-book/_build/html
+          path: _site
 
   deploy:
     needs: build

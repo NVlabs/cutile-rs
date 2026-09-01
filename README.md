@@ -4,65 +4,56 @@
 
 <img src="assets/logo.svg" alt="cuTile Rust" width="380">
 
-[![Crates.io](https://img.shields.io/crates/v/cutile.svg)](https://crates.io/crates/cutile)
+[![Crates.io](https://badgen.net/crates/v/cutile)](https://crates.io/crates/cutile)
 [![Build](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pr.yml?event=push&label=build)](https://github.com/NVlabs/cutile-rs/actions/workflows/pr.yml)
+[![Docs](https://img.shields.io/badge/docs-book-blue.svg)](https://nvlabs.github.io/cutile-rs/)
 
 </div>
 
-cuTile Rust (`cutile-rs`) is a research project which lets you write tile-based GPU kernels in Rust.
-The workspace combines:
-
-- a safe user-facing DSL for authoring kernels
-- a safe host-side API for asynchronously executing kernel functions
-- a pure Rust compiler pipeline backed by the CUDA Tile compiler
+cuTile Rust (`cutile-rs`) is a tile-based system for writing memory-safe, data-race-free GPU kernels in idiomatic Rust. It extends Rust's ownership discipline across the GPU launch boundary: mutable tensors are partitioned into disjoint pieces before launch, immutable tensors are shared, and generated launchers preserve ownership while GPU work is in flight. The same model supports synchronous launches, asynchronous pipelines, and CUDA graph replay. The `#[cutile::module]` macro embeds a captured Rust AST for each kernel in the host binary; when a kernel is needed, cuTile Rust JIT-compiles that AST through CUDA Tile IR into a GPU cubin. Local opt-outs remain available when lower-level control is needed.
 
 ## Project Status
-We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage (`-alpha`) and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
+We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing to the project.
+Please check out [CONTRIBUTING.md](CONTRIBUTING.md) if you're interested in contributing.
 
 ## Quick Start
 
 ```rust
 use cutile::prelude::*;
-use my_module::add;
 
 #[cutile::module]
-mod my_module {
+mod kernel {
     use cutile::core::*;
 
     #[cutile::entry()]
-    fn add<const S: [i32; 2]>(
-        z: &mut Tensor<f32, S>,
-        x: &Tensor<f32, { [-1, -1] }>,
-        y: &Tensor<f32, { [-1, -1] }>,
+    fn add<const B: i32>(
+        z: &mut Tensor<f32, { [B] }>,
+        x: &Tensor<f32, { [-1] }>,
+        y: &Tensor<f32, { [-1] }>,
     ) {
-        let tile_x = load_tile_like(x, z);
-        let tile_y = load_tile_like(y, z);
-        z.store(tile_x + tile_y);
+        let tx = load_tile_like(x, z);
+        let ty = load_tile_like(y, z);
+        z.store(tx + ty);
     }
 }
 
-fn main() -> Result<(), cuda_async::error::DeviceError> {
-    let x = api::ones::<f32>(&[32, 32]).sync()?;
-    let y = api::ones::<f32>(&[32, 32]).sync()?;
-    let mut z = api::zeros::<f32>(&[32, 32]).sync()?;
+fn main() -> Result<(), Error> {
+    let x = api::ones::<f32>(&[1024]);
+    let y = api::ones::<f32>(&[1024]);
+    let z = api::zeros::<f32>(&[1024]).partition([128]);
 
-    add((&mut z).partition([4, 4]), &x, &y).sync()?;
+    let (_z, _x, _y) = kernel::add(z, x, y).sync()?;
     Ok(())
 }
 ```
 
-The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. On the host side, `add(...)` constructs a lazy kernel launcher that accepts borrowed tensors: `(&mut z).partition([4, 4])` borrows the output and partitions it into 4×4 sub-tensors, while `&x` and `&y` borrow the inputs.
+The `#[cutile::module]` macro transforms `add` into a GPU kernel and generates a host-side launcher. The host code constructs lazy tensor operations, partitions the mutable output into 128-element chunks, and calls `.sync()` to JIT-compile and execute the kernel.
 
-`.sync()` JIT-compiles the kernel (cached after first use) and executes it. The launch grid `(8, 8, 1)` is inferred from the partition: 32÷4 = 8 tiles per dimension.
+The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result. The launch grid `(8, 1, 1)` is inferred from the partition: 1024÷128 = 8 tiles.
 
-- Run the above example via `cargo run -p cutile-examples --example add_refs`.
+- Run a similar example via `cargo run -p cutile-examples --example saxpy`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
-
-## Built with cuTile Rust
-
-- [Grout](https://github.com/huggingface/grout) — Qwen 3 inference engine in Rust by Hugging Face
 
 ## Setup
 
@@ -71,8 +62,9 @@ The `#[cutile::module]` macro transforms the `add` function into a GPU kernel. O
 - **NVIDIA GPU** with compute capability `sm_80` or higher (minimum supported architecture: `sm_80`).
   - `sm_100+` is supported by CUDA 13.1+.
   - `sm_8x` support was added in CUDA 13.2.
-  - `sm_90` is not yet supported; it is expected in CUDA 13.3 (release date TBD).
-- **CUDA** 13.2 recommended (`sm_8x` support and `sm_100+` performance improvements over 13.1).
+  - CUDA 13.3 adds `sm_90` support, so CUDA 13.3 users now have `sm_80+` coverage.
+  - Architectures below `sm_80` (for example `sm_70` and `sm_75`) are out of scope, and we do not plan to support them.
+- **CUDA** 13.3 recommended (`sm_80+` support and CUDA Tile IR 13.3 features such as FP4 packing and block-scaled MMA).
 - **Rust** 1.89+
 - **Linux** (tested on Ubuntu 24.04)
 
@@ -88,17 +80,20 @@ rustup default stable
 
 #### CUDA
 
-Install CUDA 13.2 for your OS by following the official instructions:
+Install CUDA 13.3 for your OS by following the official instructions:
 https://developer.nvidia.com/cuda-downloads
 
 ### Configure Environment
 
-Set `CUDA_TOOLKIT_PATH` to your CUDA 13.2 install directory.
+Set `CUDA_TOOLKIT_PATH` to your CUDA 13.3 install directory for a reproducible
+setup. If it is unset, cuTile searches standard CUDA 13.3/13.2 install
+locations such as `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
+`/usr/local/cuda-13`, and `/usr/local/cuda`.
 
 Example `.cargo/config.toml`:
 ```toml
 [env]
-CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13.2", relative = false }
+CUDA_TOOLKIT_PATH = { value = "/usr/local/cuda-13", relative = false }
 ```
 
 ### Verifying Installation
@@ -120,14 +115,14 @@ experimental-features = nix-command flakes
 
 Run a command directly:
 ```bash
-nix develop -c cargo run -p cutile-examples --example add_basic
+nix develop -c cargo run -p cutile-examples --example saxpy
 ```
 
 Or open an interactive shell:
 ```bash
 nix develop
 # cutile-rs dev shell
-#  ✓ CUDA  /nix/store/...-cuda-toolkit-13.2
+#  ✓ CUDA  /nix/store/...-cuda-toolkit-13.3
 #  ✓ Rust  1.90.0-nightly
 ```
 
@@ -141,7 +136,7 @@ The flake automatically locates host NVIDIA driver libraries on both NixOS and n
 - Benchmarks: `cargo bench`
 - Everything: `./scripts/run_all.sh` (or pipe to a log file: `./scripts/run_all.sh 2>&1 | tee test_run.log`)
 
-### Workspace Crates
+## Workspace Crates
 
 ```
 cutile                 User-facing crate for authoring and executing tile kernels
@@ -149,6 +144,9 @@ cutile                 User-facing crate for authoring and executing tile kernel
 ├── cutile-compiler
 ├── cuda-async
 └── cuda-core
+
+cutile-kernels         Reusable cuTile Rust kernels
+└── cutile
 
 cutile-macro           cuTile Rust proc-macro
 └── cutile-compiler
@@ -169,6 +167,39 @@ cuda-core              Idiomatic safe CUDA API
 cuda-bindings          NVIDIA CUDA bindings
 ```
 
+## Related Projects and References
+
+- [Grout](https://github.com/huggingface/grout): Qwen 3 inference engine in Rust by Hugging Face, built with cuTile Rust and useful as a reference for production kernel call sites.
+- [cuTile Python](https://github.com/nvidia/cutile-python): Python kernel programming with CUDA Tile.
+- [TileGym](https://github.com/NVIDIA/TileGym): CUDA Tile kernel examples and tuning patterns, including a set of ready-to-use cuTile Rust kernels under [`ops/cutile_rs`](https://github.com/NVIDIA/TileGym/tree/main/src/tilegym/ops/cutile_rs).
+- [cuda-oxide](https://github.com/NVlabs/cuda-oxide): NVlabs experimental Rust-to-CUDA compiler for writing SIMT-style GPU kernels in Rust.
+- [CUDA Tile IR documentation](https://docs.nvidia.com/cuda/tile-ir/latest/index.html): CUDA Tile IR reference documentation.
+- [CUDA documentation](https://docs.nvidia.com/cuda/): CUDA toolkit documentation.
+- [Rust NVPTX backend](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html): rustc's target support for generating PTX for NVIDIA GPUs.
+
+## Paper
+
+The cuTile Rust paper, *Fearless Concurrency on the GPU*, is available [here](https://arxiv.org/abs/2606.15991). On NVIDIA B200, cuTile Rust reaches 7 TB/s for element-wise operations and 2 PFlop/s for GEMM, about 91% of peak memory bandwidth and 92% of dense `f16` peak, respectively. The GEMM result is competitive with cuBLAS, and the B200 safety-overhead microbenchmarks show that cuTile Rust adds safety without measurable runtime overhead: safe Rust persistent GEMM reaches 2.07 PFlop/s at `M=N=K=8192` (92% of the B200 dense `f16` peak), within 0.3% of the corresponding low-level Tile IR variant.
+
+The paper also evaluates Grout, a Qwen3 inference engine built with cuTile Rust in collaboration with Hugging Face. In batch-1 Qwen3 decode, Grout reaches 171 tokens/s for Qwen3-4B on NVIDIA GeForce RTX 5090 and 82 tokens/s for Qwen3-32B on B200, showing competitive state-of-the-art performance on memory-bound inference tasks as measured by our HBM roofline analysis.
+
+Reproducibility artifacts for the paper evaluation are available [here](cutile-benchmarks/paper/). The paper-facing measurements were run against cuTile Rust 0.2.0, and the version of Grout used for the paper is available [here](https://github.com/huggingface/grout).
+
+## Citing
+
+If you use cuTile Rust in research, please cite the paper:
+
+```bibtex
+@misc{elibol2026fearlessconcurrencygpu,
+  title = {Fearless Concurrency on the GPU},
+  author = {Elibol, Melih and Roesch, Jared and Gelado, Isaac and Buehler, Eric and Garland, Michael},
+  year = {2026},
+  eprint = {2606.15991},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.PL},
+  url = {https://arxiv.org/abs/2606.15991}
+}
+```
+
 ## License
-The `cuda-bindings` crate is licensed under NVIDIA Software License: [LICENSE-NVIDIA](LICENSE-NVIDIA).
-All other crates are licensed under the Apache License, Version 2.0 https://www.apache.org/licenses/LICENSE-2.0
+All crates are licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0

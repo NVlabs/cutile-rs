@@ -27,17 +27,64 @@ pub struct LaunchConfig {
     pub shared_mem_bytes: u32,
 }
 
+/// Anything that owns an external CUDA resource. A borrowed handle can hold an
+/// `Arc<dyn ForeignOwner>` as a *liveness token*: while the handle (and anything
+/// derived from it) is alive, the token's refcount is nonzero, so the external
+/// owner cannot be dropped — and the resource it backs cannot be destroyed —
+/// out from under cutile. Blanket-implemented, so any `Arc<T>` erases to
+/// `Arc<dyn ForeignOwner>`.
+pub trait ForeignOwner: Send + Sync + 'static {}
+impl<T: Send + Sync + 'static> ForeignOwner for T {}
+
+/// Optional liveness token held by a borrowed handle (see [`ForeignOwner`]).
+///
+/// Compares equal regardless of contents (the token is an ownership detail, not
+/// part of a handle's identity) and prints opaquely, so the handle types keep
+/// their `Debug`/`PartialEq`/`Eq` derives.
+#[derive(Clone, Default)]
+pub struct KeepAlive(Option<Arc<dyn ForeignOwner>>);
+
+impl KeepAlive {
+    /// A token holding nothing (owned or raw-borrowed handles).
+    pub fn none() -> Self {
+        Self(None)
+    }
+    /// A token keeping `owner` alive for the handle's lifetime.
+    pub fn owner(owner: Arc<dyn ForeignOwner>) -> Self {
+        Self(Some(owner))
+    }
+}
+
+impl std::fmt::Debug for KeepAlive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "KeepAlive(owner)"
+        } else {
+            "KeepAlive(none)"
+        })
+    }
+}
+
+impl PartialEq for KeepAlive {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for KeepAlive {}
+
 /// A GPU device handle wrapping a CUDA primary context.
 ///
-/// Can be either **owned** (created via [`Device::new`], releases the
-/// primary context on drop) or **borrowed** (created via
-/// [`Device::borrow_raw`], does NOT release on drop).
+/// Can be **owned** (created via [`Device::new`], releases the primary context
+/// on drop), **borrowed** (created via [`Device::borrow_raw`], does NOT release
+/// on drop), or **foreign** (created via [`Device::borrow_with_owner`], holds a
+/// liveness token so the external owner outlives it).
 #[derive(Debug)]
 pub struct Device {
     pub(crate) cu_device: cuda_bindings::CUdevice,
     pub(crate) cu_ctx: cuda_bindings::CUcontext,
     pub(crate) ordinal: usize,
     owned: bool,
+    _keep_alive: KeepAlive,
 }
 
 unsafe impl Send for Device {}
@@ -48,6 +95,15 @@ impl Drop for Device {
         if !self.owned {
             return;
         }
+        let _guard = teardown_lock();
+        // Streams hold an Arc<Device>, so by the time the last device handle
+        // for this ordinal drops, every pooled handle is idle; the context
+        // release below reclaims them. Discard so a later re-retain cannot
+        // pop a handle from a torn-down context.
+        stream_pool()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.ordinal);
         let _ = self.bind_to_thread();
         let ctx = std::mem::replace(&mut self.cu_ctx, std::ptr::null_mut());
         if !ctx.is_null() {
@@ -76,6 +132,7 @@ impl Device {
             cu_ctx,
             ordinal,
             owned: true,
+            _keep_alive: KeepAlive::none(),
         });
         device.bind_to_thread()?;
         Ok(device)
@@ -101,6 +158,37 @@ impl Device {
             cu_ctx: cu_ctx as cuda_bindings::CUcontext,
             ordinal,
             owned: false,
+            _keep_alive: KeepAlive::none(),
+        })
+    }
+
+    /// Wraps externally-owned CUDA handles, holding `owner` alive for the
+    /// returned device's lifetime.
+    ///
+    /// Same as [`borrow_raw`](Self::borrow_raw), but the liveness obligation is
+    /// discharged by construction: `owner` is whatever owns the context (a
+    /// cudarc device, a torch context handle, ...), and holding it here
+    /// guarantees the handles stay valid as long as this `Device` — or anything
+    /// derived from it — lives. Only the point-in-time validity of the handles
+    /// remains a caller assertion.
+    ///
+    /// # Safety
+    /// The caller must ensure, *at construction*, that:
+    /// - `cu_ctx` points to a valid retained `CUcontext` for `cu_device`, and
+    /// - dropping `owner` would release those handles (i.e. `owner` really is
+    ///   what keeps them alive).
+    pub unsafe fn borrow_with_owner(
+        cu_ctx: *mut c_void,
+        cu_device: c_int,
+        ordinal: usize,
+        owner: Arc<dyn ForeignOwner>,
+    ) -> Arc<Self> {
+        Arc::new(Device {
+            cu_device: cu_device as cuda_bindings::CUdevice,
+            cu_ctx: cu_ctx as cuda_bindings::CUcontext,
+            ordinal,
+            owned: false,
+            _keep_alive: KeepAlive::owner(owner),
         })
     }
 
@@ -160,11 +248,20 @@ impl Device {
     /// Creates a new non-blocking CUDA stream on this device.
     pub fn new_stream(self: &Arc<Self>) -> Result<Arc<Stream>, DriverError> {
         self.bind_to_thread()?;
-        let cu_stream = stream::create(stream::StreamKind::NonBlocking)?;
+        let pooled = stream_pool()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(&self.ordinal)
+            .and_then(Vec::pop);
+        let cu_stream = match pooled {
+            Some(handle) => handle as cuda_bindings::CUstream,
+            None => stream::create(stream::StreamKind::NonBlocking)?,
+        };
         Ok(Arc::new(Stream {
             cu_stream,
             device: self.clone(),
             owned: true,
+            _keep_alive: KeepAlive::none(),
         }))
     }
 
@@ -192,6 +289,37 @@ impl Device {
     ) -> Result<Arc<Module>, DriverError> {
         self.bind_to_thread()?;
         let cu_module = { module::load(filename) }?;
+        Ok(Arc::new(Module {
+            cu_module,
+            device: self.clone(),
+            owned: true,
+        }))
+    }
+
+    /// Loads a CUDA module from an in-memory **cubin** image.
+    ///
+    /// The image must be a cubin — an ELF, which encodes its own length. This is
+    /// deliberately *not* a PTX loader: `cuModuleLoadData` parses PTX as a
+    /// NUL-terminated C string, and a byte slice carries no terminator, so PTX
+    /// bytes would be read past the end of the slice. Use
+    /// [`load_module_from_ptx_src`](Self::load_module_from_ptx_src) for PTX; it
+    /// builds a `CString`. The ELF-magic check below rejects a non-cubin image
+    /// (an empty slice included) with `CUDA_ERROR_INVALID_IMAGE` rather than
+    /// letting the driver over-read.
+    pub fn load_module_from_bytes(
+        self: &Arc<Self>,
+        image: &[u8],
+    ) -> Result<Arc<Module>, DriverError> {
+        // ELF magic `\x7fELF`; a bounded prefix check that also covers the empty
+        // slice, so the raw pointer handed to `cuModuleLoadData` is never PTX
+        // text (which it would read up to an out-of-bounds NUL).
+        if !image.starts_with(b"\x7fELF") {
+            return Err(DriverError(
+                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_IMAGE,
+            ));
+        }
+        self.bind_to_thread()?;
+        let cu_module = unsafe { module::load_data(image.as_ptr().cast()) }?;
         Ok(Arc::new(Module {
             cu_module,
             device: self.clone(),
@@ -353,18 +481,134 @@ pub struct PoolMemStats {
 
 /// A CUDA stream handle.
 ///
-/// Can be either **owned** (created via [`Device::new_stream`], destroyed
-/// on drop) or **borrowed** (created via [`Stream::borrow_raw`], does
-/// NOT destroy on drop).
+/// Can be **owned** (created via [`Device::new_stream`], destroyed on drop),
+/// **borrowed** (created via [`Stream::borrow_raw`], does NOT destroy on drop),
+/// or **foreign** (created via [`Stream::borrow_with_owner`], holds a liveness
+/// token so the external owner outlives it).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stream {
     pub(crate) cu_stream: cuda_bindings::CUstream,
     pub(crate) device: Arc<Device>,
     owned: bool,
+    _keep_alive: KeepAlive,
+}
+
+/// Per-device pool of idle stream handles (all created `NonBlocking` by
+/// [`Device::new_stream`]). `cuStreamDestroy` racing concurrent driver
+/// activity from other threads segfaults inside libcuda (reproducible in
+/// parallel test runs; a leak-streams experiment ran 10/10 clean where
+/// destroy-paths crashed ~half the runs), so owned streams are never
+/// destroyed: drops return the handle here, `new_stream` reuses it, and the
+/// last `Device` drop for an ordinal discards the pooled handles — the
+/// primary-context release reclaims them.
+fn stream_pool() -> &'static std::sync::Mutex<std::collections::HashMap<usize, Vec<usize>>> {
+    static POOL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<usize, Vec<usize>>>,
+    > = std::sync::OnceLock::new();
+    POOL.get_or_init(Default::default)
+}
+
+/// Serializes destructive driver teardown (stream destroy, module unload,
+/// context release). Concurrent teardown racing other threads' driver calls
+/// segfaults inside libcuda (observed: cuStreamDestroy_v2 during parallel
+/// test runs); teardown is cold, so one process-wide lock is cheap.
+pub(crate) fn teardown_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
+
+// ── Event ───────────────────────────────────────────────────────────────────
+
+/// A CUDA event, created with timing enabled, for device-side timing and
+/// cross-stream synchronization.
+///
+/// Owned RAII: the driver handle is destroyed on drop (the driver defers
+/// destruction of an event still captured in unfinished work, so dropping
+/// early is safe). An event is bound to its device at construction;
+/// recording it on a stream of another device is rejected.
+pub struct Event {
+    cu_event: cuda_bindings::CUevent,
+    device: Arc<Device>,
+}
+
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}
+
+impl Event {
+    /// Records this event on `stream`.
+    ///
+    /// Errors with `CUDA_ERROR_INVALID_VALUE` if the stream belongs to a
+    /// different device than the one this event was created on.
+    pub fn record(&self, stream: &Arc<Stream>) -> Result<(), DriverError> {
+        if stream.device().ordinal() != self.device.ordinal() {
+            return Err(DriverError(
+                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE,
+            ));
+        }
+        // Safety: both handles are valid by construction (RAII wrappers),
+        // and the same-device check above pins them to one context.
+        unsafe { crate::cudarc_shim::event::record(self.cu_event, stream.cu_stream()) }
+    }
+
+    /// Blocks the calling thread until this event has completed.
+    pub fn synchronize(&self) -> Result<(), DriverError> {
+        // Safety: the handle is valid by construction.
+        unsafe { crate::cudarc_shim::event::synchronize(self.cu_event) }
+    }
+
+    /// Milliseconds elapsed on the device between this event and `end`
+    /// (called on the start event, `torch.cuda.Event` convention:
+    /// `start.elapsed_time(&end)`).
+    ///
+    /// Both events must have been recorded, and `end` must have completed —
+    /// call [`synchronize`](Self::synchronize) on it first, or the driver
+    /// reports not-ready.
+    pub fn elapsed_time(&self, end: &Event) -> Result<f32, DriverError> {
+        // Safety: both handles are valid by construction.
+        unsafe { crate::cudarc_shim::event::elapsed(self.cu_event, end.cu_event) }
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // Safety: owned handle; the driver defers destruction while in use.
+        let _ = unsafe { crate::cudarc_shim::event::destroy(self.cu_event) };
+    }
+}
+
+impl Device {
+    /// Creates a timing-enabled event on this device.
+    pub fn new_event(self: &Arc<Self>) -> Result<Event, DriverError> {
+        self.bind_to_thread()?;
+        let cu_event =
+            crate::cudarc_shim::event::create(cuda_bindings::CUevent_flags_enum_CU_EVENT_DEFAULT)?;
+        Ok(Event {
+            cu_event,
+            device: self.clone(),
+        })
+    }
+
+    /// Returns the device's L2 cache size in bytes.
+    pub fn l2_cache_size_bytes(&self) -> Result<usize, DriverError> {
+        let mut value: core::ffi::c_int = 0;
+        // Safety: out-pointer is valid; the device handle is valid by
+        // construction.
+        unsafe {
+            cuda_bindings::cuDeviceGetAttribute(
+                &mut value,
+                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE,
+                self.cu_device,
+            )
+            .result()?;
+        }
+        Ok(value.max(0) as usize)
+    }
+}
 
 impl Drop for Stream {
     fn drop(&mut self) {
@@ -373,7 +617,15 @@ impl Drop for Stream {
         }
         let _ = self.device.bind_to_thread();
         if !self.cu_stream.is_null() {
-            let _ = unsafe { stream::destroy(self.cu_stream) };
+            // Never destroyed (see `stream_pool`): drain, then return the
+            // handle for reuse by the next `new_stream` on this device.
+            let _ = unsafe { stream::synchronize(self.cu_stream) };
+            stream_pool()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .entry(self.device.ordinal)
+                .or_default()
+                .push(self.cu_stream as usize);
         }
     }
 }
@@ -396,6 +648,33 @@ impl Stream {
             cu_stream: cu_stream as cuda_bindings::CUstream,
             device: device.clone(),
             owned: false,
+            _keep_alive: KeepAlive::none(),
+        })
+    }
+
+    /// Wraps an externally-owned CUDA stream, holding `owner` alive for the
+    /// returned stream's lifetime.
+    ///
+    /// Same as [`borrow_raw`](Self::borrow_raw), but the liveness obligation is
+    /// discharged by construction: holding `owner` (whatever owns the stream)
+    /// guarantees `cu_stream` stays valid as long as this `Stream` — or anything
+    /// derived from it — lives. Only the point-in-time validity of `cu_stream`
+    /// remains a caller assertion.
+    ///
+    /// # Safety
+    /// The caller must ensure, *at construction*, that `cu_stream` points to a
+    /// valid CUDA stream on `device`, and that dropping `owner` would destroy
+    /// that stream (i.e. `owner` really is what keeps it alive).
+    pub unsafe fn borrow_with_owner(
+        cu_stream: *mut c_void,
+        device: &Arc<Device>,
+        owner: Arc<dyn ForeignOwner>,
+    ) -> Arc<Self> {
+        Arc::new(Stream {
+            cu_stream: cu_stream as cuda_bindings::CUstream,
+            device: device.clone(),
+            owned: false,
+            _keep_alive: KeepAlive::owner(owner),
         })
     }
 
@@ -418,6 +697,16 @@ impl Stream {
         stream::synchronize(self.cu_stream)
     }
 
+    /// Queries stream completion without blocking: `Ok(true)` when all prior
+    /// work has completed, `Ok(false)` when work is still in flight.
+    ///
+    /// # Safety
+    /// The caller must ensure the parent device's context is current on
+    /// the calling thread.
+    pub unsafe fn query(&self) -> Result<bool, DriverError> {
+        stream::query(self.cu_stream)
+    }
+
     /// Enqueues a host-side callback to execute after all prior stream work completes.
     ///
     /// # Safety
@@ -432,6 +721,27 @@ impl Stream {
             self.cu_stream,
             Self::callback_wrapper::<F>,
             Box::into_raw(boxed_host_func) as *mut c_void,
+        )
+    }
+
+    /// Like [`launch_host_function`](Self::launch_host_function) but with an
+    /// explicit host-task sync mode (`CU_HOST_TASK_BLOCKING` /
+    /// `CU_HOST_TASK_SPINWAIT`) via `cuLaunchHostFunc_v2`.
+    ///
+    /// # Safety
+    /// The caller must ensure the parent device's context is current on
+    /// the calling thread.
+    pub unsafe fn launch_host_function_with_sync_mode<F: FnOnce() + Send>(
+        &self,
+        host_func: F,
+        sync_mode: ::core::ffi::c_uint,
+    ) -> Result<(), DriverError> {
+        let boxed_host_func = Box::new(host_func);
+        stream::launch_host_function_v2(
+            self.cu_stream,
+            Self::callback_wrapper::<F>,
+            Box::into_raw(boxed_host_func) as *mut c_void,
+            sync_mode,
         )
     }
 
@@ -483,6 +793,7 @@ impl Drop for Module {
         if !self.owned {
             return;
         }
+        let _guard = teardown_lock();
         let _ = self.device.bind_to_thread();
         let _ = unsafe { module::unload(self.cu_module) };
     }

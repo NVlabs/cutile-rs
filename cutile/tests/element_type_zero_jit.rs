@@ -12,8 +12,6 @@
 
 use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -31,11 +29,8 @@ mod zero_kernel_module {
 use zero_kernel_module::__module_ast_self;
 
 fn compile_zero_fill(ty: &str) -> String {
-    let modules = CUDATileModules::from_kernel(__module_ast_self())
-        .expect("Failed to create CUDATileModules");
-    let gpu_name = get_gpu_name(0);
-    let compiler = CUDATileFunctionCompiler::new(
-        &modules,
+    let module_op_str = common::compile_to_ir(
+        __module_ast_self,
         "zero_kernel_module",
         "zero_fill",
         &[ty.to_string(), 64.to_string(), 64.to_string()],
@@ -43,11 +38,9 @@ fn compile_zero_fill(ty: &str) -> String {
         &[],
         &[],
         None,
-        gpu_name,
         &CompileOptions::default(),
     )
-    .expect("Failed to create compiler");
-    let module_op_str = compiler.compile().expect("Failed to compile").to_string();
+    .expect("Failed to compile");
     println!("=== MLIR for zero_fill<{ty}> ===\n{module_op_str}");
     module_op_str
 }

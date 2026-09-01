@@ -4,8 +4,6 @@
  */
 use cutile::{self, api::*, tensor::*, tile_kernel::*};
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 
 mod common;
 
@@ -295,26 +293,29 @@ use control_flow_ops_module::{
     nested_if_for_if_kernel,
 };
 
+fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32])]) -> String {
+    common::compile_to_ir(
+        __module_ast_self,
+        "control_flow_ops_module",
+        function_name,
+        generics,
+        strides,
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    )
+    .expect("Failed.")
+}
+
 #[test]
 fn compile_control_flow_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "control_flow_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== CONTROL FLOW TEST MLIR ===\n{}", module_op_str);
 
         let has_for = module_op_str.contains(" for ");
@@ -338,7 +339,7 @@ fn compile_control_flow_test() -> () {
 }
 
 #[test]
-fn compile_if_result_test() -> () {
+fn execute_if_result_test() -> () {
     common::with_test_stack(|| {
         let arg: Tensor<i64> = ones(&[16]).sync().expect("Failed.");
         // If true, double and add 2.
@@ -379,23 +380,8 @@ fn execute_break_test() -> () {
 #[test]
 fn compile_break_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
-            "break_test_kernel",
-            &[128.to_string()],
-            &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        let module_op_str =
+            compile_ir("break_test_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== BREAK TEST MLIR ===\n{}", module_op_str);
 
         let has_loop = module_op_str.contains("cuda_tile.loop");
@@ -411,23 +397,11 @@ fn compile_break_test() -> () {
 #[test]
 fn compile_while_loop_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "while_loop_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== WHILE LOOP TEST MLIR ===\n{}", module_op_str);
 
         let has_loop = module_op_str.contains("cuda_tile.loop") || module_op_str.contains(" loop ");
@@ -443,23 +417,11 @@ fn compile_while_loop_test() -> () {
 #[test]
 fn compile_loop_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "infinite_loop_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== LOOP TEST MLIR ===\n{}", module_op_str);
 
         let has_loop = module_op_str.contains("cuda_tile.loop") || module_op_str.contains(" loop ");
@@ -475,23 +437,11 @@ fn compile_loop_test() -> () {
 #[test]
 fn compile_step_by_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "step_by_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== STEP_BY TEST MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -508,23 +458,11 @@ fn compile_step_by_test() -> () {
 #[test]
 fn compile_assume_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "assume_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ASSUME MLIR ===\n{}", module_op_str);
 
         // Verify assume operation appears
@@ -548,23 +486,11 @@ fn compile_assume_test() -> () {
 #[test]
 fn compile_assume_non_negative_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "assume_non_negative_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ASSUME_NON_NEGATIVE MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -583,23 +509,11 @@ fn compile_assume_non_negative_test() -> () {
 #[test]
 fn compile_assume_div_by_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "assume_div_by_test_kernel",
             &[128.to_string()],
             &[("output", &[1])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ASSUME_DIV_BY MLIR ===\n{}", module_op_str);
 
         assert!(
@@ -618,23 +532,11 @@ fn compile_assume_div_by_test() -> () {
 #[test]
 fn compile_assume_same_elements_test() -> () {
     common::with_test_stack(|| {
-        let modules = CUDATileModules::from_kernel(__module_ast_self())
-            .expect("Failed to create CUDATileModules");
-        let gpu_name = get_gpu_name(0);
-        let compiler = CUDATileFunctionCompiler::new(
-            &modules,
-            "control_flow_ops_module",
+        let module_op_str = compile_ir(
             "assume_same_elements_test_kernel",
             &[4.to_string(), 8.to_string()],
             &[("output", &[2, 2])],
-            &[],
-            &[],
-            None,
-            gpu_name,
-            &CompileOptions::default(),
-        )
-        .expect("Failed.");
-        let module_op_str = compiler.compile().expect("Failed.").to_string();
+        );
         println!("\n=== ASSUME_SAME_ELEMENTS MLIR ===\n{}", module_op_str);
 
         assert!(

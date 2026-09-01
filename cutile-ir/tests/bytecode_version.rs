@@ -36,6 +36,24 @@ fn build_kernel(name: &str) -> Module {
     module
 }
 
+fn build_kernel_with_worker_warps(name: &str, num_worker_warps_per_cta: i64) -> Module {
+    let mut module = build_kernel(name);
+    let entry = module.functions[0];
+    module.op_mut(entry).attributes.push((
+        "optimization_hints".into(),
+        Attribute::OptimizationHints(OptimizationHints {
+            entries: vec![(
+                "sm_120".into(),
+                vec![(
+                    "num_worker_warps_per_cta".into(),
+                    Attribute::i32(num_worker_warps_per_cta),
+                )],
+            )],
+        }),
+    ));
+    module
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -46,7 +64,7 @@ fn current_version_roundtrip() {
     let bytecode = write_bytecode(&module).expect("write_bytecode failed");
     let decoded = decode_bytecode(&bytecode).expect("decode_bytecode failed");
 
-    // The current version is 13.2 (BytecodeVersion::CURRENT).
+    // The current version is BytecodeVersion::CURRENT.
     let expected = format!("TileIR bytecode v{}", BytecodeVersion::CURRENT);
     assert!(
         decoded.contains(&expected),
@@ -119,6 +137,30 @@ fn reject_unsupported_version() {
 }
 
 #[test]
+fn worker_warps_hint_requires_version_13_3() {
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    let module = build_kernel_with_worker_warps("ver_worker_warps_reject", 4);
+    let error = write_bytecode_version(&module, BytecodeVersion::V13_2)
+        .expect_err("worker warps hint should require bytecode version 13.3");
+    assert!(
+        error.to_string().contains(
+            "optimization hint 'num_worker_warps_per_cta' requires bytecode version 13.3 or newer"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn worker_warps_hint_is_supported_in_version_13_3() {
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    let module = build_kernel_with_worker_warps("ver_worker_warps_accept", 4);
+    write_bytecode_version(&module, BytecodeVersion::V13_3)
+        .expect("worker warps hint should be supported in bytecode version 13.3");
+}
+
+#[test]
 fn version_display_with_tag() {
     // Verify the Display impl includes the tag when non-zero.
     let v = BytecodeVersion {
@@ -153,8 +195,8 @@ fn version_ordering() {
         tag: 0,
     };
     let v3 = BytecodeVersion {
-        major: 14,
-        minor: 0,
+        major: 13,
+        minor: 3,
         tag: 0,
     };
     assert!(v1 < v2);

@@ -223,7 +223,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         None,
                         type_instance.clone(),
                     )),
-                    "strides" => return Ok(None),
+                    "strides" | "traversal_strides" => return Ok(None),
                     "tensor_view" => return Ok(None),
                     _ => {
                         return self.jit_error_result(

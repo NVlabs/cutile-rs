@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: LicenseRef-NVIDIA-SOFTWARE-LICENSE
+// SPDX-License-Identifier: Apache-2.0
 
 //! CUDA toolkit bindings with dynamic library loading.
 //!
@@ -43,10 +43,8 @@ mod generated_curand {
 mod dyn_load;
 pub use dyn_load::*;
 
-use std::env;
-
 pub fn cuda_toolkit_dir() -> String {
-    env::var("CUDA_TOOLKIT_PATH").expect("CUDA_TOOLKIT_PATH is required but not set")
+    env!("CUTILE_RESOLVED_CUDA_TOOLKIT_PATH").to_string()
 }
 
 #[cfg(test)]

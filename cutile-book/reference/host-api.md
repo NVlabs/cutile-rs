@@ -1,6 +1,6 @@
 # Host API
 
-Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Device Operations](../guide/device-operations.md) and [Working with Data](../guide/working-with-data.md).
+Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Host vs. Device Code](../guide/host-vs-device.md), [Tensors and Tiles](../guide/tensors-and-tiles.md), and [Device Operations](../guide/device-operations.md).
 
 ---
 
@@ -93,6 +93,28 @@ let raw: Arc<Tensor<u32>> = api::arange::<u32>(4).sync_on(&stream)?.into();
 let floats: Arc<Tensor<f32>> = raw.reinterpret::<f32>(&[4])?;
 assert_eq!(floats.shape(), &[4]);
 ```
+
+Packed FP4 model bytes can use the same zero-copy metadata path. If an
+interoperability layer gives you byte storage, reinterpret it as
+`f4e2m1fnx2` before launching kernels that expect typed packed FP4 tensors:
+
+```rust
+use cutile::api::{self, DeviceOpReshape};
+use cutile::cuda_core::f4e2m1fnx2;
+use cutile::tensor::Tensor;
+use std::sync::Arc;
+
+let packed_bytes: Arc<Vec<u8>> = Arc::new(model_bytes);
+let raw: Arc<Tensor<u8>> = api::copy_host_vec_to_device(&packed_bytes)
+    .reshape(&[m, k / 2])
+    .sync_on(&stream)?
+    .into();
+let fp4: Arc<Tensor<f4e2m1fnx2>> = raw.reinterpret::<f4e2m1fnx2>(&[m, k / 2])?;
+```
+
+`reinterpret` does not repack or validate the FP4 payload. It preserves the
+bytes and changes the tensor element type metadata, so the producer of
+`model_bytes` is responsible for the low-nibble, high-nibble packing order.
 
 ### `TensorView`: zero-copy views and slices
 
@@ -219,10 +241,13 @@ use cutile::tile_kernel::CompileOptions;
 let opts = CompileOptions::default()
     .occupancy(4)
     .num_cta_in_cga(2)
-    .max_divisibility(16);
+    .max_divisibility(16)
+    .num_worker_warps_per_cta(4); // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
 
 let result = my_kernel(args).compile_options(opts).grid(grid).await?;
 ```
+
+`num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]`.
 
 Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
 
@@ -233,7 +258,7 @@ methods:
 |---|---|
 | `.grid((x, y, z))` | Set an explicit runtime launch grid instead of inferring it from partitioned tensor inputs. |
 | `.const_grid((x, y, z))` | Set a compile-time constant grid, enabling grid-dependent optimizations. |
-| `.compile_options(opts)` | Override occupancy, cluster/CTA, and divisibility hints for this compilation. |
+| `.compile_options(opts)` | Override occupancy, cluster/CTA, worker-warp, and divisibility hints for this compilation. |
 | `.generics(values)` | Bind type and const generic arguments manually when they cannot be inferred. |
 
 The JIT compiler invokes `tileiras` through normal `PATH` lookup by default.

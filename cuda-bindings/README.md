@@ -7,5 +7,6 @@ This crate is intentionally low level. Most code should depend on `cuda-core` in
 # Notes
 
 - The bindings are generated at build time.
-- `CUDA_TOOLKIT_PATH` must point at the local CUDA toolkit installation.
-- The crate is licensed under [LICENSE-NVIDIA](../LICENSE-NVIDIA).
+- `CUDA_TOOLKIT_PATH` can point at the local CUDA toolkit installation. If it
+  is unset, the build searches standard CUDA 13.3/13.2 install locations.
+- Set `CUTILE_SETUP_DIAGNOSTICS=1` to print CUDA toolkit discovery decisions.
