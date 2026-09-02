@@ -19,8 +19,23 @@ use syn::{
 };
 
 const MIN_CUDA_VERSION: u32 = 13000;
-const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
+/// Environment variables consulted (in order) to locate the CUDA toolkit
+/// root. `CUDA_HOME` is the conventional name used by nvcc wrappers and CI
+/// images.
+const TOOLKIT_ENV_VARS: [&str; 2] = ["CUDA_TOOLKIT_PATH", "CUDA_HOME"];
 const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
+
+/// Environment variable naming the CUDA `targets/<dir>` tree to use,
+/// overriding the arch+OS table in `toolkit_target.rs`. The value is a
+/// directory name under `{toolkit}/targets/` (e.g. `aarch64-linux`), the
+/// same value nvcc's `-target-dir` flag takes; CMake exposes the equivalent
+/// selection as `CUDAToolkit_TARGET_DIR`. When set, the named tree is the
+/// only include candidate: the top-level `include/` (on standard installs a
+/// symlink to the host architecture's `targets/` tree) is not consulted, so
+/// a cross-build cannot silently bind the host's headers. The directory is
+/// still probed for `cuda.h`, so a wrong value fails with the clear
+/// discovery error instead of silently falling back.
+const TOOLKIT_TARGET_DIR_ENV: &str = "CUDA_TOOLKIT_TARGET_DIR";
 
 struct ApiSpec {
     virtual_header: &'static str,
@@ -76,12 +91,20 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rerun-if-env-changed={CUDA_TOOLKIT_PATH_ENV}");
+    // Emitting any rerun-if-changed disables cargo's default "rerun on any
+    // package change", so the `include!`d selection table needs naming.
+    println!("cargo:rerun-if-changed=toolkit_target.rs");
+    for var in TOOLKIT_ENV_VARS {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    println!("cargo:rerun-if-env-changed={TOOLKIT_TARGET_DIR_ENV}");
     println!("cargo:rerun-if-env-changed={SETUP_DIAGNOSTICS_ENV}");
 
-    let cuda_toolkit = resolve_cuda_toolkit()?;
-    let cuda_toolkit = cuda_toolkit.to_string_lossy().into_owned();
-    println!("cargo:rustc-env=CUTILE_RESOLVED_CUDA_TOOLKIT_PATH={cuda_toolkit}");
+    let toolkit = resolve_cuda_toolkit()?;
+    println!(
+        "cargo:rustc-env=CUTILE_RESOLVED_CUDA_TOOLKIT_PATH={}",
+        toolkit.root.display()
+    );
 
     // CUDA 12.8 renamed the event elapsed-time entry point to
     // cuEventElapsedTime_v2; earlier toolkits only declare
@@ -89,9 +112,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     // dispatch to whichever symbol this build's toolkit declares.
     println!("cargo::rustc-check-cfg=cfg(cuda_has_cuEventElapsedTime_v2)");
     println!("cargo::rustc-check-cfg=cfg(cuda_has_cuLaunchHostFunc_v2)");
-    let resolved_cuda_h = std::path::Path::new(&cuda_toolkit)
-        .join("include")
-        .join("cuda.h");
+    let resolved_cuda_h = toolkit.include_dir.join("cuda.h");
     if let Ok(header) = fs::read_to_string(&resolved_cuda_h) {
         if header.contains("cuEventElapsedTime_v2") {
             println!("cargo:rustc-cfg=cuda_has_cuEventElapsedTime_v2");
@@ -103,68 +124,100 @@ fn run() -> Result<(), Box<dyn Error>> {
     let out_dir = env::var("OUT_DIR")?;
     let out_dir = Path::new(&out_dir);
 
-    generate_type_bindings(&cuda_toolkit, out_dir)?;
+    generate_type_bindings(&toolkit, out_dir)?;
     for spec in API_SPECS {
-        generate_dynamic_api(&cuda_toolkit, out_dir, spec)?;
+        generate_dynamic_api(&toolkit, out_dir, spec)?;
     }
 
     Ok(())
 }
 
-fn resolve_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
-    match env::var_os(CUDA_TOOLKIT_PATH_ENV) {
-        Some(value) if value.is_empty() => Err(format!(
-            "{CUDA_TOOLKIT_PATH_ENV} is set to an empty string. Set it to a CUDA 13.0+ toolkit directory."
-        )
-        .into()),
-        Some(value) => resolve_explicit_cuda_toolkit(value),
-        None => find_default_cuda_toolkit(),
-    }
+/// A validated CUDA toolkit: its install root and the include directory that
+/// actually contains `cuda.h` (`{root}/include` for standard installs,
+/// `{root}/targets/<dir>/include` for redistributable and Tegra/sbsa layouts
+/// that ship no top-level `include/`).
+struct ResolvedToolkit {
+    root: PathBuf,
+    include_dir: PathBuf,
 }
 
-fn resolve_explicit_cuda_toolkit(value: OsString) -> Result<PathBuf, Box<dyn Error>> {
-    let cuda_toolkit = PathBuf::from(value);
-    let version = validate_cuda_toolkit(&cuda_toolkit).map_err(|error| {
-        format!(
-            "{CUDA_TOOLKIT_PATH_ENV}={} is invalid: {error}",
-            cuda_toolkit.display()
-        )
-    })?;
+fn resolve_cuda_toolkit() -> Result<ResolvedToolkit, Box<dyn Error>> {
+    for var in TOOLKIT_ENV_VARS {
+        let Some(value) = env::var_os(var) else {
+            continue;
+        };
+        if value.is_empty() {
+            return Err(format!(
+                "{var} is set to an empty string. Set it to a CUDA 13.0+ toolkit directory."
+            )
+            .into());
+        }
+        return resolve_explicit_cuda_toolkit(var, value);
+    }
+    find_default_cuda_toolkit()
+}
+
+fn resolve_explicit_cuda_toolkit(
+    var: &str,
+    value: OsString,
+) -> Result<ResolvedToolkit, Box<dyn Error>> {
+    let root = PathBuf::from(value);
+    let (version, include_dir) = validate_cuda_toolkit(&root)
+        .map_err(|error| format!("{var}={} is invalid: {error}", root.display()))?;
     emit_setup_diagnostic(format_args!(
-        "using {CUDA_TOOLKIT_PATH_ENV}={} (CUDA {})",
-        cuda_toolkit.display(),
+        "using {var}={} (CUDA {})",
+        root.display(),
         format_cuda_version(version)
     ));
-    Ok(cuda_toolkit)
+    Ok(ResolvedToolkit { root, include_dir })
 }
 
-fn find_default_cuda_toolkit() -> Result<PathBuf, Box<dyn Error>> {
+fn find_default_cuda_toolkit() -> Result<ResolvedToolkit, Box<dyn Error>> {
     let mut rejected = Vec::new();
-    for cuda_toolkit in default_cuda_toolkit_candidates() {
-        match validate_cuda_toolkit(cuda_toolkit) {
-            Ok(version) => {
+    for root in default_cuda_toolkit_candidates() {
+        match validate_cuda_toolkit(root) {
+            Ok((version, include_dir)) => {
                 emit_setup_diagnostic(format_args!(
-                    "{CUDA_TOOLKIT_PATH_ENV} is unset; using discovered CUDA toolkit {} (CUDA {})",
-                    cuda_toolkit.display(),
+                    "CUDA_TOOLKIT_PATH/CUDA_HOME are unset; using discovered CUDA toolkit {} (CUDA {})",
+                    root.display(),
                     format_cuda_version(version)
                 ));
-                return Ok(cuda_toolkit.to_path_buf());
+                return Ok(ResolvedToolkit {
+                    root: root.clone(),
+                    include_dir,
+                });
             }
             Err(error) => {
                 emit_setup_diagnostic(format_args!(
-                    "{CUDA_TOOLKIT_PATH_ENV} is unset; skipping {}: {error}",
-                    cuda_toolkit.display()
+                    "CUDA_TOOLKIT_PATH/CUDA_HOME are unset; skipping {}: {error}",
+                    root.display()
                 ));
-                rejected.push(format!("  - {}: {error}", cuda_toolkit.display()));
+                rejected.push(format!("  - {}: {error}", root.display()));
             }
         }
     }
 
     Err(format!(
-        "{CUDA_TOOLKIT_PATH_ENV} is not set, and no CUDA 13.0+ toolkit was found in default locations:\n{}\nSet {CUDA_TOOLKIT_PATH_ENV} to a CUDA 13.0+ toolkit directory.",
+        "Neither CUDA_TOOLKIT_PATH nor CUDA_HOME is set, and no CUDA 13.0+ toolkit was found in default locations:\n{}\nSet CUDA_TOOLKIT_PATH or CUDA_HOME to a CUDA 13.0+ toolkit directory.",
         rejected.join("\n")
     )
     .into())
+}
+
+// The `targets/<dir>` selection table, shared verbatim with
+// `tests/toolkit_target.rs` so it can be unit tested.
+include!("toolkit_target.rs");
+
+/// [`resolve_toolkit_include_candidates`] for the target cargo is building
+/// for: the [`TOOLKIT_TARGET_DIR_ENV`] override when set, otherwise the
+/// table candidates for `CARGO_CFG_TARGET_ARCH` / `CARGO_CFG_TARGET_OS`.
+/// Just the plain `{toolkit}/include` when the override is absent and
+/// either cfg is unset, which keeps discovery from guessing.
+fn build_include_candidates(toolkit: &Path) -> Vec<PathBuf> {
+    let override_dir = env::var(TOOLKIT_TARGET_DIR_ENV).ok();
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    resolve_toolkit_include_candidates(toolkit, override_dir.as_deref(), &arch, &os)
 }
 
 fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
@@ -180,7 +233,6 @@ fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
             "/usr/local/cuda-13.3",
             "/usr/local/cuda-13.2",
             "/usr/local/cuda-13",
-            "/usr/local/cuda-12",
             "/usr/local/cuda",
         ];
 
@@ -188,19 +240,30 @@ fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
     })
 }
 
-fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<u32, String> {
+/// Validates a toolkit root: probes the standard `include/` and the
+/// `targets/<dir>/include/` layouts for `cuda.h` (only the directories
+/// [`build_include_candidates`] yields for the build target's own
+/// architecture, never all of `targets/*`), then checks the version floor.
+/// Returns the version and the include directory that contains `cuda.h`.
+fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<(u32, PathBuf), String> {
     if !cuda_toolkit.is_dir() {
         return Err(format!("{} is not a directory", cuda_toolkit.display()));
     }
 
-    let cuda_h = cuda_toolkit.join("include").join("cuda.h");
-    if !cuda_h.is_file() {
+    let candidates = build_include_candidates(cuda_toolkit);
+    let Some(include_dir) = select_include_dir(&candidates) else {
+        let probed: Vec<String> = candidates
+            .iter()
+            .map(|dir| format!("    {}", dir.join("cuda.h").display()))
+            .collect();
         return Err(format!(
-            "{} does not contain include/cuda.h",
+            "{} does not contain cuda.h. Probed:\n{}",
             cuda_toolkit.display(),
+            probed.join("\n")
         ));
-    }
+    };
 
+    let cuda_h = include_dir.join("cuda.h");
     let version = cuda_version_from_header(&cuda_h).map_err(|error| error.to_string())?;
     if version < MIN_CUDA_VERSION {
         return Err(format!(
@@ -209,7 +272,7 @@ fn validate_cuda_toolkit(cuda_toolkit: &Path) -> Result<u32, String> {
         ));
     }
 
-    Ok(version)
+    Ok((version, include_dir.clone()))
 }
 
 fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, Box<dyn Error>> {
@@ -225,7 +288,7 @@ fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, Box<dyn Error>> {
         })
         .ok_or_else(|| {
             format!(
-                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH to a CUDA 13.0+ toolkit directory.",
+                "could not find CUDA_VERSION in {}. Set CUDA_TOOLKIT_PATH or CUDA_HOME to a CUDA 13.0+ toolkit directory.",
                 cuda_h.display()
             )
             .into()
@@ -253,8 +316,8 @@ fn emit_setup_diagnostic(args: std::fmt::Arguments<'_>) {
     }
 }
 
-fn generate_type_bindings(cuda_toolkit: &str, out_dir: &Path) -> Result<(), Box<dyn Error>> {
-    let bindings = bindgen_builder(cuda_toolkit)
+fn generate_type_bindings(toolkit: &ResolvedToolkit, out_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let bindings = bindgen_builder(toolkit)
         .header("wrapper.h")
         .blocklist_function(".*")
         .generate()?;
@@ -292,11 +355,11 @@ fn cu_mem_location_uses_anon_union(generated_source: &str) -> bool {
 }
 
 fn generate_dynamic_api(
-    cuda_toolkit: &str,
+    toolkit: &ResolvedToolkit,
     out_dir: &Path,
     spec: &ApiSpec,
 ) -> Result<(), Box<dyn Error>> {
-    let bindings = bindgen_builder(cuda_toolkit)
+    let bindings = bindgen_builder(toolkit)
         .header_contents(spec.virtual_header, spec.header_contents)
         .dynamic_library_name(spec.library_name)
         .dynamic_link_require_all(false)
@@ -310,9 +373,9 @@ fn generate_dynamic_api(
     Ok(())
 }
 
-fn bindgen_builder(cuda_toolkit: &str) -> bindgen::Builder {
+fn bindgen_builder(toolkit: &ResolvedToolkit) -> bindgen::Builder {
     bindgen::builder()
-        .clang_arg(format!("-I{cuda_toolkit}/include"))
+        .clang_arg(format!("-I{}", toolkit.include_dir.display()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
 }
 
