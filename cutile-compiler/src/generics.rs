@@ -1018,7 +1018,13 @@ impl Instantiable for TypeInstanceStructuredType {
                                 // Map-shape metadata beyond the tile shape does not affect
                                 // TileRustType's element or shape instantiation.
                             } else {
-                                panic!("Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}", maybe_generic_ty.to_token_stream().to_string());
+                                // Can't resolve this type here — e.g. an element
+                                // var left unbound when a `P: PointerTo<E>` generic
+                                // is composed two levels deep. Give up gracefully so
+                                // the caller tries other instantiation strategies and
+                                // ultimately reports a spanned error, instead of
+                                // panicking the whole compile.
+                                return None;
                             }
                         }
                         syn::Type::Ptr(_) => {
@@ -1343,7 +1349,53 @@ impl GenericArgInference {
             let fn_arg_types = &fn_arg_types[i];
             self.add_generic_args(fn_arg_types, call_arg_rust_ty)?;
         }
+        self.propagate_pointer_to_bounds();
         Ok(())
+    }
+
+    /// Mirrors rustc's trait-driven inference for pointer ops: a generic
+    /// param declared `P: PointerTo<E>` that positional binding resolved
+    /// to a concrete raw pointer also determines `E` — its pointee —
+    /// because the only `PointerTo` impls are `*mut E` and `*const E`.
+    /// Without this, an element var that appears only in bounds and the
+    /// return type (the shape of every generic pointer memory op) would
+    /// stay unbound on the JIT track while rustc accepts the same call.
+    fn propagate_pointer_to_bounds(&mut self) {
+        for param in self.sig.generics.params.clone() {
+            let syn::GenericParam::Type(type_param) = param else {
+                continue;
+            };
+            let pointee = match self.param2arg.get(&type_param.ident.to_string()) {
+                Some(Some((_, bound_arg))) => match crate::types::get_ptr_type(bound_arg) {
+                    Some((_, pointee)) => pointee,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            for bound in &type_param.bounds {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    continue;
+                };
+                let Some(segment) = trait_bound.path.segments.last() else {
+                    continue;
+                };
+                if segment.ident != "PointerTo" {
+                    continue;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                    continue;
+                };
+                let Some(GenericArgument::Type(element_ty)) = args.args.first() else {
+                    continue;
+                };
+                let Some(element_ident) = get_type_ident(element_ty) else {
+                    continue;
+                };
+                if let Some(slot @ None) = self.param2arg.get_mut(&element_ident.to_string()) {
+                    *slot = Some((GenericArgType::Type, pointee.clone()));
+                }
+            }
+        }
     }
     /// Applies explicitly provided generic arguments from a function call expression.
     pub fn apply_provided_generics_fn_call(
@@ -2012,7 +2064,14 @@ impl GenericArgInference {
                         Some((GenericArgType::Type, arg_type_str.to_string())),
                     );
                     if let Some(Some((_generic_arg_type, arg))) = replaced_arg {
-                        assert_eq!(arg, arg_type_str.to_string());
+                        // A shared pointer-typed generic param can bind to both
+                        // `*const T` and `*mut T`: rustc coerces at the call site
+                        // and Tile IR erases constness, so tolerate a const/mut-only
+                        // difference — only a different pointee is a real mismatch.
+                        debug_assert_eq!(
+                            arg.replace("* const ", "* mut "),
+                            arg_type_str.replace("* const ", "* mut ")
+                        );
                     }
                 }
             }
@@ -2029,7 +2088,14 @@ impl GenericArgInference {
                         Some((GenericArgType::Type, arg_type_str.to_string())),
                     );
                     if let Some(Some((_generic_arg_type, arg))) = replaced_arg {
-                        assert_eq!(arg, arg_type_str.to_string());
+                        // A shared pointer-typed generic param can bind to both
+                        // `*const T` and `*mut T`: rustc coerces at the call site
+                        // and Tile IR erases constness, so tolerate a const/mut-only
+                        // difference — only a different pointee is a real mismatch.
+                        debug_assert_eq!(
+                            arg.replace("* const ", "* mut "),
+                            arg_type_str.replace("* const ", "* mut ")
+                        );
                     }
                 }
             }
