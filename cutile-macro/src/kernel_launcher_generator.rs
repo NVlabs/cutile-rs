@@ -484,6 +484,7 @@ pub fn generate_kernel_launcher(
     function_entry_name: &str,
     launcher_name: &str,
     _launcher_args_name: &str,
+    tile_rust_crate_root: &syn::Ident,
 ) -> Result<
     (
         RequiredGenerics,
@@ -574,7 +575,7 @@ pub fn generate_kernel_launcher(
                 // For integer scalar params, auto-compute DivHint at launch time.
                 if cutile_compiler::specialization::is_integer_scalar(&type_name) {
                     scalar_hint_exprs.push(format!(
-                        r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
+                        r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
                     ));
                 }
                 param_element_types.push(None);
@@ -611,7 +612,7 @@ pub fn generate_kernel_launcher(
                     "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
                 )));
                 scalar_hint_exprs.push(format!(
-                    r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
+                    r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
                 ));
                 param_element_types.push(None);
             }
@@ -877,7 +878,7 @@ pub fn generate_kernel_launcher(
 
     // Emit scalar_hints (populated for integer scalar and raw pointer params).
     let scalar_hints_stmt = parse_stmt(format!(
-        "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
+        "let scalar_hints: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
     ));
     launcher_method.block.stmts.push(scalar_hints_stmt.clone());
