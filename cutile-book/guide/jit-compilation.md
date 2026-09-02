@@ -66,7 +66,7 @@ fn add<const S: [i32; 2]>(
     z: &mut Tensor<f32, S>,
     x: &Tensor<f32, { [-1, -1] }>,
 ) {
-    z.store(load_tile_like(x, z));
+    z.store(x.load_like(z));
 }
 ```
 
@@ -86,7 +86,7 @@ fn normalize<const BM: i32, const BN: i32>(
     z: &mut Tensor<f32, { [BM, BN] }>,
     x: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     let row_max = reduce_max(tile, 1i32);
     z.store(tile - row_max.reshape(const_shape![BM, 1]).broadcast(z.shape()));
 }

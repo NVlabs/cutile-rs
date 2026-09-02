@@ -32,7 +32,7 @@ fn fused<const BM: i32, const BN: i32>(
     z: &mut Tensor<f32, { [BM, BN] }>,
     x: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     let centered = tile - reduce_max(tile, 1i32)
         .reshape(const_shape![BM, 1])
         .broadcast(const_shape![BM, BN]);

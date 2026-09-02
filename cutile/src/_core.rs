@@ -3536,10 +3536,24 @@ pub mod core {
     }
 
     /// Type-level dispatch for `load_tile_like`.
+    /// Load from `self` the tile at the partition index this program owns
+    /// in `y`.
+    ///
+    /// Contract: `self` must have the same shape as the whole tensor behind
+    /// `y` — the full tensor the host partitioned, not `y`'s declared
+    /// per-program slab — and `y` must be a mutable output tensor the host
+    /// passed as a partition (`tensor.partition([..])` at the call site).
+    /// The launch validator relates `self`'s tile count to the grid derived
+    /// from `y`'s partition, so an input too small for the grid is rejected
+    /// at launch.
     pub trait LoadTileLike<Y> {
         type Out;
 
         fn load_tile_like(&self, y: &Y) -> Self::Out;
+
+        /// Method-form spelling of [`load_tile_like`]; same contract as the
+        /// trait.
+        fn load_like(&self, y: &Y) -> Self::Out;
     }
 
     impl<E1: ElementType, E2: ElementType, const X: [i32; 1], const S: [i32; 1]>
@@ -3568,6 +3582,10 @@ pub mod core {
                 tma::Enabled,
             );
             tile_x
+        }
+
+        fn load_like(&self, y: &Tensor<E2, S>) -> Tile<E1, S> {
+            self.load_tile_like(y)
         }
     }
 
@@ -3598,6 +3616,10 @@ pub mod core {
             );
             tile_x
         }
+
+        fn load_like(&self, y: &Tensor<E2, S>) -> Tile<E1, S> {
+            self.load_tile_like(y)
+        }
     }
 
     impl<E1: ElementType, E2: ElementType, const X: [i32; 3], const S: [i32; 3]>
@@ -3627,9 +3649,16 @@ pub mod core {
             );
             tile_x
         }
+
+        fn load_like(&self, y: &Tensor<E2, S>) -> Tile<E1, S> {
+            self.load_tile_like(y)
+        }
     }
 
-    /// Load a tile of `x` matching `y`'s shape, indexed by the current tile-block id.
+    /// Load a tile of `x` matching `y`'s shape, indexed by the current
+    /// tile-block id. `x` must have the same shape as the whole tensor
+    /// behind `y` (not `y`'s per-program slab), and `y` must be a mutable
+    /// output tensor the host passed as a partition — see [`LoadTileLike`].
     pub fn load_tile_like<X, Y>(x: &X, y: &Y) -> <X as LoadTileLike<Y>>::Out
     where
         X: LoadTileLike<Y>,

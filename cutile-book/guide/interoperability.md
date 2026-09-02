@@ -274,7 +274,7 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 | cuTile Python | cuTile Rust |
 |---------------|-------------|
 | `@ct.kernel` | `#[cutile::entry()]` |
-| `ct.load()` | `load_tile_like()` |
+| `ct.load()` | `x.load_like(z)` |
 | `ct.store()` | `tensor.store()` |
 | `ct.bid(0)` | Implicit via partition |
 | `ct.launch()` | Async operation + `.await` |

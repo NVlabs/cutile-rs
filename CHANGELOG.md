@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `x.load_like(z)`: method-form spelling of `load_tile_like(x, z)`, lowering
+  to identical Tile IR with identical bounds-check placement. Both spellings
+  remain supported; docs and examples now use the method form.
+
 ## [0.3.0] - 2026-08-20
 
 This release introduces compiler optimizations that improve safe kernel

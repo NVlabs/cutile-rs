@@ -27,7 +27,7 @@ mod kernels {
         x: &Tensor<f32, { [-1, -1] }>,
         alpha: f32,
     ) {
-        let tile_x = load_tile_like(x, z);
+        let tile_x = x.load_like(z);
         z.store(tile_x * alpha);
     }
 }

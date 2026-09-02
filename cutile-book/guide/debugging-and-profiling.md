@@ -14,7 +14,7 @@ fn debug_kernel<const S: [i32; 2]>(
 ) {
     let pid0 = program_id(0);
     let pid1 = program_id(1);
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
 
     cuda_tile_print!("Program ({}, {}): loaded tile\n", pid0, pid1);
     z.store(tile);
@@ -26,7 +26,7 @@ GPU printing is slow and serializes tile block execution. Use it for small grids
 `cuda_tile_assert!` checks conditions inside a kernel:
 
 ```rust
-let tile = load_tile_like(x, z);
+let tile = x.load_like(z);
 cuda_tile_assert!(tile[0] > 0.0, "expected positive input");
 ```
 

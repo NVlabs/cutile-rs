@@ -378,7 +378,7 @@ Examples:
 | `pack`, `unpack` | Rank-1 byte packing and unpacking ops such as `cuda_tile.pack` and `cuda_tile.unpack` |
 | `Tile<f4e2m1fn, ...>::pack`, `Tile<f4e2m1fnx2, ...>::unpack` | Rust helpers that flatten shaped FP4 tiles, call rank-1 `cuda_tile.pack`/`cuda_tile.unpack`, and reshape the result |
 | `load_ptr_tko`, `store_ptr_tko`, `atomic_rmw_tko`, `atomic_cas_tko`, `new_token_unordered`, `join_tokens` | Memory, atomic, and token ops such as `cuda_tile.load_ptr_tko`, `cuda_tile.store_ptr_tko`, `cuda_tile.atomic_rmw_tko`, `cuda_tile.atomic_cas_tko`, `cuda_tile.make_token`, `cuda_tile.join_tokens` |
-| `load_tile_like`, `tensor.load_tile`, `tensor.store`, partition and tensor view helpers | View ops such as `cuda_tile.load_view_tko`, `cuda_tile.store_view_tko`, `cuda_tile.make_tensor_view`, `cuda_tile.make_partition_view`, plus compiler-generated shape/stride plumbing |
+| `load_like`/`load_tile_like`, `tensor.load_tile`, `tensor.store`, partition and tensor view helpers | View ops such as `cuda_tile.load_view_tko`, `cuda_tile.store_view_tko`, `cuda_tile.make_tensor_view`, `cuda_tile.make_partition_view`, plus compiler-generated shape/stride plumbing |
 | `assume_div_by`, `assume_bounds_*`, `cuda_tile_print!`, `cuda_tile_assert!` | Compiler and debugging ops such as `cuda_tile.assume`, `cuda_tile.print_tko`, and `cuda_tile.assert` |
 
 Some Tile IR operations are intentionally compiler-owned rather than public DSL
@@ -401,7 +401,7 @@ operation.
 | `tensor.store(tile)` | `(&mut Tensor<E, S>, Tile<E, S>)` | Store a tile to the tensor |
 | `tensor.load_tile(shape, idx)` | `(&Tensor<E, S>, Shape<R>, [i32; N]) -> Tile<E, R>` | Load at a partition index |
 | `load_tile_mut(tensor)` | `(&mut Tensor<E, S>) -> Tile<E, S>` | Load output tile (convenience) |
-| `load_tile_like(src, dst)` | `(&Tensor, &Tensor) -> Tile` | Load from src at dst's tile-block position (rank 1-3) |
+| `src.load_like(dst)` | `(&Tensor, &Tensor) -> Tile` | Load from src at dst's tile-block position (rank 1-3); also the free function `load_tile_like(src, dst)`. src must match the shape of the whole tensor behind dst (not dst's per-program slab), and dst must be a partitioned mutable output |
 
 ```rust
 // Pattern 1: Direct load/store on mutable tensor
@@ -413,7 +413,7 @@ let pid = program_id(0);
 let tile: Tile<f32, { [128] }> = input.load_tile(const_shape![128], [pid]);
 
 // Pattern 3: Load-like (positional)
-let tile_x: Tile<f32, { [16, 16] }> = load_tile_like(x, output);
+let tile_x: Tile<f32, { [16, 16] }> = x.load_like(output);
 ```
 
 ### Grid and Program IDs
@@ -628,7 +628,7 @@ for the full pattern.
 
 These APIs are close to the Tile IR memory/view operations. Prefer the
 high-level methods above (`tensor.load_tile`, `partition.load`,
-`partition_mut.store`, `load_tile_like`, `tensor.store`) unless you are building
+`partition_mut.store`, `x.load_like(z)`, `tensor.store`) unless you are building
 custom views, raw-pointer kernels, or compiler-facing helpers.
 
 #### View construction and queries

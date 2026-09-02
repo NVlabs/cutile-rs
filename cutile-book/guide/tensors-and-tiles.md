@@ -18,8 +18,8 @@ fn add<const S: [i32; 2]>(
     x: &Tensor<f32, { [-1, -1] }>,
     y: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile_x = load_tile_like(x, z);
-    let tile_y = load_tile_like(y, z);
+    let tile_x = x.load_like(z);
+    let tile_y = y.load_like(z);
     z.store(tile_x + tile_y);
 }
 ```
@@ -35,7 +35,7 @@ The output tensor is mutable and already partitioned by the host launcher. The i
 `Tile<E, S>` is an immutable register-resident array fragment. Tile operations create new tiles instead of mutating the original value:
 
 ```rust
-let tile = load_tile_like(x, z);
+let tile = x.load_like(z);
 let shifted = tile + 1.0f32;
 let scaled = shifted * 2.0f32;
 z.store(scaled);
@@ -88,7 +88,7 @@ fn normalize<const S: [i32; 2]>(
     z: &mut Tensor<f32, S>,          // Static tile shape from partition.
     x: &Tensor<f32, { [-1, -1] }>,   // Runtime full tensor shape.
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     z.store(tile);
 }
 ```
@@ -99,7 +99,7 @@ Const generic arrays such as `const S: [i32; 2]` and `const_shape![BM, BK]` carr
 
 ## Loading, Computing, Storing
 
-`load_tile_like(input, output)` loads a read-only tensor region matching the output tensor's tile shape and tile-block coordinates. For explicit device-side partitions, call `partition.load(index)`:
+`input.load_like(output)` loads a read-only tensor region matching the output tensor's tile shape and tile-block coordinates. For explicit device-side partitions, call `partition.load(index)`:
 
 ```rust
 let part_x = x.partition(const_shape![BM, BK]);
@@ -126,7 +126,7 @@ The DSL API reference has complete signatures. These are the operation families 
 
 | Category | Examples |
 |---|---|
-| Load and store | `load_tile_like`, `load_tile_mut`, `Partition::load`, `Tensor::store` |
+| Load and store | `load_like` (method form of `load_tile_like`), `load_tile_mut`, `Partition::load`, `Tensor::store` |
 | Arithmetic | `+`, `-`, `*`, `/`, `fma`, `true_div` |
 | Math | `exp`, `log`, `sqrt`, `rsqrt`, `sin`, `cos`, `tanh` |
 | Reduction and scan | `reduce_max`, `reduce_sum`, `reduce_min`, `scan` |
@@ -232,7 +232,7 @@ fn scale<E: ElementType, const S: [i32; 2]>(
     x: &Tensor<E, { [-1, -1] }>,
     alpha: E,
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     z.store(tile * alpha);
 }
 ```
