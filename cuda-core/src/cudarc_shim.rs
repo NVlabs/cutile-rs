@@ -320,7 +320,7 @@ pub(crate) mod stream {
         arg: *mut c_void,
         sync_mode: ::core::ffi::c_uint,
     ) -> Result<(), DriverError> {
-        cuda_bindings::cuLaunchHostFunc_v2(stream, Some(func), arg, sync_mode).result()
+        cuda_bindings::cu_launch_host_func(stream, Some(func), arg, sync_mode).result()
     }
 
     /// Begins stream capture for graph construction.

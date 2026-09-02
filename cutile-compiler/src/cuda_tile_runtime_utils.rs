@@ -17,6 +17,11 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
+/// The minimum CUDA toolkit the Tile compiler supports; `tileiras` ships
+/// with CUDA 13.2. The shared host-side crates support 13.0+ and enforce
+/// their own floor in `cuda-bindings`.
+const MIN_TILE_CUDA_VERSION: u32 = 13020;
+
 /// Environment variable used to override the `tileiras` executable.
 ///
 /// Set this to an absolute path such as `/opt/cuda-tile/bin/tileiras` to use
@@ -354,6 +359,22 @@ fn compute_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> Byte
     if let Some(dir) = toolkit_dir {
         let cuda_h = dir.join("include").join("cuda.h");
         if let Ok(cuda_version) = cuda_version_from_header(&cuda_h) {
+            // The Tile floor. The shared host-side crates support CUDA 13.0+,
+            // but the Tile compiler drives toolkit binaries (tileiras) that
+            // ship with CUDA 13.2+, so complain here, at tool discovery, with
+            // the context to say what was found. SIMT-only users never reach
+            // this path. An explicit TILEIRAS_PATH_ENV or bare-PATH resolution
+            // bypasses the check by design: the user picked their own binary.
+            if cuda_version < MIN_TILE_CUDA_VERSION {
+                panic!(
+                    "cuTile requires CUDA 13.2 or newer: the resolved toolkit at {} is CUDA {}.{}. \
+                     Set {CUDA_TOOLKIT_PATH_ENV} to a CUDA 13.2+ install \
+                     (the shared CUDA host-side crates themselves support 13.0+).",
+                    dir.display(),
+                    cuda_version / 1000,
+                    (cuda_version % 1000) / 10,
+                );
+            }
             let version = bytecode_version_from_cuda_version(cuda_version);
             emit_setup_diagnostic(format_args!(
                 "bytecode version {version} from {}",
