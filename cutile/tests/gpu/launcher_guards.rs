@@ -30,11 +30,11 @@ mod launcher_guards_module {
     #[cutile::entry()]
     unsafe fn zero_through_ptr<T: ElementType>(dst: *mut T) {
         let base: PointerTile<*mut T, { [] }> = pointer_to_tile(dst);
-        let base: PointerTile<*mut T, { [1] }> = base.reshape(const_shape![1]);
-        let base: PointerTile<*mut T, { [128] }> = base.broadcast(const_shape![128]);
-        let offsets: Tile<i32, { [128] }> = iota(const_shape![128]);
+        let base: PointerTile<*mut T, { [1] }> = base.reshape(shape![1]);
+        let base: PointerTile<*mut T, { [128] }> = base.broadcast(shape![128]);
+        let offsets: Tile<i32, { [128] }> = iota(shape![128]);
         let addrs: PointerTile<*mut T, { [128] }> = addptr_tile(base, offsets);
-        let zeros: Tile<T, { [128] }> = constant(T::ZERO, const_shape![128]);
+        let zeros: Tile<T, { [128] }> = constant(T::ZERO, shape![128]);
         store_ptr_tko(
             addrs,
             zeros,

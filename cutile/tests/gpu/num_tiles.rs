@@ -25,9 +25,9 @@ mod kernels {
         out: &mut Tensor<i32, { [BM, BN] }>,
         input: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let part = input.partition(const_shape![BM, BN]);
+        let part = input.partition(shape![BM, BN]);
         let n: i32 = num_tiles(&part, 0);
-        let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(n, const_shape![BM, BN]);
+        let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(n, shape![BM, BN]);
         out.store(tile);
     }
 
@@ -36,9 +36,9 @@ mod kernels {
         out: &mut Tensor<i32, { [BM, BN] }>,
         input: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let part = input.partition(const_shape![BM, BN]);
+        let part = input.partition(shape![BM, BN]);
         let n: i32 = num_tiles(&part, 1);
-        let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(n, const_shape![BM, BN]);
+        let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(n, shape![BM, BN]);
         out.store(tile);
     }
 }

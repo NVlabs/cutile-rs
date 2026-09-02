@@ -77,8 +77,8 @@ mod my_module {
         x: &Tensor<E, { [-1, K] }>,        // A matrix
         y: &Tensor<E, { [K, -1] }>,        // B matrix
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let pid_m = program_id(0);
         let pid_n = program_id(1);
 
@@ -238,8 +238,8 @@ fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i3
 `BM` and `BN` are known at kernel launch time because they are embedded in the `Partition` created by `.partition([bm, bn])`. `K` is known because it appears as a dimension of the input tensors `x` and `y`. But `BK` does not appear in the type of any kernel argument — it is only used *inside* the kernel body when partitioning `x` and `y` into tiles:
 
 ```rust
-let part_x = x.partition(const_shape![BM, BK]);
-let part_y = y.partition(const_shape![BK, BN]);
+let part_x = x.partition(shape![BM, BK]);
+let part_y = y.partition(shape![BK, BN]);
 ```
 
 Since `BK` has no mapping to any host-side tensor or partition, the launcher cannot infer its value automatically. This is why GEMM requires an explicit `.generics()` call.
@@ -287,13 +287,13 @@ fn gemm_persistent<
     x: &Tensor<T, { [-1, -1] }>,
     y: &Tensor<T, { [-1, -1] }>,
 ) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
 
     for out_idx in z.iter_indices() {
         let (bid_m, bid_n) = out_idx.components();
 
-        let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+        let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
         for k_tile in 0i32..num_tiles(&part_x, 1) {
             let tile_x = part_x.load([bid_m, k_tile]);
             let tile_y = part_y.load([k_tile, bid_n]);
@@ -342,8 +342,8 @@ unsafe fn gemm<T: ElementType, const BM: i32, const BN: i32, const BK: i32>(
     y: &Tensor<T, { [-1, -1] }>,
     k: i32,
 ) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
     let pid_m = program_id(0);
     let pid_n = program_id(1);
     let mut tile_z: Tile<T, { [BM, BN] }> = z.load();
@@ -394,8 +394,8 @@ fn gemm<
     x: &Tensor<E, { [M, K] }>,
     y: &Tensor<E, { [K, N] }>,
 ) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
     let mut tile_z = load_tile_mut(z);
     let pid_m = program_id(0);
     let pid_n = program_id(1);

@@ -32,7 +32,7 @@ mod checked_store_module {
     /// on axis 0; this writes the second.
     #[cutile::entry]
     fn constant_out_of_range<const N: i32, const BLOCK: i32>(out: &mut Tensor<f32, { [1, N] }>) {
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         let t: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);
         p.store(t, [1i32, 0i32]);
@@ -42,7 +42,7 @@ mod checked_store_module {
     /// it, so this exercises the lower goal on the store path.
     #[cutile::entry]
     fn constant_negative<const N: i32, const BLOCK: i32>(out: &mut Tensor<f32, { [1, N] }>) {
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         let t: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);
         p.store(t, [0i32, -1i32]);
@@ -55,7 +55,7 @@ mod checked_store_module {
         out: &mut Tensor<f32, { [1, N] }>,
         idx: i32,
     ) {
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         let t: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);
         p.store(t, [0i32, idx]);
@@ -69,7 +69,7 @@ mod checked_store_module {
     #[cutile::entry]
     fn block_id_index<const N: i32, const BLOCK: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         let t: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);
         p.store(t, [0i32, pid.0]);
@@ -81,7 +81,7 @@ mod checked_store_module {
     fn mixed_constant_and_inferred<const N: i32, const BLOCK: i32>(
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles(&p, 1) {
             let t: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);
@@ -94,7 +94,7 @@ mod checked_store_module {
     /// non-empty-extent check at launch instead of an in-kernel one.
     #[cutile::entry]
     fn dynamic_row_extent<const N: i32, const BLOCK: i32>(out: &mut Tensor<f32, { [-1, N] }>) {
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles(&p, 1) {
             let t: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);

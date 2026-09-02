@@ -26,8 +26,8 @@ mod my_kernels {
         b: &Tensor<f32, { [-1] }>,         // immutable: read-only input
     ) {
         let pid = program_id(0);
-        let tile_a: Tile<f32, S> = a.load_tile(const_shape!(S), [pid]);
-        let tile_b: Tile<f32, S> = b.load_tile(const_shape!(S), [pid]);
+        let tile_a: Tile<f32, S> = a.load_tile(shape!(S), [pid]);
+        let tile_b: Tile<f32, S> = b.load_tile(shape!(S), [pid]);
         output.store(tile_a + tile_b);
     }
 }
@@ -112,7 +112,7 @@ mod my_kernels {
         input: &Tensor<f32, { [-1] }>,
     ) {
         let pid = program_id(0);
-        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid]);
+        let tile: Tile<f32, S> = input.load_tile(shape!(S), [pid]);
         output.store(relu(tile));  // device function call, inlined
     }
 }
@@ -163,7 +163,7 @@ mod my_kernels {
         input: &Tensor<f32, { [-1] }>,
     ) {
         let pid = program_id(0);
-        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid]);
+        let tile: Tile<f32, S> = input.load_tile(shape!(S), [pid]);
         let activated: Tile<f32, S> = relu(tile);   // inlined from Module A
         output.store(square(activated));             // inlined from Module A
     }
@@ -242,16 +242,16 @@ fn kernel(
 `PartitionMut<'a, E, const D: [i32; N]>` — A mutable partitioned view.
 
 ```rust
-let part: Partition<f32, { [128, 128] }> = input.partition(const_shape![128, 128]);
+let part: Partition<f32, { [128, 128] }> = input.partition(shape![128, 128]);
 let tile: Tile<f32, { [128, 128] }> = part.load([pid_m, pid_n]);
 ```
 
 ### Shape / Array
 
-`Shape<const D: [i32; N]>` — A compile-time shape descriptor. Created with `const_shape!`:
+`Shape<const D: [i32; N]>` — A compile-time shape descriptor. Created with `shape!`:
 
 ```rust
-let shape: Shape<{ [128, 64] }> = const_shape![128, 64];
+let shape: Shape<{ [128, 64] }> = shape![128, 64];
 let shape: Shape<S> = tensor.shape();
 ```
 
@@ -316,7 +316,7 @@ Dynamic dimensions (`-1`) are resolved at runtime from the tensor's actual shape
 
 ```rust
 let ptr: PointerTile<*mut f32, { [] }> = pointer_to_tile(raw_ptr);
-let offset_ptrs: PointerTile<*mut f32, { [128] }> = ptr.broadcast(const_shape![128]).offset_tile(offsets);
+let offset_ptrs: PointerTile<*mut f32, { [128] }> = ptr.broadcast(shape![128]).offset_tile(offsets);
 ```
 
 ### Token
@@ -417,7 +417,7 @@ output.store(tile * scale_tile);
 
 // Pattern 2: Load at program position
 let pid = program_id(0);
-let tile: Tile<f32, { [128] }> = input.load_tile(const_shape![128], [pid]);
+let tile: Tile<f32, { [128] }> = input.load_tile(shape![128], [pid]);
 
 // Pattern 3: Load-like (positional)
 let tile_x: Tile<f32, { [16, 16] }> = x.load_like(output);
@@ -501,7 +501,7 @@ There are no separate `*_ftz` functions: flush-to-zero is selected by passing
 ```rust
 // Softmax numerics: subtract max, exponentiate
 let max_val: Tile<f32, { [BM] }> = reduce_max(x, 1i32);
-let shifted: Tile<f32, S> = x - max_val.reshape(const_shape![BM, 1]).broadcast(x.shape());
+let shifted: Tile<f32, S> = x - max_val.reshape(shape![BM, 1]).broadcast(x.shape());
 let softmax_exp: Tile<f32, S> = exp(shifted);
 
 // RMS normalization
@@ -554,9 +554,9 @@ let result: Tile<f32, { [128] }> = select(mask, values, zeros);
 | `broadcast_scalar(val, shape)` | `(E, Shape<S>) -> Tile<E, S>` | Broadcast a scalar to a tile shape |
 
 ```rust
-let zeros: Tile<f32, { [128] }> = constant(0.0f32, const_shape![128]);
-let indices: Tile<i32, { [64] }> = iota(const_shape![64]);  // [0, 1, 2, ..., 63]
-let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, const_shape![16, 16]);
+let zeros: Tile<f32, { [128] }> = constant(0.0f32, shape![128]);
+let indices: Tile<i32, { [64] }> = iota(shape![64]);  // [0, 1, 2, ..., 63]
+let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, shape![16, 16]);
 ```
 
 ### Shape Manipulation
@@ -574,9 +574,9 @@ let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, const_shape![16, 1
 | `shape[index]` | `(Shape<S>, usize) -> i32` | Read one runtime dimension from a shape |
 
 ```rust
-let row: Tile<f32, { [128] }> = iota(const_shape![128]);
-let col: Tile<f32, { [128, 1] }> = row.reshape(const_shape![128, 1]);
-let matrix: Tile<f32, { [128, 64] }> = col.broadcast(const_shape![128, 64]);
+let row: Tile<f32, { [128] }> = iota(shape![128]);
+let col: Tile<f32, { [128, 1] }> = row.reshape(shape![128, 1]);
+let matrix: Tile<f32, { [128, 64] }> = col.broadcast(shape![128, 64]);
 let n_cols: i32 = matrix.shape()[1];
 ```
 
@@ -610,7 +610,7 @@ let prefix: Tile<f32, { [128] }> = scan_sum(row, 0i32, reverse::Forward, 0.0f32)
 Maps to hardware tensor cores when available.
 
 ```rust
-let mut acc: Tile<f32, { [16, 16] }> = constant(0.0f32, const_shape![16, 16]);
+let mut acc: Tile<f32, { [16, 16] }> = constant(0.0f32, shape![16, 16]);
 for k in 0i32..(K/BK) {
     let a_tile: Tile<f32, { [16, 8] }> = a_part.load([pid_m, k]);
     let b_tile: Tile<f32, { [8, 16] }> = b_part.load([k, pid_n]);
@@ -620,7 +620,7 @@ for k in 0i32..(K/BK) {
 
 `mmaf_scaled` is used for FP4/FP8 block-scaled matrix multiply. Packed FP4
 tensors should be represented as `Tensor<f4e2m1fnx2, ...>`, unpacked with
-`tile.unpack(const_shape![...])` to logical `Tile<f4e2m1fn, ...>` operands, and
+`tile.unpack(shape![...])` to logical `Tile<f4e2m1fn, ...>` operands, and
 then passed to `mmaf_scaled` with FP8 scale tiles. The raw `pack` and `unpack`
 ops operate on rank-1 tiles; the FP4 tile methods emit the required
 flatten/pack-or-unpack/reshape sequence. See
@@ -697,7 +697,7 @@ block for brevity.
 
 ```rust
 let base: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
-let ptrs: PointerTile<*mut f32, { [128] }> = base.broadcast(const_shape![128]).offset_tile(offsets);
+let ptrs: PointerTile<*mut f32, { [128] }> = base.broadcast(shape![128]).offset_tile(offsets);
 let (values, token): (Tile<f32, { [128] }>, Token) =
     load_ptr_tko(ptrs, ordering::Weak, None::<scope::TileBlock>, None, None, None, Latency::<0>);
 ```
@@ -809,15 +809,15 @@ let toggled: Tile<i32, S> = xori(x, mask);
 
 ```rust
 // Float to int conversion
-let indices: Tile<i32, { [128] }> = iota(const_shape![128]);
+let indices: Tile<i32, { [128] }> = iota(shape![128]);
 let float_indices: Tile<f32, { [128] }> = convert_tile(indices);
 
 // Bitcast: reinterpret f32 bits as u32 (no value conversion)
-let float_tile: Tile<f32, { [128] }> = constant(1.0f32, const_shape![128]);
+let float_tile: Tile<f32, { [128] }> = constant(1.0f32, shape![128]);
 let bits: Tile<u32, { [128] }> = bitcast(float_tile);  // 0x3F800000
 
 // Integer extension and truncation
-let small: Tile<i16, { [64] }> = constant(42i16, const_shape![64]);
+let small: Tile<i16, { [64] }> = constant(42i16, shape![64]);
 let wide: Tile<i32, { [64] }> = exti(small);     // sign-extend i16 -> i32
 let narrow: Tile<i16, { [64] }> = trunci(wide, overflow::None);
 ```

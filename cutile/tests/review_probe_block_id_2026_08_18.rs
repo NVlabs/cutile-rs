@@ -33,7 +33,7 @@ mod block_id_review_module {
         z: &mut Tensor<f32, { [B, B] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let p = x.partition_permuted(const_shape![B, B], const_array![1, 0]);
+        let p = x.partition_permuted(shape![B, B], const_array![1, 0]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let repacked = (pid.1, pid.0);
         let (y, _x) = repacked;
@@ -50,7 +50,7 @@ mod block_id_review_module {
         x: &Tensor<f32, { [-1] }>,
         replacement: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let mut index = pid.0;
         if replacement >= 0i32 {
@@ -68,7 +68,7 @@ mod block_id_review_module {
         x: &Tensor<f32, { [-1] }>,
         replacement: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let mut index = pid.0;
         if true {
@@ -86,7 +86,7 @@ mod block_id_review_module {
         x: &Tensor<f32, { [-1] }>,
         replacement: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let mut index = pid.0;
         if false {
@@ -104,7 +104,7 @@ mod block_id_review_module {
         x: &Tensor<f32, { [-1] }>,
         replacement: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let mut index = pid.0;
         for _i in 0i32..1i32 {
@@ -119,10 +119,10 @@ mod block_id_review_module {
     /// not stake a launch check for it.
     #[cutile::entry]
     fn persistent_walk<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let ntb: (i32, i32, i32) = get_num_tile_blocks();
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in (pid.0..num_tiles(&p, 0)).step_by(ntb.0 as usize) {
             acc = acc + p.load([i]);
         }
@@ -134,7 +134,7 @@ mod block_id_review_module {
     /// grids; every invocation must validate its own grid before launch.
     #[cutile::entry(deny_in_kernel_checks = true)]
     fn explicit_grid_revalidation<const B: i32>(x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let _t = p.load([pid.0]);
     }
@@ -143,7 +143,7 @@ mod block_id_review_module {
     /// placement in a subprocess with isolated environment variables.
     #[cutile::entry]
     fn block_id_ablation<const B: i32>(x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let _t = p.load([pid.0]);
     }
@@ -155,7 +155,7 @@ mod block_id_review_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let index = (pid.0 + 2_147_483_647i32) - 2_147_483_647i32;
         z.store(p.load([index]));
@@ -168,9 +168,9 @@ mod block_id_review_module {
     fn nested_nondivisible_block_id<const OUTER: i32, const INNER: i32>(
         out: &mut Tensor<f32, { [1, OUTER] }>,
     ) {
-        let mut p: PartitionMut<f32, { [1, INNER] }> = out.partition_mut(const_shape![1, INNER]);
+        let mut p: PartitionMut<f32, { [1, INNER] }> = out.partition_mut(shape![1, INNER]);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, { [1, INNER] }> = constant(7.0, const_shape![1, INNER]);
+        let tile: Tile<f32, { [1, INNER] }> = constant(7.0, shape![1, INNER]);
         p.store(tile, [0i32, pid.1]);
     }
 }

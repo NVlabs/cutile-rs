@@ -33,22 +33,22 @@ mod my_module {
         // This is the standard cuTile-python/nv-triton pattern:
         //   base_ptr -> reshape [1] -> broadcast [TILE_SIZE]
         let in_base: PointerTile<*mut f32, { [] }> = pointer_to_tile(in_ptr);
-        let in_1d: PointerTile<*mut f32, { [1] }> = in_base.reshape(const_shape![1]);
-        let in_ptrs: PointerTile<*mut f32, { [128] }> = in_1d.broadcast(const_shape![128]);
+        let in_1d: PointerTile<*mut f32, { [1] }> = in_base.reshape(shape![1]);
+        let in_ptrs: PointerTile<*mut f32, { [128] }> = in_1d.broadcast(shape![128]);
 
         let out_base: PointerTile<*mut f32, { [] }> = pointer_to_tile(out_ptr);
-        let out_1d: PointerTile<*mut f32, { [1] }> = out_base.reshape(const_shape![1]);
-        let out_ptrs: PointerTile<*mut f32, { [128] }> = out_1d.broadcast(const_shape![128]);
+        let out_1d: PointerTile<*mut f32, { [1] }> = out_base.reshape(shape![1]);
+        let out_ptrs: PointerTile<*mut f32, { [128] }> = out_1d.broadcast(shape![128]);
 
-        let scale_tile: Tile<f32, { [128] }> = broadcast_scalar(scale, const_shape![128]);
-        let len_tile: Tile<i32, { [128] }> = broadcast_scalar(len, const_shape![128]);
+        let scale_tile: Tile<f32, { [128] }> = broadcast_scalar(scale, shape![128]);
+        let len_tile: Tile<i32, { [128] }> = broadcast_scalar(len, shape![128]);
 
         // Grid-stride loop: each block starts at pid.0 * 128 and steps by grid.0 * 128.
         let start: i32 = pid.0 * 128i32;
         let step: i32 = grid.0 * 128i32;
         for offset in (start..len).step_by(step as usize) {
             let offsets: Tile<i32, { [128] }> =
-                iota(const_shape![128]) + broadcast_scalar(offset, const_shape![128]);
+                iota(shape![128]) + broadcast_scalar(offset, shape![128]);
             let mask: Tile<bool, { [128] }> = lt_tile(offsets, len_tile);
 
             let src: PointerTile<*mut f32, { [128] }> = in_ptrs.offset_tile(offsets);
