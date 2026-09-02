@@ -25,10 +25,11 @@
 //! - **Invalid candidates are data.** A candidate rejected by launch checks
 //!   or the correctness gate records [`TrialState::Invalid`] with its message;
 //!   it never aborts the search.
-//! - **Persistence is checked.** The trial log records the tuner's name and
-//!   a hash of its search space and refuses to resume from a log that does
-//!   not match; the record store built on top extends the same discipline
-//!   with full provenance (source hash, toolchain fingerprint, arch).
+//! - **Persistence is checked.** The trial log records the tuner's name, a
+//!   hash of its search space, and — when supplied — the arch, the kernel's
+//!   source hash, and the toolchain fingerprint ([`LogProvenance`]), and
+//!   refuses to resume from a log that does not match; the record store
+//!   built on top applies the same provenance to recorded winners.
 
 use crate::bench::{do_bench, BenchOptions, Measurement};
 use crate::error::Error;
@@ -362,7 +363,7 @@ pub struct Autotuner {
     budget: Option<Duration>,
     bench: BenchOptions,
     log_path: Option<PathBuf>,
-    arch: Option<String>,
+    provenance: LogProvenance,
 }
 
 /// What a tuning run returns: every trial visited plus the winning config,
@@ -385,7 +386,7 @@ impl Autotuner {
             budget: None,
             bench: BenchOptions::default(),
             log_path: None,
-            arch: None,
+            provenance: LogProvenance::default(),
         }
     }
 
@@ -396,7 +397,32 @@ impl Autotuner {
     /// device handle. Optional: a log written without an arch, or opened
     /// without one, skips the check (legacy logs stay readable).
     pub fn arch(mut self, arch: impl Into<String>) -> Self {
-        self.arch = Some(arch.into());
+        self.provenance.arch = Some(arch.into());
+        self
+    }
+
+    /// Records the kernel module's `_SOURCE_HASH` in the trial log header, so
+    /// a resume from a log written before the kernel was edited is refused
+    /// (mirroring [`Workspace::source_hash`]). Optional, like [`arch`](Self::arch).
+    pub fn source_hash(mut self, source_hash: impl Into<String>) -> Self {
+        self.provenance.source_hash = Some(source_hash.into());
+        self
+    }
+
+    /// Records the `tileiras --version` fingerprint in the trial log header,
+    /// so a resume from a log written under another toolkit is refused
+    /// (mirroring [`Workspace::tileiras_fingerprint`]). Optional, like
+    /// [`arch`](Self::arch).
+    pub fn tileiras_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.provenance.tileiras_fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    /// Sets every provenance axis at once — typically
+    /// [`LogProvenance::from_workspace`] of the [`Workspace`] the results will
+    /// be recorded against.
+    pub fn provenance(mut self, provenance: LogProvenance) -> Self {
+        self.provenance = provenance;
         self
     }
 
@@ -484,7 +510,7 @@ impl Autotuner {
             self.log_path.as_deref(),
             &self.name,
             &space_hash(&self.configs),
-            self.arch.as_deref(),
+            &self.provenance,
         )?;
         let searcher = GridSearch::new().resume(log.existing_trials());
         self.run_searcher(searcher, stream, setup, &mut log)
@@ -507,7 +533,7 @@ impl Autotuner {
             self.log_path.as_deref(),
             &self.name,
             &space_hash(&self.configs),
-            self.arch.as_deref(),
+            &self.provenance,
         )?;
         self.run_searcher(searcher, stream, setup, &mut log)
     }
@@ -528,7 +554,7 @@ impl Autotuner {
             self.log_path.as_deref(),
             &self.name,
             &space_hash(objective.configs()),
-            self.arch.as_deref(),
+            &self.provenance,
         )?;
         let searcher = GridSearch::new().resume(log.existing_trials());
         self.run_objective_searcher(searcher, objective, &mut log)
@@ -546,7 +572,7 @@ impl Autotuner {
             self.log_path.as_deref(),
             &self.name,
             &space_hash(objective.configs()),
-            self.arch.as_deref(),
+            &self.provenance,
         )?;
         self.run_objective_searcher(searcher, objective, &mut log)
     }
@@ -1027,33 +1053,99 @@ pub struct TrialLog {
     existing: Vec<Trial>,
 }
 
+/// Provenance a trial log is keyed on beyond the tuner name and search-space
+/// hash: the target architecture, the kernel module's `_SOURCE_HASH`, and the
+/// `tileiras --version` fingerprint — the same axes [`Workspace`] carries for
+/// records. A measured trial is only comparable to a new one when all three
+/// agree: a log written before a kernel edit or a toolkit change would
+/// otherwise resume and let its stale timings decide `best` without
+/// re-measurement.
+///
+/// Every field is optional so untagged callers and legacy logs keep working:
+/// when BOTH the stored header and the running search name a value and they
+/// differ, the resume is refused; `None` on either side skips that check
+/// (with a warning when the log is the untagged side, since the caller
+/// evidently cares). Fill it from a [`Workspace`] with
+/// [`LogProvenance::from_workspace`] to get every check.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogProvenance {
+    /// Target architecture, e.g. `"sm_120"`.
+    pub arch: Option<String>,
+    /// The kernel module's `_SOURCE_HASH`.
+    pub source_hash: Option<String>,
+    /// Output of `tileiras --version`.
+    pub tileiras_fingerprint: Option<String>,
+}
+
+impl LogProvenance {
+    /// Every axis of `ws`, so the trial log is checked as strictly as a
+    /// [`Record`] loaded against the same workspace.
+    pub fn from_workspace(ws: &Workspace) -> Self {
+        Self {
+            arch: Some(ws.arch.clone()),
+            source_hash: Some(ws.source_hash.clone()),
+            tileiras_fingerprint: Some(ws.tileiras_fingerprint.clone()),
+        }
+    }
+
+    // (name, stored, running) for every axis, in the order they are reported.
+    fn axes<'a>(
+        &'a self,
+        other: &'a LogProvenance,
+    ) -> [(&'static str, &'a Option<String>, &'a Option<String>); 3] {
+        [
+            ("arch", &self.arch, &other.arch),
+            ("source_hash", &self.source_hash, &other.source_hash),
+            (
+                "tileiras fingerprint",
+                &self.tileiras_fingerprint,
+                &other.tileiras_fingerprint,
+            ),
+        ]
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct LogHeader {
     log_schema: u32,
     tuner: String,
     space: String,
-    /// Target architecture (e.g. `"sm_120"`), if the caller supplied one.
-    /// `#[serde(default)]` keeps logs written before this field existed
-    /// readable (they parse as `None`), and `None` on either side skips the
-    /// arch check entirely.
+    /// Provenance the caller supplied. `#[serde(default)]` on each field keeps
+    /// logs written before it existed readable (they parse as `None`), and
+    /// `None` on either side skips that axis' check (see [`LogProvenance`]).
     #[serde(default)]
     arch: Option<String>,
+    #[serde(default)]
+    source_hash: Option<String>,
+    #[serde(default)]
+    tileiras_fingerprint: Option<String>,
+}
+
+impl LogHeader {
+    fn provenance(&self) -> LogProvenance {
+        LogProvenance {
+            arch: self.arch.clone(),
+            source_hash: self.source_hash.clone(),
+            tileiras_fingerprint: self.tileiras_fingerprint.clone(),
+        }
+    }
 }
 
 impl TrialLog {
     /// Opens (or heads) a trial log at `path` for tuner `tuner` over the
-    /// space identified by `space` (see [`space_hash`]), optionally scoped to
-    /// target architecture `arch`. `None` for `path` yields a no-op log. A log
-    /// written by a different tuner or space is refused — adopting foreign
-    /// timings is the under-keyed-persistence failure this module exists to
-    /// prevent. When both the stored header and `arch` name an architecture and
-    /// they differ, the resume is refused too; if either is `None`, the arch
-    /// check is skipped.
+    /// space identified by `space` (see [`space_hash`]), scoped by
+    /// `provenance` (arch, kernel source hash, tileiras fingerprint — each
+    /// optional). `None` for `path` yields a no-op log. A log written by a
+    /// different tuner or space is refused — adopting foreign timings is the
+    /// under-keyed-persistence failure this module exists to prevent. Each
+    /// provenance axis is refused the same way when both the stored header
+    /// and `provenance` name a value and they differ; `None` on either side
+    /// skips that axis (see [`LogProvenance`]).
     pub fn open(
         path: Option<&Path>,
         tuner: &str,
         space: &str,
-        arch: Option<&str>,
+        provenance: &LogProvenance,
     ) -> Result<Self, Error> {
         let Some(path) = path else {
             return Ok(Self {
@@ -1065,7 +1157,9 @@ impl TrialLog {
             log_schema: 1,
             tuner: tuner.to_string(),
             space: space.to_string(),
-            arch: arch.map(str::to_string),
+            arch: provenance.arch.clone(),
+            source_hash: provenance.source_hash.clone(),
+            tileiras_fingerprint: provenance.tileiras_fingerprint.clone(),
         };
         let mut existing = Vec::new();
         let mut needs_newline = false;
@@ -1117,24 +1211,26 @@ impl TrialLog {
                         header.space, expected.space
                     ));
                 }
-                if let (Some(h), Some(e)) = (&header.arch, &expected.arch) {
-                    if h != e {
-                        diffs.push(format!("arch {h:?} (running {e:?})"));
-                    }
-                }
-                // The arch guard is only as strong as the log's first writer: an
-                // untagged log carries no arch, so a caller that now supplies one
-                // gets no protection. Warn loudly rather than silently adopt
-                // possibly-foreign timings — the caller clearly cares about arch.
-                if header.arch.is_none() {
-                    if let Some(e) = &expected.arch {
-                        eprintln!(
-                            "cutile::tune: resuming trial log {} that records no arch \
-                             while this run targets {e:?} — its timings are adopted \
-                             unchecked; re-tune from scratch if it may have come from \
-                             another arch",
-                            path.display()
-                        );
+                for (axis, stored, running) in header.provenance().axes(provenance) {
+                    match (stored, running) {
+                        (Some(h), Some(e)) if h != e => {
+                            diffs.push(format!("{axis} {h:?} (running {e:?})"));
+                        }
+                        // A provenance guard is only as strong as the log's
+                        // first writer: an untagged log carries no value, so a
+                        // caller that now supplies one gets no protection. Warn
+                        // loudly rather than silently adopt possibly-foreign
+                        // timings — the caller clearly cares about this axis.
+                        (None, Some(e)) => {
+                            eprintln!(
+                                "cutile::tune: resuming trial log {} that records no {axis} \
+                                 while this run has {e:?} — its timings are adopted \
+                                 unchecked; re-tune from scratch if it may predate a \
+                                 change on that axis",
+                                path.display()
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 if !diffs.is_empty() {
@@ -1984,7 +2080,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cutile_tune_log_{}", std::process::id()));
         let _ = std::fs::remove_file(&dir);
         {
-            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s", None).unwrap();
+            let mut log =
+                TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
             log.append(&Trial {
                 config_id: "BN=64".into(),
                 state: TrialState::Measured {
@@ -2000,7 +2097,7 @@ mod tests {
                 },
             });
         }
-        let log = TrialLog::open(Some(dir.as_path()), "t", "s", None).unwrap();
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
         let existing = log.existing_trials();
         assert_eq!(existing.len(), 2);
         assert_eq!(existing[0].median_ms(), Some(1.5));
@@ -2008,10 +2105,17 @@ mod tests {
 
         // Wrong tuner or space: refused loudly, not silently adopted, and the
         // message names the field that differs.
-        let err = TrialLog::open(Some(dir.as_path()), "other", "s", None).unwrap_err();
+        let err = TrialLog::open(Some(dir.as_path()), "other", "s", &LogProvenance::default())
+            .unwrap_err();
         assert!(err.to_string().contains("different search"));
         assert!(err.to_string().contains("tuner"));
-        let err = TrialLog::open(Some(dir.as_path()), "t", "different", None).unwrap_err();
+        let err = TrialLog::open(
+            Some(dir.as_path()),
+            "t",
+            "different",
+            &LogProvenance::default(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("different search"));
         assert!(err.to_string().contains("space"));
 
@@ -2022,7 +2126,8 @@ mod tests {
             write!(f, "{{\"config_id\":\"torn").unwrap();
         }
         {
-            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s", None).unwrap();
+            let mut log =
+                TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
             log.append(&Trial {
                 config_id: "BN=256".into(),
                 state: TrialState::Measured {
@@ -2032,7 +2137,7 @@ mod tests {
                 },
             });
         }
-        let log = TrialLog::open(Some(dir.as_path()), "t", "s", None).unwrap();
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
         assert_eq!(
             log.existing_trials().len(),
             3,
@@ -2048,35 +2153,127 @@ mod tests {
 
         // Head a log tagged with arch "sm_120", with one measured trial.
         {
-            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s", Some("sm_120")).unwrap();
+            let mut log =
+                TrialLog::open(Some(dir.as_path()), "t", "s", &arch_only("sm_120")).unwrap();
             log.append(&Trial::measured("BN=64", 1.5, 1.4, 5));
         }
 
         // Reopening on a different arch is refused, and the message says so.
-        let err = TrialLog::open(Some(dir.as_path()), "t", "s", Some("sm_100")).unwrap_err();
+        let err = TrialLog::open(Some(dir.as_path()), "t", "s", &arch_only("sm_100")).unwrap_err();
         assert!(err.to_string().contains("different search"), "{err}");
         assert!(err.to_string().contains("arch"), "{err}");
 
         // Same arch resumes.
-        let log = TrialLog::open(Some(dir.as_path()), "t", "s", Some("sm_120")).unwrap();
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &arch_only("sm_120")).unwrap();
         assert_eq!(log.existing_trials().len(), 1);
 
         // Caller supplies no arch: the check is skipped, so the sm_120 log
         // still resumes (arch-agnostic callers keep working).
-        let log = TrialLog::open(Some(dir.as_path()), "t", "s", None).unwrap();
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
         assert_eq!(log.existing_trials().len(), 1);
 
         // A legacy log with no arch recorded resumes even when the caller now
         // supplies one (None on the header side skips the check).
         let _ = std::fs::remove_file(&dir);
         {
-            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s", None).unwrap();
+            let mut log =
+                TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
             log.append(&Trial::measured("BN=64", 1.5, 1.4, 5));
         }
-        let log = TrialLog::open(Some(dir.as_path()), "t", "s", Some("sm_100")).unwrap();
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &arch_only("sm_100")).unwrap();
         assert_eq!(log.existing_trials().len(), 1);
 
         let _ = std::fs::remove_file(&dir);
+    }
+
+    fn arch_only(arch: &str) -> LogProvenance {
+        LogProvenance {
+            arch: Some(arch.to_string()),
+            ..LogProvenance::default()
+        }
+    }
+
+    #[test]
+    fn source_hash_and_tileiras_mismatch_refuse_resume() {
+        let dir = std::env::temp_dir().join(format!("cutile_tune_prov_{}", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        let tagged = LogProvenance {
+            arch: Some("sm_120".into()),
+            source_hash: Some("abc123".into()),
+            tileiras_fingerprint: Some("release 13.3, V13.3.36".into()),
+        };
+        {
+            let mut log = TrialLog::open(Some(dir.as_path()), "t", "s", &tagged).unwrap();
+            log.append(&Trial::measured("BN=64", 1.5, 1.4, 5));
+        }
+        // Identical provenance resumes.
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &tagged).unwrap();
+        assert_eq!(log.existing_trials().len(), 1);
+
+        // The kernel was edited since the log was written: refused, naming the axis.
+        let mut edited = tagged.clone();
+        edited.source_hash = Some("def456".into());
+        let err = TrialLog::open(Some(dir.as_path()), "t", "s", &edited).unwrap_err();
+        assert!(err.to_string().contains("different search"), "{err}");
+        assert!(err.to_string().contains("source_hash"), "{err}");
+
+        // The toolkit changed: refused, naming the axis.
+        let mut toolkit = tagged.clone();
+        toolkit.tileiras_fingerprint = Some("release 13.4, V13.4.1".into());
+        let err = TrialLog::open(Some(dir.as_path()), "t", "s", &toolkit).unwrap_err();
+        assert!(err.to_string().contains("tileiras fingerprint"), "{err}");
+
+        // Every differing axis is reported, not only the first.
+        let mut both = edited.clone();
+        both.tileiras_fingerprint = toolkit.tileiras_fingerprint.clone();
+        let err = TrialLog::open(Some(dir.as_path()), "t", "s", &both).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("source_hash") && msg.contains("tileiras fingerprint"),
+            "{msg}"
+        );
+
+        // An untagged caller skips every check (legacy behaviour).
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
+        assert_eq!(log.existing_trials().len(), 1);
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn legacy_header_without_provenance_still_resumes() {
+        // A header written before source_hash / tileiras_fingerprint existed:
+        // the fields deserialize as None, so a tagged caller resumes (with a
+        // warning) instead of being refused.
+        let dir = std::env::temp_dir().join(format!("cutile_tune_legacy_{}", std::process::id()));
+        std::fs::write(&dir, "{\"log_schema\":1,\"tuner\":\"t\",\"space\":\"s\"}\n").unwrap();
+        {
+            let mut log =
+                TrialLog::open(Some(dir.as_path()), "t", "s", &LogProvenance::default()).unwrap();
+            log.append(&Trial::measured("BN=64", 1.5, 1.4, 5));
+        }
+        let tagged = LogProvenance {
+            arch: Some("sm_120".into()),
+            source_hash: Some("abc123".into()),
+            tileiras_fingerprint: Some("release 13.3, V13.3.36".into()),
+        };
+        let log = TrialLog::open(Some(dir.as_path()), "t", "s", &tagged).unwrap();
+        assert_eq!(
+            log.existing_trials().len(),
+            1,
+            "None on the header side skips each axis"
+        );
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn provenance_from_workspace_fills_every_axis() {
+        let p = LogProvenance::from_workspace(&ws());
+        assert_eq!(p.arch.as_deref(), Some("sm_120"));
+        assert_eq!(p.source_hash.as_deref(), Some("abc123"));
+        assert_eq!(
+            p.tileiras_fingerprint.as_deref(),
+            Some("release 13.3, V13.3.36")
+        );
     }
 
     #[test]
@@ -2188,7 +2385,7 @@ mod tests {
     }
 
     fn silent_log() -> TrialLog {
-        TrialLog::open(None, "t", "s", None).unwrap()
+        TrialLog::open(None, "t", "s", &LogProvenance::default()).unwrap()
     }
 
     #[test]
@@ -2311,14 +2508,14 @@ mod tests {
         let path = dir.join("trials.jsonl");
         std::fs::write(&path, "\n").unwrap();
         {
-            let mut log = TrialLog::open(Some(&path), "t", "s", None).unwrap();
+            let mut log = TrialLog::open(Some(&path), "t", "s", &LogProvenance::default()).unwrap();
             log.append(&Trial {
                 config_id: cfg(1, 1).id,
                 state: TrialState::Invalid { reason: "x".into() },
             });
         }
         // Reopening must find a valid header, not refuse the log.
-        let log = TrialLog::open(Some(&path), "t", "s", None).unwrap();
+        let log = TrialLog::open(Some(&path), "t", "s", &LogProvenance::default()).unwrap();
         assert_eq!(log.existing_trials().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -215,7 +215,7 @@ fn unpack_packed_fp4_bytes(
     input: &Tensor<u8, { [-1] }>,
 ) {
     let bytes = load_tile(input, const_shape![32], [0]);
-    let f4s = unpack(bytes);
+    let f4s: Tile<f4e2m1fn, { [64] }> = unpack(bytes);
     let packed = f4s.pack(const_shape![32]);
     output.store(packed);
 }
@@ -255,7 +255,6 @@ mod nvfp4_linear {
     ) {
         let pid_m = program_id(0);
         let pid_n = program_id(1);
-        let k_tiles = Dim::new(x.shape()[1] / BK_PACKED);
 
         let part_x = x.partition(const_shape![BM, BK_PACKED]);
         let part_y = y.partition(const_shape![BN, BK_PACKED]);
@@ -264,7 +263,7 @@ mod nvfp4_linear {
 
         let mut tile_z = constant(0.0f32, const_shape![BM, BN]);
 
-        for k_tile in k_tiles {
+        for k_tile in 0i32..num_tiles(&part_x, 1) {
             let tile_x_packed = part_x.load([pid_m, k_tile]);
             let tile_y_packed = part_y.load([pid_n, k_tile]);
 
@@ -299,18 +298,19 @@ tile shape.
 
 ## Launch Shape
 
-For the kernel above, `BK` is the logical K tile width. The kernel computes
-`k_tiles` from `k / BK`; the host passes `BK` plus the derived packed and scale
-tile widths used in static tile shapes:
+For the kernel above, `BK` is the logical K tile width. The kernel walks the K
+tiles of the packed activation partition with `num_tiles(&part_x, 1)`; the host
+passes `BK` plus the derived packed and scale tile widths used in static tile
+shapes:
 
 ```rust
 use cutile::api;
 use cutile::tile_kernel::TileKernel;
 use cutile::tensor::IntoPartition;
 
-let bm = 16i32;
-let bn = 16i32;
-let bk = 64i32;
+let bm = 16usize;
+let bn = 16usize;
+let bk = 64usize;
 let bk_packed = bk / 2;
 let bk_scales = bk / 16;
 let z = api::zeros::<f32>(&[m, n]).partition([bm, bn]);

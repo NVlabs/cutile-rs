@@ -119,7 +119,7 @@ Each program runs the same code but with different coordinates. This is how prog
 
 1. **At compile time:** `#[cutile::module]` captures your Rust code as an AST.
 2. **At first kernel launch:** The AST is compiled to Tile IR bytecode → cubin (GPU binary).
-3. **Cached:** The cubin is cached, so subsequent runs are instant.
+3. **Cached:** The compiled kernel is cached in memory for the rest of the process, so later launches of the same variant skip compilation. Caching across processes (an on-disk cubin cache) is opt-in; see [Compilation](../guide/jit-compilation.md).
 4. **Launch:** 4 tile programs are dispatched to the GPU.
 5. **Execution:** All 4 tile programs run concurrently, each printing its coordinates.
 

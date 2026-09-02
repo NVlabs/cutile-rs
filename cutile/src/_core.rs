@@ -2764,10 +2764,20 @@ pub mod core {
 
     /// Atomic read-modify-write. `mode` selects the op (`atomic::*`),
     /// `memory_ordering` excludes `Weak`. Returns `(old_values, token)`.
+    ///
+    /// # Safety
+    /// Dereferences raw device pointers, like [`load_ptr_tko`] and
+    /// [`store_ptr_tko`]: forming and offsetting the pointer tile is safe, but
+    /// the read-modify-write is not. Every lane's address (masked lanes
+    /// excepted — they are never dereferenced) must point to a valid,
+    /// correctly-aligned `E` the kernel is allowed to write for the launch's
+    /// lifetime, and the caller upholds the memory-model contract of the
+    /// chosen `memory_ordering`/`memory_scope` with respect to every other
+    /// access to that location.
     #[doc(hidden)]
     #[cuda_tile::op(name="cuda_tile.atomic_rmw_tko", params=["pointers", "arg"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn atomic_rmw_tko<
+    pub unsafe fn atomic_rmw_tko<
         E: ElementType,
         const S: [i32; N],
         M: atomic::Mode,
@@ -2787,9 +2797,19 @@ pub mod core {
 
     /// Atomic compare-and-swap. Bitwise comparison: NaN ≠ NaN, ±0.0 distinct
     /// if their bit patterns differ. Returns `(old_values, token)`.
+    ///
+    /// # Safety
+    /// Dereferences raw device pointers, like [`load_ptr_tko`] and
+    /// [`store_ptr_tko`]: forming and offsetting the pointer tile is safe, but
+    /// the compare-and-swap is not. Every lane's address (masked lanes
+    /// excepted — they are never dereferenced) must point to a valid,
+    /// correctly-aligned `E` the kernel is allowed to write for the launch's
+    /// lifetime, and the caller upholds the memory-model contract of the
+    /// chosen `memory_ordering`/`memory_scope` with respect to every other
+    /// access to that location.
     #[cuda_tile::op(name="cuda_tile.atomic_cas_tko", params=["pointers", "cmp", "val"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn atomic_cas_tko<
+    pub unsafe fn atomic_cas_tko<
         E: ElementType,
         const S: [i32; N],
         O: ordering::AtomicMode,

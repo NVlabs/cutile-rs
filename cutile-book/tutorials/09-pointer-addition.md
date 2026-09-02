@@ -43,7 +43,8 @@ mod my_module {
 
 use my_module::add_ptr;
 
-async fn async_main() -> Result<(), cutile::error::Error> {
+#[tokio::main]
+async fn main() -> Result<(), cutile::error::Error> {
     let len = 2usize.pow(5);
     let tile_size = 4usize;
 

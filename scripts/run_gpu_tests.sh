@@ -91,7 +91,10 @@ run_step \
 for test_target in \
     concurrent_capture \
     cuda_graph \
+    device_fault \
+    drop_in_flight \
     execute_once \
+    execution_lock \
     pool_allocation \
     reactor_correctness
 do

@@ -30,6 +30,13 @@ pub const TILEIRAS_PATH_ENV: &str = "CUTILE_TILEIRAS_PATH";
 pub const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
 
 const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
+/// Honored after `CUDA_TOOLKIT_PATH`, like the build scripts do: the
+/// conventional name used by nvcc wrappers and CI images.
+const CUDA_HOME_ENV: &str = "CUDA_HOME";
+/// The toolkit environment variables naming a CUDA install root, in
+/// precedence order. Mirrors `TOOLKIT_ENV_VARS` in the workspace build
+/// scripts.
+const TOOLKIT_ENV_VARS: [&str; 2] = [CUDA_TOOLKIT_PATH_ENV, CUDA_HOME_ENV];
 const MIN_CUDA_VERSION: u32 = 13020;
 
 /// Environment variable to force the emitted Tile IR bytecode version
@@ -46,11 +53,12 @@ pub fn get_compiler_version() -> String {
 // [`crate::check_optimizations::CheckOptimizations`] (see `from_env` there);
 // the compiler consults that policy, never the environment.
 
-/// `CUTILE_JIT_LOG=1` also reports every bounds check that stays inside a
-/// loop body with the reason it could not hoist.
+/// `CUTILE_JIT_LOG` (`1`/`true`/`yes`/`on`, like every other on/off switch
+/// of the crate and of `cutile`) also reports every bounds check that stays
+/// inside a loop body with the reason it could not hoist.
 pub fn jit_hoist_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env::var("CUTILE_JIT_LOG").is_ok_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| env_flag_enabled("CUTILE_JIT_LOG"))
 }
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
@@ -93,33 +101,39 @@ fn tileiras_executable_name() -> &'static str {
     }
 }
 
-fn cuda_toolkit_tileiras(cuda_toolkit_path: Option<OsString>) -> Option<PathBuf> {
-    let tileiras = cuda_toolkit_path
-        .filter(|value| !value.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .map(|path| path.join("bin").join(tileiras_executable_name()));
-    match tileiras {
-        Some(path) if path.is_file() => {
-            emit_setup_diagnostic(format_args!(
-                "using {CUDA_TOOLKIT_PATH_ENV} tileiras at {}",
-                path.display()
-            ));
-            Some(path)
-        }
-        Some(path) => {
-            emit_setup_diagnostic(format_args!(
-                "{CUDA_TOOLKIT_PATH_ENV} did not contain tileiras at {}",
-                path.display()
-            ));
-            None
-        }
-        None => None,
+/// A toolkit root named by the environment: `(variable, value)`, so the
+/// diagnostics can say which variable was honored.
+type ToolkitEnv = (&'static str, OsString);
+
+fn cuda_toolkit_tileiras(cuda_toolkit_path: Option<ToolkitEnv>) -> Option<PathBuf> {
+    let (var, tileiras) = cuda_toolkit_path
+        .filter(|(_, value)| !value.as_os_str().is_empty())
+        .map(|(var, value)| {
+            (
+                var,
+                PathBuf::from(value)
+                    .join("bin")
+                    .join(tileiras_executable_name()),
+            )
+        })?;
+    if tileiras.is_file() {
+        emit_setup_diagnostic(format_args!(
+            "using {var} tileiras at {}",
+            tileiras.display()
+        ));
+        Some(tileiras)
+    } else {
+        emit_setup_diagnostic(format_args!(
+            "{var} did not contain tileiras at {}",
+            tileiras.display()
+        ));
+        None
     }
 }
 
 fn resolve_tileiras_binary(
     tileiras_override: Option<OsString>,
-    cuda_toolkit_path: Option<OsString>,
+    cuda_toolkit_path: Option<ToolkitEnv>,
 ) -> (PathBuf, Option<PathBuf>) {
     resolve_tileiras_with_toolkit_candidates(
         tileiras_override,
@@ -133,7 +147,7 @@ fn resolve_tileiras_binary(
 /// to locate `cuda.h` for bytecode-version selection.
 fn resolve_tileiras_with_toolkit_candidates(
     tileiras_override: Option<OsString>,
-    cuda_toolkit_path: Option<OsString>,
+    cuda_toolkit_path: Option<ToolkitEnv>,
     default_cuda_toolkit_candidates: &[PathBuf],
 ) -> (PathBuf, Option<PathBuf>) {
     if let Some(path) = tileiras_override.filter(|value| !value.as_os_str().is_empty()) {
@@ -172,7 +186,7 @@ fn toolkit_root_of(tileiras: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 fn resolve_tileiras_binary_with_candidates(
     tileiras_override: Option<OsString>,
-    cuda_toolkit_path: Option<OsString>,
+    cuda_toolkit_path: Option<ToolkitEnv>,
     default_cuda_toolkit_candidates: &[PathBuf],
 ) -> PathBuf {
     resolve_tileiras_with_toolkit_candidates(
@@ -188,10 +202,10 @@ fn resolve_tileiras_binary_with_candidates(
 /// Resolution order:
 ///
 /// 1. [`TILEIRAS_PATH_ENV`] when set.
-/// 2. `$CUDA_TOOLKIT_PATH/bin/tileiras` when `CUDA_TOOLKIT_PATH` is set and
-///    the binary exists there.
-/// 3. `$CUDA_TOOLKIT_PATH`-style default CUDA installs with CUDA 13.2+ and
-///    `bin/tileiras`.
+/// 2. `$CUDA_TOOLKIT_PATH/bin/tileiras`, then `$CUDA_HOME/bin/tileiras`,
+///    when the variable is set and the binary exists there (the same two
+///    variables, in the same order, that the workspace build scripts honor).
+/// 3. Default CUDA install locations with CUDA 13.2+ and `bin/tileiras`.
 /// 4. `tileiras` through normal `PATH` lookup.
 pub fn tileiras_binary() -> PathBuf {
     tileiras_and_toolkit().0
@@ -275,27 +289,40 @@ fn stat_fingerprint(tileiras: &Path) -> String {
     format!("stat\0{}\0{len}\0{mtime_ns}", path.display())
 }
 
+/// The first set, non-empty toolkit variable (`CUDA_TOOLKIT_PATH`, then
+/// `CUDA_HOME`) with its value.
+fn toolkit_env() -> Option<ToolkitEnv> {
+    TOOLKIT_ENV_VARS.iter().find_map(|&var| {
+        env::var_os(var)
+            .filter(|v| !v.as_os_str().is_empty())
+            .map(|v| (var, v))
+    })
+}
+
 /// Resolves `tileiras` together with the CUDA toolkit root (when applicable),
-/// using the active `CUTILE_TILEIRAS_PATH` / `CUDA_TOOLKIT_PATH` environment.
+/// using the active `CUTILE_TILEIRAS_PATH` / `CUDA_TOOLKIT_PATH` / `CUDA_HOME`
+/// environment.
 ///
 /// Cached by the environment values that drive resolution: steady-state launches
-/// only re-read the two env vars, and the expensive toolkit/`cuda.h` lookup is
+/// only re-read the env vars, and the expensive toolkit/`cuda.h` lookup is
 /// recomputed only when one of those values changes. This mirrors
 /// [`cached_bytecode_version`] and [`fingerprint_of`].
 fn tileiras_and_toolkit() -> (PathBuf, Option<PathBuf>) {
     let tileiras_env = env::var_os(TILEIRAS_PATH_ENV).filter(|v| !v.as_os_str().is_empty());
-    let toolkit_env = env::var_os(CUDA_TOOLKIT_PATH_ENV).filter(|v| !v.as_os_str().is_empty());
-    cached_tileiras_and_toolkit(tileiras_env, toolkit_env)
+    cached_tileiras_and_toolkit(tileiras_env, toolkit_env())
 }
+
+/// The resolved `tileiras` binary and, when found through a toolkit, that
+/// toolkit's root.
+type TileirasResolution = (PathBuf, Option<PathBuf>);
 
 fn cached_tileiras_and_toolkit(
     tileiras_env: Option<OsString>,
-    toolkit_env: Option<OsString>,
-) -> (PathBuf, Option<PathBuf>) {
-    static CACHE: OnceLock<
-        Mutex<HashMap<(Option<OsString>, Option<OsString>), (PathBuf, Option<PathBuf>)>>,
-    > = OnceLock::new();
-    let key = (tileiras_env, toolkit_env);
+    toolkit_env: Option<ToolkitEnv>,
+) -> TileirasResolution {
+    type Key = (Option<OsString>, Option<ToolkitEnv>);
+    static CACHE: OnceLock<Mutex<HashMap<Key, TileirasResolution>>> = OnceLock::new();
+    let key: Key = (tileiras_env, toolkit_env);
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(result) = cache.lock().unwrap().get(&key) {
         return result.clone();
@@ -324,31 +351,44 @@ fn cached_tileiras_and_toolkit(
 /// The result is clamped to `[MIN_SUPPORTED, CURRENT]`. Feature
 /// incompatibilities (e.g. an FP4 kernel against a 13.2 toolchain) are left for
 /// `tileiras` to diagnose rather than pre-checked here.
-fn selected_bytecode_version() -> BytecodeVersion {
+///
+/// Fails — instead of falling back to a version the toolchain may not accept
+/// — when the toolkit is older than the Tile floor or when the probe cannot
+/// be carried out (unwritable temp dir, `tileiras` not launchable or
+/// crashing, every version rejected).
+fn selected_bytecode_version() -> Result<BytecodeVersion, JITError> {
     let (tileiras, toolkit) = tileiras_and_toolkit();
     cached_bytecode_version(&tileiras, toolkit.as_deref())
 }
 
-fn cached_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> BytecodeVersion {
+fn cached_bytecode_version(
+    tileiras: &Path,
+    toolkit_dir: Option<&Path>,
+) -> Result<BytecodeVersion, JITError> {
     static CACHE: OnceLock<Mutex<HashMap<(PathBuf, Option<PathBuf>), BytecodeVersion>>> =
         OnceLock::new();
     let key = (tileiras.to_path_buf(), toolkit_dir.map(PathBuf::from));
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(&version) = cache.lock().unwrap().get(&key) {
-        return version;
+        return Ok(version);
     }
-    let version = compute_bytecode_version(tileiras, toolkit_dir);
+    // Only a successful negotiation is cached: a transient environment
+    // failure (a full temp dir, say) is retried on the next compile.
+    let version = compute_bytecode_version(tileiras, toolkit_dir)?;
     cache.lock().unwrap().insert(key, version);
-    version
+    Ok(version)
 }
 
-fn compute_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> BytecodeVersion {
+fn compute_bytecode_version(
+    tileiras: &Path,
+    toolkit_dir: Option<&Path>,
+) -> Result<BytecodeVersion, JITError> {
     if let Some(value) = env::var_os(BYTECODE_VERSION_ENV).filter(|v| !v.is_empty()) {
         let text = value.to_string_lossy();
         match parse_bytecode_version(&text) {
             Some(version) => {
                 emit_setup_diagnostic(format_args!("{BYTECODE_VERSION_ENV}={version} (override)"));
-                return version;
+                return Ok(version);
             }
             None => emit_setup_diagnostic(format_args!(
                 "ignoring invalid {BYTECODE_VERSION_ENV}={text}"
@@ -357,39 +397,39 @@ fn compute_bytecode_version(tileiras: &Path, toolkit_dir: Option<&Path>) -> Byte
     }
 
     if let Some(dir) = toolkit_dir {
-        let cuda_h = dir.join("include").join("cuda.h");
-        if let Ok(cuda_version) = cuda_version_from_header(&cuda_h) {
+        if let Ok((cuda_h, cuda_version)) = cuda_version_from_toolkit(dir) {
             // The Tile floor. The shared host-side crates support CUDA 13.0+,
             // but the Tile compiler drives toolkit binaries (tileiras) that
             // ship with CUDA 13.2+, so complain here, at tool discovery, with
             // the context to say what was found. SIMT-only users never reach
             // this path. An explicit TILEIRAS_PATH_ENV or bare-PATH resolution
             // bypasses the check by design: the user picked their own binary.
+            // An error, not a panic: this runs inside the `Result`-returning
+            // JIT path, whose callers own cache-cleanup on failure.
             if cuda_version < MIN_TILE_CUDA_VERSION {
-                panic!(
-                    "cuTile requires CUDA 13.2 or newer: the resolved toolkit at {} is CUDA {}.{}. \
-                     Set {CUDA_TOOLKIT_PATH_ENV} to a CUDA 13.2+ install \
+                return Err(JITError::Generic(format!(
+                    "cuTile requires CUDA 13.2 or newer: the resolved toolkit at {} is CUDA {}. \
+                     Set {CUDA_TOOLKIT_PATH_ENV} or {CUDA_HOME_ENV} to a CUDA 13.2+ install \
                      (the shared CUDA host-side crates themselves support 13.0+).",
                     dir.display(),
-                    cuda_version / 1000,
-                    (cuda_version % 1000) / 10,
-                );
+                    format_cuda_version(cuda_version),
+                )));
             }
             let version = bytecode_version_from_cuda_version(cuda_version);
             emit_setup_diagnostic(format_args!(
                 "bytecode version {version} from {}",
                 cuda_h.display()
             ));
-            return version;
+            return Ok(version);
         }
     }
 
-    let version = probe_max_supported_bytecode_version(tileiras);
+    let version = probe_max_supported_bytecode_version(tileiras)?;
     emit_setup_diagnostic(format_args!(
         "bytecode version {version} from probing {}",
         tileiras.display()
     ));
-    version
+    Ok(version)
 }
 
 /// Maps a CUDA `CUDA_VERSION` integer (e.g. `13030`) to a clamped bytecode version.
@@ -563,36 +603,76 @@ fn build_probe_module() -> cutile_ir::Module {
 /// Probes `tileiras` for the newest bytecode version it accepts by compiling a
 /// tiny but REPRESENTATIVE module (an entry with a `for` region) at each
 /// candidate version, newest first.
-fn probe_max_supported_bytecode_version(tileiras: &Path) -> BytecodeVersion {
+///
+/// Only a `tileiras` that ran to completion and exited non-zero counts as a
+/// rejection of that version. Anything environmental — the probe image
+/// cannot be written, the binary cannot be launched, or it dies from a
+/// signal — is an error: the former fallback to `MIN_SUPPORTED` in those
+/// cases handed the real kernel to a toolchain nothing had been verified
+/// against, and produced the confusing failure there instead of here.
+/// Rejection of every supported version is an error too, carrying the
+/// assembler's own diagnostic.
+fn probe_max_supported_bytecode_version(tileiras: &Path) -> Result<BytecodeVersion, JITError> {
     let tmp_dir = env::temp_dir();
+    let mut last_rejection = String::new();
     for &version in BytecodeVersion::SUPPORTED.iter().rev() {
         let module = build_probe_module();
-        let Ok(bytes) = write_bytecode_version(&module, version) else {
-            continue;
-        };
+        let bytes = write_bytecode_version(&module, version).map_err(|e| {
+            JITError::Generic(format!(
+                "internal: the bytecode-version probe module does not encode at {version}: {e}"
+            ))
+        })?;
         let base = tmp_dir.join(Uuid::new_v4().to_string());
-        let bc_filename = format!("{}.bc", base.display());
-        let cubin_filename = format!("{}.cubin", base.display());
-        if std::fs::write(&bc_filename, &bytes).is_err() {
-            continue;
+        let bc_file = ScopedTempFile::new(base.with_extension("bc"));
+        let cubin_file = ScopedTempFile::new(base.with_extension("cubin"));
+        let bc_filename = bc_file.path().to_string_lossy().into_owned();
+        let cubin_filename = cubin_file.path().to_string_lossy().into_owned();
+        std::fs::write(bc_file.path(), &bytes).map_err(|e| {
+            JITError::Generic(format!(
+                "cannot write the bytecode-version probe to {bc_filename}: {e} \
+                 (the temporary directory {} must be writable to run tileiras)",
+                tmp_dir.display()
+            ))
+        })?;
+        let args = ["--gpu-name", "sm_120", "-o", &cubin_filename, &bc_filename];
+        let output = Command::new(tileiras).args(args).output().map_err(|e| {
+            JITError::Generic(tileiras_launch_error(tileiras, &args, &bc_filename, e))
+        })?;
+        if output.status.success() {
+            return Ok(version);
         }
-        let accepted = Command::new(tileiras)
-            .args(["--gpu-name", "sm_120", "-o", &cubin_filename, &bc_filename])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-        let _ = std::fs::remove_file(&bc_filename);
-        let _ = std::fs::remove_file(&cubin_filename);
-        if accepted {
-            return version;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.code().is_none() {
+            // Killed by a signal: the binary crashed, it did not judge the
+            // image.
+            return Err(JITError::Generic(format!(
+                "{} crashed ({}) while probing bytecode version {version}.\n\
+                 command: {}\n\
+                 stderr:\n{stderr}",
+                tileiras.display(),
+                output.status,
+                display_command(tileiras, &args),
+            )));
         }
+        emit_setup_diagnostic(format_args!(
+            "{} rejected bytecode version {version} ({})",
+            tileiras.display(),
+            output.status
+        ));
+        last_rejection = format!("{version}: {}", stderr.trim());
     }
-    emit_setup_diagnostic(format_args!(
-        "could not probe a supported bytecode version from {}; using {}",
+    Err(JITError::Generic(format!(
+        "{} accepts none of the bytecode versions this compiler can emit ({}).\n\
+         last rejection ({last_rejection})\n\
+         hint: cuTile requires CUDA 13.2+; set {CUDA_TOOLKIT_PATH_ENV}/{CUDA_HOME_ENV} or \
+         {TILEIRAS_PATH_ENV} to a matching toolkit, or force a version with {BYTECODE_VERSION_ENV}.",
         tileiras.display(),
-        BytecodeVersion::MIN_SUPPORTED
-    ));
-    BytecodeVersion::MIN_SUPPORTED
+        BytecodeVersion::SUPPORTED
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )))
 }
 
 /// `--opt-level` passed to `tileiras`. Not configurable yet.
@@ -659,7 +739,7 @@ pub fn serialize_tile_ir_bytecode(
         );
     }
 
-    let bytecode_version = selected_bytecode_version();
+    let bytecode_version = selected_bytecode_version()?;
     let bytes = write_bytecode_version(module, bytecode_version).map_err(|e| {
         JITError::Generic(format!(
             "Failed to serialize bytecode for module {}: {e}",
@@ -769,8 +849,8 @@ impl TileirasOptions {
 /// the complete input to this stage.
 ///
 /// The temporary `.bc` and `.cubin` are removed before returning. The one
-/// exception is a failing `tileiras` run, which leaves the `.bc` on disk because
-/// the error message names it.
+/// exception is a `tileiras` run that fails or cannot be launched, which
+/// leaves the `.bc` on disk because the error message names it.
 pub fn run_tileiras(
     bytecode: &[u8],
     gpu_name: &str,
@@ -799,10 +879,15 @@ pub fn run_tileiras(
         args.push("--sanitize=memcheck");
     }
     args.extend(["-o", &cubin_filename, &bc_filename]);
-    let output = Command::new(&tileiras)
-        .args(&args)
-        .output()
-        .map_err(|e| JITError::Generic(tileiras_launch_error(&tileiras, &args, &bc_filename, e)))?;
+    let output = match Command::new(&tileiras).args(&args).output() {
+        Ok(output) => output,
+        Err(e) => {
+            // The message names the bytecode, so it has to outlive this call.
+            let message = tileiras_launch_error(&tileiras, &args, &bc_filename, e);
+            bc_file.keep();
+            return Err(JITError::Generic(message));
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -996,18 +1081,20 @@ fn tileiras_launch_error(
         "failed to launch tileiras.\n\
          error: {error}\n\
          command: {}\n\
-         bytecode: {bc_filename}\n\
-         CUTILE_TILEIRAS_PATH: {}\n\
-         CUDA_TOOLKIT_PATH: {}\n",
+         bytecode: {bc_filename} (kept for inspection)\n\
+         {TILEIRAS_PATH_ENV}: {}\n\
+         {CUDA_TOOLKIT_PATH_ENV}: {}\n\
+         {CUDA_HOME_ENV}: {}\n",
         display_command(tileiras, args),
         env::var(TILEIRAS_PATH_ENV).unwrap_or_else(|_| "<unset>".to_string()),
         env::var(CUDA_TOOLKIT_PATH_ENV).unwrap_or_else(|_| "<unset>".to_string()),
+        env::var(CUDA_HOME_ENV).unwrap_or_else(|_| "<unset>".to_string()),
     );
 
     if env::var_os(TILEIRAS_PATH_ENV).is_none() {
         message.push_str(
-            "hint: install CUDA 13.2+ with tileiras, set CUDA_TOOLKIT_PATH to that toolkit, \
-             set CUTILE_TILEIRAS_PATH to the absolute tileiras path, or rerun with \
+            "hint: install CUDA 13.2+ with tileiras, set CUDA_TOOLKIT_PATH or CUDA_HOME to that \
+             toolkit, set CUTILE_TILEIRAS_PATH to the absolute tileiras path, or rerun with \
              CUTILE_SETUP_DIAGNOSTICS=1 to trace toolkit discovery.",
         );
     } else {
@@ -1043,14 +1130,14 @@ fn default_cuda_toolkit_tileiras(candidates: &[PathBuf]) -> Option<PathBuf> {
         match supported_cuda_toolkit_tileiras(candidate) {
             Ok(tileiras) => {
                 emit_setup_diagnostic(format_args!(
-                    "{CUDA_TOOLKIT_PATH_ENV} is unset; using discovered tileiras at {}",
+                    "{CUDA_TOOLKIT_PATH_ENV}/{CUDA_HOME_ENV} are unset; using discovered tileiras at {}",
                     tileiras.display()
                 ));
                 return Some(tileiras);
             }
             Err(error) => {
                 emit_setup_diagnostic(format_args!(
-                    "{CUDA_TOOLKIT_PATH_ENV} is unset; skipping {}: {error}",
+                    "{CUDA_TOOLKIT_PATH_ENV}/{CUDA_HOME_ENV} are unset; skipping {}: {error}",
                     candidate.display()
                 ));
             }
@@ -1065,8 +1152,7 @@ fn supported_cuda_toolkit_tileiras(cuda_toolkit: &Path) -> Result<PathBuf, Strin
         return Err("not a directory".to_string());
     }
 
-    let cuda_h = cuda_toolkit.join("include").join("cuda.h");
-    let version = cuda_version_from_header(&cuda_h)?;
+    let (_, version) = cuda_version_from_toolkit(cuda_toolkit)?;
     if version < MIN_CUDA_VERSION {
         return Err(format!(
             "CUDA toolkit {} is too old",
@@ -1080,6 +1166,46 @@ fn supported_cuda_toolkit_tileiras(cuda_toolkit: &Path) -> Result<PathBuf, Strin
     }
 
     Ok(tileiras)
+}
+
+/// The `include/` directories of a toolkit root that may hold `cuda.h`, in
+/// priority order: the standard top-level `include/`, then the
+/// `targets/<dir>/include/` trees CUDA ships for this machine's platform
+/// (`x86_64-linux`; `sbsa-linux` then `aarch64-linux` on aarch64, which a
+/// Rust triple cannot tell apart). Redistributable and Tegra/sbsa layouts
+/// have no top-level `include/`. Mirrors `toolkit_target_dirs` in
+/// `cuda-bindings/toolkit_target.rs` for the build target; here the
+/// running binary's platform is the target.
+fn toolkit_include_dirs(cuda_toolkit: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![cuda_toolkit.join("include")];
+    let target_dirs: &[&str] = match (env::consts::OS, env::consts::ARCH) {
+        ("linux", "x86_64") => &["x86_64-linux"],
+        ("linux", "aarch64") => &["sbsa-linux", "aarch64-linux"],
+        _ => &[],
+    };
+    for dir in target_dirs {
+        dirs.push(cuda_toolkit.join("targets").join(dir).join("include"));
+    }
+    dirs
+}
+
+/// `CUDA_VERSION` from the first `cuda.h` found under a toolkit root (see
+/// [`toolkit_include_dirs`]), with the header's path. The error lists every
+/// path probed.
+fn cuda_version_from_toolkit(cuda_toolkit: &Path) -> Result<(PathBuf, u32), String> {
+    let mut probed = Vec::new();
+    for include_dir in toolkit_include_dirs(cuda_toolkit) {
+        let cuda_h = include_dir.join("cuda.h");
+        if cuda_h.is_file() {
+            return cuda_version_from_header(&cuda_h).map(|version| (cuda_h, version));
+        }
+        probed.push(cuda_h.display().to_string());
+    }
+    Err(format!(
+        "no cuda.h under {} (probed {})",
+        cuda_toolkit.display(),
+        probed.join(", ")
+    ))
 }
 
 fn cuda_version_from_header(cuda_h: &Path) -> Result<u32, String> {
@@ -1184,13 +1310,157 @@ mod tests {
         // an empty module).
         let tileiras = tileiras_binary();
         if Command::new(&tileiras).arg("--version").output().is_ok() {
-            let version = probe_max_supported_bytecode_version(&tileiras);
+            let version = probe_max_supported_bytecode_version(&tileiras)
+                .unwrap_or_else(|e| panic!("probe against {}: {e}", tileiras.display()));
             assert!(
                 version >= BytecodeVersion::MIN_SUPPORTED,
                 "probe found no accepted version against {}",
                 tileiras.display()
             );
         }
+    }
+
+    /// A `tileiras` that cannot be launched is an error, not a silent fall
+    /// back to `MIN_SUPPORTED`.
+    #[test]
+    fn probe_reports_an_unlaunchable_tileiras_as_an_error() {
+        let missing = env::temp_dir().join(format!("cutile_missing_tileiras_{}", Uuid::new_v4()));
+        let err = probe_max_supported_bytecode_version(&missing)
+            .expect_err("a missing tileiras must fail the probe");
+        assert!(
+            err.to_string().contains("failed to launch tileiras"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A `tileiras` that dies from a signal did not judge the image: error.
+    #[test]
+    #[cfg(unix)]
+    fn probe_reports_a_crashing_tileiras_as_an_error() {
+        let temp_dir = env::temp_dir().join(format!("cutile_crashing_tileiras_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let fake = temp_dir.join("tileiras");
+        write_fake_tileiras_script(&fake, "kill -SEGV $$\n");
+        let err = probe_max_supported_bytecode_version(&fake)
+            .expect_err("a crashing tileiras must fail the probe");
+        assert!(
+            err.to_string().contains("crashed"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    /// A `tileiras` that rejects every supported version is an error carrying
+    /// its own diagnostic, not a fall back to a version it just refused.
+    #[test]
+    #[cfg(unix)]
+    fn probe_reports_total_rejection_as_an_error() {
+        let temp_dir =
+            env::temp_dir().join(format!("cutile_rejecting_tileiras_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let fake = temp_dir.join("tileiras");
+        write_fake_tileiras_script(&fake, "echo 'unsupported bytecode' >&2\nexit 1\n");
+        let err = probe_max_supported_bytecode_version(&fake)
+            .expect_err("a tileiras rejecting every version must fail the probe");
+        let text = err.to_string();
+        assert!(
+            text.contains("accepts none of the bytecode versions")
+                && text.contains("unsupported bytecode"),
+            "unexpected error: {text}"
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    /// A toolkit older than the Tile floor is an `Err` from the `Result`
+    /// path, never a panic (the JIT callers own cache cleanup on failure).
+    #[test]
+    fn pre_tile_toolkit_is_an_error_not_a_panic() {
+        let temp_dir = env::temp_dir().join(format!("cutile_old_toolkit_{}", Uuid::new_v4()));
+        let tileiras = create_fake_cuda_toolkit(&temp_dir, 13010, true);
+        let err = compute_bytecode_version(&tileiras, Some(temp_dir.as_path()))
+            .expect_err("a CUDA 13.1 toolkit must be rejected");
+        let text = err.to_string();
+        assert!(
+            text.contains("CUDA 13.2 or newer") && text.contains("13.1"),
+            "unexpected error: {text}"
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    /// `CUDA_HOME` names a toolkit root just like `CUDA_TOOLKIT_PATH`, and
+    /// loses to it when both are set.
+    #[test]
+    #[cfg(unix)]
+    fn cuda_home_is_honored_after_cuda_toolkit_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home_dir = env::temp_dir().join(format!("cutile_cuda_home_{}", Uuid::new_v4()));
+        let path_dir = env::temp_dir().join(format!("cutile_cuda_toolkit_{}", Uuid::new_v4()));
+        let home_tileiras = create_fake_cuda_toolkit(&home_dir, 13030, true);
+        let path_tileiras = create_fake_cuda_toolkit(&path_dir, 13030, true);
+
+        // Resolution through the CUDA_HOME value alone.
+        assert_eq!(
+            resolve_tileiras_binary_with_candidates(
+                None,
+                Some((CUDA_HOME_ENV, home_dir.clone().into_os_string())),
+                &[]
+            ),
+            home_tileiras
+        );
+
+        // Environment precedence: CUDA_HOME only, then both.
+        let _unset_path = EnvVarGuard::unset(CUDA_TOOLKIT_PATH_ENV);
+        let _home = EnvVarGuard::set(CUDA_HOME_ENV, &home_dir);
+        assert_eq!(
+            toolkit_env(),
+            Some((CUDA_HOME_ENV, home_dir.clone().into_os_string()))
+        );
+        {
+            let _path = EnvVarGuard::set(CUDA_TOOLKIT_PATH_ENV, &path_dir);
+            assert_eq!(
+                toolkit_env(),
+                Some((CUDA_TOOLKIT_PATH_ENV, path_dir.clone().into_os_string()))
+            );
+            assert_eq!(
+                cached_tileiras_and_toolkit(None, toolkit_env()).0,
+                path_tileiras
+            );
+        }
+
+        let _ = fs::remove_dir_all(home_dir);
+        let _ = fs::remove_dir_all(path_dir);
+    }
+
+    /// `cuda.h` is found in a `targets/<dir>/include/` tree when the toolkit
+    /// has no top-level `include/` (redistributable and Tegra/sbsa layouts).
+    #[test]
+    fn cuda_h_is_found_in_the_targets_layout() {
+        let root = env::temp_dir().join(format!("cutile_targets_toolkit_{}", Uuid::new_v4()));
+        let include_dirs = toolkit_include_dirs(&root);
+        let Some(target_include) = include_dirs.get(1) else {
+            eprintln!("skipping: CUDA ships no targets/ tree for this platform");
+            return;
+        };
+        fs::create_dir_all(target_include).unwrap();
+        fs::write(
+            target_include.join("cuda.h"),
+            "#define CUDA_VERSION 13020\n",
+        )
+        .unwrap();
+        let (cuda_h, version) = cuda_version_from_toolkit(&root).expect("targets layout");
+        assert_eq!(version, 13020);
+        assert_eq!(cuda_h, target_include.join("cuda.h"));
+        // ...and the top-level header still wins when both exist.
+        fs::create_dir_all(root.join("include")).unwrap();
+        fs::write(
+            root.join("include").join("cuda.h"),
+            "#define CUDA_VERSION 13030\n",
+        )
+        .unwrap();
+        assert_eq!(cuda_version_from_toolkit(&root).unwrap().1, 13030);
+        let err = cuda_version_from_toolkit(&root.join("nowhere")).unwrap_err();
+        assert!(err.contains("no cuda.h under"), "unexpected error: {err}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1233,7 +1503,7 @@ mod tests {
         assert_eq!(
             resolve_tileiras_binary_with_candidates(
                 None,
-                Some(temp_dir.clone().into_os_string()),
+                Some((CUDA_TOOLKIT_PATH_ENV, temp_dir.clone().into_os_string())),
                 &[]
             ),
             tileiras
@@ -1248,7 +1518,11 @@ mod tests {
     fn tileiras_binary_ignores_cuda_toolkit_path_without_tileiras() {
         let temp_dir = env::temp_dir().join(format!("cutile_cuda_toolkit_{}", Uuid::new_v4()));
         assert_eq!(
-            resolve_tileiras_binary_with_candidates(None, Some(temp_dir.into_os_string()), &[]),
+            resolve_tileiras_binary_with_candidates(
+                None,
+                Some((CUDA_TOOLKIT_PATH_ENV, temp_dir.into_os_string())),
+                &[]
+            ),
             PathBuf::from(tileiras_executable_name())
         );
     }
@@ -1296,11 +1570,12 @@ mod tests {
             bytecode_version_from_cuda_version(13020),
             BytecodeVersion::V13_2
         );
+        // Out-of-range values clamp into [MIN_SUPPORTED, CURRENT]; 13.1 is
+        // below the Tile floor (and its toolkit is rejected before this).
         assert_eq!(
             bytecode_version_from_cuda_version(13010),
-            BytecodeVersion::V13_1
+            BytecodeVersion::MIN_SUPPORTED
         );
-        // Out-of-range values clamp into [MIN_SUPPORTED, CURRENT].
         assert_eq!(
             bytecode_version_from_cuda_version(13000),
             BytecodeVersion::MIN_SUPPORTED
@@ -1340,7 +1615,7 @@ mod tests {
         assert_eq!(toolkit.as_deref(), Some(temp_dir.as_path()));
         // cuda.h reports CUDA 13.2, so we emit bytecode 13.2 without probing.
         assert_eq!(
-            compute_bytecode_version(&tileiras, toolkit.as_deref()),
+            compute_bytecode_version(&tileiras, toolkit.as_deref()).expect("13.2 toolkit"),
             BytecodeVersion::V13_2
         );
         let _ = fs::remove_dir_all(temp_dir);
@@ -1607,6 +1882,12 @@ mod tests {
             env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = env::var_os(key);
+            env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1658,13 +1939,9 @@ mod tests {
 
     #[cfg(unix)]
     fn write_fake_tileiras(path: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::write(
+        write_fake_tileiras_script(
             path,
-            r#"#!/bin/sh
-set -eu
-args_file="$0.args"
+            r#"args_file="$0.args"
 printf '%s\n' "$0" "$@" > "$args_file"
 out=""
 while [ "$#" -gt 0 ]; do
@@ -1680,8 +1957,15 @@ if [ -z "$out" ]; then
 fi
 printf 'fake cubin\n' > "$out"
 "#,
-        )
-        .unwrap();
+        );
+    }
+
+    /// Writes an executable `sh` script standing in for `tileiras`.
+    #[cfg(unix)]
+    fn write_fake_tileiras_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, format!("#!/bin/sh\nset -eu\n{body}")).unwrap();
 
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);

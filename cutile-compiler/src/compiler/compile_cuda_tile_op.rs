@@ -180,11 +180,10 @@ fn resolve_static_params(
 }
 
 fn get_signedness_attr(key: &str, element_type_str: &str) -> Result<(String, Attribute), JITError> {
-    let signedness_str = match element_type_str {
-        "bool" | "u32" | "u64" => "unsigned",
-        _ => "signed",
-    };
-    Ok(signedness_attr(key, signedness_str))
+    Ok(signedness_attr(
+        key,
+        super::utils::rust_int_signedness(element_type_str),
+    ))
 }
 
 fn memory_scope_value(scope: &str) -> Option<i64> {

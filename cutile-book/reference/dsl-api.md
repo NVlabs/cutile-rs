@@ -48,7 +48,7 @@ mod my_kernels {
 
 | Attribute | Type | Description |
 |---|---|---|
-| `print_ir = true` | bool | Print three stages at JIT compile time: (1) the generated entry point wrapper (Rust), (2) the original kernel function, (3) the compiled Tile IR text |
+| `print_ir = true` | bool | Print two artifacts at JIT compile time: the generated entry point wrapper (Rust) and the compiled Tile IR text |
 | `unchecked_accesses` | bool | **Unsafe waiver.** Emit *no* safety checks — no verification in the kernel, at launch, or at compile time. Requires `unsafe fn`. The caller asserts correctness |
 | `deny_in_kernel_checks` | bool | **Safe strict.** Error at compile time if any safety check would remain in the kernel (i.e. cannot be discharged at compile time or hoisted to launch). Checks are still fully verified — this only forbids ones that cost device registers. The diagnostic names the check that could not leave the kernel and why |
 | `preconditions = ( ... )` | expr | Declared shape facts, verified by the generated launcher before the kernel runs and assumed by the compiler when discharging safety checks. Two forms: `dim(a, i) == dim(b, j)` (two axis extents are equal) and `dim(t, k) % d == 0` (an axis extent is a multiple of the integer literal `d`). A launch whose shapes violate a declared fact is rejected with an error naming it |
@@ -79,7 +79,6 @@ fn traced_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) { ... }
 
 | Attribute | Type | Description |
 |---|---|---|
-| `core` | bool | Internal: marks the core module (`_core.rs`) that provides built-in DSL functions |
 | `tile_rust_crate = true` | bool | Internal: used when defining kernels inside the cutile crate itself (changes import paths from `cutile::` to `crate::`) |
 
 ```rust
@@ -206,7 +205,7 @@ let s: Tile<f32, { [] }>;
 - `tile.reshape(shape)` — Reshape (must preserve element count)
 - `tile.transpose()` — Transpose a rank-2 tile
 
-**Arithmetic operators:** `+`, `-`, `*`, `/` are overloaded for element-wise operations between tiles of the same shape and type.
+**Arithmetic operators:** `+`, `-`, `*`, `/` are overloaded for element-wise operations between tiles of the same shape and type. Integer `/` and `%` follow Rust semantics: the quotient truncates toward zero (`-7 / 2 == -3`) and the remainder takes the dividend's sign (`-7 % 2 == -1`); unsigned element types divide as unsigned. Use `ceil_div` for a quotient rounded toward positive infinity.
 
 ```rust
 let z: Tile<f32, { [128] }> = a + b;     // element-wise add
@@ -233,7 +232,8 @@ fn kernel(
 - `tensor.load_tile(shape, [indices])` — Load a tile at a specific partition index
 - `tensor.partition(shape)` — Create a `Partition` view for block-indexed loading
 - `tensor.partition_permuted(shape, dim_map)` — Create a permuted `Partition` view
-- `unsafe tensor.partition_mut(shape)` — Create a mutable `PartitionMut` view
+- `tensor.partition_mut(shape)` — Create a mutable `PartitionMut` view (requires `&mut Tensor`; safe because every unproven store through the view is itself `unsafe`)
+- `unsafe tensor.partition_full_mut(shape)` — Create a mutable `PartitionMut` view over the full tensor, without the tile-block offset, for schedule-driven kernels
 
 ### Partition / PartitionMut
 
@@ -384,8 +384,15 @@ Examples:
 Some Tile IR operations are intentionally compiler-owned rather than public DSL
 functions. `cuda_tile.module`, `cuda_tile.entry`, `cuda_tile.return`, and
 control-flow operations are generated from Rust modules, entry attributes,
-`return`, `if`, `for`, `loop`, `break`, and `continue` syntax. This keeps user
-code Rust-shaped while still lowering to the corresponding Tile IR operations.
+`return`, `if`, `for`, `loop`, `while`, `break`, and `continue` syntax. This
+keeps user code Rust-shaped while still lowering to the corresponding Tile IR
+operations. Two forms have no Tile IR counterpart and are compile errors:
+`return` anywhere below the top level of a function body (inside `if`/`else`,
+a loop, or a nested block — Tile IR regions cannot exit the function early;
+guard the remaining statements with the condition instead), and `break`
+inside a `for` loop (`cuda_tile.for` cannot exit early; use `while`/`loop`,
+which lower to `cuda_tile.loop` and support `break`). `continue` is supported
+in every loop form.
 
 Tile IR attributes such as memory ordering, memory scope, comparison predicate,
 rounding mode, overflow behavior, and flush-to-zero mode are represented as
@@ -436,16 +443,15 @@ for i in (pid..total).step_by(n as usize) { ... }
 
 ### Arithmetic (Element-wise)
 
-In addition to operator overloading (`+`, `-`, `*`, `/`), these explicit functions are available:
+In addition to operator overloading (`+`, `-`, `*`, `/`, `%`; integer `/` truncates toward zero and `%` takes the dividend's sign, exactly as in Rust, for signed and unsigned element types alike), these explicit functions are available:
 
 | Function | Signature | Description |
 |---|---|---|
 | `absi(x)` | `Tile<E, S> -> Tile<E, S>` | Absolute value (integer) |
 | `absf(x)` | `Tile<E, S> -> Tile<E, S>` | Absolute value (float) |
-| `negi(x)` | `Tile<E, S> -> Tile<E, S>` | Negation (integer) |
+| `negi(x, overflow)` | `(Tile<E, S>, overflow::Mode) -> Tile<E, S>` | Negation (integer); `overflow::{None, NoSignedWrap, NoUnsignedWrap, NoWrap}` |
 | `negf(x)` | `Tile<E, S> -> Tile<E, S>` | Negation (float) |
-| `fma(a, b, c)` | `(Tile<E, S>, Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Fused multiply-add: `a * b + c` |
-| `fma_ftz(a, b, c)` | `(Tile<E, S>, Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Fused multiply-add (flush-to-zero) |
+| `fma(lhs, rhs, acc, rounding, ftz)` | `(Tile<E, S>, Tile<E, S>, Tile<E, S>, rounding::Mode, ftz::Mode) -> Tile<E, S>` | Fused multiply-add: `lhs * rhs + acc` |
 | `pow(base, exp)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Power |
 | `ceil_div(a, b)` | `(E, E) -> E` | Ceiling division (scalar) |
 | `true_div(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | True (floating-point) division |
@@ -457,14 +463,14 @@ let abs_x: Tile<f32, S> = absf(x);
 let abs_i: Tile<i32, S> = absi(int_tile);
 
 // Fused multiply-add: a * b + c (single instruction, no intermediate rounding)
-let result: Tile<f32, S> = fma(a, b, c);
+let result: Tile<f32, S> = fma(a, b, c, rounding::NearestEven, ftz::Disabled);
 
 // Power
 let squared: Tile<f32, S> = pow(x, broadcast_scalar(2.0f32, x.shape()));
 
 // Negation
 let neg_x: Tile<f32, S> = negf(x);
-let neg_i: Tile<i32, S> = negi(int_tile);
+let neg_i: Tile<i32, S> = negi(int_tile, overflow::None);
 ```
 
 ### Math (Floating-Point)
@@ -472,14 +478,11 @@ let neg_i: Tile<i32, S> = negi(int_tile);
 | Function | Signature | Description |
 |---|---|---|
 | `exp(x)` | `Tile<E, S> -> Tile<E, S>` | e^x |
-| `exp2(x, ftz::Disabled)` | `Tile<E, S> -> Tile<E, S>` | 2^x |
-| `exp2_ftz(x)` | `Tile<E, S> -> Tile<E, S>` | 2^x with flush-to-zero |
+| `exp2(x, ftz)` | `(Tile<E, S>, ftz::Mode) -> Tile<E, S>` | 2^x |
 | `log(x)` | `Tile<E, S> -> Tile<E, S>` | Natural logarithm |
 | `log2(x)` | `Tile<E, S> -> Tile<E, S>` | Base-2 logarithm |
-| `sqrt(x)` | `Tile<E, S> -> Tile<E, S>` | Square root |
-| `sqrt_ftz(x)` | `Tile<E, S> -> Tile<E, S>` | Square root with flush-to-zero |
-| `rsqrt(x)` | `Tile<E, S> -> Tile<E, S>` | Reciprocal square root (1/sqrt(x)) |
-| `rsqrt_ftz(x)` | `Tile<E, S> -> Tile<E, S>` | Reciprocal square root with flush-to-zero |
+| `sqrt(x, rounding, ftz)` | `(Tile<E, S>, rounding::Mode, ftz::Mode) -> Tile<E, S>` | Square root |
+| `rsqrt(x, ftz)` | `(Tile<E, S>, ftz::Mode) -> Tile<E, S>` | Reciprocal square root (1/sqrt(x)) |
 | `sin(x)` | `Tile<E, S> -> Tile<E, S>` | Sine |
 | `cos(x)` | `Tile<E, S> -> Tile<E, S>` | Cosine |
 | `tan(x)` | `Tile<E, S> -> Tile<E, S>` | Tangent |
@@ -488,14 +491,12 @@ let neg_i: Tile<i32, S> = negi(int_tile);
 | `tanh(x)` | `Tile<E, S> -> Tile<E, S>` | Hyperbolic tangent |
 | `ceil(x)` | `Tile<E, S> -> Tile<E, S>` | Ceiling |
 | `floor(x)` | `Tile<E, S> -> Tile<E, S>` | Floor |
-| `maxf(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float max |
-| `minf(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float min |
-| `maxf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float max (flush-to-zero) |
-| `minf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float min (flush-to-zero) |
-| `addf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float add (flush-to-zero) |
-| `subf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float sub (flush-to-zero) |
-| `mulf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float mul (flush-to-zero) |
-| `divf_ftz(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Float div (flush-to-zero) |
+| `maxf(lhs, rhs, nan, ftz)` | `(Tile<E, S>, Tile<E, S>, nan::Mode, ftz::Mode) -> Tile<E, S>` | Float max; `nan::Enabled` propagates NaN |
+| `minf(lhs, rhs, nan, ftz)` | `(Tile<E, S>, Tile<E, S>, nan::Mode, ftz::Mode) -> Tile<E, S>` | Float min; `nan::Enabled` propagates NaN |
+| `addf(lhs, rhs, rounding, ftz)`, `subf(…)`, `mulf(…)`, `divf(…)` | `(Tile<E, S>, Tile<E, S>, rounding::Mode, ftz::Mode) -> Tile<E, S>` | Explicit float add/sub/mul/div with rounding and flush-to-zero control (the `+ - * /` operators use the defaults) |
+
+There are no separate `*_ftz` functions: flush-to-zero is selected by passing
+`ftz::Enabled` to the base operation.
 
 ```rust
 // Softmax numerics: subtract max, exponentiate
@@ -506,21 +507,23 @@ let softmax_exp: Tile<f32, S> = exp(shifted);
 // RMS normalization
 let sq: Tile<f32, S> = x * x;
 let mean_sq: Tile<f32, { [BM] }> = reduce_sum(sq, 1i32);
-let rms: Tile<f32, { [BM] }> = rsqrt(mean_sq + broadcast_scalar(1e-6f32, mean_sq.shape()));
+let rms: Tile<f32, { [BM] }> =
+    rsqrt(mean_sq + broadcast_scalar(1e-6f32, mean_sq.shape()), ftz::Disabled);
 
 // Activation functions
 let gelu_approx: Tile<f32, S> = x * (constant(1.0f32, x.shape()) + tanh(x));
 let swish: Tile<f32, S> = x / (constant(1.0f32, x.shape()) + exp(negf(x)));
 
-// exp2 is faster than exp on GPU — convert: exp(x) = exp2(x * log2(e, ftz::Disabled))
+// exp2 is faster than exp on GPU — convert: exp(x) = exp2(x * log2(e))
 let log2_e: f32 = 1.4426950408889634f32;
-let fast_exp: Tile<f32, S> = exp2(x * broadcast_scalar(log2_e, x.shape()));
+let fast_exp: Tile<f32, S> = exp2(x * broadcast_scalar(log2_e, x.shape()), ftz::Disabled);
 
-// Flush-to-zero variants: treat denormals as zero (faster on some hardware, f32 only)
-let clamped: Tile<f32, S> = maxf_ftz(x, broadcast_scalar(0.0f32, x.shape()));
-let sum: Tile<f32, S> = addf_ftz(a, b);
-let product: Tile<f32, S> = mulf_ftz(a, b);
-let fma_result: Tile<f32, S> = fma_ftz(a, b, c);
+// Flush-to-zero: pass ftz::Enabled to treat denormals as zero (faster on some hardware, f32 only)
+let clamped: Tile<f32, S> =
+    maxf(x, broadcast_scalar(0.0f32, x.shape()), nan::Disabled, ftz::Enabled);
+let sum: Tile<f32, S> = addf(a, b, rounding::NearestEven, ftz::Enabled);
+let product: Tile<f32, S> = mulf(a, b, rounding::NearestEven, ftz::Enabled);
+let fma_result: Tile<f32, S> = fma(a, b, c, rounding::NearestEven, ftz::Enabled);
 ```
 
 ### Comparison
@@ -534,8 +537,8 @@ let fma_result: Tile<f32, S> = fma_ftz(a, b, c);
 | `lt_tile(a, b)` | `-> Tile<bool, S>` | Less than |
 | `le_tile(a, b)` | `-> Tile<bool, S>` | Less or equal |
 | `select(cond, a, b)` | `(Tile<bool, S>, Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Conditional select |
-| `min(a, b)` / `max(a, b)` | Scalar min/max |
-| `min_tile(a, b)` / `max_tile(a, b)` | Element-wise min/max |
+| `min(a, b)` / `max(a, b)` | `(E, E) -> E` | Scalar min/max |
+| `min_tile(a, b)` / `max_tile(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Element-wise min/max |
 
 ```rust
 let mask: Tile<bool, { [128] }> = lt_tile(indices, len_tile);
@@ -565,9 +568,9 @@ let scale: Tile<f32, { [16, 16] }> = broadcast_scalar(2.0f32, const_shape![16, 1
 | `tile.transpose()` | `Tile<E, [M, N]> -> Tile<E, [N, M]>` | Rank-2 transpose |
 | `reshape(tile, shape)` | `(Tile<E, S>, Shape<R>) -> Tile<E, R>` | Free function reshape |
 | `broadcast(tile, shape)` | `(Tile<E, S>, Shape<R>) -> Tile<E, R>` | Free function broadcast |
-| `permute(tile, indices, shape)` | `(Tile<E, A>, Array<I>, Shape<R>) -> Tile<E, R>` | Transpose / permute dimensions |
+| `permute(tile, permutation)` | `(Tile<E, A>, Array<I>) -> Tile<E, R>` | Transpose / permute dimensions (e.g. `const_array![1, 0]`); the result shape `R` is ascribed at the call site |
 | `cat(a, b, dim)` | `(Tile<E, SLhs>, Tile<E, SRhs>, i32) -> Tile<E, SOut>` | Concatenate along a dimension |
-| `extract(tile, offsets, shape)` | `(Tile<E, SIn>, [i32; N], Shape<SOut>) -> Tile<E, SOut>` | Extract a sub-tile |
+| `extract(tile, indices)` | `(Tile<E, SIn>, [Tile<i32, {[]}>; N]) -> Tile<E, SOut>` | Extract a sub-tile at rank-0 index tiles; the result shape `SOut` is ascribed at the call site |
 | `shape[index]` | `(Shape<S>, usize) -> i32` | Read one runtime dimension from a shape |
 
 ```rust
@@ -585,7 +588,7 @@ let n_cols: i32 = matrix.shape()[1];
 | `reduce_max(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Max reduction |
 | `reduce_min(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Min reduction |
 | `reduce_prod(tile, dim)` | `(Tile<E, S>, i32) -> Tile<E, R>` | Product reduction |
-| `reduce(tile, dim, identity, f)` | `(Tile<E, S>, i32, E, Fn(E, E) -> E) -> Tile<E, R>` | Custom reduction |
+| `reduce(tile, dim, identity, f)` | `(Tile<E, S>, i32, E, Fn(E, E) -> E) -> Tile<E, S>` | Custom reduction; typed with the input shape (only `reduce_min/max/sum/prod` collapse the axis in their return type) |
 | `scan_sum(tile, dim, reverse, identity)` | `(Tile<E, S>, i32, reverse::Mode, E) -> Tile<E, S>` | Prefix sum |
 | `scan(tile, dim, reverse, identity, f)` | `(Tile<E, S>, i32, reverse::Mode, E, Fn(E, E) -> E) -> Tile<E, S>` | Custom prefix scan |
 
@@ -601,7 +604,7 @@ let prefix: Tile<f32, { [128] }> = scan_sum(row, 0i32, reverse::Forward, 0.0f32)
 
 | Function | Signature | Description |
 |---|---|---|
-| `mma(a, b, c)` | `(Tile<E, {[M,K]}>, Tile<E, {[K,N]}>, Tile<E, {[M,N]}>) -> Tile<E, {[M,N]}>` | Matrix multiply-accumulate |
+| `mma(a, b, c)` | `(Tile<E1, {[M,K]}>, Tile<E1, {[K,N]}>, Tile<E2, {[M,N]}>) -> Tile<E2, {[M,N]}>` | Matrix multiply-accumulate; the accumulator element type may differ from the inputs (e.g. `f16` inputs, `f32` accumulator) |
 | `mmaf_scaled(a, b, c, a_scale, b_scale)` | `(Tile<E, A>, Tile<E, B>, Tile<f32, C>, Tile<S, AS>, Tile<S, BS>) -> Tile<f32, C>` | Block-scaled floating-point matrix multiply-accumulate |
 
 Maps to hardware tensor cores when available.
@@ -679,14 +682,18 @@ let tile: Tile<f32, S> =
 
 | Function | Signature | Description |
 |---|---|---|
-| `load_ptr_tko(ptrs, ordering, Option<scope>, mask, fill, token, Latency<N>)` | `-> (Tile<E, S>, Token)` | Scatter-gather load via pointers |
-| `store_ptr_tko(ptrs, values, ordering, Option<scope>, mask, token, Latency<N>)` | `-> Token` | Scatter-gather store via pointers |
+| `unsafe load_ptr_tko(ptrs, ordering, Option<scope>, mask, fill, token, Latency<N>)` | `-> (Tile<E, S>, Token)` | Scatter-gather load via pointers |
+| `unsafe store_ptr_tko(ptrs, values, ordering, Option<scope>, mask, token, Latency<N>)` | `-> Token` | Scatter-gather store via pointers |
 | `pointer_to_tile(ptr)` | `P -> PointerTile<P, {[]}>` | Convert raw pointer to scalar pointer tile |
 | `tile_to_pointer(ptile)` | `PointerTile<P, {[]}> -> P` | Convert back |
-| `addptr(ptile, offset)` | Offset a pointer tile by a scalar |
-| `addptr_tile(ptile, offsets)` | Offset a pointer tile by an index tile |
-| `broadcast_ptr(ptile, shape)` | Broadcast a pointer tile to a larger shape |
-| `reshape_ptr(ptile, shape)` | Reshape a pointer tile |
+| `addptr(ptile, offset)` | `(PointerTile<P, D>, i32) -> PointerTile<P, D>` | Offset a pointer tile by a scalar |
+| `addptr_tile(ptile, offsets)` | `(PointerTile<P, D>, Tile<I, D>) -> PointerTile<P, D>` | Offset a pointer tile by an index tile |
+| `broadcast_ptr(ptile, shape)` | `(PointerTile<P, S>, Shape<R>) -> PointerTile<P, R>` | Broadcast a pointer tile to a larger shape |
+| `reshape_ptr(ptile, shape)` | `(PointerTile<P, S>, Shape<R>) -> PointerTile<P, R>` | Reshape a pointer tile |
+
+`load_ptr_tko` and `store_ptr_tko` dereference raw device pointers and are
+`unsafe fn`s: call them inside an `unsafe` block. The snippets below omit the
+block for brevity.
 
 ```rust
 let base: PointerTile<*mut f32, { [] }> = pointer_to_tile(ptr);
@@ -699,8 +706,8 @@ let (values, token): (Tile<f32, { [128] }>, Token) =
 
 | Function | Signature | Description |
 |---|---|---|
-| `atomic_rmw_tko(ptrs, vals, mode, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic read-modify-write |
-| `atomic_cas_tko(ptrs, cmp, new, ordering, scope, mask, hint)` | `-> (Tile<E, S>, Token)` | Atomic compare-and-swap |
+| `unsafe atomic_rmw_tko(ptrs, arg, mode, ordering, scope, mask, token)` | `(PointerTile<*mut E, S>, Tile<E, S>, atomic::Mode, ordering::AtomicMode, scope::Mode, Option<Tile<bool, S>>, Option<Token>) -> (Tile<E, S>, Token)` | Atomic read-modify-write |
+| `unsafe atomic_cas_tko(ptrs, cmp, val, ordering, scope, mask, token)` | `(PointerTile<*mut E, S>, Tile<E, S>, Tile<E, S>, ordering::AtomicMode, scope::Mode, Option<Tile<bool, S>>, Option<Token>) -> (Tile<E, S>, Token)` | Atomic compare-and-swap |
 
 **RMW modes:** `atomic::{Add, AddF, And, Or, Xor, Max, Min, Umax, Umin, Xchg}`
 
@@ -708,9 +715,14 @@ let (values, token): (Tile<f32, { [128] }>, Token) =
 
 **Scopes:** `scope::{TileBlock, Device, System}`
 
+Both atomics dereference raw device pointers and are `unsafe fn`s, like
+`load_ptr_tko`/`store_ptr_tko`:
+
 ```rust
-atomic_rmw_tko(ptrs, increments, atomic::Add, ordering::Relaxed, scope::Device, None, None);
-atomic_cas_tko(ptrs, expected, desired, ordering::AcqRel, scope::System, None, None);
+unsafe {
+    atomic_rmw_tko(ptrs, increments, atomic::Add, ordering::Relaxed, scope::Device, None, None);
+    atomic_cas_tko(ptrs, expected, desired, ordering::AcqRel, scope::System, None, None);
+}
 ```
 
 #### Tokens
@@ -761,8 +773,8 @@ let _: Token =
 | `andi(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Bitwise AND |
 | `ori(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Bitwise OR |
 | `xori(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Bitwise XOR |
-| `shli(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Shift left |
-| `shri(a, b)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Shift right |
+| `shli(lhs, rhs, overflow)` | `(Tile<E, S>, Tile<E, S>, overflow::Mode) -> Tile<E, S>` | Shift left |
+| `shri(lhs, rhs)` | `(Tile<E, S>, Tile<E, S>) -> Tile<E, S>` | Shift right (arithmetic for signed `E`, logical for unsigned) |
 
 ```rust
 // Mask lower 8 bits
@@ -771,7 +783,7 @@ let low_byte: Tile<i32, S> = andi(x, mask);
 
 // Shift left by 2 (multiply by 4)
 let shift: Tile<i32, S> = constant(2, x.shape());
-let shifted: Tile<i32, S> = shli(x, shift);
+let shifted: Tile<i32, S> = shli(x, shift, overflow::None);
 
 // Toggle bits with XOR
 let toggled: Tile<i32, S> = xori(x, mask);

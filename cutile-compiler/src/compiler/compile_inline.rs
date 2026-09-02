@@ -157,6 +157,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // the caller's loop context governs check hoisting inside it.
             call_variables.loop_frames = ctx.loop_frames.clone();
             call_variables.module_scope.push(module_name.clone());
+            // The callee's body block is a function body: a top-level `return`
+            // there yields the call's value.
+            call_variables.fn_body = true;
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
 
@@ -197,6 +200,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 generic_arg_inference
                     .get_generic_vars_instance(&generic_vars, &self.modules.primitives())
             };
+            // The callee's body compiles in its own module's scope: its
+            // `const`s, and the consts named in its types, are its module's.
+            let _module_scope = self.push_module_scope(module_name);
             self.add_module_const_vars(&mut call_generic_vars);
             // Add function call const generics as variables.
             for (key, value) in call_generic_vars.ordered_inst_i32() {
@@ -379,6 +385,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // the caller's loop context governs check hoisting inside it.
             call_variables.loop_frames = ctx.loop_frames.clone();
             call_variables.module_scope.push(module_name.clone());
+            call_variables.fn_body = true;
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&impl_method.sig);
             for i in 0..param_names.len() {
@@ -421,6 +428,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     )?
                 }
             };
+            // The callee's body compiles in its own module's scope: its
+            // `const`s, and the consts named in its types, are its module's.
+            let _module_scope = self.push_module_scope(module_name.as_str());
             self.add_module_const_vars(&mut call_generic_vars);
 
             // Add method call const generics as variables.

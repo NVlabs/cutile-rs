@@ -72,8 +72,9 @@ mod diff_module {
     }
 
     /// An access skipped by `continue` for `k >= limit`. The attained index
-    /// set is `[0, limit)`, a strict subset of the loop's range; the hoisted
-    /// check tests the range's extreme anyway (defect D2).
+    /// set is `[0, limit)`, a strict subset of the loop's range; the check
+    /// must stay in place, since a hoisted one would test the range's
+    /// extreme (the former defect D2).
     #[cutile::entry]
     fn continue_before<const B: i32>(
         z: &mut Tensor<f32, { [B] }>,
@@ -243,7 +244,9 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "continue_before_limit_in_bounds",
-        known_p_violation: Some("D2: hoisted check tests an index `continue` never attains"),
+        // D2 ("hoisted check tests an index `continue` never attains") is
+        // fixed: a body with an early exit keeps its check in place.
+        known_p_violation: None,
         reference_must_stop: false,
     },
     Case {

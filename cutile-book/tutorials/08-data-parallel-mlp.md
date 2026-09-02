@@ -71,6 +71,7 @@ mod data_parallel_module {
     }
 }
 
+use cuda_async::error::DeviceError;
 use data_parallel_module::{gemm, relu, matvec};
 
 #[tokio::main]

@@ -17,7 +17,10 @@
 
 use crate::error::JITError;
 use crate::syn_utils::*;
-use std::collections::HashMap;
+use quote::ToTokens;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 use syn::{
     ImplItem, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemStruct,
     ItemTrait, ItemType, UseTree,
@@ -159,8 +162,14 @@ pub struct NameResolver {
     cached_traits: HashMap<String, ItemTrait>,
     /// All type aliases across all modules: name → ItemType.
     cached_type_aliases: HashMap<String, ItemType>,
-    /// All constants across all modules: name → ItemConst.
+    /// All constants across all modules: name → ItemConst. Last definition
+    /// wins for a name several modules define, so this map is only for the
+    /// legacy callers that have no module to scope by; see
+    /// [`Self::consts_visible_from`].
     cached_consts: HashMap<String, ItemConst>,
+    /// Per-module memo of [`Self::consts_visible_from`]: type normalization
+    /// asks for it on every compiled type.
+    visible_consts: RefCell<HashMap<String, Rc<HashMap<String, ItemConst>>>>,
     /// All static items across all modules: name → ItemStatic.
     cached_statics: HashMap<String, ItemStatic>,
     /// All struct impls across all modules: struct_name → [(module_name, ItemImpl)].
@@ -238,7 +247,15 @@ impl NameResolver {
                 }
                 Item::Const(c) => {
                     let name = c.ident.to_string();
-                    mi.consts.insert(name.clone(), c.clone());
+                    // A module's items — nested submodules included — form
+                    // one flat scope here; a second definition of the name
+                    // would silently replace the first.
+                    if mi.consts.insert(name.clone(), c.clone()).is_some() {
+                        return Err(JITError::generic_err(&format!(
+                            "duplicate const `{name}` in module `{module_name}`: nested submodules \
+                             share the module's flat scope; rename one of them"
+                        )));
+                    }
                     cached_consts.insert(name, c.clone());
                 }
                 Item::Static(s) => {
@@ -390,6 +407,7 @@ impl NameResolver {
             cached_statics,
             cached_struct_impls,
             cached_trait_impls,
+            visible_consts: RefCell::new(HashMap::new()),
         })
     }
 
@@ -589,6 +607,69 @@ impl NameResolver {
     /// Get a module-level static by its DefId.
     pub fn get_static(&self, def_id: &DefId) -> Option<&ItemStatic> {
         self.items.get(&def_id.module)?.statics.get(&def_id.name)
+    }
+
+    /// Resolve a module-level constant by name from `calling_module`, along
+    /// the scope chain of [`Self::resolve_path`]: the module's own item, an
+    /// explicit import, the implicit core import, and finally any module —
+    /// but only when exactly one module defines the name, or every
+    /// definition is token-identical. A name that several modules define
+    /// differently, and that the calling module neither defines nor imports,
+    /// is ambiguous and resolves to nothing rather than to whichever module
+    /// happened to be indexed last (which is what the flat map did: a helper
+    /// module's `N` replaced the kernel's own `N` in its tile shapes).
+    pub fn resolve_const(&self, name: &str, calling_module: &str) -> Option<&ItemConst> {
+        let in_module = |module: &str| self.items.get(module).and_then(|mi| mi.consts.get(name));
+        if let Some(item) = in_module(calling_module) {
+            return Some(item);
+        }
+        if let Some(source) = self
+            .imports
+            .get(calling_module)
+            .and_then(|imports| imports.get(name))
+        {
+            if let Some(item) = in_module(source) {
+                return Some(item);
+            }
+        }
+        if let Some(item) = self.core_module.as_deref().and_then(in_module) {
+            return Some(item);
+        }
+        let mut definitions = self
+            .items
+            .values()
+            .filter_map(|mi| mi.consts.get(name))
+            .peekable();
+        let first = definitions.next()?;
+        let same_text = |item: &ItemConst| {
+            item.to_token_stream().to_string() == first.to_token_stream().to_string()
+        };
+        definitions.all(same_text).then_some(first)
+    }
+
+    /// Every constant visible from `module`, by name (see
+    /// [`Self::resolve_const`]). Memoized per module.
+    pub fn consts_visible_from(&self, module: &str) -> Rc<HashMap<String, ItemConst>> {
+        if let Some(cached) = self.visible_consts.borrow().get(module) {
+            return cached.clone();
+        }
+        let names: BTreeSet<&str> = self
+            .items
+            .values()
+            .flat_map(|mi| mi.consts.keys().map(String::as_str))
+            .collect();
+        let visible: HashMap<String, ItemConst> = names
+            .into_iter()
+            .filter_map(|name| {
+                self.resolve_const(name, module)
+                    .map(|item| (name.to_string(), item.clone()))
+            })
+            .collect();
+        let visible = Rc::new(visible);
+        self.visible_consts
+            .borrow_mut()
+            .insert(module.to_string(), visible.clone());
+        visible
     }
 
     /// Iterate all indexed static items with their defining module.
@@ -953,6 +1034,86 @@ mod tests {
         assert!(resolver.functions().contains_key("alpha"));
         assert!(resolver.functions().contains_key("gamma"));
         assert!(resolver.structs().contains_key("Beta"));
+    }
+
+    /// Same-named consts in two modules resolve per module: the kernel's own
+    /// definition wins for the kernel, the helper's for the helper, and a
+    /// third module that imports one of them gets that one. Only the flat
+    /// map is last-wins.
+    #[test]
+    fn same_named_consts_resolve_per_module() {
+        let (a, a_mod) = make_module(
+            "kernel_mod",
+            vec![
+                parse_quote! { use helper_mod::helper; },
+                parse_quote! { const N: i32 = 128; },
+            ],
+        );
+        let (b, b_mod) = make_module(
+            "helper_mod",
+            vec![
+                parse_quote! { const N: i32 = 64; },
+                parse_quote! { const ONLY_HERE: i32 = 7; },
+                parse_quote! { pub fn helper() {} },
+            ],
+        );
+        let (c, c_mod) = make_module("importer_mod", vec![parse_quote! { use helper_mod::N; }]);
+        let (d, d_mod) = make_module("bystander_mod", vec![parse_quote! { fn other() {} }]);
+        let resolver =
+            NameResolver::build(&[(a, a_mod), (b, b_mod), (c, c_mod), (d, d_mod)]).unwrap();
+        let value = |item: &ItemConst| crate::type_aliases::const_item_i32_value(item).unwrap();
+
+        assert_eq!(
+            value(resolver.resolve_const("N", "kernel_mod").unwrap()),
+            128
+        );
+        assert_eq!(
+            value(resolver.resolve_const("N", "helper_mod").unwrap()),
+            64
+        );
+        assert_eq!(
+            value(resolver.resolve_const("N", "importer_mod").unwrap()),
+            64
+        );
+        // Neither defined nor imported, and defined differently elsewhere:
+        // ambiguous, so unresolved — never "whichever was indexed last".
+        assert!(resolver.resolve_const("N", "bystander_mod").is_none());
+        // A unique global definition still resolves from anywhere.
+        assert_eq!(
+            value(
+                resolver
+                    .resolve_const("ONLY_HERE", "bystander_mod")
+                    .unwrap()
+            ),
+            7
+        );
+
+        let kernel_view = resolver.consts_visible_from("kernel_mod");
+        assert_eq!(value(&kernel_view["N"]), 128);
+        assert_eq!(value(&kernel_view["ONLY_HERE"]), 7);
+        let bystander_view = resolver.consts_visible_from("bystander_mod");
+        assert!(!bystander_view.contains_key("N"));
+        assert!(bystander_view.contains_key("ONLY_HERE"));
+    }
+
+    /// A const defined twice inside one module's flat scope (a nested
+    /// submodule reusing the name) is rejected instead of silently replaced.
+    #[test]
+    fn duplicate_const_within_a_module_is_rejected() {
+        let (name, module) = make_module(
+            "dup_mod",
+            vec![
+                parse_quote! { const N: i32 = 1; },
+                parse_quote! { mod inner { const N: i32 = 2; } },
+            ],
+        );
+        let err = NameResolver::build(&[(name, module)])
+            .err()
+            .expect("a duplicate const must be rejected");
+        assert!(
+            err.to_string().contains("duplicate const `N`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

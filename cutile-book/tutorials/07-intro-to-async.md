@@ -64,6 +64,7 @@ use cutile::api::{ones, zeros};
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::{PartitionOp, TileKernel, ToHostVecOp};
 use cuda_async::device_operation::*;
+use cuda_async::error::DeviceError;
 use std::sync::Arc;
 
 #[cutile::module]
