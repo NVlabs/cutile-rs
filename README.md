@@ -32,8 +32,8 @@ mod kernel {
         x: &Tensor<f32, { [-1] }>,
         y: &Tensor<f32, { [-1] }>,
     ) {
-        let tx = load_tile_like(x, z);
-        let ty = load_tile_like(y, z);
+        let tx = x.load_like(z);
+        let ty = y.load_like(z);
         z.store(tx + ty);
     }
 }
