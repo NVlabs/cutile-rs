@@ -33,12 +33,12 @@ mod partition_index_schedules_module {
     ) {
         let k_tiles: i32 = K / BK;
 
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
 
         for index in z.iter_indices() {
             let (bid_m, bid_n) = index.components();
-            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             for k_tile in 0i32..k_tiles {
                 let tile_x = part_x.load([bid_m, k_tile]);
                 let tile_y = part_y.load([k_tile, bid_n]);
@@ -70,12 +70,12 @@ mod partition_index_schedules_module {
     ) {
         let k_tiles: i32 = K / BK;
 
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
 
         for index in z.iter_indices() {
             let (bid_m, bid_n) = index.components();
-            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             for k_tile in 0i32..k_tiles {
                 let tile_x = part_x.load([bid_m, k_tile]);
                 let tile_y = part_y.load([k_tile, bid_n]);
@@ -101,12 +101,12 @@ mod partition_index_schedules_module {
         let n = num_tiles(&z, 1);
         let k = Dim::new(x.shape()[1] / BK);
 
-        let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-        let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+        let part_x = x.partition(shape![BM, BK]).with_bounds((m, k));
+        let part_y = y.partition(shape![BK, BN]).with_bounds((k, n));
 
         for index in z.iter_indices() {
             let (bid_m, bid_n) = index.components();
-            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             for k_tile in k {
                 let tile_x = part_x.load(coord((bid_m, k_tile)));
                 let tile_y = part_y.load(coord((k_tile, bid_n)));
@@ -131,11 +131,11 @@ mod partition_index_schedules_module {
     ) {
         let rows = num_tiles(&out, 0);
         let cols = num_tiles(&out, 1);
-        let part_x = x.partition(const_shape![1, BS]).with_bounds((rows, cols));
+        let part_x = x.partition(shape![1, BS]).with_bounds((rows, cols));
         let cols = cols.into_dim();
         for index in out.iter_indices() {
             let (row, _col) = index.components();
-            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, const_shape![1, BS]);
+            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, shape![1, BS]);
             for j in cols {
                 let t = part_x.load(coord((row, j)));
                 acc = acc + t;
@@ -164,7 +164,7 @@ mod partition_index_schedules_module {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row = pid.0;
         for j in cols {
-            let tile: Tile<T, { [1, BS] }> = constant(T::ZERO, const_shape![1, BS]);
+            let tile: Tile<T, { [1, BS] }> = constant(T::ZERO, shape![1, BS]);
             out.store(tile, coord((row, j)));
         }
     }
@@ -183,11 +183,11 @@ mod partition_index_schedules_module {
     ) {
         let rows = num_tiles(&out, 0);
         let cols = num_tiles(&out, 1);
-        let part_x = x.partition(const_shape![1, BS]).with_bounds((rows, cols));
+        let part_x = x.partition(shape![1, BS]).with_bounds((rows, cols));
         let cols = cols.into_dim();
         for index in out.iter_indices_with(&res) {
             let (row, _col) = index.components();
-            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, const_shape![1, BS]);
+            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, shape![1, BS]);
             for j in cols {
                 let t = part_x.load(coord((row, j)));
                 acc = acc + t;
@@ -219,11 +219,11 @@ mod partition_index_schedules_module {
     ) {
         let rows = num_tiles(&out, 0);
         let cols = num_tiles(&out, 1);
-        let part_x = x.partition(const_shape![1, BS]).with_bounds((rows, cols));
+        let part_x = x.partition(shape![1, BS]).with_bounds((rows, cols));
         let cols = cols.into_dim();
         for index in out.iter_indices_with(&res) {
             let (row, _col) = index.components();
-            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, const_shape![1, BS]);
+            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, shape![1, BS]);
             for j in cols {
                 let t = part_x.load(coord((row, j)));
                 acc = acc + t;
@@ -247,7 +247,7 @@ mod partition_index_schedules_module {
     ) {
         for index in out.iter_indices() {
             let (row, _col) = index.components();
-            let tile: Tile<T, { [1, BS] }> = constant(T::ZERO, const_shape![1, BS]);
+            let tile: Tile<T, { [1, BS] }> = constant(T::ZERO, shape![1, BS]);
             out.store(tile, coord((row, row)));
         }
     }
@@ -262,11 +262,11 @@ mod partition_index_schedules_module {
     ) {
         let rows = num_tiles(&out, 0);
         let cols = num_tiles(&out, 1);
-        let part_x = x.partition(const_shape![1, BS]).with_bounds((rows, cols));
+        let part_x = x.partition(shape![1, BS]).with_bounds((rows, cols));
         let cols = cols.into_dim();
         for index in out.iter_indices() {
             let (row, _col) = index.components();
-            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, const_shape![1, BS]);
+            let mut acc: Tile<T, { [1, BS] }> = constant(T::ZERO, shape![1, BS]);
             for j in cols {
                 let t = part_x.load(coord((row, j)));
                 acc = acc + t;
@@ -288,7 +288,7 @@ mod partition_index_schedules_module {
     ) {
         let m = num_tiles(&z, 0);
         let n = num_tiles(&z, 1);
-        let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, n));
+        let part_x = x.partition(shape![BM, BK]).with_bounds((m, n));
         for index in z.iter_indices() {
             let (bid_m, bid_n) = index.components();
             let _tile_x = part_x.load(coord((bid_n, bid_m)));
@@ -312,7 +312,7 @@ mod partition_index_schedules_module {
         let d0 = num_tiles(&z, 0);
         let d2 = num_tiles(&z, 2);
         let part_x = x
-            .partition(const_shape![1, BS, BD])
+            .partition(shape![1, BS, BD])
             .with_bounds((d0, Dim::new(1), d2));
         for index in z.iter_indices() {
             let [i0, _i1, i2] = index.coords();
@@ -335,7 +335,7 @@ mod partition_index_schedules_module {
         let d0 = num_tiles(&z, 0);
         let d2 = num_tiles(&z, 2);
         let part_x = x
-            .partition(const_shape![1, BS, BD])
+            .partition(shape![1, BS, BD])
             .with_bounds((d0, Dim::new(1), d2));
         for index in z.iter_indices() {
             let [i0, _i1, i2] = index.coords();
@@ -357,7 +357,7 @@ mod partition_index_schedules_module {
         let d0 = num_tiles(&z, 0);
         let d2 = num_tiles(&z, 2);
         let part_x = x
-            .partition(const_shape![1, BS, BD])
+            .partition(shape![1, BS, BD])
             .with_bounds((d0, Dim::new(1), d2));
         for index in z.iter_indices() {
             let [i0, _i1, i2] = index.coords();
@@ -374,7 +374,7 @@ mod partition_index_schedules_module {
     >(
         mut z: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
     ) {
-        let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+        let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
         let index: PartitionIndex<{ [BM, BN] }> =
             swizzle_partition_index_2d::<{ [BM, BN] }, MAP_SHAPE>(0i32, 1i32, 1i32);
         z.store(tile, index);
@@ -391,7 +391,7 @@ mod partition_index_schedules_module {
         mut b: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
     ) {
         for index in a.iter_indices() {
-            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             b.store(tile, index);
         }
     }
@@ -407,7 +407,7 @@ mod partition_index_schedules_module {
     ) {
         for index in z.iter_indices() {
             let (_bid_b, _bid_s, _bid_d) = index.components();
-            let tile: Tile<T, { [1, BS, BD] }> = constant(T::ZERO, const_shape![1, BS, BD]);
+            let tile: Tile<T, { [1, BS, BD] }> = constant(T::ZERO, shape![1, BS, BD]);
             z.store(tile, index);
         }
     }
@@ -417,7 +417,7 @@ mod partition_index_schedules_module {
         mut z: MappedPartitionMut<T, { [BN] }, MAP_SHAPE>,
     ) {
         for index in z.iter_indices() {
-            let tile: Tile<T, { [BN] }> = constant(T::ZERO, const_shape![BN]);
+            let tile: Tile<T, { [BN] }> = constant(T::ZERO, shape![BN]);
             z.store(tile, index);
         }
     }
@@ -433,7 +433,7 @@ mod partition_index_schedules_module {
         mut residual_out: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
     ) {
         for index in out.iter_indices_with(&residual_out) {
-            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             out.store(tile, index);
             residual_out.store(tile, index);
         }
@@ -451,7 +451,7 @@ mod partition_index_schedules_module {
         mut c: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
     ) {
         for index in a.iter_indices_with(&b) {
-            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             c.store(tile, index);
         }
     }
@@ -472,13 +472,13 @@ mod partition_index_schedules_module {
         k: &Tensor<T, { [-1, -1, D] }>,
         kv_tiles: i32,
     ) {
-        let part_k = k.partition(const_shape![1, BN, D]);
+        let part_k = k.partition(shape![1, BN, D]);
         for index in out.iter_indices() {
             let (_q_idx, head_idx, _d0) = index.components();
-            let mut acc: Tile<T, { [BM, 1, D] }> = constant(T::ZERO, const_shape![BM, 1, D]);
+            let mut acc: Tile<T, { [BM, 1, D] }> = constant(T::ZERO, shape![BM, 1, D]);
             for j in 0i32..kv_tiles {
                 let k_tile = part_k.load_pipelined::<2>([head_idx, j, 0i32]);
-                let k_tile: Tile<T, { [BM, 1, D] }> = k_tile.reshape(const_shape![BM, 1, D]);
+                let k_tile: Tile<T, { [BM, 1, D] }> = k_tile.reshape(shape![BM, 1, D]);
                 acc = acc + k_tile;
             }
             out.store(acc, index);
@@ -495,8 +495,8 @@ mod partition_index_schedules_module {
         head: i32,
         n: i32,
     ) {
-        let part = x.partition(const_shape![BN, D]);
-        let mut acc: Tile<T, { [BN, D] }> = constant(T::ZERO, const_shape![BN, D]);
+        let part = x.partition(shape![BN, D]);
+        let mut acc: Tile<T, { [BN, D] }> = constant(T::ZERO, shape![BN, D]);
         for _a in 0i32..n {
             for b in 0i32..2i32 {
                 let t = part.load([head, b]);
@@ -515,8 +515,8 @@ mod partition_index_schedules_module {
         x: &Tensor<T, { [-1, -1] }>,
         n: i32,
     ) {
-        let part = x.partition(const_shape![BN, D]);
-        let mut acc: Tile<T, { [BN, D] }> = constant(T::ZERO, const_shape![BN, D]);
+        let part = x.partition(shape![BN, D]);
+        let mut acc: Tile<T, { [BN, D] }> = constant(T::ZERO, shape![BN, D]);
         for j in 0i32..n {
             let t = part.load([2i32 * j + 1i32, 0i32]);
             acc = acc + t;
@@ -536,7 +536,7 @@ mod partition_index_schedules_module {
         n_tiles: i32,
     ) {
         for index in z.iter_indices_within([(start_tile, n_tiles), (0i32, -1i32)]) {
-            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             z.store(tile, index);
         }
     }
@@ -551,7 +551,7 @@ mod partition_index_schedules_module {
         mut z: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
     ) {
         for index in z.iter_indices_within([(-1i32, 2i32), (0i32, -1i32)]) {
-            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             z.store(tile, index);
         }
     }
@@ -571,7 +571,7 @@ mod partition_index_schedules_module {
         for index in
             out.iter_indices_within_with([(start_tile, n_tiles), (0i32, -1i32)], &residual_out)
         {
-            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let tile: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             out.store(tile, index);
             residual_out.store(tile, index);
         }

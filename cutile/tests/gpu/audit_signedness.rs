@@ -31,14 +31,14 @@ mod signedness_module {
         x: &Tensor<u8, { [-1] }>,
         y: &Tensor<u8, { [-1] }>,
     ) {
-        let xt: Tile<u8, S> = x.load_tile(const_shape!(S), [0i32]);
-        let yt: Tile<u8, S> = y.load_tile(const_shape!(S), [0i32]);
+        let xt: Tile<u8, S> = x.load_tile(shape!(S), [0i32]);
+        let yt: Tile<u8, S> = y.load_tile(shape!(S), [0i32]);
         q.store(xt / yt);
         r.store(xt % yt);
         mx.store(maxi(xt, yt));
         mn.store(mini(xt, yt));
-        let one: Tile<u8, S> = constant(1u8, const_shape!(S));
-        let zero: Tile<u8, S> = constant(0u8, const_shape!(S));
+        let one: Tile<u8, S> = constant(1u8, shape!(S));
+        let zero: Tile<u8, S> = constant(0u8, shape!(S));
         gt.store(select(cmpi(xt, yt, predicate::GreaterThan), one, zero));
     }
 
@@ -48,7 +48,7 @@ mod signedness_module {
         let gt: i32 = if a > b { 1i32 } else { 0i32 };
         let big_quotient: i32 = if a / b >= 60u8 { 10i32 } else { 0i32 };
         let t: Tile<i32, { [] }> = scalar_to_tile(gt + big_quotient);
-        out.store(t.reshape(const_shape![1]));
+        out.store(t.reshape(shape![1]));
     }
 }
 

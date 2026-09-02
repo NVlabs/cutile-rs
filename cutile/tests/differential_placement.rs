@@ -59,9 +59,9 @@ mod diff_module {
         y: &Tensor<f32, { [-1, -1] }>,
         flag: i32,
     ) {
-        let px = x.partition(const_shape![B, B]);
-        let py = y.partition(const_shape![B, B]);
-        let mut acc: Tile<f32, { [B, B] }> = constant(0.0, const_shape![B, B]);
+        let px = x.partition(shape![B, B]);
+        let py = y.partition(shape![B, B]);
+        let mut acc: Tile<f32, { [B, B] }> = constant(0.0, shape![B, B]);
         for k in 0i32..num_tiles(&px, 1) {
             if flag > 0i32 {
                 let t = py.load([k, 0i32]);
@@ -81,8 +81,8 @@ mod diff_module {
         x: &Tensor<f32, { [-1] }>,
         limit: i32,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for k in 0i32..64i32 {
             if k >= limit {
                 continue;
@@ -107,7 +107,7 @@ mod diff_module {
         x: &Tensor<f32, { [-1] }>,
         idx: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let t = p.load([idx]);
         z.store(t);
     }
@@ -119,7 +119,7 @@ mod diff_module {
     /// count must stop in both builds.
     #[cutile::entry]
     fn block_id_foreign<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let t = p.load([pid.0]);
         z.store(t);
@@ -130,8 +130,8 @@ mod diff_module {
     /// reference build refusing to inherit that proof (S2's count pin).
     #[cutile::entry]
     fn same_view_walk<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..num_tiles(&p, 0) {
             acc = acc + p.load([i]);
         }
@@ -142,8 +142,8 @@ mod diff_module {
     /// fold and emits an actual-value check at the access.
     #[cutile::entry]
     fn static_fold_walk<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [48] }>) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             acc = acc + p.load([i]);
         }
@@ -158,8 +158,8 @@ mod diff_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = max(i * -2_000_000_000i32, i);
             acc = acc + p.load([index]);
@@ -176,8 +176,8 @@ mod diff_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = (i * 2_000_000_000i32) % 1_000i32;
             acc = acc + p.load([index]);
@@ -192,8 +192,8 @@ mod diff_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [48] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = max(i * -2_000_000_000i32, i);
             acc = acc + p.load([index]);

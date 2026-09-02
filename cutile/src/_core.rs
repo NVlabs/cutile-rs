@@ -1384,7 +1384,7 @@ pub mod core {
     // ========================================================================
 
     /// Compile-time shape descriptor for tensors and tiles. Construct via
-    /// [`const_shape!`].
+    /// [`shape!`].
     #[cuda_tile::variadic_struct(N = 6, constructor = "new")]
     #[derive(Copy, Clone)]
     pub struct Shape<'a, const D: [i32; N]> {
@@ -1401,6 +1401,31 @@ pub mod core {
     }
 
     /// Construct a compile-time `Shape` from literal dims (0–4D supported).
+    ///
+    /// For the rare runtime-extent case, construct `Shape` directly:
+    /// `Shape::<{ [-1] }> { dims: &[n] }`.
+    #[macro_export]
+    macro_rules! shape {
+        () => {
+            Shape_0::const_new()
+        };
+        ($x1:literal) => {
+            Shape_1::<$x1>::const_new()
+        };
+        ($x1:literal, $x2:literal) => {
+            Shape_2::<$x1, $x2>::const_new()
+        };
+        ($x1:literal, $x2:literal, $x3:literal) => {
+            Shape_3::<$x1, $x2, $x3>::const_new()
+        };
+        ($x1:literal, $x2:literal, $x3:literal, $x4:literal) => {
+            Shape_4::<$x1, $x2, $x3, $x4>::const_new()
+        };
+    }
+    pub use shape;
+
+    /// Construct a compile-time `Shape` from literal dims (0–4D supported).
+    #[deprecated(note = "use shape![..]")]
     #[macro_export]
     macro_rules! const_shape {
         () => {
@@ -1419,6 +1444,7 @@ pub mod core {
             Shape_4::<$x1, $x2, $x3, $x4>::const_new()
         };
     }
+    #[allow(deprecated)]
     pub use const_shape;
 
     /// Compile-time index/metadata array — used for permutations and dim maps.
@@ -3703,7 +3729,7 @@ pub mod core {
         let ones_shape: Shape<{ [1; N] }> = Shape::<{ [1; N] }> { dims: dims };
         let dst_part: Partition<i64, { [1; N] }> = dst.partition(ones_shape);
         let dst_ptr_int: Tile<i64, { [1; N] }> = dst_part.load(idx);
-        let dst_ptr_int: Tile<i64, { [] }> = dst_ptr_int.reshape(const_shape![]);
+        let dst_ptr_int: Tile<i64, { [] }> = dst_ptr_int.reshape(shape![]);
         let dst_ptr: PointerTile<*mut T, { [] }> = int_to_ptr(dst_ptr_int);
         let dst_tensor: Tensor<T, R> =
             unsafe { make_tensor_view(dst_ptr, shape, strides, new_token_unordered()) };

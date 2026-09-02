@@ -37,7 +37,7 @@ mod kernels {
         w: &Tensor<f32, { [D] }>,
         eps: f32,
     ) {
-        let shape: Shape<{ [1, BS] }> = const_shape![1, BS];
+        let shape: Shape<{ [1, BS] }> = shape![1, BS];
         let tiles: i32 = D / BS;
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row = pid.0;
@@ -48,14 +48,14 @@ mod kernels {
             rms = rms + t * t;
         }
         let s: Tile<f32, { [1] }> = reduce_sum(rms, 1i32);
-        let s: f32 = tile_to_scalar(s.reshape(const_shape![]));
+        let s: f32 = tile_to_scalar(s.reshape(shape![]));
         let n: f32 = convert_scalar(D);
         let inv: f32 = 1.0f32 / (s / n + eps);
         let inv_tile: Tile<f32, { [] }> =
             sqrt(scalar_to_tile(inv), rounding::NegativeInf, ftz::Disabled);
         let inv: f32 = tile_to_scalar(inv_tile);
         let scale: Tile<f32, { [1, BS] }> = inv.broadcast(shape);
-        let w_part: Partition<f32, { [BS] }> = w.partition(const_shape![BS]);
+        let w_part: Partition<f32, { [BS] }> = w.partition(shape![BS]);
         let mut out_part: PartitionMut<f32, { [1, BS] }> = unsafe { out.partition_mut(shape) };
         for j in 0i32..tiles {
             let t: Tile<f32, { [1, BS] }> = x_part.load([row, j]);
@@ -71,16 +71,16 @@ mod kernels {
         w: &Tensor<f32, { [-1, K] }>,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let x_part = x.partition(const_shape![1, BK]);
-        let w_part = w.partition(const_shape![BN, BK]);
-        let mut acc = out.load().reshape(const_shape![BN, 1]);
+        let x_part = x.partition(shape![1, BK]);
+        let w_part = w.partition(shape![BN, BK]);
+        let mut acc = out.load().reshape(shape![BN, 1]);
         for k in 0i32..(K / BK) {
-            let tx = x_part.load([0i32, k]).reshape(const_shape![1, BK]);
+            let tx = x_part.load([0i32, k]).reshape(shape![1, BK]);
             let tw = w_part.load([pid.0, k]);
             let txt: Tile<f32, { [BK, 1] }> = tx.transpose();
             acc = mma(tw, txt, acc);
         }
-        out.store(acc.reshape(const_shape![BN]));
+        out.store(acc.reshape(shape![BN]));
     }
 
     #[cutile::entry()]

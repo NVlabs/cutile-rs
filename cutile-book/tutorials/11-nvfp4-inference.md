@@ -214,9 +214,9 @@ fn unpack_packed_fp4_bytes(
     output: &mut Tensor<f4e2m1fnx2, { [32] }>,
     input: &Tensor<u8, { [-1] }>,
 ) {
-    let bytes = load_tile(input, const_shape![32], [0]);
+    let bytes = load_tile(input, shape![32], [0]);
     let f4s: Tile<f4e2m1fn, { [64] }> = unpack(bytes);
-    let packed = f4s.pack(const_shape![32]);
+    let packed = f4s.pack(shape![32]);
     output.store(packed);
 }
 ```
@@ -256,19 +256,19 @@ mod nvfp4_linear {
         let pid_m = program_id(0);
         let pid_n = program_id(1);
 
-        let part_x = x.partition(const_shape![BM, BK_PACKED]);
-        let part_y = y.partition(const_shape![BN, BK_PACKED]);
-        let part_x_scales = x_scales.partition(const_shape![BM, BK_SCALES]);
-        let part_y_scales = y_scales.partition(const_shape![BN, BK_SCALES]);
+        let part_x = x.partition(shape![BM, BK_PACKED]);
+        let part_y = y.partition(shape![BN, BK_PACKED]);
+        let part_x_scales = x_scales.partition(shape![BM, BK_SCALES]);
+        let part_y_scales = y_scales.partition(shape![BN, BK_SCALES]);
 
-        let mut tile_z = constant(0.0f32, const_shape![BM, BN]);
+        let mut tile_z = constant(0.0f32, shape![BM, BN]);
 
         for k_tile in 0i32..num_tiles(&part_x, 1) {
             let tile_x_packed = part_x.load([pid_m, k_tile]);
             let tile_y_packed = part_y.load([pid_n, k_tile]);
 
-            let tile_x = tile_x_packed.unpack(const_shape![BM, BK]);
-            let tile_y = tile_y_packed.unpack(const_shape![BN, BK]).transpose();
+            let tile_x = tile_x_packed.unpack(shape![BM, BK]);
+            let tile_y = tile_y_packed.unpack(shape![BN, BK]).transpose();
 
             let tile_x_scales = part_x_scales.load([pid_m, k_tile]);
             let tile_y_scales = part_y_scales.load([pid_n, k_tile]).transpose();
@@ -286,7 +286,7 @@ The key shape conversion is:
 
 ```text
 Tile<f4e2m1fnx2, [BM, BK_PACKED]>  // BK_PACKED = BK / 2
-    unpack(const_shape![BM, BK]) -> Tile<f4e2m1fn, [BM, BK]>
+    unpack(shape![BM, BK]) -> Tile<f4e2m1fn, [BM, BK]>
 ```
 
 Do not pass `Tile<f4e2m1fnx2, ...>` directly to `mmaf_scaled`. The MMA operand

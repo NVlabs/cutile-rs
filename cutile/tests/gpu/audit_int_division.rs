@@ -28,8 +28,8 @@ mod int_division_module {
     ) {
         let q: Tile<i32, { [] }> = scalar_to_tile(a / b);
         let r: Tile<i32, { [] }> = scalar_to_tile(a % b);
-        q_out.store(q.reshape(const_shape![1]));
-        r_out.store(r.reshape(const_shape![1]));
+        q_out.store(q.reshape(shape![1]));
+        r_out.store(r.reshape(shape![1]));
     }
 
     /// Element-wise `/` and `%` on signed tiles.
@@ -40,8 +40,8 @@ mod int_division_module {
         x: &Tensor<i32, { [-1] }>,
         y: &Tensor<i32, { [-1] }>,
     ) {
-        let xt: Tile<i32, S> = x.load_tile(const_shape!(S), [0i32]);
-        let yt: Tile<i32, S> = y.load_tile(const_shape!(S), [0i32]);
+        let xt: Tile<i32, S> = x.load_tile(shape!(S), [0i32]);
+        let yt: Tile<i32, S> = y.load_tile(shape!(S), [0i32]);
         q_out.store(xt / yt);
         r_out.store(xt % yt);
     }
@@ -55,8 +55,8 @@ mod int_division_module {
         x: &Tensor<u32, { [-1] }>,
         y: &Tensor<u32, { [-1] }>,
     ) {
-        let xt: Tile<u32, S> = x.load_tile(const_shape!(S), [0i32]);
-        let yt: Tile<u32, S> = y.load_tile(const_shape!(S), [0i32]);
+        let xt: Tile<u32, S> = x.load_tile(shape!(S), [0i32]);
+        let yt: Tile<u32, S> = y.load_tile(shape!(S), [0i32]);
         q_out.store(xt / yt);
         r_out.store(xt % yt);
     }
@@ -65,14 +65,14 @@ mod int_division_module {
     #[cutile::entry()]
     fn scalar_ceil_div(out: &mut Tensor<i32, { [1] }>, a: i32, b: i32) {
         let q: Tile<i32, { [] }> = scalar_to_tile(ceil_div(a, b));
-        out.store(q.reshape(const_shape![1]));
+        out.store(q.reshape(shape![1]));
     }
 
     /// An index computed with `/` from a runtime scalar: the access must
     /// stay guarded, and the guard must agree with Rust (`-1 / B == 0`).
     #[cutile::entry()]
     fn div_index<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>, n: i32) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let idx = n / B;
         z.store(p.load([idx]));
     }
@@ -82,8 +82,8 @@ mod int_division_module {
     /// truncate too, or the loads for `i < 0` read tile `-1` unchecked.
     #[cutile::entry()]
     fn trunc_div_static_discharge(z: &mut Tensor<f32, { [16] }>, x: &Tensor<f32, { [32] }>) {
-        let p = x.partition(const_shape![16]);
-        let mut acc: Tile<f32, { [16] }> = constant(0.0, const_shape![16]);
+        let p = x.partition(shape![16]);
+        let mut acc: Tile<f32, { [16] }> = constant(0.0, shape![16]);
         for i in -15i32..32i32 {
             acc = acc + p.load([i / 16i32]);
         }

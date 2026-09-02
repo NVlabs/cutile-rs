@@ -21,8 +21,8 @@ mod atomic_red_kernels {
     #[cutile::entry()]
     unsafe fn atomic_red_accumulate(out: &Tensor<f32, { [-1, -1] }>) {
         let mut out_part: PartitionMut<f32, { [16, 16] }> =
-            unsafe { out.partition_full_mut(const_shape![16, 16]) };
-        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, const_shape![16, 16]);
+            unsafe { out.partition_full_mut(shape![16, 16]) };
+        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, shape![16, 16]);
         let _tok: Token = unsafe {
             atomic_red_view_tko(
                 &mut out_part,

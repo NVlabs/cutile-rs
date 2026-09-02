@@ -24,7 +24,7 @@ mod short_circuit_module {
     fn bump_hits() -> bool {
         let (old, _load_token) = HITS.load(ordering::Acquire, scope::Device);
         let _store_token = HITS.store(
-            old + constant(1i32, const_shape![]),
+            old + constant(1i32, shape![]),
             ordering::Release,
             scope::Device,
         );
@@ -40,7 +40,7 @@ mod short_circuit_module {
         let t: i32 = if taken { 1i32 } else { 0i32 };
         let (hits, _load_token) = HITS.load(ordering::Acquire, scope::Device);
         let encoded: Tile<i32, { [] }> = hits + scalar_to_tile(t * 100i32);
-        out.store(encoded.reshape(const_shape![1]));
+        out.store(encoded.reshape(shape![1]));
     }
 
     /// Writes `hits + 100 * taken` (see `short_circuit_and` for the flags).
@@ -50,7 +50,7 @@ mod short_circuit_module {
         let t: i32 = if taken { 1i32 } else { 0i32 };
         let (hits, _load_token) = HITS.load(ordering::Acquire, scope::Device);
         let encoded: Tile<i32, { [] }> = hits + scalar_to_tile(t * 100i32);
-        out.store(encoded.reshape(const_shape![1]));
+        out.store(encoded.reshape(shape![1]));
     }
 
     /// The motivating shape: the remainder must not be computed for `n == 0`.
@@ -59,7 +59,7 @@ mod short_circuit_module {
         let divisible = n != 0i32 && idx % n == 0i32;
         let t: i32 = if divisible { 1i32 } else { 0i32 };
         let tile: Tile<i32, { [] }> = scalar_to_tile(t);
-        out.store(tile.reshape(const_shape![1]));
+        out.store(tile.reshape(shape![1]));
     }
 }
 

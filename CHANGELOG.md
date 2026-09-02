@@ -45,6 +45,9 @@ on 0.3.0.
 
 ### Added
 
+- `shape![..]`: the shape constructor macro, replacing `const_shape!` (now
+  deprecated; both spellings work on both compile tracks). Runtime extents
+  keep the explicit form `Shape::<{ [-1] }> { dims: &[n] }`.
 - `x.load_like(z)`: method-form spelling of `load_tile_like(x, z)`, lowering
   to identical Tile IR with identical bounds-check placement. Both spellings
   remain supported; docs and examples now use the method form (#259).

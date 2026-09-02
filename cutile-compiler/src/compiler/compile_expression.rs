@@ -4051,12 +4051,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let last_seg = last_seg.unwrap();
                     let mac_name = last_seg.ident.to_string();
                     Ok(match mac_name.as_str() {
-                        "const_shape" | "const_array" => {
+                        "const_shape" | "shape" | "const_array" => {
                             // TODO (hme): Remove special case for const_shape here
                             //  and on the proc-macro side (rank_instantiation.rs).
                             let args = self.const_shape_macro_args(mac_expr, generic_vars, ctx)?;
                             let cga_str = format!("{{[{}]}}", args.join(", "));
-                            let ty_str = if mac_name == "const_shape" {
+                            let ty_str = if mac_name == "const_shape" || mac_name == "shape" {
                                 "Shape"
                             } else {
                                 "Array"

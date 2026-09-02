@@ -31,14 +31,14 @@ mod program_id_module {
             + 10_000 * num_programs(1)
             + 100_000 * num_programs(2);
         let id: Tile<i32, { [] }> = scalar_to_tile(encoded);
-        out.store(id.reshape(const_shape![1, 1, 1]));
+        out.store(id.reshape(shape![1, 1, 1]));
     }
 
     /// The rank-1 idiom: each program copies exactly the sub-tensor it
     /// owns.
     #[cutile::entry()]
     fn copy_by_program_id(z: &mut Tensor<f32, { [4] }>, x: &Tensor<f32, { [-1] }>) {
-        let tile = x.partition(const_shape![4]).load([program_id(0)]);
+        let tile = x.partition(shape![4]).load([program_id(0)]);
         z.store(tile);
     }
 }

@@ -16,10 +16,10 @@ mod my_module {
         let tile_x: Tile<f32, { [BM, BN] }> = x.load_like(y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
-            tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
+            tile_x_max.reshape(shape![BM, 1]).broadcast(y.shape());
         let num: Tile<f32, { [BM, BN] }> = exp(tile_x - tile_x_max);
         let denom: Tile<f32, { [BM] }> = reduce_sum(num, 1);
-        let denom = denom.reshape(const_shape![BM, 1]).broadcast(y.shape());
+        let denom = denom.reshape(shape![BM, 1]).broadcast(y.shape());
         y.store(num / denom);
     }
 }

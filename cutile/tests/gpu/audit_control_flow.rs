@@ -22,7 +22,7 @@ mod control_flow_module {
     /// A `return` under `if` used to be dropped, and the load executed.
     #[cutile::entry()]
     fn early_return_in_if(z: &mut Tensor<f32, { [16] }>, x: &Tensor<f32, { [-1] }>, n: i32) {
-        let p = x.partition(const_shape![16]);
+        let p = x.partition(shape![16]);
         let idx = get_tile_block_id().0;
         if idx >= n {
             return;
@@ -33,8 +33,8 @@ mod control_flow_module {
     /// `cuda_tile.break` is not valid inside `cuda_tile.for`.
     #[cutile::entry()]
     fn break_in_for(z: &mut Tensor<f32, { [16] }>, x: &Tensor<f32, { [-1] }>, n: i32) {
-        let p = x.partition(const_shape![16]);
-        let mut acc: Tile<f32, { [16] }> = constant(0.0, const_shape![16]);
+        let p = x.partition(shape![16]);
+        let mut acc: Tile<f32, { [16] }> = constant(0.0, shape![16]);
         for i in 0i32..4i32 {
             if i >= n {
                 break;
@@ -47,7 +47,7 @@ mod control_flow_module {
     /// A top-level `return` stays supported.
     #[cutile::entry()]
     fn top_level_return(z: &mut Tensor<f32, { [16] }>) {
-        let t: Tile<f32, { [16] }> = constant(1.0, const_shape![16]);
+        let t: Tile<f32, { [16] }> = constant(1.0, shape![16]);
         z.store(t);
         return;
     }
@@ -55,10 +55,10 @@ mod control_flow_module {
     /// `break` inside `while` lowers to `cuda_tile.loop`, which supports it.
     #[cutile::entry()]
     fn break_in_while(z: &mut Tensor<f32, { [16] }>) {
-        let mut acc: Tile<f32, { [16] }> = constant(0.0, const_shape![16]);
+        let mut acc: Tile<f32, { [16] }> = constant(0.0, shape![16]);
         let mut i: i32 = 0i32;
         while i < 10i32 {
-            acc = acc + constant(1.0, const_shape![16]);
+            acc = acc + constant(1.0, shape![16]);
             i = i + 1i32;
             if i >= 3i32 {
                 break;
