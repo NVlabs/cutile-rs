@@ -291,8 +291,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 TypeInstance::ElementType(element_instance),
             )?));
         } else if let Some(TypeInstance::PtrType(ptr_instance)) = type_instance {
-            let Some(pointer_attrs) = self.modules.get_primitives_attrs("Pointer", "* mut E")
-            else {
+            let Some(pointer_attrs) = self.modules.get_primitives_attrs(
+                "Pointer",
+                crate::types::pointer_impl_key(ptr_instance.is_mutable),
+            ) else {
                 return self
                     .jit_error_result(&ty.span(), "misconfigured Pointer impl in core module");
             };

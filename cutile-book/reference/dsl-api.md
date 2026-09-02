@@ -25,9 +25,9 @@ mod my_kernels {
         a: &Tensor<f32, { [-1] }>,         // immutable: read-only input
         b: &Tensor<f32, { [-1] }>,         // immutable: read-only input
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile_a: Tile<f32, S> = a.load_tile(const_shape!(S), [pid.0]);
-        let tile_b: Tile<f32, S> = b.load_tile(const_shape!(S), [pid.0]);
+        let pid = program_id(0);
+        let tile_a: Tile<f32, S> = a.load_tile(const_shape!(S), [pid]);
+        let tile_b: Tile<f32, S> = b.load_tile(const_shape!(S), [pid]);
         output.store(tile_a + tile_b);
     }
 }
@@ -112,8 +112,8 @@ mod my_kernels {
         output: &mut Tensor<f32, S>,
         input: &Tensor<f32, { [-1] }>,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid.0]);
+        let pid = program_id(0);
+        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid]);
         output.store(relu(tile));  // device function call, inlined
     }
 }
@@ -163,8 +163,8 @@ mod my_kernels {
         output: &mut Tensor<f32, S>,
         input: &Tensor<f32, { [-1] }>,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid.0]);
+        let pid = program_id(0);
+        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid]);
         let activated: Tile<f32, S> = relu(tile);   // inlined from Module A
         output.store(square(activated));             // inlined from Module A
     }
@@ -237,13 +237,13 @@ fn kernel(
 
 ### Partition / PartitionMut
 
-`Partition<'a, E, const D: [i32; N]>` — A read-only partitioned view of a tensor, dividing it into tiles indexed by block ID.
+`Partition<'a, E, const D: [i32; N]>` — A read-only partitioned view of a tensor, dividing it into tiles indexed by program ID.
 
 `PartitionMut<'a, E, const D: [i32; N]>` — A mutable partitioned view.
 
 ```rust
 let part: Partition<f32, { [128, 128] }> = input.partition(const_shape![128, 128]);
-let tile: Tile<f32, { [128, 128] }> = part.load([pid.0, pid.1]);
+let tile: Tile<f32, { [128, 128] }> = part.load([pid_m, pid_n]);
 ```
 
 ### Shape / Array
@@ -408,26 +408,30 @@ operation.
 let tile: Tile<f32, { [128] }> = load_tile_mut(output);
 output.store(tile * scale_tile);
 
-// Pattern 2: Load at block position
-let pid: (i32, i32, i32) = get_tile_block_id();
-let tile: Tile<f32, { [128] }> = input.load_tile(const_shape![128], [pid.0]);
+// Pattern 2: Load at program position
+let pid = program_id(0);
+let tile: Tile<f32, { [128] }> = input.load_tile(const_shape![128], [pid]);
 
 // Pattern 3: Load-like (positional)
 let tile_x: Tile<f32, { [16, 16] }> = load_tile_like(x, output);
 ```
 
-### Grid and Block
+### Grid and Program IDs
 
 | Function | Signature | Description |
 |---|---|---|
-| `get_tile_block_id()` | `() -> (i32, i32, i32)` | Current thread block's (x, y, z) index in the grid |
-| `get_num_tile_blocks()` | `() -> (i32, i32, i32)` | Total (x, y, z) dimensions of the grid |
+| `program_id(axis)` | `(i32) -> i32` | This tile program's index along grid axis `axis` (0, 1, or 2) |
+| `num_programs(axis)` | `(i32) -> i32` | The launch grid extent along grid axis `axis` (0, 1, or 2) |
+| `get_tile_block_id()` | `() -> (i32, i32, i32)` | All three (x, y, z) program indices as a tuple |
+| `get_num_tile_blocks()` | `() -> (i32, i32, i32)` | All three (x, y, z) grid extents as a tuple |
+
+For each axis `k`, `0 <= program_id(k) < num_programs(k)`.
 
 ```rust
-let pid: (i32, i32, i32) = get_tile_block_id();
-let grid: (i32, i32, i32) = get_num_tile_blocks();
+let pid = program_id(0);
+let n = num_programs(0);
 // Grid-stride loop
-for i in (pid.0..total).step_by(grid.0 as usize) { ... }
+for i in (pid..total).step_by(n as usize) { ... }
 ```
 
 ### Arithmetic (Element-wise)
@@ -605,8 +609,8 @@ Maps to hardware tensor cores when available.
 ```rust
 let mut acc: Tile<f32, { [16, 16] }> = constant(0.0f32, const_shape![16, 16]);
 for k in 0i32..(K/BK) {
-    let a_tile: Tile<f32, { [16, 8] }> = a_part.load([pid.0, k]);
-    let b_tile: Tile<f32, { [8, 16] }> = b_part.load([k, pid.1]);
+    let a_tile: Tile<f32, { [16, 8] }> = a_part.load([pid_m, k]);
+    let b_tile: Tile<f32, { [8, 16] }> = b_part.load([k, pid_n]);
     acc = mma(a_tile, b_tile, acc);
 }
 ```
@@ -666,9 +670,9 @@ ordering, scope, latency, and TMA controls explicitly.
 | `unsafe store_view_tko_mut(view, tile, index, ordering, scope, latency, tma)` | `(&mut PartitionMut<E, S>, Tile<E, S>, [i32; N], O, Sc, Option<i32>, T) -> Token` | Store a tile into a mutable partition |
 
 ```rust
-let pid = get_tile_block_id();
+let pid = program_id(0);
 let tile: Tile<f32, S> =
-    load_view_tko(&part, [pid.0], ordering::Weak, scope::TileBlock, None, tma::Enabled);
+    load_view_tko(&part, [pid], ordering::Weak, scope::TileBlock, None, tma::Enabled);
 ```
 
 #### Pointer-based loads and stores
@@ -836,12 +840,15 @@ let stride: i32 = unsafe { assume_div_by::<_, 4>(stride) };
 | `cuda_tile_assert!(cond, msg)` | GPU assertion |
 
 ```rust
-let pid: (i32, i32, i32) = get_tile_block_id();
-cuda_tile_print!("Block ({}, {}, {})\n", pid.0, pid.1, pid.2);
+let pid0 = program_id(0);
+let pid1 = program_id(1);
+let pid2 = program_id(2);
+cuda_tile_print!("Program ({}, {}, {})\n", pid0, pid1, pid2);
 
 // Assert a condition — aborts the kernel if false
 cuda_tile_assert!(len > 0, "Length must be positive");
 
-// Print scalars for debugging (runs on every block, so output may interleave)
-cuda_tile_print!("offset = {}\n", pid.0 * 128);
+// Print scalars for debugging (runs on every program, so output may interleave)
+let offset = pid0 * 128;
+cuda_tile_print!("offset = {}\n", offset);
 ```

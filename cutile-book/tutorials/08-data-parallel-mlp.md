@@ -31,11 +31,12 @@ mod data_parallel_module {
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK, BN]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid_m = program_id(0);
+        let pid_n = program_id(1);
         let mut tile_z = load_tile_mut(z);
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid.0, i]);
-            let tile_y = part_y.load([i, pid.1]);
+            let tile_x = part_x.load([pid_m, i]);
+            let tile_y = part_y.load([i, pid_n]);
             tile_z = mma(tile_x, tile_y, tile_z);
         }
         z.store(tile_z);
@@ -50,10 +51,10 @@ mod data_parallel_module {
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid = program_id(0);
         let mut tile_z = z.load().reshape(const_shape![BM, 1]);
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid.0, i]);
+            let tile_x = part_x.load([pid, i]);
             let tile_y = part_y.load([i]).reshape(const_shape![BK, 1]);
             tile_z = mma(tile_x, tile_y, tile_z);
             continue;
