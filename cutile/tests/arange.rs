@@ -22,7 +22,7 @@ mod test_kernels {
     #[cutile::entry()]
     fn copy_immutable<const B: i32>(out: &mut Tensor<i32, { [B] }>, a: &Tensor<i32, { [-1] }>) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
         out.store(tile_a);
     }
 }

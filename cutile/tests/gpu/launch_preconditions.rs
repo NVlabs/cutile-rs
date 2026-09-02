@@ -36,7 +36,7 @@ mod launch_preconditions_module {
     ) {
         let m = Dim::new(x.shape()[0] / BM);
         let n = Dim::new(x.shape()[1] / BN);
-        let part = x.partition(const_shape![BM, BN]).with_bounds((m, n));
+        let part = x.partition(shape![BM, BN]).with_bounds((m, n));
         for i in m {
             for j in n {
                 let tile = part.load(coord((i, j)));

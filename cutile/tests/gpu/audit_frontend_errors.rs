@@ -36,7 +36,7 @@ mod frontend_errors_module {
             (3i32, 4i32)
         };
         let t: Tile<i32, { [] }> = scalar_to_tile(a + b);
-        out.store(t.reshape(const_shape![1]));
+        out.store(t.reshape(shape![1]));
     }
 
     /// A per-dimension callee: its generics are inferred from the argument
@@ -63,7 +63,7 @@ mod frontend_errors_module {
         x: &Tensor<f32, { [-1] }>,
         idx: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         z.store(p.load([idx]));
     }
 
@@ -74,7 +74,7 @@ mod frontend_errors_module {
         x: &Tensor<f32, { [-1] }>,
         idx: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         z.store(p.load([idx]));
     }
 }

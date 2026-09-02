@@ -153,8 +153,8 @@ mod gemm_module {
         x: &Tensor<E, { [-1, K] }>,
         y: &Tensor<E, { [K, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let pid_m = program_id(0);
         let pid_n = program_id(1);
         let mut tile_z = load_tile_mut(z);
@@ -211,10 +211,10 @@ mod softmax_module {
         let tile_x: Tile<f32, { [BM, BN] }> = x.load_like(y);
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
-            tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
+            tile_x_max.reshape(shape![BM, 1]).broadcast(y.shape());
         let num: Tile<f32, { [BM, BN] }> = exp(tile_x - tile_x_max);
         let denom: Tile<f32, { [BM] }> = reduce_sum(num, 1);
-        let denom = denom.reshape(const_shape![BM, 1]).broadcast(y.shape());
+        let denom = denom.reshape(shape![BM, 1]).broadcast(y.shape());
         y.store(num / denom);
     }
 }
@@ -276,56 +276,56 @@ mod fmha_module {
         let head_idx = pid0 % h;
         let q_m_idx = program_id(1);
 
-        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+        let two: Tile<f32, { [] }> = constant(2.0f32, shape![]);
         let log2: f32 = tile_to_scalar(log(two));
         let qk_scale: f32 = qk_scale / log2;
-        let qk_scale: Tile<f32, { [BM, BN] }> = qk_scale.broadcast(const_shape![BM, BN]);
+        let qk_scale: Tile<f32, { [BM, BN] }> = qk_scale.broadcast(shape![BM, BN]);
 
-        let mut m_i: Tile<f32, { [BM, 1] }> = constant(f32::NEG_INFINITY, const_shape![BM, 1]);
-        let mut l_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, const_shape![BM, 1]);
-        let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, const_shape![BM, D]);
+        let mut m_i: Tile<f32, { [BM, 1] }> = constant(f32::NEG_INFINITY, shape![BM, 1]);
+        let mut l_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, shape![BM, 1]);
+        let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, shape![BM, D]);
 
-        let q_part: Partition<f32, { [1, 1, BM, D] }> = q.partition(const_shape![1, 1, BM, D]);
+        let q_part: Partition<f32, { [1, 1, BM, D] }> = q.partition(shape![1, 1, BM, D]);
         let tq: Tile<f32, { [1, 1, BM, D] }> = q_part.load([batch_idx, head_idx, q_m_idx, 0i32]);
-        let tq: Tile<f32, { [BM, D] }> = tq.reshape(const_shape![BM, D]);
+        let tq: Tile<f32, { [BM, D] }> = tq.reshape(shape![BM, D]);
 
         let n: i32 = k.shape()[2];
         let num_tiles: i32 = ceil_div(n, BN);
 
-        let k_part = k.partition(const_shape![1, 1, BN, D]);
-        let v_part = v.partition(const_shape![1, 1, BN, D]);
+        let k_part = k.partition(shape![1, 1, BN, D]);
+        let v_part = v.partition(shape![1, 1, BN, D]);
 
         for j in 0i32..num_tiles {
             let k_tile: Tile<f32, { [BN, D] }> = k_part
                 .load([batch_idx, head_idx, j, 0i32])
-                .reshape(const_shape![BN, D]);
+                .reshape(shape![BN, D]);
             let k_tile_trans: Tile<f32, { [D, BN] }> = k_tile.transpose();
-            let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+            let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, shape![BM, BN]);
             let qk: Tile<f32, { [BM, BN] }> = mma(tq, k_tile_trans, qk);
             let qk: Tile<f32, { [BM, BN] }> = qk * qk_scale;
 
             let qk_max: Tile<f32, { [BM] }> = reduce_max(qk, 1);
-            let qk_max: Tile<f32, { [BM, 1] }> = qk_max.reshape(const_shape![BM, 1]);
+            let qk_max: Tile<f32, { [BM, 1] }> = qk_max.reshape(shape![BM, 1]);
             let m_ij: Tile<f32, { [BM, 1] }> = max_tile(m_i, qk_max);
-            let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
+            let qk = qk - m_ij.broadcast(shape![BM, BN]);
 
             let p: Tile<f32, { [BM, BN] }> = exp2(qk, ftz::Disabled);
             let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1);
-            let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
+            let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(shape![BM, 1]);
             let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
 
             l_i = l_i * alpha + l_ij;
-            let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(const_shape![BM, D]);
+            let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(shape![BM, D]);
             acc = acc * alpha;
 
             let v_tile: Tile<f32, { [1, 1, BN, D] }> = v_part.load([batch_idx, head_idx, j, 0i32]);
-            let v_tile: Tile<f32, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+            let v_tile: Tile<f32, { [BN, D] }> = v_tile.reshape(shape![BN, D]);
             acc = mma(p, v_tile, acc);
             m_i = m_ij;
         }
 
-        acc = true_div(acc, l_i.broadcast(const_shape![BM, D]));
-        let acc = acc.reshape(const_shape![1, BM, D]);
+        acc = true_div(acc, l_i.broadcast(shape![BM, D]));
+        let acc = acc.reshape(shape![1, BM, D]);
         out.store(acc);
     }
 }
@@ -420,8 +420,8 @@ mod mlp_module {
         x: &Tensor<E, { [-1, K] }>,
         y: &Tensor<E, { [K, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let pid_m = program_id(0);
         let pid_n = program_id(1);
         let mut tile_z = load_tile_mut(z);
@@ -439,21 +439,21 @@ mod mlp_module {
         x: &Tensor<f32, { [-1, K] }>,
         y: &Tensor<f32, { [K] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK]);
         let pid = program_id(0);
-        let mut tile_z = z.load().reshape(const_shape![BM, 1]);
+        let mut tile_z = z.load().reshape(shape![BM, 1]);
         for i in 0i32..(K / BK) {
             let tile_x = part_x.load([pid, i]);
-            let tile_y = part_y.load([i]).reshape(const_shape![BK, 1]);
+            let tile_y = part_y.load([i]).reshape(shape![BK, 1]);
             tile_z = mma(tile_x, tile_y, tile_z);
         }
-        z.store(tile_z.reshape(const_shape![BM]));
+        z.store(tile_z.reshape(shape![BM]));
     }
 
     #[cutile::entry()]
     fn mlp_relu<const D: i32>(input_output: &mut Tensor<f32, { [D] }>) {
-        let zero_tile: Tile<f32, { [D] }> = constant(0.0f32, const_shape![D]);
+        let zero_tile: Tile<f32, { [D] }> = constant(0.0f32, shape![D]);
         let input = input_output.load();
         input_output.store(max_tile(zero_tile, input));
     }
@@ -531,7 +531,7 @@ mod pointer_add_module {
         let x_tensor: Tensor<T, { [-1] }> = get_tensor(x_ptr, len);
         let y_tensor: Tensor<T, { [-1] }> = get_tensor(y_ptr, len);
         let pid = program_id(0);
-        let tile_shape = const_shape![4i32];
+        let tile_shape = shape![4i32];
         let tile_x = x_tensor.partition(tile_shape).load([pid]);
         let tile_y = y_tensor.partition(tile_shape).load([pid]);
         z_tensor

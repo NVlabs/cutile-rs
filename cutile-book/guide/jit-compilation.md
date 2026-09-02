@@ -88,7 +88,7 @@ fn normalize<const BM: i32, const BN: i32>(
 ) {
     let tile = x.load_like(z);
     let row_max = reduce_max(tile, 1i32);
-    z.store(tile - row_max.reshape(const_shape![BM, 1]).broadcast(z.shape()));
+    z.store(tile - row_max.reshape(shape![BM, 1]).broadcast(z.shape()));
 }
 ```
 

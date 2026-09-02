@@ -32,8 +32,8 @@ mod review_probe_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = max(i * -2_000_000_000i32, i);
             acc = acc + p.load([index]);
@@ -50,8 +50,8 @@ mod review_probe_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = (i * 2_000_000_000i32) % 1_000i32;
             acc = acc + p.load([index]);
@@ -66,8 +66,8 @@ mod review_probe_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [48] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = max(i * -2_000_000_000i32, i);
             acc = acc + p.load([index]);

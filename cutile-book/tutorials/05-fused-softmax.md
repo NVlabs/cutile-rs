@@ -65,14 +65,14 @@ mod my_module {
         // Find max per row (for numerical stability)
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
-            tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
+            tile_x_max.reshape(shape![BM, 1]).broadcast(y.shape());
 
         // Subtract max and exponentiate
         let num: Tile<f32, { [BM, BN] }> = exp(tile_x - tile_x_max);
 
         // Sum per row
         let denom: Tile<f32, { [BM] }> = reduce_sum(num, 1);
-        let denom = denom.reshape(const_shape![BM, 1]).broadcast(y.shape());
+        let denom = denom.reshape(shape![BM, 1]).broadcast(y.shape());
 
         // Divide
         y.store(num / denom);
@@ -134,7 +134,7 @@ After reduction, reshape and broadcast to match the original tile:
 // [BM] → [BM, 1] → [BM, BN]
 let tile_x_max: Tile<f32, { [BM, BN] }> =
     tile_x_max
-    .reshape(const_shape![BM, 1])   // [2] → [2, 1]
+    .reshape(shape![BM, 1])   // [2] → [2, 1]
     .broadcast(y.shape());           // [2, 1] → [2, 8]
 ```
 

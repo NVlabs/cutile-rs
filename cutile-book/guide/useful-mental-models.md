@@ -61,7 +61,7 @@ Inside a kernel, the program id selects the logical region:
 
 ```rust
 let pid_m = program_id(0);
-let part_x = x.partition(const_shape![BM, BK]);
+let part_x = x.partition(shape![BM, BK]);
 let tile_x = part_x.load([pid_m, k_tile]);
 ```
 

@@ -2221,7 +2221,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             return Ok(None);
         };
         let ty_name = match name.as_str() {
-            "const_shape" => "Shape",
+            "const_shape" | "shape" => "Shape",
             "const_array" => "Array",
             _ => return Ok(None),
         };

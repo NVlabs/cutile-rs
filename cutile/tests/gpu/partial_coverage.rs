@@ -26,7 +26,7 @@ mod partial_coverage_module {
     /// Writes a constant to this CTA's slab; safe, and provably so.
     #[cutile::entry(deny_in_kernel_checks = true)]
     fn fill_rows<const BM: i32, const D: i32>(out: &mut Tensor<f32, { [BM, D] }>) {
-        let t: Tile<f32, { [BM, D] }> = constant(7.0, const_shape![BM, D]);
+        let t: Tile<f32, { [BM, D] }> = constant(7.0, shape![BM, D]);
         out.store(t);
     }
 }

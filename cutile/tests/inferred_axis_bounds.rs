@@ -29,7 +29,7 @@ mod inferred_module {
     /// Unannotated: an ordinary range loop over `num_tiles`, dynamic extent.
     #[cutile::entry]
     fn plain_loop<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         for i in 0i32..num_tiles(&p, 0) {
             let t = p.load([i]);
             z.store(t);
@@ -39,7 +39,7 @@ mod inferred_module {
     /// Annotated twin: the same loop over an explicit `Dim`.
     #[cutile::entry]
     fn dim_loop<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let d = num_tiles(&p, 0).into_dim();
         for i in d {
             let t = p.load([i]);
@@ -53,7 +53,7 @@ mod inferred_module {
         z: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let p = x.partition(const_shape![BM, BN]);
+        let p = x.partition(shape![BM, BN]);
         for i in 0i32..num_tiles(&p, 0) {
             for j in 0i32..num_tiles(&p, 1) {
                 let t = p.load([i, j]);
@@ -68,7 +68,7 @@ mod inferred_module {
         z: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let p = x.partition(const_shape![BM, BN]);
+        let p = x.partition(shape![BM, BN]);
         let rows = num_tiles(&p, 0).into_dim();
         let cols = num_tiles(&p, 1).into_dim();
         let bp = p.with_bounds((rows, cols));
@@ -91,9 +91,9 @@ mod inferred_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let py = y.partition(const_shape![BK, BN]);
-        let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, const_shape![BM, BN]);
+        let px = x.partition(shape![BM, BK]);
+        let py = y.partition(shape![BK, BN]);
+        let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, shape![BM, BN]);
         for k in 0i32..num_tiles(&px, 1) {
             let tx = px.load([0i32, k]);
             let ty = py.load([k, 0i32]);
@@ -111,9 +111,9 @@ mod inferred_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let py = y.partition(const_shape![BK, BN]);
-        let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, const_shape![BM, BN]);
+        let px = x.partition(shape![BM, BK]);
+        let py = y.partition(shape![BK, BN]);
+        let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, shape![BM, BN]);
         for k in 0i32..num_tiles(&px, 1) {
             let tx = px.load([0i32, k]);
             let ty = py.load([k, 0i32]);
@@ -131,7 +131,7 @@ mod inferred_module {
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
         let xp = x
-            .partition(const_shape![BM, BN])
+            .partition(shape![BM, BN])
             .with_bounds((num_tiles(&z, 0), num_tiles(&z, 1)));
         for index in z.iter_indices() {
             let (m, n) = index.components();
@@ -152,7 +152,7 @@ mod inferred_module {
         mut z: MappedPartitionMut<f32, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let xp = x.partition(const_shape![BM, BN]);
+        let xp = x.partition(shape![BM, BN]);
         for index in z.iter_indices() {
             let (m, n) = index.components();
             let t = xp.load([m, n]);
@@ -170,8 +170,8 @@ mod inferred_module {
         y: &Tensor<f32, { [-1, -1] }>,
         flag: i32,
     ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let py = y.partition(const_shape![BK, BN]);
+        let px = x.partition(shape![BM, BK]);
+        let py = y.partition(shape![BK, BN]);
         for k in 0i32..num_tiles(&px, 1) {
             if flag > 0i32 {
                 let ty = py.load([k, 0i32]);
@@ -188,7 +188,7 @@ mod inferred_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let t = p.load([pid.0]);
         z.store(t);
@@ -199,9 +199,9 @@ mod inferred_module {
     /// kernel-visible view.
     #[cutile::entry(deny_in_kernel_checks = true)]
     fn block_id_indexed_store<const B: i32>(out: &mut Tensor<f32, { [-1] }>) {
-        let mut p = out.partition_mut(const_shape![B]);
+        let mut p = out.partition_mut(shape![B]);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let t: Tile<f32, { [B] }> = constant(1.0, const_shape![B]);
+        let t: Tile<f32, { [B] }> = constant(1.0, shape![B]);
         p.store(t, [pid.0]);
     }
 }

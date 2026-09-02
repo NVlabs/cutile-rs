@@ -536,10 +536,9 @@ mod atomic_red_view_module {
     /// output view, no old values returned.
     #[cutile::entry()]
     unsafe fn atomic_red_view_kernel(output: &mut Tensor<f32, { [-1, -1] }>) {
-        let mut out_part: PartitionMut<f32, { [16, 16] }> =
-            output.partition_mut(const_shape![16, 16]);
+        let mut out_part: PartitionMut<f32, { [16, 16] }> = output.partition_mut(shape![16, 16]);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, const_shape![16, 16]);
+        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, shape![16, 16]);
         let _tok: Token = unsafe {
             atomic_red_view_tko(
                 &mut out_part,
@@ -1164,8 +1163,8 @@ mod gather_scatter_view_module {
     unsafe fn gsv_kernel(data: &Tensor<f32, { [-1, -1] }>) {
         let tok: Token = new_token_unordered();
         let gsv: GatherScatterView<f32, { [8, 64] }, 0> =
-            unsafe { make_gather_scatter_view(data, const_shape![8, 64], padding::None) };
-        let sparse_idx: Tile<i32, { [8] }> = constant(0i32, const_shape![8]);
+            unsafe { make_gather_scatter_view(data, shape![8, 64], padding::None) };
+        let sparse_idx: Tile<i32, { [8] }> = constant(0i32, shape![8]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let (_tile, _tok): (Tile<f32, { [8, 64] }>, Token) = unsafe {
             load_gather_scatter_view_tko(
@@ -1215,7 +1214,7 @@ mod strided_view_module {
     unsafe fn sv_kernel(data: &Tensor<f32, { [-1, -1] }>) {
         let tok: Token = new_token_unordered();
         let sv: StridedView<f32, { [16, 16] }, { [2, 1] }, { [0, 1] }> =
-            unsafe { make_strided_view(data, const_shape![16, 16], padding::None) };
+            unsafe { make_strided_view(data, shape![16, 16], padding::None) };
         let pid: (i32, i32, i32) = get_tile_block_id();
         let (_tile, _tok): (Tile<f32, { [16, 16] }>, Token) = unsafe {
             load_strided_view_tko(
@@ -1267,7 +1266,7 @@ mod strided_view_permuted_module {
     unsafe fn sv_permuted_kernel(data: &Tensor<f32, { [-1, -1] }>) {
         let tok: Token = new_token_unordered();
         let sv: StridedView<f32, { [16, 16] }, { [2, 1] }, { [1, 0] }> =
-            unsafe { make_strided_view(data, const_shape![16, 16], padding::None) };
+            unsafe { make_strided_view(data, shape![16, 16], padding::None) };
         let pid: (i32, i32, i32) = get_tile_block_id();
         let (_tile, _tok): (Tile<f32, { [16, 16] }>, Token) = unsafe {
             load_strided_view_tko(

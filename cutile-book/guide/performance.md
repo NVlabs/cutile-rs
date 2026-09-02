@@ -34,12 +34,12 @@ fn fused<const BM: i32, const BN: i32>(
 ) {
     let tile = x.load_like(z);
     let centered = tile - reduce_max(tile, 1i32)
-        .reshape(const_shape![BM, 1])
-        .broadcast(const_shape![BM, BN]);
+        .reshape(shape![BM, 1])
+        .broadcast(shape![BM, BN]);
     let exp_x = exp(centered);
     let sum = reduce_sum(exp_x, 1i32)
-        .reshape(const_shape![BM, 1])
-        .broadcast(const_shape![BM, BN]);
+        .reshape(shape![BM, 1])
+        .broadcast(shape![BM, BN]);
     z.store(true_div(exp_x, sum));
 }
 ```
@@ -65,7 +65,7 @@ Increase arithmetic intensity by reusing loaded tiles, fusing adjacent operation
 Use `mma` and `mmaf_scaled` for matrix multiply paths. The compiler lowers supported dtype and shape combinations to Tensor Core instructions:
 
 ```rust
-let mut acc = constant(0.0f32, const_shape![BM, BN]);
+let mut acc = constant(0.0f32, shape![BM, BN]);
 for k_tile in 0i32..k_tiles {
     let tile_x = part_x.load([pid_m, k_tile]);
     let tile_y = part_y.load([k_tile, pid_n]);
@@ -92,12 +92,12 @@ fn gemm_persistent<
     x: &Tensor<T, { [-1, -1] }>,
     y: &Tensor<T, { [-1, -1] }>,
 ) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
 
     for out_idx in z.iter_indices() {
         let (bid_m, bid_n) = out_idx.components();
-        let mut acc: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+        let mut acc: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
         for k_tile in 0i32..num_tiles(&part_x, 1) {
             acc = mma(part_x.load([bid_m, k_tile]), part_y.load([k_tile, bid_n]), acc);
         }
