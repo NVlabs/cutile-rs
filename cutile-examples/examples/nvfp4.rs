@@ -10,9 +10,6 @@
  * Run with: cargo run -p cutile-examples --example nvfp4
  */
 
-// Still on the deprecated `Dim::new` spelling; migrate with the examples pass.
-#![allow(deprecated)]
-
 use cutile::cuda_core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::prelude::*;
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
@@ -50,7 +47,6 @@ mod nvfp4_linear {
         alpha: f32,
     ) {
         let pid = get_tile_block_id();
-        let k_tiles = Dim::new(x.shape()[1] / BK_PACKED);
 
         let part_x = x.partition(const_shape![BM, BK_PACKED]);
         let part_y = y.partition(const_shape![BN, BK_PACKED]);
@@ -59,7 +55,7 @@ mod nvfp4_linear {
 
         let mut tile_z = constant(0.0f32, const_shape![BM, BN]);
 
-        for k_tile in k_tiles {
+        for k_tile in 0i32..num_tiles(&part_x, 1) {
             let tile_x_packed = part_x.load([pid.0, k_tile]);
             let tile_y_packed = part_y.load([pid.1, k_tile]);
 

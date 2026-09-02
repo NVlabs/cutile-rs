@@ -7,7 +7,7 @@ use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
 use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
 use crate::error::DeviceError;
-use cuda_core::{sys, IntoResult, Stream};
+use cuda_core::{sys, Device, IntoResult, Stream};
 use std::future::IntoFuture;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 
 /// A captured and instantiated CUDA graph, ready for replay.
 ///
-/// Created via [`CudaGraph::capture`], which executes a [`DeviceOp`] once
-/// on a capture stream, recording all GPU work into a graph. The graph can then
+/// Created via [`CudaGraph::capture`], which runs a [`DeviceOp`] once on a
+/// capture stream, recording all GPU work into a graph. The graph can then
 /// be replayed any number of times via [`launch`](CudaGraph::launch).
 ///
 /// All device pointers used by the operation are baked into the graph at capture
@@ -32,7 +32,7 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 /// // Build a lazy operation (no GPU work yet).
 /// let forward_op = build_forward_pass(&model, &bufs);
 ///
-/// // Capture: executes once, records into graph, synchronizes.
+/// // Capture: records the op's GPU work into a graph. Nothing has run yet.
 /// let mut graph = CudaGraph::capture(stream.clone(), forward_op)?;
 /// let bufs = graph.take_output().unwrap();
 ///
@@ -44,66 +44,42 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 /// ```
 pub struct CudaGraph<T> {
     stream: Arc<Stream>,
-    cu_graph: sys::CUgraph,
-    cu_graph_exec: sys::CUgraphExec,
+    exec: Arc<GraphExecHandle>,
     output: Option<T>,
 }
 
-impl<T: Send> CudaGraph<T> {
-    /// Capture a [`DeviceOp`] into a replayable CUDA graph.
-    ///
-    /// Executes `op` once on `stream` in capture mode. All GPU work (kernel
-    /// launches, memcpys, etc.) issued by the operation is recorded into a
-    /// graph. The graph is then instantiated, uploaded, and the stream is
-    /// synchronized so the output `T` is safe to read immediately.
-    ///
-    /// Retrieve the output via [`take_output`](CudaGraph::take_output).
-    pub fn capture(
-        stream: Arc<Stream>,
-        op: impl DeviceOp<Output = T>,
+/// Owns an instantiated CUDA graph: the `CUgraph` it was instantiated from
+/// and the `CUgraphExec` that replays it.
+///
+/// Shared (via `Arc`) between the [`CudaGraph`] and every [`GraphLaunch`] it
+/// hands out, so a launch can never replay an exec that has already been
+/// destroyed: the handles live until the last owner — graph or pending
+/// launch — is dropped. `GraphLaunch` used to copy the raw `CUgraphExec`, so
+/// `let l = graph.launch(); drop(graph); l.sync()` launched a destroyed exec.
+struct GraphExecHandle {
+    /// Bound before destruction: the driver needs the owning context current.
+    device: Arc<Device>,
+    cu_graph: sys::CUgraph,
+    cu_graph_exec: sys::CUgraphExec,
+}
+
+// SAFETY: both fields are opaque driver handles that the CUDA driver
+// synchronizes internally; `cuGraphLaunch` may be issued from any thread. The
+// only mutation is the destroy in `Drop`, which runs exactly once, after the
+// last `Arc` owner is gone.
+unsafe impl Send for GraphExecHandle {}
+unsafe impl Sync for GraphExecHandle {}
+
+impl GraphExecHandle {
+    /// Instantiates `cu_graph` and pre-uploads the exec on `stream`. Takes
+    /// ownership of `cu_graph` on every path: it is destroyed if
+    /// instantiation fails, and owned by the returned handle otherwise
+    /// (whose `Drop` also covers an upload failure).
+    fn instantiate(
+        device: Arc<Device>,
+        cu_graph: sys::CUgraph,
+        stream: &Stream,
     ) -> Result<Self, DeviceError> {
-        let device = stream.device().clone();
-        device.bind_to_thread()?;
-
-        // Begin capture.
-        unsafe {
-            stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
-        }
-
-        // Execute the operation on the capture stream.
-        let exec_ctx = ExecutionContext::new(stream.clone());
-        let op_result = unsafe { op.execute(&exec_ctx) };
-
-        // End capture — must happen regardless of op success.
-        let end_result = unsafe { stream.end_capture() };
-
-        // Handle the (op_result, end_result) matrix, cleaning up on failure.
-        let (output, cu_graph) = match (op_result, end_result) {
-            (Err(op_err), Ok(cu_graph)) => {
-                if !cu_graph.is_null() {
-                    unsafe {
-                        let _ = sys::cuGraphDestroy(cu_graph).result();
-                    }
-                }
-                return Err(op_err);
-            }
-            (Err(op_err), Err(_)) => {
-                return Err(op_err);
-            }
-            (Ok(_), Err(capture_err)) => {
-                return Err(DeviceError::Driver(capture_err));
-            }
-            (Ok(output), Ok(cu_graph)) => {
-                if cu_graph.is_null() {
-                    return Err(DeviceError::Internal(
-                        "cuStreamEndCapture returned null graph".into(),
-                    ));
-                }
-                (output, cu_graph)
-            }
-        };
-
-        // Instantiate.
         let cu_graph_exec = unsafe {
             let mut cu_graph_exec = MaybeUninit::<sys::CUgraphExec>::uninit();
             match sys::cuGraphInstantiateWithFlags(cu_graph_exec.as_mut_ptr(), cu_graph, 0).result()
@@ -115,23 +91,121 @@ impl<T: Send> CudaGraph<T> {
                 }
             }
         };
-
-        // Upload (pre-stages graph resources on the device).
-        if let Err(e) = unsafe { sys::cuGraphUpload(cu_graph_exec, stream.cu_stream()).result() } {
-            unsafe {
-                let _ = sys::cuGraphExecDestroy(cu_graph_exec).result();
-                let _ = sys::cuGraphDestroy(cu_graph).result();
-            }
-            return Err(DeviceError::Driver(e));
-        }
-
-        // Synchronize so the output is safe to read.
-        unsafe { stream.synchronize() }?;
-
-        Ok(Self {
-            stream,
+        let handle = Self {
+            device,
             cu_graph,
             cu_graph_exec,
+        };
+        // Upload (pre-stages graph resources on the device). On failure
+        // `handle` drops here and destroys both objects.
+        unsafe { sys::cuGraphUpload(handle.cu_graph_exec, stream.cu_stream()).result()? };
+        Ok(handle)
+    }
+}
+
+impl Drop for GraphExecHandle {
+    fn drop(&mut self) {
+        let _ = self.device.bind_to_thread();
+        if !self.cu_graph_exec.is_null() {
+            let _ = unsafe { sys::cuGraphExecDestroy(self.cu_graph_exec).result() };
+        }
+        if !self.cu_graph.is_null() {
+            let _ = unsafe { sys::cuGraphDestroy(self.cu_graph).result() };
+        }
+    }
+}
+
+/// Runs `record` with `stream` in (relaxed) capture mode and turns the
+/// recorded work into an instantiated, uploaded graph.
+///
+/// `cuStreamEndCapture` runs on every path — success, a `record` error, and
+/// (before the panic resumes) a panic inside `record` — so a failure can
+/// never leave the stream stuck in capture mode, and a graph handle produced
+/// on a failing path is destroyed rather than leaked.
+///
+/// The caller must hold the execution lock: recording executes a `DeviceOp`.
+fn capture_on<R>(
+    stream: &Arc<Stream>,
+    record: impl FnOnce() -> Result<R, DeviceError>,
+) -> Result<(R, Arc<GraphExecHandle>), DeviceError> {
+    let device = stream.device().clone();
+    device.bind_to_thread()?;
+
+    unsafe {
+        stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
+    }
+
+    let recorded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(record)) {
+        Ok(result) => result,
+        Err(payload) => {
+            if let Ok(cu_graph) = unsafe { stream.end_capture() } {
+                destroy_graph(cu_graph);
+            }
+            std::panic::resume_unwind(payload);
+        }
+    };
+
+    // End capture — must happen regardless of the record result.
+    let end_result = unsafe { stream.end_capture() };
+
+    // Handle the (recorded, end_result) matrix, cleaning up on failure.
+    let (output, cu_graph) = match (recorded, end_result) {
+        (Err(err), Ok(cu_graph)) => {
+            destroy_graph(cu_graph);
+            return Err(err);
+        }
+        (Err(err), Err(_)) => return Err(err),
+        (Ok(_), Err(capture_err)) => return Err(DeviceError::Driver(capture_err)),
+        (Ok(_), Ok(cu_graph)) if cu_graph.is_null() => {
+            return Err(DeviceError::Internal(
+                "cuStreamEndCapture returned null graph".into(),
+            ));
+        }
+        (Ok(output), Ok(cu_graph)) => (output, cu_graph),
+    };
+
+    let exec = GraphExecHandle::instantiate(device, cu_graph, stream)?;
+
+    // Drain the upload. The recorded work itself has *not* run.
+    unsafe { stream.synchronize() }?;
+
+    Ok((output, Arc::new(exec)))
+}
+
+fn destroy_graph(cu_graph: sys::CUgraph) {
+    if !cu_graph.is_null() {
+        let _ = unsafe { sys::cuGraphDestroy(cu_graph).result() };
+    }
+}
+
+impl<T: Send> CudaGraph<T> {
+    /// Capture a [`DeviceOp`] into a replayable CUDA graph.
+    ///
+    /// Runs `op` once on `stream` in capture mode. All GPU work (kernel
+    /// launches, memcpys, etc.) issued by the operation is *recorded* into a
+    /// graph, not executed. The graph is then instantiated and uploaded.
+    ///
+    /// The output `T` is available immediately via
+    /// [`take_output`](CudaGraph::take_output), but only its host-side
+    /// metadata (shapes, device pointers, handles) is meaningful: the GPU
+    /// data behind it is first computed when the graph is launched. Read it
+    /// after `graph.launch().sync_on(graph.stream())`.
+    ///
+    /// Capture holds the thread-local execution lock for the duration of
+    /// `op`, so nested `.sync()` / `.sync_on()` / `.await` inside it return
+    /// the non-reentrant error (see [`Scope`]). If `op` fails or panics, the
+    /// capture is ended and the stream left usable before the error or panic
+    /// propagates.
+    pub fn capture(
+        stream: Arc<Stream>,
+        op: impl DeviceOp<Output = T>,
+    ) -> Result<Self, DeviceError> {
+        let _execution_lock = crate::device_operation::acquire_execution_lock()?;
+        let exec_ctx = ExecutionContext::new(stream.clone());
+        let (output, exec) = capture_on(&stream, || unsafe { op.execute(&exec_ctx) })?;
+        Ok(Self {
+            stream,
+            exec,
             output: Some(output),
         })
     }
@@ -144,22 +218,63 @@ impl<T: Send> CudaGraph<T> {
         self.output.take()
     }
 
-    /// Execute a [`DeviceOp`] on the graph's stream without synchronizing.
+    /// Enqueue a [`GraphNode`] on the graph's stream without synchronizing.
     ///
-    /// Use this to update graph inputs before [`launch`](CudaGraph::launch).
-    /// The operation is issued on the same stream the graph will run on, so
-    /// stream ordering guarantees it completes before the graph's kernels
-    /// begin.
+    /// Use this to refresh graph inputs — typically a memcpy into a
+    /// pre-allocated buffer the graph reads — before [`launch`](CudaGraph::launch).
+    ///
+    /// # Ordering
+    ///
+    /// The operation is issued on [`stream`](CudaGraph::stream), so it
+    /// completes before any *later work on that same stream*. That includes
+    /// a launch executed on the graph's stream:
+    /// `graph.launch().sync_on(graph.stream())`. A launch scheduled anywhere
+    /// else — `.sync()`, `.await`, or `.sync_on(&other_stream)` — is **not**
+    /// ordered after the update.
+    ///
+    /// # Why the bounds
+    ///
+    /// `update` runs a `DeviceOp` without waiting for it, which is only
+    /// sound when nothing can observe the operation early: the op must be a
+    /// [`GraphNode`] (it neither allocates nor frees device memory) and must
+    /// produce no output. Ops with an output, or ops that are not
+    /// `GraphNode`, are rejected at compile time:
+    ///
+    /// ```compile_fail,E0271
+    /// use cuda_async::cuda_graph::CudaGraph;
+    /// use cuda_async::device_operation::value;
+    ///
+    /// fn reject_output(graph: &CudaGraph<()>) {
+    ///     let _ = graph.update(value(5));
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0277
+    /// use cuda_async::cuda_graph::CudaGraph;
+    /// use cuda_async::device_operation::{value, DeviceOp};
+    ///
+    /// fn reject_non_graph_node(graph: &CudaGraph<()>) {
+    ///     let _ = graph.update(value(()).boxed());
+    /// }
+    /// ```
+    ///
+    /// Like `sync_on`, this takes the thread-local execution lock.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // Copy a new embedding into the graph's pre-allocated input buffer.
     /// graph.update(api::memcpy(&mut h_input, &new_embedding))?;
-    /// graph.launch().sync_on(&stream)?;
+    /// graph.launch().sync_on(graph.stream())?;
     /// ```
-    pub fn update<O: Send>(&self, op: impl DeviceOp<Output = O>) -> Result<O, DeviceError> {
+    pub fn update<N>(&self, op: N) -> Result<(), DeviceError>
+    where
+        N: GraphNode + DeviceOp<Output = ()>,
+    {
+        let _execution_lock = crate::device_operation::acquire_execution_lock()?;
         let ctx = ExecutionContext::new(self.stream.clone());
+        // SAFETY: the op is a `GraphNode` (no alloc/free) with no output, so
+        // nothing it produces can be read before the stream is synchronized.
         unsafe { op.execute(&ctx) }
     }
 
@@ -174,11 +289,16 @@ impl<T: Send> CudaGraph<T> {
     /// graph.launch().then(next_op).sync()?;      // compose with other ops
     /// ```
     ///
-    /// Any operations issued via [`update`](CudaGraph::update) on the same
-    /// stream are guaranteed to complete before the graph runs.
+    /// The launch shares ownership of the instantiated graph, so it stays
+    /// valid even if the `CudaGraph` is dropped first.
+    ///
+    /// Operations issued via [`update`](CudaGraph::update) are guaranteed to
+    /// complete before the graph runs **only when the launch is executed on
+    /// [`stream`](CudaGraph::stream)** (same-stream ordering); on any other
+    /// stream there is no ordering between them.
     pub fn launch(&self) -> GraphLaunch {
         GraphLaunch {
-            cu_graph_exec: self.cu_graph_exec,
+            exec: Arc::clone(&self.exec),
         }
     }
 
@@ -192,18 +312,21 @@ impl<T: Send> CudaGraph<T> {
 ///
 /// Created by [`CudaGraph::launch`]. The graph executes on whichever stream
 /// the op is scheduled on (via `.sync_on(&stream)`, `.sync()`, or `.await`).
+/// Holds a shared reference to the instantiated graph, so it may outlive the
+/// [`CudaGraph`] that created it.
 pub struct GraphLaunch {
-    cu_graph_exec: sys::CUgraphExec,
+    exec: Arc<GraphExecHandle>,
 }
-
-// CUgraphExec is an opaque CUDA driver handle, safe to send across threads.
-unsafe impl Send for GraphLaunch {}
 
 impl DeviceOp for GraphLaunch {
     type Output = ();
 
     unsafe fn execute(self, context: &ExecutionContext) -> Result<(), DeviceError> {
-        sys::cuGraphLaunch(self.cu_graph_exec, context.get_cuda_stream().cu_stream()).result()?;
+        sys::cuGraphLaunch(
+            self.exec.cu_graph_exec,
+            context.get_cuda_stream().cu_stream(),
+        )
+        .result()?;
         Ok(())
     }
 }
@@ -222,23 +345,6 @@ impl IntoFuture for GraphLaunch {
             Ok(Ok(future)) => future,
             Ok(Err(e)) => DeviceFuture::failed(e),
             Err(e) => DeviceFuture::failed(e),
-        }
-    }
-}
-
-impl<T> Drop for CudaGraph<T> {
-    fn drop(&mut self) {
-        let device = self.stream.device();
-        let _ = device.bind_to_thread();
-
-        let cu_graph_exec = std::mem::replace(&mut self.cu_graph_exec, std::ptr::null_mut());
-        if !cu_graph_exec.is_null() {
-            let _ = unsafe { sys::cuGraphExecDestroy(cu_graph_exec).result() };
-        }
-
-        let cu_graph = std::mem::replace(&mut self.cu_graph, std::ptr::null_mut());
-        if !cu_graph.is_null() {
-            let _ = unsafe { sys::cuGraphDestroy(cu_graph).result() };
         }
     }
 }
@@ -285,18 +391,19 @@ impl<T> Drop for CudaGraph<T> {
 ///    single stream. Sequential same-stream execution is ordered — no
 ///    data races.
 ///
-/// 3. **Cross-stream operations during capture are harmless.** If the
-///    user calls `op.sync_on(&other_stream)` inside the closure, that
-///    work executes eagerly on `other_stream` — but no captured work is
-///    executing concurrently (the capture stream is recording, not
-///    running). At graph launch time, the eagerly-executed work is long
-///    complete. No overlap, no race.
+/// 3. **Other executions inside the closure are rejected.** The scope
+///    holds the thread-local execution lock for the duration of the
+///    closure, so `op.sync_on(&other_stream)`, `op.sync()`, and
+///    `op.sync_on(&capture_stream)` all return the non-reentrant
+///    `DeviceError` before reaching the driver. Nothing executes eagerly
+///    alongside the recording. (Independently, CUDA itself rejects
+///    synchronizing or querying a capturing stream with
+///    `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`.) The one way around the
+///    lock is a [`then_unchecked`](DeviceOp::then_unchecked) chain recorded
+///    via `record`, whose closure may execute eagerly — that is exactly the
+///    caller's `unsafe` assertion.
 ///
-/// 4. **`sync_on` on the capture stream fails at runtime.** CUDA returns
-///    `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` if you try to synchronize
-///    a stream that is capturing.
-///
-/// 5. **Borrow checker enforces `&mut` exclusivity.** `record` consumes
+/// 4. **Borrow checker enforces `&mut` exclusivity.** `record` consumes
 ///    the op, releasing `&mut`. The next `record` can then borrow the
 ///    same buffer as `&` for reading.
 ///
@@ -330,9 +437,9 @@ impl<T> Drop for CudaGraph<T> {
 ///
 /// | Operation | What happens |
 /// |---|---|
-/// | `op.sync_on(&capture_stream)` | Runtime error from CUDA driver |
-/// | `op.sync_on(&other_stream)` | Executes eagerly outside the graph — no race (see point 3) |
-/// | `op.sync()` | May pick the capture stream (error) or another stream (executes eagerly) |
+/// | `op.sync_on(&capture_stream)` | Non-reentrant execution-lock error; nothing executes |
+/// | `op.sync_on(&other_stream)` | Non-reentrant execution-lock error; nothing executes |
+/// | `op.sync()` / `op.await` | Non-reentrant execution-lock error; nothing executes |
 ///
 /// These are all defined behavior but serve no purpose inside a graph
 /// capture scope — use `s.record(op)` instead.
@@ -358,10 +465,11 @@ impl Scope {
     /// Only operations that implement [`GraphNode`] can be recorded.
     /// This excludes allocation ops (`zeros`, `ones`, `dup`, etc.)
     /// whose addresses may change on replay.
-    pub fn record<T: Send>(
-        &self,
-        op: impl GraphNode + DeviceOp<Output = T>,
-    ) -> Result<T, DeviceError> {
+    pub fn record<T, N>(&self, op: N) -> Result<T, DeviceError>
+    where
+        T: Send,
+        N: GraphNode + DeviceOp<Output = T>,
+    {
         // SAFETY: The scope's stream is in capture mode. No GPU work
         // executes — ops are recorded as graph nodes. The GraphNode bound
         // ensures no alloc/free ops are recorded. See Scope docs for
@@ -401,104 +509,17 @@ impl CudaGraph<()> {
     where
         F: FnOnce(&Scope) -> Result<(), DeviceError>,
     {
-        crate::device_operation::acquire_execution_lock()?;
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::scope_inner(stream, f)
-        }));
-
-        crate::device_operation::release_execution_lock();
-
-        match result {
-            Ok(inner) => inner,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    }
-
-    fn scope_inner<F>(stream: &Arc<Stream>, f: F) -> Result<Self, DeviceError>
-    where
-        F: FnOnce(&Scope) -> Result<(), DeviceError>,
-    {
-        let device = stream.device().clone();
-        device.bind_to_thread()?;
-
-        // Begin capture.
-        unsafe {
-            stream.begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)?;
-        }
-
+        // The guard releases the lock on return and on unwind; `capture_on`
+        // ends the capture itself before a panic propagates.
+        let _execution_lock = crate::device_operation::acquire_execution_lock()?;
         let scope = Scope {
             ctx: ExecutionContext::new(stream.clone()),
             _not_send: std::marker::PhantomData,
         };
-
-        // Run the closure. Catch panics so cuStreamEndCapture always runs.
-        let scope_result =
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&scope))) {
-                Ok(result) => result,
-                Err(panic_payload) => {
-                    let _ = unsafe { stream.end_capture() };
-                    std::panic::resume_unwind(panic_payload);
-                }
-            };
-
-        // End capture.
-        let end_result = unsafe { stream.end_capture() };
-
-        let cu_graph = match (scope_result, end_result) {
-            (Err(scope_err), Ok(cu_graph)) => {
-                if !cu_graph.is_null() {
-                    unsafe {
-                        let _ = sys::cuGraphDestroy(cu_graph).result();
-                    }
-                }
-                return Err(scope_err);
-            }
-            (Err(scope_err), Err(_)) => {
-                return Err(scope_err);
-            }
-            (Ok(_), Err(capture_err)) => {
-                return Err(DeviceError::Driver(capture_err));
-            }
-            (Ok(()), Ok(cu_graph)) => {
-                if cu_graph.is_null() {
-                    return Err(DeviceError::Internal(
-                        "cuStreamEndCapture returned null graph".into(),
-                    ));
-                }
-                cu_graph
-            }
-        };
-
-        // Instantiate.
-        let cu_graph_exec = unsafe {
-            let mut cu_graph_exec = MaybeUninit::<sys::CUgraphExec>::uninit();
-            match sys::cuGraphInstantiateWithFlags(cu_graph_exec.as_mut_ptr(), cu_graph, 0).result()
-            {
-                Ok(()) => cu_graph_exec.assume_init(),
-                Err(e) => {
-                    let _ = sys::cuGraphDestroy(cu_graph).result();
-                    return Err(DeviceError::Driver(e));
-                }
-            }
-        };
-
-        // Upload.
-        if let Err(e) = unsafe { sys::cuGraphUpload(cu_graph_exec, stream.cu_stream()).result() } {
-            unsafe {
-                let _ = sys::cuGraphExecDestroy(cu_graph_exec).result();
-                let _ = sys::cuGraphDestroy(cu_graph).result();
-            }
-            return Err(DeviceError::Driver(e));
-        }
-
-        // Synchronize.
-        unsafe { stream.synchronize() }?;
-
+        let ((), exec) = capture_on(stream, || f(&scope))?;
         Ok(CudaGraph {
             stream: stream.clone(),
-            cu_graph,
-            cu_graph_exec,
+            exec,
             output: Some(()),
         })
     }

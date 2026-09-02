@@ -76,3 +76,44 @@ mod borrow_raw_parts;
 
 #[path = "gpu/device_debug.rs"]
 mod device_debug;
+
+// ---------------------------------------------------------------------------
+// Soundness guards: shape/storage invariants, launcher-side validation, and
+// graph-capture input discipline.
+// ---------------------------------------------------------------------------
+
+#[path = "gpu/tensor_guards.rs"]
+mod tensor_guards;
+
+#[path = "gpu/launcher_guards.rs"]
+mod launcher_guards;
+
+#[path = "gpu/graph_scope_inputs.rs"]
+mod graph_scope_inputs;
+// 2026-08 codegen audit regressions, one module per fix; `audit_common`
+// holds the shared compile/transfer/subprocess helpers.
+// ---------------------------------------------------------------------------
+
+#[path = "gpu/audit_common.rs"]
+mod audit_common;
+
+#[path = "gpu/audit_signedness.rs"]
+mod audit_signedness;
+
+#[path = "gpu/audit_int_division.rs"]
+mod audit_int_division;
+
+#[path = "gpu/audit_short_circuit.rs"]
+mod audit_short_circuit;
+
+#[path = "gpu/audit_control_flow.rs"]
+mod audit_control_flow;
+
+#[path = "gpu/audit_check_hoisting.rs"]
+mod audit_check_hoisting;
+
+#[path = "gpu/audit_frontend_errors.rs"]
+mod audit_frontend_errors;
+
+#[path = "gpu/audit_module_consts.rs"]
+mod audit_module_consts;

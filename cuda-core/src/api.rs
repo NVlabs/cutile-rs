@@ -34,10 +34,10 @@ pub unsafe fn init(flags: c_uint) -> Result<(), DriverError> {
 ///
 /// # Safety
 /// `ctx` must be a valid CUDA context handle.
-pub unsafe fn api_version(ctx: cuda_bindings::CUcontext) -> c_uint {
+pub unsafe fn api_version(ctx: cuda_bindings::CUcontext) -> Result<c_uint, DriverError> {
     let mut api_version = 0 as c_uint;
-    unsafe { cuda_bindings::cuCtxGetApiVersion(ctx, &mut api_version) };
-    api_version
+    unsafe { cuda_bindings::cuCtxGetApiVersion(ctx, &mut api_version) }.result()?;
+    Ok(api_version)
 }
 
 /// Launches a CUDA kernel with the given grid/block dimensions and parameters.
@@ -71,14 +71,22 @@ pub unsafe fn launch_kernel(
 
 /// Asynchronously allocates `num_bytes` of device memory on the given stream.
 ///
+/// Driver failures (out of memory included) come back as `Err` for the
+/// caller to handle; the returned pointer becomes valid once the allocation
+/// executes in stream order.
+///
 /// # Safety
 /// `stream` must be a valid, non-destroyed CUDA stream.
-pub unsafe fn malloc_async(num_bytes: usize, stream: &Arc<Stream>) -> sys::CUdeviceptr {
+pub unsafe fn malloc_async(
+    num_bytes: usize,
+    stream: &Arc<Stream>,
+) -> Result<sys::CUdeviceptr, DriverError> {
     crate::cudarc_shim::memory::malloc_async(stream.cu_stream(), num_bytes)
-        .expect("Malloc async failed.")
 }
 
 /// Asynchronously allocates `num_bytes` of device memory from a specific pool on the given stream.
+///
+/// Driver failures come back as `Err`, as for [`malloc_async`].
 ///
 /// # Safety
 /// `stream` must be a valid, non-destroyed CUDA stream. `pool` must be a valid memory pool.
@@ -86,14 +94,10 @@ pub unsafe fn malloc_from_pool_async(
     num_bytes: usize,
     pool: &Arc<crate::MemPool>,
     stream: &Arc<Stream>,
-) -> sys::CUdeviceptr {
+) -> Result<sys::CUdeviceptr, DriverError> {
     crate::cudarc_shim::pool::malloc_from_pool_async(pool.cu_pool(), stream.cu_stream(), num_bytes)
-        .expect("Malloc from pool async failed.")
 }
 
-/// Asynchronously frees device memory on the given stream.
-///
-/// # Safety
 /// Asynchronously sets `num_bytes` bytes at `dptr` to `value` on `stream`.
 ///
 /// # Safety
@@ -108,9 +112,14 @@ pub unsafe fn memset_d8_async(
     crate::cudarc_shim::memory::memset_d8_async(dptr, value, num_bytes, stream.cu_stream())
 }
 
-/// `dptr` must have been allocated with `malloc_async` and must not be used after this call.
-pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<Stream>) {
-    crate::cudarc_shim::memory::free_async(dptr, stream.cu_stream()).expect("Free async failed.")
+/// Asynchronously frees device memory on the given stream.
+///
+/// # Safety
+/// `dptr` must have been allocated with [`malloc_async`] or
+/// [`malloc_from_pool_async`], `stream` must be ordered after every use of
+/// the allocation, and `dptr` must not be used after this call.
+pub unsafe fn free_async(dptr: sys::CUdeviceptr, stream: &Arc<Stream>) -> Result<(), DriverError> {
+    crate::cudarc_shim::memory::free_async(dptr, stream.cu_stream())
 }
 
 /// Asynchronously copies `num_elements` of type `T` from host to device memory.
@@ -122,12 +131,11 @@ pub unsafe fn memcpy_htod_async<T>(
     src: *const T,
     num_elements: usize,
     stream: &Arc<Stream>,
-) {
+) -> Result<(), DriverError> {
     let num_bytes = num_elements * mem::size_of::<T>();
     unsafe {
         crate::cudarc_shim::memory::memcpy_htod_async(dst, src, num_bytes, stream.cu_stream())
     }
-    .expect("memcpy_htod_async failed.")
 }
 
 /// Asynchronously copies `num_elements` of type `T` from device to host memory.
@@ -139,12 +147,11 @@ pub unsafe fn memcpy_dtoh_async<T>(
     src: sys::CUdeviceptr,
     num_elements: usize,
     stream: &Arc<Stream>,
-) {
+) -> Result<(), DriverError> {
     let num_bytes = num_elements * mem::size_of::<T>();
     unsafe {
         crate::cudarc_shim::memory::memcpy_dtoh_async(dst, src, num_bytes, stream.cu_stream())
     }
-    .expect("memcpy_dtoh_async failed.")
 }
 
 /// Asynchronously copies `num_elements` of type `T` between device memory regions.
@@ -156,26 +163,27 @@ pub unsafe fn memcpy_dtod_async<T>(
     src: sys::CUdeviceptr,
     num_elements: usize,
     stream: &Arc<Stream>,
-) {
+) -> Result<(), DriverError> {
     let num_bytes = num_elements * mem::size_of::<T>();
     unsafe {
         crate::cudarc_shim::memory::memcpy_dtod_async(dst, src, num_bytes, stream.cu_stream())
     }
-    .expect("memcpy_dtod_async failed.")
 }
 
 /// Wrappers around the cuRAND random number generation library.
 pub mod curand {
     // TODO (hme): Probably move this into its own file at some point.
 
+    use crate::runtime::Stream;
     use cuda_bindings::{
         curandCreateGenerator, curandDestroyGenerator, curandGenerateNormal,
         curandGenerateNormalDouble, curandGenerateUniform, curandGenerateUniformDouble,
         curandGenerator_t, curandRngType_CURAND_RNG_PSEUDO_DEFAULT,
-        curandSetPseudoRandomGeneratorSeed, CUdeviceptr,
+        curandSetPseudoRandomGeneratorSeed, curandSetStream, CUdeviceptr,
     };
     use std::ffi::c_ulonglong;
     use std::mem::MaybeUninit;
+    use std::sync::Arc;
 
     /// Creates a new pseudo-random number generator with default RNG type.
     ///
@@ -218,6 +226,16 @@ pub mod curand {
     impl RNG {
         /// Creates a new RNG, optionally seeded.
         ///
+        /// A fresh generator launches its kernels on the **legacy default
+        /// stream**: each `generate_*` call is ordered with that stream, not
+        /// with the stream that allocated or will consume the destination
+        /// buffer. A buffer allocated with `cuMemAllocAsync` on a non-blocking
+        /// stream may therefore not exist yet when the generator writes to it,
+        /// and a consumer on that stream may read before the write lands. Use
+        /// [`new_on_stream`](Self::new_on_stream) (or
+        /// [`set_stream`](Self::set_stream)) to bind generation to the stream
+        /// that owns the buffer.
+        ///
         /// # Safety
         /// cuRAND library must be available.
         pub unsafe fn new(seed: Option<u64>) -> Self {
@@ -226,6 +244,40 @@ pub mod curand {
                 set_seed(curand_gen, seed);
             }
             Self { curand_gen }
+        }
+
+        /// Creates a new RNG whose kernels run on `stream`, optionally seeded.
+        ///
+        /// The stream is bound before the seed is applied, so the generator's
+        /// state setup is stream-ordered too. Equivalent to
+        /// [`new`](Self::new) followed by [`set_stream`](Self::set_stream).
+        ///
+        /// # Safety
+        /// cuRAND library must be available, and `stream` must be a valid,
+        /// non-destroyed stream whose device context is current on the
+        /// calling thread.
+        pub unsafe fn new_on_stream(seed: Option<u64>, stream: &Arc<Stream>) -> Self {
+            let rng = Self {
+                curand_gen: get_rng(),
+            };
+            rng.set_stream(stream);
+            if let Some(seed) = seed {
+                set_seed(rng.curand_gen, seed);
+            }
+            rng
+        }
+
+        /// Binds this generator's kernel launches to `stream`
+        /// (`curandSetStream`). Every later `generate_*` call is ordered on
+        /// `stream`; until this is called the generator uses the legacy
+        /// default stream (see [`new`](Self::new)). Like the other calls in
+        /// this module, a non-success cuRAND status is an assertion failure.
+        ///
+        /// # Safety
+        /// `stream` must be a valid, non-destroyed stream on the device whose
+        /// context is current on the calling thread.
+        pub unsafe fn set_stream(&self, stream: &Arc<Stream>) {
+            assert!(curandSetStream(self.curand_gen, stream.cu_stream()) == 0);
         }
 
         /// Generates normally distributed `f32` values into device memory.
@@ -340,8 +392,12 @@ unsafe fn get_device_attribute(
     device_attr: CUdevice_attribute,
 ) -> Result<i32, DriverError> {
     let mut result: MaybeUninit<c_int> = MaybeUninit::uninit();
-    assert!(cuDeviceGetAttribute(result.as_mut_ptr(), device_attr, device) == 0);
-    Ok(result.assume_init())
+    // `result` is only read (by `IntoResult`) when the driver reported success.
+    (
+        cuDeviceGetAttribute(result.as_mut_ptr(), device_attr, device),
+        result,
+    )
+        .result()
 }
 
 /// Returns the device clock rate in kHz.
@@ -355,6 +411,11 @@ pub unsafe fn get_device_clock_rate(device: CUdevice) -> Result<i32, DriverError
     )
 }
 
+/// Returns the device's compute capability as an `sm_<major><minor>` name
+/// (e.g. `sm_120`), the form the Tile compiler takes as its target.
+///
+/// # Safety
+/// `device` must be a valid CUDA device handle.
 pub unsafe fn get_device_sm_name(device: CUdevice) -> Result<String, DriverError> {
     let major = get_device_attribute(
         device,

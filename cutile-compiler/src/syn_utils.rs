@@ -225,8 +225,18 @@ impl SingleMetaList {
             None => None,
         }
     }
-    /// Parses a named entry as a boolean literal.
+    /// Parses a named entry as a boolean literal. The bare form
+    /// (`#[cutile::entry(unchecked_accesses)]`, a `Meta::Path`) means `true`,
+    /// as the reference documents; it used to be silently ignored because
+    /// only `name = value` entries were consulted.
     pub fn parse_bool(&self, name: &str) -> Option<bool> {
+        if self
+            .variables
+            .iter()
+            .any(|item| matches!(item, Meta::Path(path) if path.is_ident(name)))
+        {
+            return Some(true);
+        }
         let value = self.get_value(name);
         match value {
             Some(val) => {

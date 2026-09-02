@@ -113,7 +113,7 @@ For each Q tile (row block of the output):
 
 > **Implementation note:** The code below uses `exp2` instead of `exp` as a performance
 > optimization — `exp2` is faster on GPU hardware. To compensate, the scale factor is
-> divided by `ln(2)` so that `exp2(x / ln(2, ftz::Disabled)) = exp(x)`. The correction factor `α` and
+> divided by `ln(2)` so that `exp2(x / ln(2), ftz::Disabled) = exp(x)`. The correction factor `α` and
 > softmax numerator `P` are both computed with `exp2` using this adjusted scale.
 
 ---
@@ -282,7 +282,7 @@ cargo run --example flash_attention
 ```
 
 ```text
-out_host.shape() = [128, 1024, 64]
+out shape = [128, 1024, 64]
 diff near zero? true: 5.96e-8
 diff near zero? true: 2.98e-8
 ... (validates against reference for all batch×head combinations)

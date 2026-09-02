@@ -35,16 +35,22 @@ the following hold, per index coordinate:
 | Compile-time constant, or value with known constant bounds | Hoisted (or discharged against static shapes) |
 | The loop variable `j` of a `for j in lo..hi` loop | Hoisted, checked at `hi - 1` |
 | `a * j + b` with constant `a`, `b` | Hoisted at the extreme iteration, when that extreme provably fits `i32`; otherwise in place |
-| Loop variable of a `.step_by(...)` loop | In place |
+| Loop variable of a `(lo..hi).step_by(k)` loop | Hoisted, checked at the *last attained* index `lo + k * floor((hi - 1 - lo) / k)`, when `lo`, `hi`, and `k` are compile-time constants; otherwise in place |
 | Value computed *inside* the loop body (other than the forms above) | In place |
 | Any access written inside an `if`/`else` in the loop | In place |
+| Any access in a loop body that contains a `continue` | In place |
 
 Additionally, a hoisted check keeps climbing outward through directly
-nested loops whose trip counts are statically non-zero, stopping at the
-first loop whose bound it depends on. Hoisted checks are guarded so that a
-loop which executes zero times can never trap — semantics are unchanged
-except that a genuine violation traps before the loop instead of at its
-first offending iteration.
+nested loops whose trip counts are statically non-zero and whose bodies
+contain no `continue`, stopping at the first loop whose bound it depends
+on. Hoisted checks are guarded so that a loop which executes zero times can
+never trap. Hoisting does change *when* a violation is reported: a hoisted
+check traps before the loop starts, so the iterations that precede the
+offending one — and any stores they would have made — do not run. It never
+changes *whether* a kernel traps: a hoisted check tests only index values
+the loop actually attains, which is why a body with `continue` (some
+iterations skip the access) or a stepped loop with a runtime step (the
+attained set is unknown) keeps its check in place.
 
 The practical rules of thumb that fall out of the table:
 
@@ -54,11 +60,13 @@ The practical rules of thumb that fall out of the table:
   compiler does not currently chase invariant arithmetic through the loop
   body — it proves invariance by position).
 - **Index hot-loop accesses with the loop variable directly**, or an
-  affine expression of it, and write the loop as `for j in lo..hi` without
-  `step_by`.
+  affine expression of it, and write the loop as `for j in lo..hi`; a
+  `step_by(k)` loop hoists only when `lo`, `hi`, and `k` are all
+  compile-time constants.
 - **Keep hot-loop accesses unconditional.** A load under an `if` may
   execute on no iteration, so its check cannot move; lift the condition out
-  of the loop or accept the in-place check.
+  of the loop or accept the in-place check. The same holds for a body with
+  a `continue`: every access after it is conditional.
 - **Keep index arithmetic wrap-free.** A range fact survives an operation
   only when the operation provably cannot overflow `i32`; an expression
   that can wrap forfeits its facts (even if later `max`/`%` steps pull the

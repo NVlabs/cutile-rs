@@ -37,3 +37,4 @@ once_cell = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 sha2 = { workspace = true }
+trybuild = { workspace = true }

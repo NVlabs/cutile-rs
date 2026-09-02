@@ -130,16 +130,16 @@ struct L2Clear {
 impl L2Clear {
     /// Twice the L2 size flushes reliably; clamp keeps pathological
     /// attribute readings from allocating absurd buffers.
-    fn new(stream: &Arc<Stream>) -> Self {
+    fn new(stream: &Arc<Stream>) -> Result<Self, Error> {
         let l2 = stream.device().l2_cache_size_bytes().unwrap_or(0);
         let num_bytes = (l2 * 2).clamp(64 << 20, 512 << 20);
         // Safety: freed in Drop on the same stream; never exposed.
-        let dptr = unsafe { cuda_core::malloc_async(num_bytes, stream) };
-        Self {
+        let dptr = unsafe { cuda_core::malloc_async(num_bytes, stream) }?;
+        Ok(Self {
             dptr,
             num_bytes,
             stream: stream.clone(),
-        }
+        })
     }
 
     fn clear(&self) -> Result<(), Error> {
@@ -153,8 +153,10 @@ impl L2Clear {
 impl Drop for L2Clear {
     fn drop(&mut self) {
         // Safety: allocated by us with malloc_async; stream order guarantees
-        // the free lands after every enqueued memset.
-        unsafe { cuda_core::free_async(self.dptr, &self.stream) };
+        // the free lands after every enqueued memset. A refused free cannot be
+        // reported from a destructor and must not panic here; the scratch
+        // buffer then lives until the context is released.
+        let _ = unsafe { cuda_core::free_async(self.dptr, &self.stream) };
     }
 }
 
@@ -196,7 +198,7 @@ where
     let target_ms = opts.rep.as_secs_f64() * 1e3;
     let reps = ((target_ms / est_ms as f64).round() as usize).clamp(opts.min_reps, opts.max_reps);
 
-    let l2 = opts.clear_l2.then(|| L2Clear::new(stream));
+    let l2 = opts.clear_l2.then(|| L2Clear::new(stream)).transpose()?;
     let mut times_ms = Vec::with_capacity(reps);
     for _ in 0..reps {
         if let Some(l2) = &l2 {
@@ -235,7 +237,7 @@ where
     let reps =
         (((target_ms / est_ms as f64) / 2.0).round() as usize).clamp(opts.min_reps, opts.max_reps);
 
-    let l2 = opts.clear_l2.then(|| L2Clear::new(stream));
+    let l2 = opts.clear_l2.then(|| L2Clear::new(stream)).transpose()?;
     let (mut times_a, mut times_b) = (Vec::with_capacity(reps), Vec::with_capacity(reps));
     for _ in 0..reps {
         if let Some(l2) = &l2 {

@@ -82,11 +82,11 @@ let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
 
 Mutable tensors **must** be partitioned on the host side before kernel launch. This guarantees that each tile block writes to a disjoint sub-region — satisfying Rust's exclusive access requirement for mutable memory. The host-side `Partition` also determines the launch grid: cutile automatically infers that an 8×8 partition means 64 tile blocks.
 
-On the host side, the generated launcher expects a `Partition<Tensor<T>>` for every `&mut Tensor` parameter, so you always call `.partition(...)` before passing the tensor.
+On the host side, the generated launcher expects a partition for every `&mut Tensor` parameter — `Partition<Tensor<T>>` from `tensor.partition(...)`, `Partition<&mut Tensor<T>>` from `(&mut tensor).partition(...)`, or a mapped partition — so you always call `.partition(...)` before passing the tensor.
 
 ### Device-Side Partitioning (Available for `&Tensor`)
 
-Read-only inputs are passed as `Arc<Tensor<T>>` on the host side — no host-side partitioning required. Multiple tile blocks can safely read from the same or overlapping regions, so there is no exclusive-access constraint to enforce.
+Read-only inputs are passed as `&Tensor<T>`, `Tensor<T>`, `Arc<Tensor<T>>`, or `&TensorView<T>` on the host side — no host-side partitioning required. Multiple tile blocks can safely read from the same or overlapping regions, so there is no exclusive-access constraint to enforce.
 
 Instead, read-only tensors can be partitioned **inside the kernel** using `.partition(const_shape![M, N])`:
 

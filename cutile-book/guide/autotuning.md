@@ -23,7 +23,7 @@ required. The rest of the builder is optional: `prune` filters candidates,
 `budget` bounds wall-clock, `log` makes the run resumable, and `require`
 declares incumbents the search must cover.
 
-```rust,ignore
+```rust
 let configs: Vec<Config> = [16i64, 32, 64, 128]
     .into_iter()
     .map(|bn| Config::new([("BN", ParamValue::Int(bn))]))
@@ -42,7 +42,7 @@ let output = Autotuner::new("fmha_decode")
         // return the closure to be timed. Err(..) records the candidate as
         // invalid and the search continues.
         let bn = config.int("BN").unwrap();
-        let mut launch = move |stream: &Stream| {
+        let mut launch = move |stream: &Arc<Stream>| {
             fmha_decode(out.partition([1, bn as i32]), &q, &k, &v)
                 .generics(generics_for(bn))
                 .sync_on(stream)
@@ -73,7 +73,7 @@ and returns a `Trial` built with `Trial::measured` or `Trial::invalid`, and
 provides the same trial logging, resume, and `require` coverage as the
 closure path:
 
-```rust,ignore
+```rust
 let mut objective = EngineObjective::new(engine, configs);
 let output = Autotuner::new("engine_prefill")
     .arch(current_arch) // e.g. "sm_100"; resume refuses a foreign-arch log
@@ -99,7 +99,7 @@ next to the code it tunes. The file holds a provenance header (kernel
 name, source hash, cutile version, `tileiras` fingerprint, architecture,
 search-space hash) and one entry per shape-class bucket.
 
-```rust,ignore
+```rust
 use cutile::tune::{L2Key, Record, RecordEntry, Workspace};
 
 // After tuning: `winner` is the winning Trial, `best` its Config
@@ -150,7 +150,7 @@ the dispatch call expression itself and cannot drift from it. `api::meta`
 placeholder tensors carry shape and dtype without allocating, so warming
 performs no launches and no device allocation:
 
-```rust,ignore
+```rust
 my_module::my_kernel(api::meta::<f32>(&[64, 64]).sync()?.partition([16, 16]), ...)
     .generics(generics)
     .compile_options(opts)
@@ -159,10 +159,12 @@ my_module::my_kernel(api::meta::<f32>(&[64, 64]).sync()?.partition([16, 16]), ..
 
 Tuning sweeps churn specializations by design, and each cached kernel holds
 device memory, so the in-memory kernel cache — intentionally unbounded for
-steady-state engines — needs managing during a sweep:
-`clear_kernel_cache()`, `evict_kernel(&key)`, and `retain_kernels(pred)`
-remove entries, releasing each module's device memory when its last holder
-drops. The one obligation is to quiesce first: a launched kernel executes
-after the launch call returns, so synchronize any stream that may still be
-running cached kernels — between tuning trials, exactly where an objective
-already synchronizes.
+steady-state engines — needs managing during a sweep. The `unsafe`
+functions `clear_kernel_cache()`, `evict_kernel(&key)`, and
+`retain_kernels(pred)` in `cutile::tile_kernel` (gated behind
+`experimental-tune`) remove entries, releasing each module's device memory
+when its last holder drops. They are `unsafe` because of the one obligation
+they cannot check: quiesce first. A launched kernel executes after the launch
+call returns, so synchronize any stream that may still be running cached
+kernels — between tuning trials, exactly where an objective already
+synchronizes.

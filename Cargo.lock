@@ -491,6 +491,7 @@ dependencies = [
  "sha2",
  "syn",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]

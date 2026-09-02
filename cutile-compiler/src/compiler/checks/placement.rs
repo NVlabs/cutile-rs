@@ -6,16 +6,18 @@
 //! Residual placement: where a goal that no JIT-stage proof source decided
 //! becomes a device check, and in what instantiated form.
 //!
-//! When the check sits directly in a loop body and the index is
-//! loop-invariant (or affine in the unit-step induction variable), the
-//! whole comparison chain is emitted in the loop's preheader instead of
-//! the hot body: the upper goal takes the strongest extreme instance of
-//! the index, the lower goal the weakest, and the pair is wrapped in an
-//! `upper <= lower || in_bounds` guard so an empty loop — whose accesses
-//! never execute — cannot trap spuriously. Assert semantics are otherwise
-//! unchanged: the same violation traps, before the loop instead of at the
-//! offending iteration. Everything else stays an in-place check at the
-//! access block.
+//! When the check sits directly in a loop body whose every iteration runs
+//! to completion (no `continue`), and the index is loop-invariant (or
+//! affine in the unit-step induction variable, or statically ranged over
+//! the values the loop actually attains), the whole comparison chain is
+//! emitted in the loop's preheader instead of the hot body: the upper goal
+//! takes the strongest extreme instance of the index, the lower goal the
+//! weakest, and the pair is wrapped in an `upper <= lower || in_bounds`
+//! guard so an empty loop — whose accesses never execute — cannot trap
+//! spuriously. A hoisted check traps exactly when some iteration's access
+//! would have, but it traps *before the loop*: the iterations preceding the
+//! offending one (and their stores) no longer execute. Everything else
+//! stays an in-place check at the access block.
 //!
 //! Either way the check is about to become a device instruction, so
 //! placement is also where the `deny_in_kernel_checks` policy fires,
@@ -111,6 +113,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             };
             if block_id != innermost.body_block {
                 no_hoist_why = Some("check sits inside a conditional block");
+                break 'classify None;
+            }
+            // A body that can skip the rest of an iteration (`continue`) does
+            // not execute the access on every iteration, so the extreme
+            // instance a hoisted check would test may never be attained
+            // (differential harness defect D2).
+            if innermost.has_early_exit {
+                no_hoist_why = Some("the loop body has an early exit (`continue`)");
                 break 'classify None;
             }
             // Values the emitted check will reference; each must dominate
@@ -221,8 +231,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             };
             // Walk outward: cross a loop only when it is directly nested
             // (its preheader is the enclosing body), statically non-empty
-            // (its accesses execute on every enclosing iteration), and
-            // every operand dominates the enclosing preheader.
+            // (its accesses execute on every enclosing iteration), the
+            // enclosing body cannot skip it with an early exit, and every
+            // operand dominates the enclosing preheader.
             let mut target = frames.len() - 1;
             while target > 0 {
                 let inner = &frames[target];
@@ -231,7 +242,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let deps_dominate = operand_deps
                     .iter()
                     .all(|value| value.index() < outer.value_watermark);
-                if contiguous && inner.known_non_empty && deps_dominate {
+                if contiguous && inner.known_non_empty && !outer.has_early_exit && deps_dominate {
                     target -= 1;
                 } else {
                     break;
@@ -447,21 +458,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             Some(HoistIndex::Const { max, .. }) => {
                 self.compile_constant(module, check_block, generic_vars, *max)?
             }
-            Some(HoistIndex::Invariant) | None => {
-                // Without proof discharge the check is the semantic
-                // reference, so it tests the index's ACTUAL value; the
-                // static-max substitution below is an optimization that
-                // deliberately over-tests (the range's extreme), which is
-                // exactly what the differential harness must not inherit
-                // from the thing it referees.
-                if !self.check_opts.discharge_proofs {
-                    goals.index.clone()
-                } else if let Some(bounds) = goals.index.bounds.filter(fits_i32) {
-                    self.compile_constant(module, check_block, generic_vars, bounds.end as i32)?
-                } else {
-                    goals.index.clone()
-                }
-            }
+            // An in-place check (and a hoisted loop-invariant one) tests the
+            // index's ACTUAL value. A check stays in place precisely when the
+            // access is conditional — under an `if`, after a `continue`, or
+            // outside any loop with a merely-ranged index — so the range's
+            // extreme may never be attained and substituting it (as this arm
+            // once did) traps spuriously: `for k in 0..64 { if k >= limit
+            // { continue; } p.load([k]) }` tested `63` against ten tiles.
+            // Only a hoisted `Const` check may test the extreme, and
+            // `classify_hoist` admits that only for a body every iteration
+            // of which reaches the access.
+            Some(HoistIndex::Invariant) | None => goals.index.clone(),
         };
         let shape_dim_value = match dynamic_extent {
             Some(shape_value) => shape_value,
@@ -472,17 +479,43 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 self.compile_constant(module, check_block, generic_vars, extent)?
             }
         };
-        // Compute ceil_div(shape, tile) as (shape + tile - 1) / tile
-        // using floor division. This avoids positive_inf rounding which
-        // can be misoptimized when the dividend carries assume hints.
-        let tile_minus_one =
-            self.compile_constant(module, check_block, generic_vars, goals.tile - 1)?;
-        let shape_plus_tile_minus_one = self.compile_binary_op_from_values(
+        // Compute ceil_div(shape, tile) as `shape / tile + min(shape % tile, 1)`
+        // (exact for `shape >= 0`, `tile >= 1`). Every intermediate is bounded
+        // by `shape`, so the chain cannot wrap even for an extent near
+        // `i32::MAX` — the former `(shape + tile - 1) / tile` did, turning the
+        // check into `index < <negative>` (audit 2026-08). It also avoids the
+        // `positive_inf` rounding mode, which can be misoptimized when the
+        // dividend carries assume hints. A static extent folds the whole chain
+        // to a constant.
+        let quotient = self.compile_binary_op_from_values(
             module,
             check_block,
             shape_dim_value.clone(),
-            tile_minus_one,
-            &TileBinaryOp::Add,
+            tile_dim_value.clone(),
+            &TileBinaryOp::Div,
+            generic_vars,
+            ctx,
+            None,
+            span,
+        )?;
+        let remainder = self.compile_binary_op_from_values(
+            module,
+            check_block,
+            shape_dim_value.clone(),
+            tile_dim_value,
+            &TileBinaryOp::Rem,
+            generic_vars,
+            ctx,
+            None,
+            span,
+        )?;
+        let one = self.compile_constant(module, check_block, generic_vars, 1)?;
+        let carry = self.compile_binary_op_from_values(
+            module,
+            check_block,
+            remainder,
+            one,
+            &TileBinaryOp::Min,
             generic_vars,
             ctx,
             None,
@@ -491,9 +524,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let div_result_value = self.compile_binary_op_from_values(
             module,
             check_block,
-            shape_plus_tile_minus_one,
-            tile_dim_value,
-            &TileBinaryOp::Div,
+            quotient,
+            carry,
+            &TileBinaryOp::Add,
             generic_vars,
             ctx,
             None,

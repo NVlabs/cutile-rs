@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use syn::Expr;
 
 // Re-export shared types.
-pub use super::shared_types::{BlockTerminator, Mutability};
+pub use super::shared_types::{BlockTerminator, LoopKind, Mutability};
 
 /// Flattens all values in a `BTreeMap` of [`TileRustValue`]s into a linear list.
 pub fn unpack_btree_to(
@@ -97,6 +97,15 @@ pub(crate) struct LoopFrame {
     /// instead of a runtime strongest-instance substitution. `None` when either
     /// bound is a runtime value.
     pub(crate) induction_range: Option<crate::bounds::Bounds<i64>>,
+    /// True when the loop body contains an early exit (`continue`, `break`,
+    /// `return`) anywhere, including inside nested conditionals. A check
+    /// hoisted to the preheader assumes the guarded access executes on every
+    /// iteration — at the loop extremes in particular — and an early exit
+    /// breaks that: `if k >= limit { continue; }` before an access attains
+    /// only `[0, limit)`, so testing the range's extreme traps spuriously
+    /// (differential harness defect D2). No check hoists out of such a body,
+    /// and no check from an inner loop hoists across it.
+    pub(crate) has_early_exit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -615,6 +624,18 @@ pub struct CompilerContext {
     /// loop-invariant and induction-variable bounds checks into the
     /// innermost loop's preheader instead of the hot loop body.
     pub(crate) loop_frames: Vec<LoopFrame>,
+    /// True while this context compiles a function body block itself — the
+    /// kernel entry body or an inlined callee's body — which is the only
+    /// place a `return` statement is supported. `compile_block` clears it
+    /// on entry, so every nested block (an `if` branch, a loop body, a bare
+    /// `{}`/`unsafe {}` block) compiled from a clone sees `false`: a
+    /// `return` there cannot be lowered (the enclosing block's terminator
+    /// would be emitted and control would fall through) and is rejected.
+    pub(crate) fn_body: bool,
+    /// The Tile IR loop op of the innermost enclosing source loop, if any.
+    /// Inherited by nested blocks; decides whether a `break` is
+    /// representable (only inside `cuda_tile.loop`).
+    pub(crate) innermost_loop: Option<LoopKind>,
 }
 
 impl CompilerContext {
@@ -625,6 +646,8 @@ impl CompilerContext {
             default_terminator: None,
             module_scope: vec![],
             loop_frames: vec![],
+            fn_body: false,
+            innermost_loop: None,
         }
     }
 
@@ -652,6 +675,8 @@ impl CompilerContext {
             default_terminator,
             module_scope,
             loop_frames: self.loop_frames.clone(),
+            fn_body: false,
+            innermost_loop: self.innermost_loop,
         })
     }
 

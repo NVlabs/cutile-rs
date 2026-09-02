@@ -78,7 +78,7 @@ For block-scaled formats such as NVFP4 and MXFP8, `mmaf_scaled` consumes low-pre
 
 ## Bounds and Mapped Partitions
 
-The preferred safe performance path for persistent or mapped traversal is a mapped output partition. The output partition produces bounded, disjoint indices, while input partitions use `with_bounds(...)` to carry the matching logical grid:
+The preferred safe performance path for persistent or mapped traversal is a mapped output partition. The output partition produces bounded, disjoint indices; input partitions are indexed with plain arrays, and the compiler infers the bounds from the loops and mapped components that produce each index:
 
 ```rust
 fn gemm_persistent<
@@ -92,20 +92,21 @@ fn gemm_persistent<
     x: &Tensor<T, { [-1, -1] }>,
     y: &Tensor<T, { [-1, -1] }>,
 ) {
-    let m = num_tiles(&z, 0);
-    let n = num_tiles(&z, 1);
-    let k = Dim::new(x.shape()[1] / BK);
-
-    let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-    let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+    let part_x = x.partition(const_shape![BM, BK]);
+    let part_y = y.partition(const_shape![BK, BN]);
 
     for out_idx in z.iter_indices() {
         let (bid_m, bid_n) = out_idx.components();
-        let acc = compute_tile(bid_m, bid_n, k, &part_x, &part_y);
+        let mut acc: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+        for k_tile in 0i32..num_tiles(&part_x, 1) {
+            acc = mma(part_x.load([bid_m, k_tile]), part_y.load([k_tile, bid_n]), acc);
+        }
         z.store(acc, out_idx);
     }
 }
 ```
+
+`with_bounds(...)`, `Dim::new(...)`, and `coord(...)` are deprecated since 0.3.0; [Bounds-Check Placement](bounds-check-placement.md) describes where the remaining checks are placed.
 
 `unchecked_accesses = true` remains available when the programmer wants to opt out of runtime bounds checks explicitly:
 

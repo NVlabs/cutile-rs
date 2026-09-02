@@ -165,7 +165,7 @@ fn alloc_with_custom_pool_via_device_op() {
                 "sync() must route allocation through the registered pool"
             );
             let num_bytes = 1024;
-            let dptr = unsafe { ctx.alloc_async(num_bytes) };
+            let dptr = unsafe { ctx.alloc_async(num_bytes) }.expect("device allocation failed");
             assert!(dptr != 0, "allocation returned null pointer");
             value(dptr)
         });
@@ -210,7 +210,7 @@ fn alloc_without_pool_uses_default() {
         let op = with_context(|ctx| {
             assert!(ctx.get_pool().is_none());
             let num_bytes = 1024;
-            let dptr = unsafe { ctx.alloc_async(num_bytes) };
+            let dptr = unsafe { ctx.alloc_async(num_bytes) }.expect("device allocation failed");
             assert!(dptr != 0, "allocation returned null pointer");
             value(dptr)
         });
@@ -282,7 +282,7 @@ fn schedule_applies_device_pool() {
                 pool_ptr,
                 "schedule must pick up device pool"
             );
-            let dptr = unsafe { ctx.alloc_async(512) };
+            let dptr = unsafe { ctx.alloc_async(512) }.expect("device allocation failed");
             assert!(dptr != 0, "allocation returned null pointer");
             value(dptr)
         })
@@ -319,7 +319,7 @@ fn sync_on_applies_device_pool() {
                 pool_ptr,
                 "sync_on must pick up device pool"
             );
-            let dptr = unsafe { ctx.alloc_async(512) };
+            let dptr = unsafe { ctx.alloc_async(512) }.expect("device allocation failed");
             assert!(dptr != 0, "allocation returned null pointer");
             value(dptr)
         })
@@ -351,7 +351,7 @@ fn switch_between_pools() {
 
         set_device_pool(0, pool_a).expect("set A failed");
         let op_a = with_context(|ctx| {
-            let dptr = unsafe { ctx.alloc_async(512) };
+            let dptr = unsafe { ctx.alloc_async(512) }.expect("device allocation failed");
             assert!(dptr != 0);
             value(())
         });
@@ -359,7 +359,7 @@ fn switch_between_pools() {
 
         set_device_pool(0, pool_b).expect("set B failed");
         let op_b = with_context(|ctx| {
-            let dptr = unsafe { ctx.alloc_async(512) };
+            let dptr = unsafe { ctx.alloc_async(512) }.expect("device allocation failed");
             assert!(dptr != 0);
             value(())
         });
@@ -368,7 +368,7 @@ fn switch_between_pools() {
         clear_device_pool(0).expect("clear failed");
         let op_default = with_context(|ctx| {
             assert!(ctx.get_pool().is_none());
-            let dptr = unsafe { ctx.alloc_async(512) };
+            let dptr = unsafe { ctx.alloc_async(512) }.expect("device allocation failed");
             assert!(dptr != 0);
             value(())
         });
@@ -413,7 +413,8 @@ fn mem_stats_track_alloc_and_free() {
 
         const N: usize = 1 << 20;
 
-        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) };
+        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) }
+            .expect("pool allocation failed");
         assert!(dptr != 0);
         unsafe { stream.synchronize() }.expect("stream sync failed");
 
@@ -429,7 +430,7 @@ fn mem_stats_track_alloc_and_free() {
             stats.used_high
         );
 
-        unsafe { cuda_core::free_async(dptr, &stream) };
+        unsafe { cuda_core::free_async(dptr, &stream) }.expect("free failed");
         unsafe { stream.synchronize() }.expect("stream sync failed");
 
         let stats = pool.mem_stats().expect("read stats failed");
@@ -463,8 +464,9 @@ fn reset_used_high_collapses_watermark_to_current() {
 
         const N: usize = 1 << 20;
 
-        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) };
-        unsafe { cuda_core::free_async(dptr, &stream) };
+        let dptr = unsafe { cuda_core::malloc_from_pool_async(N, &pool, &stream) }
+            .expect("pool allocation failed");
+        unsafe { cuda_core::free_async(dptr, &stream) }.expect("free failed");
         unsafe { stream.synchronize() }.expect("stream sync failed");
 
         let before = pool.mem_stats().expect("read stats failed");
@@ -481,5 +483,61 @@ fn reset_used_high_collapses_watermark_to_current() {
             after.used_high, after.used_current,
             "after reset, used_high should collapse to used_current"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Thread-local context map survives failed lookups and rejected re-inits
+// ---------------------------------------------------------------------------
+
+/// Regression: `with_global_device_context` used to return through `?` with
+/// the thread's context map taken out of its `Cell`, dropping every live
+/// context on the thread. A lookup for a device that cannot be initialized
+/// must fail *without* losing the pool registered for device 0.
+#[test]
+fn failed_lookup_keeps_other_device_contexts_alive() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        let pool_ptr = pool.cu_pool();
+        set_device_pool(0, pool).expect("set pool failed");
+
+        // Device 9999 does not exist: the default-policy init fails after the
+        // map has been leased out of the thread-local.
+        let lookup = cuda_async::device_context::with_global_device_context(9999, |_| ());
+        assert!(lookup.is_err(), "lookup of a bogus device must fail");
+
+        let retrieved = get_device_pool(0)
+            .expect("get pool failed")
+            .expect("pool must survive a failed lookup on another device");
+        assert_eq!(retrieved.cu_pool(), pool_ptr);
+    });
+}
+
+/// Regression: a rejected second `init_device_contexts` used to discard the
+/// live map while reporting "already initialized".
+#[test]
+fn rejected_reinit_keeps_device_contexts_alive() {
+    on_fresh_thread(|| {
+        init_device_contexts(0, 1).expect("init failed (requires GPU)");
+
+        let pool = with_device(0, |device| device.new_mem_pool())
+            .expect("get context failed")
+            .expect("pool creation failed");
+        let pool_ptr = pool.cu_pool();
+        set_device_pool(0, pool).expect("set pool failed");
+
+        assert!(
+            init_device_contexts(0, 1).is_err(),
+            "second init must be rejected"
+        );
+
+        let retrieved = get_device_pool(0)
+            .expect("get pool failed")
+            .expect("pool must survive a rejected re-initialization");
+        assert_eq!(retrieved.cu_pool(), pool_ptr);
     });
 }

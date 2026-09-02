@@ -38,10 +38,7 @@ const NESTED_MUTABLE_ACCESS_OFFSET_META: &str = "nested_mutable_access_offset";
 
 /// Helper: determine signedness string from a Rust element type name.
 fn get_signedness_str(element_type_str: &str) -> &'static str {
-    match element_type_str {
-        "bool" | "u8" | "u16" | "u32" | "u64" => "unsigned",
-        _ => "signed",
-    }
+    super::utils::rust_int_signedness(element_type_str)
 }
 
 /// Convert a `TileRustType` that the old compiler built into a

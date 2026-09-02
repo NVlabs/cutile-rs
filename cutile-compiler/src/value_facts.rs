@@ -40,6 +40,13 @@ pub(crate) struct ScalarFacts {
 
 /// `floor(numerator / divisor)` with a compile-time-constant `divisor`.
 ///
+/// The device op behind `/` truncates toward zero (Rust semantics; see
+/// `compile_binary_op`), which coincides with `floor` exactly when the
+/// numerator is non-negative. Every consumer of this residue relates it to a
+/// tensor extent — never negative — so the `floor` reading below is exact
+/// there; the divisor is required positive at construction for the same
+/// reason.
+///
 /// Integer division is not linear, so it cannot live in [`Term`]. It is kept
 /// here, on the *analysis* side, instead of being added to the predicate
 /// vocabulary as an opaque atom. That distinction matters: an opaque atom would
