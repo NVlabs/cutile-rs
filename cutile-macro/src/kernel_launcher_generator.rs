@@ -588,12 +588,12 @@ pub fn generate_kernel_launcher(
                         .err("Pointers can only be used in unsafe kernel entry points.");
                 }
                 let ptr_str = ptr_type.to_token_stream().to_string();
-                let Some((_is_mutable, type_name)) = get_ptr_type(&ptr_str) else {
+                let Some((is_mutable, type_name)) = get_ptr_type(&ptr_str) else {
                     return ptr_type.err(&format!("Unexpected pointer type: {}", ptr_str));
                 };
-                // `*const` and `*mut` params launch identically: the host
-                // passes a device address either way; constness is a
-                // device-side type discipline, not a launch property.
+                if !is_mutable {
+                    return ptr_type.err("Pointers must be * mut.");
+                }
                 arg_types.push(
                     syn::parse2::<Type>(format!("DevicePointer<{}>", type_name).parse().unwrap())
                         .unwrap(),

@@ -79,14 +79,13 @@ mod my_module {
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK, BN]);
-        let pid_m = program_id(0);
-        let pid_n = program_id(1);
+        let pid: (i32, i32, i32) = get_tile_block_id();
 
         let mut tile_z = load_tile_mut(z);
 
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid_m, i]);
-            let tile_y = part_y.load([i, pid_n]);
+            let tile_x = part_x.load([pid.0, i]);
+            let tile_y = part_y.load([i, pid.1]);
             tile_z = mma(tile_x, tile_y, tile_z);  // C += A @ B
         }
         z.store(tile_z);
@@ -137,8 +136,8 @@ The K-loop iterates over pairs of tiles from A and B, accumulating partial produ
 
 ```rust
 for i in 0i32..(K / BK) {
-    let tile_x = part_x.load([pid_m, i]);  // Load A[row_group, i]
-    let tile_y = part_y.load([i, pid_n]);  // Load B[i, col_group]
+    let tile_x = part_x.load([pid.0, i]);  // Load A[row_group, i]
+    let tile_y = part_y.load([i, pid.1]);  // Load B[i, col_group]
     tile_z = mma(tile_x, tile_y, tile_z);  // Accumulate: C += A @ B
 }
 ```
@@ -337,12 +336,11 @@ unsafe fn gemm<T: ElementType, const BM: i32, const BN: i32, const BK: i32>(
 ) {
     let part_x = x.partition(const_shape![BM, BK]);
     let part_y = y.partition(const_shape![BK, BN]);
-    let pid_m = program_id(0);
-    let pid_n = program_id(1);
+    let pid: (i32, i32, i32) = get_tile_block_id();
     let mut tile_z: Tile<T, { [BM, BN] }> = z.load();
     for i in 0i32..(k / BK) {
-        let tile_x = part_x.load([pid_m, i]);
-        let tile_y = part_y.load([i, pid_n]);
+        let tile_x = part_x.load([pid.0, i]);
+        let tile_y = part_y.load([i, pid.1]);
         tile_z = mma(tile_x, tile_y, tile_z);
     }
     z.store(tile_z);
@@ -373,7 +371,7 @@ See [`cutile-benchmarks/benches/gemm.rs`](https://github.com/nvlabs/cutile-rs/tr
 
 The older safe performance path is to make **all** tensor dimensions static const
 generics. When the compiler knows every dimension and the launch grid at JIT
-time, it can prove direct `program_id(axis)` partition accesses are in bounds
+time, it can prove direct `get_tile_block_id()` partition accesses are in bounds
 and optimize the checks away entirely - no `unsafe` required:
 
 ```rust
@@ -390,11 +388,10 @@ fn gemm<
     let part_x = x.partition(const_shape![BM, BK]);
     let part_y = y.partition(const_shape![BK, BN]);
     let mut tile_z = load_tile_mut(z);
-    let pid_m = program_id(0);
-    let pid_n = program_id(1);
+    let pid: (i32, i32, i32) = get_tile_block_id();
     for i in 0i32..(K / BK) {
-        let tile_x = part_x.load([pid_m, i]);
-        let tile_y = part_y.load([i, pid_n]);
+        let tile_x = part_x.load([pid.0, i]);
+        let tile_y = part_y.load([i, pid.1]);
         tile_z = mma(tile_x, tile_y, tile_z);
     }
     z.store(tile_z);

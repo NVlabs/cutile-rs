@@ -20,7 +20,7 @@ Start with powers of two or dimensions that align with the compute operation:
 | GEMM | Tile shapes compatible with Tensor Core MMA dimensions |
 | Reductions | Axis sizes that avoid excessive register pressure |
 
-Use profiling to tune from there, or search the candidates automatically with [autotuning](#autotuning-experimental). Very small tiles spend too much time on overhead. Very large tiles can spill registers or reduce the number of resident tile blocks.
+Use profiling to tune from there, or search the candidates automatically with [autotuning](autotuning.md). Very small tiles spend too much time on overhead. Very large tiles can spill registers or reduce the number of resident tile blocks.
 
 ## Memory Traffic and Fusion
 
@@ -67,8 +67,8 @@ Use `mma` and `mmaf_scaled` for matrix multiply paths. The compiler lowers suppo
 ```rust
 let mut acc = constant(0.0f32, const_shape![BM, BN]);
 for k_tile in 0i32..k_tiles {
-    let tile_x = part_x.load([pid_m, k_tile]);
-    let tile_y = part_y.load([k_tile, pid_n]);
+    let tile_x = part_x.load([pid.0, k_tile]);
+    let tile_y = part_y.load([k_tile, pid.1]);
     acc = mma(tile_x, tile_y, acc);
 }
 z.store(acc);
@@ -137,7 +137,7 @@ Optimization hints guide code generation for a target architecture:
 fn kernel<const S: [i32; 2]>(...) { ... }
 ```
 
-Runtime `CompileOptions` can override entry-level hints, which makes them a tunable axis: put the candidate values in a `Config` and apply them in the tuner's setup closure (see [Autotuning](#autotuning-experimental)). `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. `num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]` and requires bytecode version 13.3 or newer. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
+Runtime `CompileOptions` can override entry-level hints, which makes them a tunable axis: put the candidate values in a `Config` and apply them in the tuner's setup closure (see [Autotuning](autotuning.md)). `occupancy`, `num_cta_in_cga`, and `num_worker_warps_per_cta` are architecture-specific scheduling hints; `max_divisibility` controls divisibility assumptions used by the compiler. `num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]` and requires bytecode version 13.3 or newer. Because compile options are part of the JIT cache key, benchmark a small set of candidates instead of generating many one-off specializations.
 
 ## Common Pitfalls
 
@@ -167,71 +167,14 @@ Timing uses CUDA events (device timeline, not host clocks), warmup absorbs first
 
 ## Autotuning (experimental)
 
-`cutile::tune` automates the candidate search described in the sections above. It is gated behind the `experimental-tune` Cargo feature, and the API may change between releases:
-
-```toml
-cutile = { version = "...", features = ["experimental-tune"] }
-```
-
-The programmer declares the candidates, writes a setup closure, and the tuner measures each one:
-
-```rust
-use cutile::tune::{Autotuner, Config, ParamValue};
-
-let configs: Vec<Config> = [32i64, 64, 128, 256]
-    .into_iter()
-    .map(|bs| Config::new([("BLOCK_SIZE", ParamValue::Int(bs))]))
-    .collect();
-
-let output = Autotuner::new("rms_norm")
-    .configs(configs)
-    .run(&stream, |stream, config| {
-        let block_size = config.int("BLOCK_SIZE").unwrap();
-        // Prepare the launch for this candidate, run it once as a
-        // correctness gate, and return the closure to be timed.
-        let mut launch = build_launch(block_size)?;
-        launch(stream)?;
-        Ok(launch)
-    })?;
-
-let best = output.best.expect("a winner");
-```
-
-How it works:
-
-- A `Config` is a named set of integer or string parameters. The setup closure reads them to pick a monomorphization, a partition shape, or `CompileOptions` values.
-- Setup runs once per candidate. If it returns an error, the candidate is recorded as `TrialState::Invalid` with the message and the search continues. Invalid candidates never abort a run.
-- Each surviving candidate is timed with `do_bench`. After the search, the two best candidates are re-measured head to head with `do_bench_paired`, and that contemporaneous comparison picks the winner. Sequential medians never decide on their own.
-- `.prune(...)` removes candidates before they are visited. `.budget(...)` bounds the total wall-clock time of the run.
-- `.log(path)` appends every trial to a JSONL file. Rerunning with the same log resumes an interrupted search instead of starting over. The log records the tuner name and a hash of the search space, and refuses to resume from a log that belongs to a different search.
-
-### Committing winners
-
-A `tune::Record` persists winners so production loads them instead of re-searching. It is one JSON file per kernel, written by `save` and intended to be committed next to the code it tunes. The file holds a provenance header (kernel name, source hash, cutile version, `tileiras` fingerprint, target architecture, search-space hash) and one entry per shape-class bucket: the winning `Config`, its median, and optionally the winner's JIT cache key. A stored key carries the key encoding that produced it, because cutile can change that encoding without any change to the kernel or the toolchain.
-
-```rust
-use cutile::tune::{L2Key, Record, RecordEntry, Workspace};
-
-// After tuning: store the winner for this bucket.
-let mut record = Record::new(&workspace);
-record.insert(RecordEntry {
-    bucket: "tg<=512".into(),
-    config: best,
-    median_ms,
-    samples,
-    l2_key: Some(L2Key::current(launcher.specialize()?.l2_cache_key()?)),
-});
-record.save(&path)?;
-
-// In production: load, verified against the running workspace.
-let (record, warnings) = Record::load_verified(&path, &workspace, |entry| {
-    Ok(Some(specialize_for(&entry.config)?.l2_cache_key()?))
-})?;
-```
-
-`load_verified` refuses a record whose kernel, architecture, source hash, or search space does not match the running workspace, and refuses any entry whose stored JIT cache key no longer matches the recomputed one. That last check covers the kernel's dependencies and the toolchain, so a stale winner fails loudly instead of applying silently. Conditions that do not invalidate the configs themselves come back as warnings: a `tileiras` version drift that only shifts timings, and a stored key from an older key encoding — in both cases a recomputed key cannot match the stored one, so the check is skipped rather than read as staleness. A record is never applied on a best-effort basis: it either verifies or it does not load.
-
-The `autotune` example runs a complete search over the block size of an RMS normalization kernel:
+`cutile::tune` automates the candidate search described in the sections
+above: declare the configurations, write a setup closure, and the tuner
+measures each one, persists the trials, and commits the winner to a
+verified record. It is gated behind the `experimental-tune` Cargo feature.
+The [Autotuning](autotuning.md) chapter covers the whole workflow — the
+search, engine-scale `Objective` implementations, committing winners, and warming
+the kernel cache — and the `autotune` example runs a complete search over
+the block size of an RMS normalization kernel:
 
 ```sh
 cargo run -p cutile-examples --example autotune --features experimental-tune

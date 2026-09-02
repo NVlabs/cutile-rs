@@ -36,11 +36,7 @@ fn synthetic_tile_instance(rust_ty: syn::Type, element_name: &str, shape: &[i32]
 }
 
 /// Build a `TypeInstance::StructuredType` for a synthetic pointer tile type.
-fn synthetic_ptr_instance(
-    rust_ty: syn::Type,
-    element_name: &str,
-    is_mutable: bool,
-) -> TypeInstance {
+fn synthetic_ptr_instance(rust_ty: syn::Type, element_name: &str) -> TypeInstance {
     TypeInstance::StructuredType(crate::generics::TypeInstanceStructuredType {
         generic_ty: rust_ty.clone(),
         instance_ty: rust_ty.clone(),
@@ -49,7 +45,7 @@ fn synthetic_ptr_instance(
                 generic_ty: rust_ty.clone(),
                 instance_ty: rust_ty,
                 rust_element_instance_ty: element_name.to_string(),
-                is_mutable,
+                is_mutable: true,
             },
         )),
         shape: vec![],
@@ -221,11 +217,8 @@ impl TileRustType {
         Self::from_tile(element_name, &[])
     }
 
-    /// Build a `TileRustType` for a scalar pointer tile
-    /// `PointerTile<*mut element, {[]}>` / `PointerTile<*const element, {[]}>`.
-    /// Constness is a Rust-facing property only: the Tile IR pointer type
-    /// carries no mutability, so both build the same IR type.
-    pub(crate) fn from_scalar_ptr(element_name: &str, is_mutable: bool) -> Option<TileRustType> {
+    /// Build a `TileRustType` for a scalar pointer tile `PointerTile<*mut element, {[]}>`.
+    pub(crate) fn from_scalar_ptr(element_name: &str) -> Option<TileRustType> {
         let scalar = super::_type::scalar_from_name(element_name)?;
         let tile_ir_ty = TileIrType::Tile(cutile_ir::ir::TileType {
             shape: vec![],
@@ -234,9 +227,8 @@ impl TileRustType {
             )),
         });
         let type_str = format!("!cuda_tile.tile<!cuda_tile.ptr<{element_name}>>");
-        let prefix = crate::types::ptr_prefix(is_mutable);
         let rust_ty =
-            syn::parse_str::<syn::Type>(&format!("PointerTile<{prefix} {element_name}, {{[]}}>"))
+            syn::parse_str::<syn::Type>(&format!("PointerTile<* mut {element_name}, {{[]}}>"))
                 .ok()?;
         Some(TileRustType {
             kind: Kind::PrimitiveType,
@@ -245,58 +237,8 @@ impl TileRustType {
             tile_ir_ty: Some(tile_ir_ty),
             params: vec![],
             rust_ty: rust_ty.clone(),
-            type_instance: synthetic_ptr_instance(rust_ty, element_name, is_mutable),
+            type_instance: synthetic_ptr_instance(rust_ty, element_name),
         })
-    }
-
-    /// Re-labels the Rust-facing constness of this type's raw-pointer
-    /// component — `*mut E` <-> `*const E`, scalar or inside a
-    /// `PointerTile`. The Tile IR type is deliberately untouched: IR
-    /// pointers carry no constness, which is exactly what makes
-    /// `cast_const`/`cast_mut` free.
-    pub(crate) fn set_pointer_constness(&mut self, is_mutable: bool) {
-        let (from, to) = if is_mutable {
-            ("* const", "* mut")
-        } else {
-            ("* mut", "* const")
-        };
-        let relabel = |ty: &syn::Type| -> Option<syn::Type> {
-            let s = quote::quote!(#ty).to_string();
-            if s.contains(from) {
-                syn::parse_str::<syn::Type>(&s.replace(from, to)).ok()
-            } else {
-                None
-            }
-        };
-        if let Some(new_ty) = relabel(&self.rust_ty) {
-            self.rust_ty = new_ty;
-        }
-        let relabel_ptr_instance = |inst: &mut crate::generics::TypeInstancePtrType| {
-            inst.is_mutable = is_mutable;
-            if let Some(new_ty) = relabel(&inst.instance_ty) {
-                inst.instance_ty = new_ty;
-            }
-            if let Some(new_ty) = relabel(&inst.generic_ty) {
-                inst.generic_ty = new_ty;
-            }
-        };
-        match &mut self.type_instance {
-            TypeInstance::PtrType(inst) => relabel_ptr_instance(inst),
-            TypeInstance::StructuredType(structured) => {
-                if let Some(new_ty) = relabel(&structured.instance_ty) {
-                    structured.instance_ty = new_ty;
-                }
-                if let Some(new_ty) = relabel(&structured.generic_ty) {
-                    structured.generic_ty = new_ty;
-                }
-                if let Some(crate::generics::TypInstancePrimitiveType::PtrType(inst)) =
-                    &mut structured.primitive_type
-                {
-                    relabel_ptr_instance(inst);
-                }
-            }
-            _ => {}
-        }
     }
 
     pub(crate) fn new_structure(

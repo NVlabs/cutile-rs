@@ -32,16 +32,16 @@ fn add<const S: [i32; 2]>(
 
 The kernel describes what happens to one tile-shaped region. The compiler and runtime map that work onto CUDA execution units.
 
-## Tile Programs and Tile Blocks
+## Tile Blocks and Tile Threads
 
-A tile program is the logical unit of concurrent execution. Each tile program runs the entry function once and processes one region of the output. It can query its per-axis grid coordinates and extents:
+A tile block is the logical unit of concurrent execution. Each tile block runs the entry function once and processes one region of the output. It can query its coordinates and the total launch grid:
 
 ```rust
-let pid0 = program_id(0);
-let n0 = num_programs(0);
+let pid: (i32, i32, i32) = get_tile_block_id();
+let grid: (i32, i32, i32) = get_num_tile_blocks();
 ```
 
-The terms tile program, tile block, and tile thread refer to the same logical unit. The API uses `program_id(axis)` and `num_programs(axis)`; the tuple forms `get_tile_block_id()` and `get_num_tile_blocks()` return all three axes at once.
+The terms tile block and tile thread refer to the same logical unit. The API uses `get_tile_block_id()` and `get_num_tile_blocks()`.
 
 Tile blocks that fit on available Streaming Multiprocessors run at the same time. The full set of tile blocks is concurrent: their relative order is unspecified, and kernels must not depend on one tile block running before another unless an explicit synchronization mechanism exists outside the kernel.
 
@@ -57,12 +57,12 @@ Grid:            (ceil(128 / 32), ceil(256 / 64), 1)
 
 Tensor dimension 0 maps to grid `x`, dimension 1 maps to grid `y`, and dimension 2 maps to grid `z`. For tensors of lower rank, trailing grid dimensions are 1.
 
-Inside a kernel, the program id selects the logical region:
+Inside a kernel, the tile block id selects the logical region:
 
 ```rust
-let pid_m = program_id(0);
+let pid: (i32, i32, i32) = get_tile_block_id();
 let part_x = x.partition(const_shape![BM, BK]);
-let tile_x = part_x.load([pid_m, k_tile]);
+let tile_x = part_x.load([pid.0, k_tile]);
 ```
 
 For mutable outputs, the selected sub-tensor is passed directly to the tile block.
