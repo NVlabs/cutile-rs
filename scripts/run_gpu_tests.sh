@@ -67,6 +67,7 @@ for test_target in \
     simt_context_sync_policy \
     simt_device_buffer \
     simt_device_buffer_leaks \
+    simt_module_globals \
     simt_pinned_host_buffer \
     simt_stream_priority \
     simt_stream_query \
@@ -93,7 +94,8 @@ for test_target in \
     cuda_graph \
     execute_once \
     pool_allocation \
-    reactor_correctness
+    reactor_correctness \
+    simt_execute_once
 do
     run_step \
         "cuda-async GPU integration test ${test_target}" \
