@@ -58,7 +58,7 @@ pub enum DeviceFutureState {
 }
 
 /// Shared state between a CUDA stream callback and the async waker.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StreamCallbackState {
     pub(crate) waker: AtomicWaker,
     pub(crate) complete: AtomicBool,
@@ -67,10 +67,7 @@ pub struct StreamCallbackState {
 impl StreamCallbackState {
     /// Creates a new callback state with the completion flag unset.
     pub fn new() -> Self {
-        Self {
-            waker: AtomicWaker::new(),
-            complete: AtomicBool::new(false),
-        }
+        Self::default()
     }
     /// Marks the operation as complete and wakes the associated task.
     ///

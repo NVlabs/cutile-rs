@@ -44,9 +44,10 @@ fn build_kernel(
     build_body(&mut module, block_id, &args);
     let needs_return = {
         let block = module.block(block_id);
-        block.ops.last().map_or(true, |&last| {
-            !matches!(module.op(last).opcode, Opcode::Return)
-        })
+        block
+            .ops
+            .last()
+            .is_none_or(|&last| !matches!(module.op(last).opcode, Opcode::Return))
     };
     if needs_return {
         let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);

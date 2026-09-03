@@ -92,7 +92,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &call_expr.span(),
                 &format!(
                     "expected a structured or primitive type for first argument of `{}`, got {:?}",
-                    &call_expr.to_token_stream().to_string(),
+                    call_expr.to_token_stream(),
                     partition_value.kind
                 ),
             );
@@ -102,7 +102,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 &call_expr.span(),
                 &format!(
                     "Unexpected kind for arg 1 in {}",
-                    &call_expr.to_token_stream().to_string()
+                    call_expr.to_token_stream()
                 ),
             );
         }

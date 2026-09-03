@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -110,7 +109,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_scan_sum_test() -> () {
+fn compile_scan_sum_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "scan_sum_test_kernel",
@@ -142,7 +141,7 @@ fn compile_scan_sum_test() -> () {
 }
 
 #[test]
-fn compile_reduce_closure_test() -> () {
+fn compile_reduce_closure_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "reduce_closure_test_kernel",
@@ -177,7 +176,7 @@ fn compile_reduce_closure_test() -> () {
 }
 
 #[test]
-fn compile_reduce_product_closure_test() -> () {
+fn compile_reduce_product_closure_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "reduce_product_closure_test_kernel",
@@ -212,7 +211,7 @@ fn compile_reduce_product_closure_test() -> () {
 }
 
 #[test]
-fn compile_reduce_max_closure_test() -> () {
+fn compile_reduce_max_closure_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "reduce_max_closure_test_kernel",
@@ -247,7 +246,7 @@ fn compile_reduce_max_closure_test() -> () {
 }
 
 #[test]
-fn compile_scan_closure_test() -> () {
+fn compile_scan_closure_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "scan_closure_test_kernel",

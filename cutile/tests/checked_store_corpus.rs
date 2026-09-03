@@ -19,7 +19,6 @@
 //! in `inferred_axis_bounds.rs`. There is no `partition_permuted_mut`, so the
 //! permuted case is only reachable through loads.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

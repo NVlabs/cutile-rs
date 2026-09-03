@@ -10,7 +10,6 @@
 //! the axis-th result. No GPU execution — these tests only cover the
 //! DSL → IR lowering path.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

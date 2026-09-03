@@ -5,7 +5,6 @@
 
 //! Compile-only coverage for the example flash-attention kernels.
 
-use cutile;
 use cutile::compile_api::KernelCompiler;
 
 mod common;

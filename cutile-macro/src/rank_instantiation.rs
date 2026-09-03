@@ -1130,9 +1130,7 @@ impl RankInstantiator {
     /// Rewrite a free-fn signature (generics, args, return) and its body.
     pub fn rewrite_function(mut self, item: &ItemFn) -> Result<ItemFn, Error> {
         let mut item = item.clone();
-        if let Err(e) = rewrite_fn_sig(&mut item.sig, &self.bindings) {
-            return Err(e);
-        }
+        rewrite_fn_sig(&mut item.sig, &self.bindings)?;
         self.visit_block_mut(&mut item.block);
         self.into_result(item)
     }
@@ -1142,13 +1140,8 @@ impl RankInstantiator {
     pub fn rewrite_impl(mut self, item: &ItemImpl) -> Result<ItemImpl, Error> {
         let mut item = item.clone();
         let original_self_ty = (*item.self_ty).clone();
-        match rewrite_type_for_rank(&item.self_ty, &self.bindings) {
-            Ok(t) => *item.self_ty = t,
-            Err(e) => return Err(e),
-        }
-        if let Err(e) = rewrite_generics_for_rank(&mut item.generics, &self.bindings) {
-            return Err(e);
-        }
+        *item.self_ty = rewrite_type_for_rank(&item.self_ty, &self.bindings)?;
+        rewrite_generics_for_rank(&mut item.generics, &self.bindings)?;
         if let Some(trait_) = &mut item.trait_ {
             let path = &mut trait_.1;
             if path.segments.is_empty() {
@@ -1159,9 +1152,7 @@ impl RankInstantiator {
             }
             let last_seg = path.segments.last_mut().unwrap();
             if let PathArguments::AngleBracketed(path_args) = &mut last_seg.arguments {
-                if let Err(e) = rewrite_generic_args_for_rank(path_args, &self.bindings) {
-                    return Err(e);
-                }
+                rewrite_generic_args_for_rank(path_args, &self.bindings)?
             }
         }
 
@@ -1170,10 +1161,7 @@ impl RankInstantiator {
             match item_in_impl {
                 ImplItem::Type(type_impl) => {
                     let mut result = type_impl.clone();
-                    match rewrite_type_for_rank(&type_impl.ty, &self.bindings) {
-                        Ok(t) => result.ty = t,
-                        Err(e) => return Err(e),
-                    }
+                    result.ty = rewrite_type_for_rank(&type_impl.ty, &self.bindings)?;
                     impl_items.push(ImplItem::Type(result));
                 }
                 ImplItem::Const(c) => impl_items.push(ImplItem::Const(c.clone())),
@@ -1185,8 +1173,8 @@ impl RankInstantiator {
                     }
                     let mut result = fn_impl.clone();
                     self.rewrite_impl_method(&original_self_ty, &mut result);
-                    if self.error.is_some() {
-                        return Err(self.error.unwrap());
+                    if let Some(error) = self.error.take() {
+                        return Err(error);
                     }
                     impl_items.push(ImplItem::Fn(result));
                 }
@@ -1444,7 +1432,7 @@ pub fn instantiate_type_alias_for_rank(item: &ItemType) -> Result<ItemType, Erro
     let bindings = RankBindings::from_generics(&item.generics)?;
     let mut item = item.clone();
     rewrite_generics_for_rank(&mut item.generics, &bindings)?;
-    item.ty = Box::new(rewrite_type_for_rank(&item.ty, &bindings)?);
+    *item.ty = rewrite_type_for_rank(&item.ty, &bindings)?;
     Ok(item)
 }
 
@@ -1456,7 +1444,7 @@ pub fn instantiate_type_alias_for_rank(item: &ItemType) -> Result<ItemType, Erro
 pub fn instantiate_static_for_rank(item: &ItemStatic) -> Result<ItemStatic, Error> {
     let bindings = RankBindings::new();
     let mut item = item.clone();
-    item.ty = Box::new(rewrite_type_for_rank(&item.ty, &bindings)?);
+    *item.ty = rewrite_type_for_rank(&item.ty, &bindings)?;
     let concrete_type_ident = concrete_type_ident(&item.ty);
     let mut instantiator = RankInstantiator::new(bindings);
     instantiator.visit_expr_mut(&mut item.expr);

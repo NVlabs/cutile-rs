@@ -17,7 +17,6 @@
 //! kernel places its checks exactly where its annotated twin does. That
 //! equality is the precondition for removing the annotations entirely.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

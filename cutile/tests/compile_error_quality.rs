@@ -5,7 +5,6 @@
 
 //! Compile-only error-quality tests.
 
-use cutile;
 use cutile_compiler::ast::Module;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::error::JITError;

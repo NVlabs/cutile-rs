@@ -557,7 +557,7 @@ fn build_probe_module() -> cutile_ir::Module {
     let ub = const_i32(&mut module, 4);
     let step = const_i32(&mut module, 1);
     let (body_region, body_blk, body_args) =
-        build_single_block_region(&mut module, &[tile_i32.clone()]);
+        build_single_block_region(&mut module, std::slice::from_ref(&tile_i32));
     // The load sits INSIDE the region and references parent-scope values
     // (view, token) plus the block argument — the cross-region encoding a
     // real kernel exercises.
@@ -1533,7 +1533,7 @@ mod tests {
         let tileiras = create_fake_cuda_toolkit(&temp_dir, 13020, true);
 
         assert_eq!(
-            resolve_tileiras_binary_with_candidates(None, None, &[temp_dir.clone()]),
+            resolve_tileiras_binary_with_candidates(None, None, std::slice::from_ref(&temp_dir)),
             tileiras
         );
 

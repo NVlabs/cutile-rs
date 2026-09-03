@@ -13,7 +13,6 @@
 //! The reshape/broadcast pattern avoids the ptr-to-int/int-to-ptr workaround
 //! that was previously required for PointerTile shape manipulation.
 
-use cutile;
 use cutile::api::{arange, zeros};
 use cutile::tensor::{Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;

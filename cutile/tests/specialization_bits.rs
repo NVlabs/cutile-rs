@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile::api;
 use cutile::tile_kernel::{DeviceOp, TileKernel};
 use cutile_compiler::compiler::utils::CompileOptions;
@@ -76,7 +75,7 @@ fn compile_kernel(
     scalar_hints: &[(&str, &DivHint)],
     options: &CompileOptions,
 ) -> String {
-    let result = common::compile_to_ir(
+    common::compile_to_ir(
         __module_ast_self,
         "spec_test_module",
         name,
@@ -87,8 +86,7 @@ fn compile_kernel(
         None,
         options,
     )
-    .expect("Failed to compile");
-    result
+    .expect("Failed to compile")
 }
 
 // -- SpecializationBits produces correct assume_div_by in MLIR --

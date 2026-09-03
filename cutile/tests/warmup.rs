@@ -88,7 +88,7 @@ fn cache_key_different_tileiras_fingerprint() {
 #[test]
 fn cache_key_tileiras_stat_fallback_is_distinct() {
     let key_stat = default_key()
-        .tileiras_fingerprint("stat\0/usr/local/cuda/bin/tileiras\094855128\0170000000")
+        .tileiras_fingerprint("stat\x00/usr/local/cuda/bin/tileiras\x0094855128\x00170000000")
         .build();
     let key_version = default_key()
         .tileiras_fingerprint("release 13.3, V13.3.36")
