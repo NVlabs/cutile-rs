@@ -10,6 +10,7 @@
 mod api;
 pub(crate) mod cudarc_shim;
 mod dtype;
+mod dtype_convert;
 mod error;
 mod runtime;
 pub mod simt;
