@@ -19,21 +19,21 @@ mod global_memory_module {
     #[cutile::entry()]
     fn load_global_kernel(out: &mut Tensor<i32, { [1] }>) {
         let (value, _token) = COUNTER.load(ordering::Acquire, scope::Device);
-        out.store(value.reshape(const_shape![1]));
+        out.store(value.reshape(shape![1]));
     }
 
     #[cutile::entry()]
     fn store_global_kernel(out: &mut Tensor<i32, { [1] }>) {
-        let value = constant(3i32, const_shape![]);
+        let value = constant(3i32, shape![]);
         let _token = COUNTER.store(value, ordering::Release, scope::Device);
-        out.store(value.reshape(const_shape![1]));
+        out.store(value.reshape(shape![1]));
     }
 
     #[cutile::entry()]
     fn atomic_add_global_kernel(out: &mut Tensor<f32, { [1] }>) {
-        let increment = constant(1.0f32, const_shape![]);
+        let increment = constant(1.0f32, shape![]);
         let (old, _token) = FLOAT_ACCUM.atomic_add(increment, ordering::AcqRel, scope::Device);
-        out.store(old.reshape(const_shape![1]));
+        out.store(old.reshape(shape![1]));
     }
 }
 
@@ -45,7 +45,7 @@ mod bad_static_module {
 
     #[cutile::entry()]
     fn kernel(out: &mut Tensor<i32, { [1] }>) {
-        let value = constant(1i32, const_shape![1]);
+        let value = constant(1i32, shape![1]);
         out.store(value);
     }
 }

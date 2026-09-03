@@ -19,5 +19,8 @@ mod warmup;
 #[path = "gpu/warmup_bench.rs"]
 mod warmup_bench;
 
+#[path = "gpu/warmup_composed.rs"]
+mod warmup_composed;
+
 #[path = "gpu/jit_disk_cache.rs"]
 mod jit_disk_cache;

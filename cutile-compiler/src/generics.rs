@@ -204,7 +204,12 @@ impl GenericVars {
                                 ));
                             }
                             for _ in 0..cga_param.length {
-                                let arg = args[pos].parse::<i32>().unwrap();
+                                let arg = args[pos].parse::<i32>().map_err(|err| {
+                                    SourceLocation::unknown().jit_error(&format!(
+                                        "generic argument `{}` for const array parameter `{}` is not an i32: {err}",
+                                        args[pos], cga_param.name
+                                    ))
+                                })?;
                                 inst.push(arg);
                                 pos += 1;
                             }
@@ -221,7 +226,12 @@ impl GenericVars {
                             let name = const_param.ident.to_string();
                             let ty = type_path.to_token_stream().to_string();
                             if ty == "i32" {
-                                let arg = args[pos].parse::<i32>().unwrap();
+                                let arg = args[pos].parse::<i32>().map_err(|err| {
+                                    SourceLocation::unknown().jit_error(&format!(
+                                        "generic argument `{}` for const parameter `{}` is not an i32: {err}",
+                                        args[pos], const_param.ident
+                                    ))
+                                })?;
                                 ordered_param_vars.push(name.clone());
                                 inst_i32.insert(name, arg);
                             } else if ty == "bool" {
@@ -250,6 +260,18 @@ impl GenericVars {
                     }
                 }
                 GenericParam::Type(type_param) => {
+                    // Host-supplied generics can run short (a launcher built
+                    // with too few `.generics(...)`); indexing past them was
+                    // a panic, not a diagnostic.
+                    if pos >= args.len() {
+                        return SourceLocation::unknown().jit_error_result(&format!(
+                            "not enough generic arguments to instantiate type parameter `{}`: \
+                             expected at least {} but got {}",
+                            type_param.ident,
+                            pos + 1,
+                            args.len()
+                        ));
+                    }
                     let var_str = type_param.ident.to_string();
                     ordered_param_vars.push(var_str.clone());
                     inst_types.insert(var_str, args[pos].clone());
@@ -1018,7 +1040,13 @@ impl Instantiable for TypeInstanceStructuredType {
                                 // Map-shape metadata beyond the tile shape does not affect
                                 // TileRustType's element or shape instantiation.
                             } else {
-                                panic!("Failed to get cuda tile type for ty={} \n generic_arg={generic_arg:#?} \n generic_args={generic_vars:#?}", maybe_generic_ty.to_token_stream().to_string());
+                                // Can't resolve this type here — e.g. an element
+                                // var left unbound when a `P: PointerTo<E>` generic
+                                // is composed two levels deep. Give up gracefully so
+                                // the caller tries other instantiation strategies and
+                                // ultimately reports a spanned error, instead of
+                                // panicking the whole compile.
+                                return None;
                             }
                         }
                         syn::Type::Ptr(_) => {
@@ -1254,6 +1282,11 @@ pub struct GenericArgInference {
     /// caller symbols, and both forms of the same dimension must unify.
     /// Populated by [`Self::map_args_to_params`]; empty otherwise.
     caller_scalars: HashMap<String, i32>,
+    /// Caller-side const generic array instances (`S` → `[128, 64]`), so a
+    /// shape element written as a projection (`S[0]`) unifies with a
+    /// per-dimension callee parameter (`fn f<const M: i32>(x: Tile<E, {[M]}>)`).
+    /// Populated alongside `caller_scalars`.
+    caller_arrays: HashMap<String, Vec<i32>>,
 }
 
 // TODO (hme): Separate generic parameter inference from type inference procedure.
@@ -1298,6 +1331,7 @@ impl GenericArgInference {
             params,
             method_params: Some(method_params),
             caller_scalars: HashMap::new(),
+            caller_arrays: HashMap::new(),
         }
     }
 
@@ -1320,6 +1354,7 @@ impl GenericArgInference {
             params,
             method_params: None,
             caller_scalars: HashMap::new(),
+            caller_arrays: HashMap::new(),
         }
     }
 
@@ -1336,6 +1371,7 @@ impl GenericArgInference {
         caller_generic_vars: &GenericVars,
     ) -> Result<(), JITError> {
         self.caller_scalars = caller_generic_vars.inst_i32.clone();
+        self.caller_arrays = caller_generic_vars.inst_array.clone();
         let (fn_arg_types, _return_type) = get_sig_types(&self.sig, self_ty);
         // Get the generic parameters in this function signature.
         for i in 0..call_arg_rust_tys.len() {
@@ -1343,7 +1379,53 @@ impl GenericArgInference {
             let fn_arg_types = &fn_arg_types[i];
             self.add_generic_args(fn_arg_types, call_arg_rust_ty)?;
         }
+        self.propagate_pointer_to_bounds();
         Ok(())
+    }
+
+    /// Mirrors rustc's trait-driven inference for pointer ops: a generic
+    /// param declared `P: PointerTo<E>` that positional binding resolved
+    /// to a concrete raw pointer also determines `E` — its pointee —
+    /// because the only `PointerTo` impls are `*mut E` and `*const E`.
+    /// Without this, an element var that appears only in bounds and the
+    /// return type (the shape of every generic pointer memory op) would
+    /// stay unbound on the JIT track while rustc accepts the same call.
+    fn propagate_pointer_to_bounds(&mut self) {
+        for param in self.sig.generics.params.clone() {
+            let syn::GenericParam::Type(type_param) = param else {
+                continue;
+            };
+            let pointee = match self.param2arg.get(&type_param.ident.to_string()) {
+                Some(Some((_, bound_arg))) => match crate::types::get_ptr_type(bound_arg) {
+                    Some((_, pointee)) => pointee,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            for bound in &type_param.bounds {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    continue;
+                };
+                let Some(segment) = trait_bound.path.segments.last() else {
+                    continue;
+                };
+                if segment.ident != "PointerTo" {
+                    continue;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                    continue;
+                };
+                let Some(GenericArgument::Type(element_ty)) = args.args.first() else {
+                    continue;
+                };
+                let Some(element_ident) = get_type_ident(element_ty) else {
+                    continue;
+                };
+                if let Some(slot @ None) = self.param2arg.get_mut(&element_ident.to_string()) {
+                    *slot = Some((GenericArgType::Type, pointee.clone()));
+                }
+            }
+        }
     }
     /// Applies explicitly provided generic arguments from a function call expression.
     pub fn apply_provided_generics_fn_call(
@@ -1728,6 +1810,57 @@ impl GenericArgInference {
         self.add_generic_args(type_param, type_arg)
     }
 
+    /// Records `arg_val` as the inferred value of the shape parameter
+    /// `param_var`. Symbolic elements are normalized through the caller's
+    /// generics: argument types mix entry-substituted literals with caller
+    /// symbols for the same dimension (`128` vs `D`), and both must unify. A
+    /// dynamic `-1` carries no information about the parameter — it never
+    /// binds and never overrides — while two different concrete values are a
+    /// genuine conflict.
+    fn bind_shape_param(&mut self, param_var: &str, arg_val: String) -> Result<(), JITError> {
+        let normalize = |scalars: &HashMap<String, i32>, value: String| match scalars.get(&value) {
+            Some(instance) => instance.to_string(),
+            None => value,
+        };
+        let arg_val = normalize(&self.caller_scalars, arg_val);
+        if arg_val == "- 1" || arg_val == "-1" {
+            return Ok(());
+        }
+        let replaced = self.param2arg.insert(
+            param_var.to_string(),
+            Some((GenericArgType::GenericConstExpr, arg_val.clone())),
+        );
+        if let Some(Some((_, previous))) = replaced {
+            let previous = normalize(&self.caller_scalars, previous);
+            if previous != "- 1" && previous != "-1" && previous != arg_val {
+                return Err(JITError::Generic(format!(
+                    "conflicting const-generic inference for `{param_var}` in call to `{callee}`: one argument implies `{previous}`, another implies `{arg_val}`",
+                    callee = self.sig.ident,
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The value of a caller-side `PARAM[i]` shape element: `PARAM` must be
+    /// one of the caller's const generic arrays and `i` an integer literal in
+    /// range. `None` for any other index expression.
+    fn caller_array_element(&self, index: &syn::ExprIndex) -> Option<i32> {
+        let Expr::Path(base) = index.expr.as_ref() else {
+            return None;
+        };
+        let array = self
+            .caller_arrays
+            .get(&base.path.get_ident()?.to_string())?;
+        let Expr::Lit(lit) = index.index.as_ref() else {
+            return None;
+        };
+        let Lit::Int(position) = &lit.lit else {
+            return None;
+        };
+        array.get(position.base10_parse::<usize>().ok()?).copied()
+    }
+
     fn add_generic_args(
         &mut self,
         type_param: &syn::Type,
@@ -1877,6 +2010,39 @@ impl GenericArgInference {
                         _ => panic!("Unexpected generics {param_type:#?} {arg_const:#?}"),
                     }
                 }
+                // `Tile<E, S>` against `Tile<E, {[M, N]}>`: the caller passes its
+                // whole const generic array where the callee takes one parameter
+                // per dimension. Each `M`, `N` binds to the caller's instance of
+                // that element (the projected spelling `{[S[0], S[1]]}` takes the
+                // array/array path below). Anything else here is not a shape
+                // relation and binds nothing, as before.
+                (
+                    GenericArgument::Type(arg_type),
+                    GenericArgument::Const(Expr::Block(param_block)),
+                ) => {
+                    let caller_array = get_type_ident(arg_type)
+                        .and_then(|ident| self.caller_arrays.get(&ident.to_string()).cloned());
+                    let param_elems = match param_block.block.stmts.first() {
+                        Some(Stmt::Expr(Expr::Array(param_array), _)) => Some(&param_array.elems),
+                        _ => None,
+                    };
+                    if let (Some(caller_array), Some(param_elems)) = (caller_array, param_elems) {
+                        if caller_array.len() != param_elems.len() {
+                            return Err(JITError::Generic(format!(
+                                "rank mismatch in call to `{}`: the argument's shape has {} dimensions but the parameter's has {}",
+                                self.sig.ident,
+                                caller_array.len(),
+                                param_elems.len()
+                            )));
+                        }
+                        for (param_elem, value) in param_elems.iter().zip(caller_array) {
+                            let param_var = param_elem.to_token_stream().to_string();
+                            if self.param2arg.contains_key(&param_var) {
+                                self.bind_shape_param(&param_var, value.to_string())?;
+                            }
+                        }
+                    }
+                }
                 (GenericArgument::Const(arg_const), GenericArgument::Const(param_const)) => {
                     // println!("expand GenericArgument::Const? {const_param:#?}");
                     match (arg_const, param_const) {
@@ -1896,51 +2062,38 @@ impl GenericArgInference {
                                         let param_var = param_elem.to_token_stream().to_string();
                                         if self.param2arg.contains_key(&param_var) {
                                             let arg_elem = &arg_array_expr.elems[i];
+                                            let unsupported_element = |what: &str| {
+                                                JITError::Generic(format!(
+                                                    "cannot infer the generics of `{}` from the shape element `{}` ({what}); \
+                                                     shape elements must be integer literals, `-1`, const generic parameters, \
+                                                     or `PARAM[i]` projections of a const generic array",
+                                                    self.sig.ident,
+                                                    arg_elem.to_token_stream(),
+                                                ))
+                                            };
                                             let arg_val = match arg_elem {
-                                                Expr::Lit(lit) => {
-                                                    match &lit.lit {
-                                                        Lit::Int(_int_lit) => arg_elem.to_token_stream().to_string(),
-                                                        _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
+                                                Expr::Lit(lit) => match &lit.lit {
+                                                    Lit::Int(_) => arg_elem.to_token_stream().to_string(),
+                                                    _ => return Err(unsupported_element("a non-integer literal")),
+                                                },
+                                                Expr::Unary(_) | Expr::Path(_) => {
+                                                    arg_elem.to_token_stream().to_string()
+                                                }
+                                                // `S[0]`: the caller projects its const generic
+                                                // array onto a per-dimension callee parameter.
+                                                // Resolve the element now, so it unifies like a
+                                                // literal. This was an `unimplemented!` panic.
+                                                Expr::Index(index) => match self.caller_array_element(index) {
+                                                    Some(value) => value.to_string(),
+                                                    None => {
+                                                        return Err(unsupported_element(
+                                                            "an index that is not `PARAM[i]` over a caller const generic array with a literal index",
+                                                        ))
                                                     }
                                                 },
-                                                Expr::Unary(_unary_expr) => {
-                                                    arg_elem.to_token_stream().to_string()
-                                                },
-                                                Expr::Path(_path) => {
-                                                    arg_elem.to_token_stream().to_string()
-                                                },
-                                                _ => unimplemented!("Unexpected array element {arg_elem:#?} in {arg_array_expr:#?}"),
+                                                _ => return Err(unsupported_element("an unsupported expression")),
                                             };
-                                            // Normalize symbolic elements through the
-                                            // caller's generics: argument types mix
-                                            // entry-substituted literals with caller
-                                            // symbols for the same dimension (`128` vs
-                                            // `D`), and both must unify.
-                                            let arg_val = match self.caller_scalars.get(&arg_val) {
-                                                Some(value) => value.to_string(),
-                                                None => arg_val,
-                                            };
-                                            // Skip inference from dynamic dims (-1): they
-                                            // carry no information about the generic param.
-                                            if arg_val == "- 1" || arg_val == "-1" {
-                                                continue;
-                                            }
-                                            let replaced_arg = self.param2arg.insert(param_var.to_string(), Some((GenericArgType::GenericConstExpr, arg_val.to_string())));
-                                            if let Some(Some((_arg_type, arg))) = replaced_arg {
-                                                let arg = match self.caller_scalars.get(&arg) {
-                                                    Some(value) => value.to_string(),
-                                                    None => arg,
-                                                };
-                                                // Allow overriding a previous -1 (dynamic)
-                                                // inference with a concrete value, but
-                                                // two different concrete values conflict.
-                                                if arg != "- 1" && arg != "-1" && arg != arg_val {
-                                                    return Err(JITError::Generic(format!(
-                                                        "conflicting const-generic inference for `{param_var}` in call to `{callee}`: one argument implies `{arg}`, another implies `{arg_val}`",
-                                                        callee = self.sig.ident,
-                                                    )));
-                                                }
-                                            }
+                                            self.bind_shape_param(&param_var, arg_val)?;
                                         }
                                     }
                                 },
@@ -2012,7 +2165,14 @@ impl GenericArgInference {
                         Some((GenericArgType::Type, arg_type_str.to_string())),
                     );
                     if let Some(Some((_generic_arg_type, arg))) = replaced_arg {
-                        assert_eq!(arg, arg_type_str.to_string());
+                        // A shared pointer-typed generic param can bind to both
+                        // `*const T` and `*mut T`: rustc coerces at the call site
+                        // and Tile IR erases constness, so tolerate a const/mut-only
+                        // difference — only a different pointee is a real mismatch.
+                        debug_assert_eq!(
+                            arg.replace("* const ", "* mut "),
+                            arg_type_str.replace("* const ", "* mut ")
+                        );
                     }
                 }
             }
@@ -2029,7 +2189,14 @@ impl GenericArgInference {
                         Some((GenericArgType::Type, arg_type_str.to_string())),
                     );
                     if let Some(Some((_generic_arg_type, arg))) = replaced_arg {
-                        assert_eq!(arg, arg_type_str.to_string());
+                        // A shared pointer-typed generic param can bind to both
+                        // `*const T` and `*mut T`: rustc coerces at the call site
+                        // and Tile IR erases constness, so tolerate a const/mut-only
+                        // difference — only a different pointee is a real mismatch.
+                        debug_assert_eq!(
+                            arg.replace("* const ", "* mut "),
+                            arg_type_str.replace("* const ", "* mut ")
+                        );
                     }
                 }
             }
@@ -2550,6 +2717,60 @@ mod inference_tests {
         assert_eq!(vars.inst_i32.get("K"), Some(&128));
         assert_eq!(vars.inst_i32.get("M"), Some(&16));
         assert_eq!(vars.inst_i32.get("N"), Some(&32));
+    }
+
+    /// A caller shape written as projections of its const generic array
+    /// (`S[0]`, `S[1]`) unifies with a per-dimension callee's parameters.
+    /// This was an `unimplemented!` panic (2026-08 audit).
+    #[test]
+    fn projected_array_elements_unify_with_per_dimension_params() {
+        let sig: Signature = syn::parse_quote! {
+            fn scale_rows<const M: i32, const N: i32>(t: Tile<f32, { [M, N] }>) -> Tile<f32, { [M, N] }>
+        };
+        let mut inference = GenericArgInference::new_function(sig);
+        let mut caller = GenericVars::empty_unchecked();
+        caller.inst_array.insert("S".to_string(), vec![4, 8]);
+        let args: Vec<Type> = vec![syn::parse_quote!(Tile<f32, { [S[0], S[1]] }>)];
+        inference
+            .map_args_to_params(&args, None, &caller)
+            .expect("S[0] and S[1] resolve through the caller's array");
+        let vars = inference.get_generic_vars_instance(&caller, &HashMap::new());
+        assert_eq!(vars.inst_i32.get("M"), Some(&4));
+        assert_eq!(vars.inst_i32.get("N"), Some(&8));
+
+        // An index the caller cannot resolve is a diagnostic, not a panic.
+        let mut inference = GenericArgInference::new_function(syn::parse_quote! {
+            fn scale_rows<const M: i32, const N: i32>(t: Tile<f32, { [M, N] }>) -> Tile<f32, { [M, N] }>
+        });
+        let args: Vec<Type> = vec![syn::parse_quote!(Tile<f32, { [Q[0], 8] }>)];
+        let err = inference
+            .map_args_to_params(&args, None, &caller)
+            .expect_err("Q is not a caller array");
+        let message = err.to_string();
+        assert!(
+            message.contains("Q") && message.contains("scale_rows") && message.contains("PARAM[i]"),
+            "unexpected error: {message}"
+        );
+    }
+
+    /// The caller may also pass its whole const generic array (`Tile<f32, S>`)
+    /// where the callee takes one parameter per dimension; each element binds
+    /// to the caller's instance.
+    #[test]
+    fn whole_array_argument_binds_per_dimension_params() {
+        let sig: Signature = syn::parse_quote! {
+            fn scale_rows<const M: i32, const N: i32>(t: Tile<f32, { [M, N] }>) -> Tile<f32, { [M, N] }>
+        };
+        let mut inference = GenericArgInference::new_function(sig);
+        let mut caller = GenericVars::empty_unchecked();
+        caller.inst_array.insert("S".to_string(), vec![4, 8]);
+        let args: Vec<Type> = vec![syn::parse_quote!(Tile<f32, S>)];
+        inference
+            .map_args_to_params(&args, None, &caller)
+            .expect("S resolves through the caller's array");
+        let vars = inference.get_generic_vars_instance(&caller, &HashMap::new());
+        assert_eq!(vars.inst_i32.get("M"), Some(&4));
+        assert_eq!(vars.inst_i32.get("N"), Some(&8));
     }
 
     /// Normalization cannot over-normalize: two different symbols with

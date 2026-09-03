@@ -188,9 +188,11 @@ fn notification_path_completes_and_data_is_visible() {
     });
 }
 
-/// Spurious wake: waking the task without completion must re-poll to
-/// Pending (no panic, no premature Ready) and the future must still
-/// complete afterwards.
+/// Spurious wake: waking the task without completion must re-poll without
+/// panicking, staying Pending while the work is in flight, and the future
+/// must still complete afterwards. A re-poll probes the stream, so once the
+/// memsets have drained it may return Ready; a completed future must not be
+/// polled again (the `Future` contract), so the loop stops there.
 #[test]
 fn spurious_wake_repolls_to_pending_then_completes() {
     on_fresh_thread(|| {
@@ -203,11 +205,20 @@ fn spurious_wake_repolls_to_pending_then_completes() {
         let first = Pin::new(&mut future).poll(&mut cx);
         assert!(first.is_pending(), "slow op resolved on first poll");
         // Spurious wake + immediate re-poll, several times.
+        let mut completed = None;
         for _ in 0..4 {
             waker.wake_by_ref();
-            let _ = Pin::new(&mut future).poll(&mut cx);
+            if let Poll::Ready(result) = Pin::new(&mut future).poll(&mut cx) {
+                completed = Some(result);
+                break;
+            }
         }
-        block_on_with_deadline(future, DEADLINE).expect("op failed after spurious wakes");
+        match completed {
+            Some(result) => result.expect("op failed on a re-poll after the work drained"),
+            None => {
+                block_on_with_deadline(future, DEADLINE).expect("op failed after spurious wakes")
+            }
+        }
     });
 }
 

@@ -56,29 +56,33 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         // Load from pointer tile with relaxed/device semantics, no optional params
-        let (loaded_values, _load_token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            Some(scope::Device),
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _load_token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         // Modify the values
         let modified: Tile<f32, S> = loaded_values + constant(1.0, output.shape());
 
         // Store back to pointer tile with relaxed/device semantics, no optional params
-        let _store_token: Token = store_ptr_tko(
-            ptrs,
-            modified,
-            ordering::Relaxed,
-            Some(scope::Device),
-            None,
-            None,
-            Latency::<0>,
-        );
+        let _store_token: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                modified,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         // Store result using regular tensor API
         output.store(modified);
@@ -91,15 +95,17 @@ mod memory_and_atomic_ops_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -111,15 +117,17 @@ mod memory_and_atomic_ops_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Acquire,
-            Some(scope::System),
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Acquire,
+                Some(scope::System),
+                None,
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -132,15 +140,17 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         let input_token = new_token_unordered();
-        let (loaded_values, _result_token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            Some(scope::Device),
-            None,
-            None,
-            Some(input_token),
-            Latency::<0>,
-        );
+        let (loaded_values, _result_token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                None,
+                Some(input_token),
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -156,15 +166,17 @@ mod memory_and_atomic_ops_module {
         let mask: Tile<bool, S> = constant(true, output.shape());
         let padding = 0.0f32;
 
-        let (loaded_values, _token): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            Some(scope::Device),
-            Some(mask),
-            Some(padding),
-            None,
-            Latency::<0>,
-        );
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                Some(mask),
+                Some(padding),
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded_values);
     }
@@ -180,15 +192,17 @@ mod memory_and_atomic_ops_module {
         let values: Tile<f32, S> = constant(42.0f32, output.shape());
 
         // Store with release semantics and sys scope
-        let _store_token: Token = store_ptr_tko(
-            ptrs,
-            values,
-            ordering::Release,
-            Some(scope::System),
-            None,
-            None,
-            Latency::<0>,
-        );
+        let _store_token: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                values,
+                ordering::Release,
+                Some(scope::System),
+                None,
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(values);
     }
@@ -207,15 +221,17 @@ mod memory_and_atomic_ops_module {
         let mask: Tile<bool, S> = constant(true, output.shape());
 
         // Store with mask, relaxed semantics, and device scope
-        let _store_token: Token = store_ptr_tko(
-            ptrs,
-            values,
-            ordering::Relaxed,
-            Some(scope::Device),
-            Some(mask),
-            None,
-            Latency::<0>,
-        );
+        let _store_token: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                values,
+                ordering::Relaxed,
+                Some(scope::Device),
+                Some(mask),
+                None,
+                Latency::<0>,
+            )
+        };
 
         output.store(values);
     }
@@ -232,15 +248,17 @@ mod memory_and_atomic_ops_module {
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
 
         // Use atomic_addf_tko with relaxed/device semantics, no optional params
-        let (old_values, _result_token): (Tile<f32, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            increments,
-            atomic::AddF,
-            ordering::Relaxed,
-            scope::Device,
-            None,
-            None,
-        );
+        let (old_values, _result_token): (Tile<f32, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                increments,
+                atomic::AddF,
+                ordering::Relaxed,
+                scope::Device,
+                None,
+                None,
+            )
+        };
 
         output.store(old_values);
 
@@ -266,15 +284,17 @@ mod memory_and_atomic_ops_module {
         let _token: Token = new_token_unordered();
 
         // Perform atomic compare-and-swap
-        let (old_values, _result_token): (Tile<f32, S>, Token) = atomic_cas_tko(
-            ptrs,
-            cmp_values,
-            new_values,
-            ordering::Relaxed,
-            scope::Device,
-            None,
-            Some(_token),
-        );
+        let (old_values, _result_token): (Tile<f32, S>, Token) = unsafe {
+            atomic_cas_tko(
+                ptrs,
+                cmp_values,
+                new_values,
+                ordering::Relaxed,
+                scope::Device,
+                None,
+                Some(_token),
+            )
+        };
 
         output.store(old_values);
 
@@ -298,15 +318,17 @@ mod memory_and_atomic_ops_module {
         let mask_values: Tile<bool, S> = constant(true, output.shape());
 
         // Perform atomic compare-and-swap with mask
-        let (old_values, _result_token): (Tile<i64, S>, Token) = atomic_cas_tko(
-            ptrs,
-            cmp_values,
-            new_values,
-            ordering::Acquire,
-            scope::Device,
-            Some(mask_values),
-            None,
-        );
+        let (old_values, _result_token): (Tile<i64, S>, Token) = unsafe {
+            atomic_cas_tko(
+                ptrs,
+                cmp_values,
+                new_values,
+                ordering::Acquire,
+                scope::Device,
+                Some(mask_values),
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -323,15 +345,17 @@ mod memory_and_atomic_ops_module {
         let new_values: Tile<i64, S> = constant(200i64, output.shape());
 
         // Perform atomic compare-and-swap with acq_rel ordering and sys scope
-        let (old_values, _result_token): (Tile<i64, S>, Token) = atomic_cas_tko(
-            ptrs,
-            cmp_values,
-            new_values,
-            ordering::AcqRel,
-            scope::System,
-            None,
-            None,
-        );
+        let (old_values, _result_token): (Tile<i64, S>, Token) = unsafe {
+            atomic_cas_tko(
+                ptrs,
+                cmp_values,
+                new_values,
+                ordering::AcqRel,
+                scope::System,
+                None,
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -346,15 +370,17 @@ mod memory_and_atomic_ops_module {
 
         let values: Tile<i64, S> = constant(0xFFi64, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            values,
-            atomic::And,
-            ordering::Relaxed,
-            scope::Device,
-            None,
-            None,
-        );
+        let (old_values, _token): (Tile<i64, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                values,
+                atomic::And,
+                ordering::Relaxed,
+                scope::Device,
+                None,
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -368,15 +394,17 @@ mod memory_and_atomic_ops_module {
 
         let increments: Tile<i64, S> = constant(5i64, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            increments,
-            atomic::Add,
-            ordering::AcqRel,
-            scope::System,
-            None,
-            None,
-        );
+        let (old_values, _token): (Tile<i64, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                increments,
+                atomic::Add,
+                ordering::AcqRel,
+                scope::System,
+                None,
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -390,15 +418,17 @@ mod memory_and_atomic_ops_module {
 
         let values: Tile<i64, S> = constant(100i64, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            values,
-            atomic::Max,
-            ordering::Acquire,
-            scope::Device,
-            None,
-            None,
-        );
+        let (old_values, _token): (Tile<i64, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                values,
+                atomic::Max,
+                ordering::Acquire,
+                scope::Device,
+                None,
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -413,15 +443,17 @@ mod memory_and_atomic_ops_module {
         let increments: Tile<i64, S> = constant(10i64, output.shape());
         let mask: Tile<bool, S> = constant(true, output.shape());
 
-        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            increments,
-            atomic::Add,
-            ordering::Relaxed,
-            scope::Device,
-            Some(mask),
-            None,
-        );
+        let (old_values, _token): (Tile<i64, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                increments,
+                atomic::Add,
+                ordering::Relaxed,
+                scope::Device,
+                Some(mask),
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -436,15 +468,17 @@ mod memory_and_atomic_ops_module {
         let values: Tile<i64, S> = constant(0xFFFFi64, output.shape());
         let input_token: Token = new_token_unordered();
 
-        let (old_values, _token): (Tile<i64, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            values,
-            atomic::Xor,
-            ordering::Release,
-            scope::System,
-            None,
-            Some(input_token),
-        );
+        let (old_values, _token): (Tile<i64, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                values,
+                atomic::Xor,
+                ordering::Release,
+                scope::System,
+                None,
+                Some(input_token),
+            )
+        };
 
         output.store(old_values);
     }
@@ -458,15 +492,17 @@ mod memory_and_atomic_ops_module {
 
         let new_values: Tile<f32, S> = constant(42.5f32, output.shape());
 
-        let (old_values, _token): (Tile<f32, S>, Token) = atomic_rmw_tko(
-            ptrs,
-            new_values,
-            atomic::Xchg,
-            ordering::AcqRel,
-            scope::Device,
-            None,
-            None,
-        );
+        let (old_values, _token): (Tile<f32, S>, Token) = unsafe {
+            atomic_rmw_tko(
+                ptrs,
+                new_values,
+                atomic::Xchg,
+                ordering::AcqRel,
+                scope::Device,
+                None,
+                None,
+            )
+        };
 
         output.store(old_values);
     }
@@ -500,10 +536,9 @@ mod atomic_red_view_module {
     /// output view, no old values returned.
     #[cutile::entry()]
     unsafe fn atomic_red_view_kernel(output: &mut Tensor<f32, { [-1, -1] }>) {
-        let mut out_part: PartitionMut<f32, { [16, 16] }> =
-            output.partition_mut(const_shape![16, 16]);
+        let mut out_part: PartitionMut<f32, { [16, 16] }> = output.partition_mut(shape![16, 16]);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, const_shape![16, 16]);
+        let tile: Tile<f32, { [16, 16] }> = constant(1.0f32, shape![16, 16]);
         let _tok: Token = unsafe {
             atomic_red_view_tko(
                 &mut out_part,
@@ -1128,8 +1163,8 @@ mod gather_scatter_view_module {
     unsafe fn gsv_kernel(data: &Tensor<f32, { [-1, -1] }>) {
         let tok: Token = new_token_unordered();
         let gsv: GatherScatterView<f32, { [8, 64] }, 0> =
-            unsafe { make_gather_scatter_view(data, const_shape![8, 64], padding::None) };
-        let sparse_idx: Tile<i32, { [8] }> = constant(0i32, const_shape![8]);
+            unsafe { make_gather_scatter_view(data, shape![8, 64], padding::None) };
+        let sparse_idx: Tile<i32, { [8] }> = constant(0i32, shape![8]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let (_tile, _tok): (Tile<f32, { [8, 64] }>, Token) = unsafe {
             load_gather_scatter_view_tko(
@@ -1179,7 +1214,7 @@ mod strided_view_module {
     unsafe fn sv_kernel(data: &Tensor<f32, { [-1, -1] }>) {
         let tok: Token = new_token_unordered();
         let sv: StridedView<f32, { [16, 16] }, { [2, 1] }, { [0, 1] }> =
-            unsafe { make_strided_view(data, const_shape![16, 16], padding::None) };
+            unsafe { make_strided_view(data, shape![16, 16], padding::None) };
         let pid: (i32, i32, i32) = get_tile_block_id();
         let (_tile, _tok): (Tile<f32, { [16, 16] }>, Token) = unsafe {
             load_strided_view_tko(
@@ -1231,7 +1266,7 @@ mod strided_view_permuted_module {
     unsafe fn sv_permuted_kernel(data: &Tensor<f32, { [-1, -1] }>) {
         let tok: Token = new_token_unordered();
         let sv: StridedView<f32, { [16, 16] }, { [2, 1] }, { [1, 0] }> =
-            unsafe { make_strided_view(data, const_shape![16, 16], padding::None) };
+            unsafe { make_strided_view(data, shape![16, 16], padding::None) };
         let pid: (i32, i32, i32) = get_tile_block_id();
         let (_tile, _tok): (Tile<f32, { [16, 16] }>, Token) = unsafe {
             load_strided_view_tko(

@@ -20,7 +20,6 @@ use cutile_compiler::cuda_tile_runtime_utils::{
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
-use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
 use std::path::PathBuf;
@@ -62,7 +61,9 @@ fn record_jit_compile() {
 }
 
 use crate::error::*;
-use crate::tensor::{GridBound, IntoPartition, IntoPartitionArc, Partition, Tensor};
+use crate::tensor::{
+    GridBound, IntoPartition, IntoPartitionArc, KernelInput, KernelOutput, Partition, Tensor,
+};
 
 pub use cuda_async::{
     device_buffer::*, device_context::*, device_future::*, device_operation::*, launch::*,
@@ -213,6 +214,16 @@ impl TileFunctionKeyBuilder {
 }
 
 impl TileFunctionKey {
+    /// The kernel's module name.
+    pub fn module_name(&self) -> &str {
+        &self.module_name
+    }
+
+    /// The kernel's function name.
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
+
     /// Start building a key with required `module_name` and `function_name`.
     /// All other fields default to empty / `None` / `default()`.
     pub fn builder(
@@ -371,8 +382,100 @@ pub fn _specialization_from_context<F: Fn() -> Module>(
 static KERNEL_CACHE: OnceLock<DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>> =
     OnceLock::new();
 
-pub fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>> {
+/// The process-global L1 cache. Crate-internal ONLY: exposing the raw
+/// `DashMap` publicly would hand out safe `.clear()`/`.remove()`/`.retain()`,
+/// which bypass the `unsafe` eviction gate below — safe code could unload a
+/// `Module` mid-launch (the exact UAF the gate prevents) or re-create the
+/// re-entrant `.retain()` deadlock. All external mutation must go through the
+/// `unsafe` eviction APIs.
+pub(crate) fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>
+{
     KERNEL_CACHE.get_or_init(DashMap::new)
+}
+
+/// Clears L1. Test-support only — `#[doc(hidden)]`, not public API, and
+/// `unsafe` for the same reason as the eviction APIs: it can unload a
+/// `Module` still executing on the GPU, so the caller must quiesce first.
+/// Tests control launch timing, so they satisfy that obligation.
+///
+/// # Safety
+/// See [`clear_kernel_cache`]: quiesce every stream that may run a cached
+/// kernel before calling.
+#[doc(hidden)]
+pub unsafe fn clear_kernel_cache_for_tests() {
+    get_kernel_cache().clear();
+}
+
+/// Removes every kernel from the process-global in-memory cache.
+///
+/// Entries removed here drop the cache's reference; the underlying CUDA
+/// module unloads (releasing its device memory) when the LAST holder
+/// drops, so host-side users are protected by refcount. What refcounts
+/// cannot see is the GPU: a launched kernel executes after the launch
+/// call returns. A tuning objective between trials is exactly the
+/// situation this API exists for: sweeps churn specializations by design,
+/// each holding device memory, while the cache is intentionally unbounded
+/// for steady-state engines (capacity policy lives in the L2 disk cache).
+///
+/// In-flight compiles are unaffected: a thread mid-compile holds its own
+/// `Arc` to its single-flight slot and completes into it; the next
+/// request for that key recompiles (or is served by the disk cache).
+///
+/// Returns the number of entries removed. Freed device bytes are not
+/// tracked host-side; per-module sizes are not observable through the
+/// driver's module API.
+///
+/// # Safety
+/// The caller must quiesce first: synchronize every stream that may still
+/// be running any cached kernel before calling. Unloading a `Module` whose
+/// grid is still executing on the device is undefined behavior, and host
+/// refcounts cannot observe in-flight GPU work — only the caller knows
+/// which streams are idle. This is why the eviction APIs are `unsafe`.
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn clear_kernel_cache() -> usize {
+    unsafe { retain_kernels(|_| false) }
+}
+
+/// Removes one specialization from the in-memory cache; returns whether
+/// it was present.
+///
+/// # Safety
+/// Same quiesce obligation as [`clear_kernel_cache`]: the caller must
+/// ensure no stream is still running this kernel before evicting it.
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn evict_kernel(key: &TileFunctionKey) -> bool {
+    get_kernel_cache().remove(key).is_some()
+}
+
+/// Keeps only specializations whose key satisfies `pred`; returns the
+/// number of entries removed.
+///
+/// `pred` may freely query the cache (`contains_cuda_function`,
+/// `evict_kernel`, or even trigger a compile): it runs with no cache lock
+/// held. Use the [`TileFunctionKey::module_name`]/
+/// [`TileFunctionKey::function_name`] accessors to scope a predicate to
+/// your own kernel.
+///
+/// # Safety
+/// Same quiesce obligation as [`clear_kernel_cache`].
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn retain_kernels(mut pred: impl FnMut(&TileFunctionKey) -> bool) -> usize {
+    let cache = get_kernel_cache();
+    // Snapshot every key first, fully draining the iterator so no shard lock
+    // is held, THEN evaluate `pred` and remove. Evaluating `pred` inside
+    // `DashMap::retain` (or during iteration) holds a shard lock, so the
+    // instant the predicate re-enters the cache — a lookup, an evict, a
+    // compile — it self-deadlocks that shard, wedging every subsequent JIT
+    // lookup in the process. Useful predicates ("evict only my kernel's
+    // specializations") want exactly that re-entry.
+    let keys: Vec<TileFunctionKey> = cache.iter().map(|entry| entry.key().clone()).collect();
+    let mut removed = 0;
+    for key in keys {
+        if !pred(&key) && cache.remove(&key).is_some() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Get (or create) the single-flight compilation slot for `key`.
@@ -407,8 +510,8 @@ pub fn contains_cuda_function(key: &TileFunctionKey) -> bool {
 
 /// Reads Tile IR text from a file.
 ///
-/// This helper function reads intermediate representation files from disk, typically
-/// for debugging purposes when using `use_debug_mlir` or similar options.
+/// This helper function reads intermediate representation files from disk, the
+/// counterpart of the `dump_mlir_dir` entry attribute's [`write_ir`].
 ///
 /// ## Parameters
 ///
@@ -438,9 +541,11 @@ fn read_ir(path: String) -> Result<String, std::io::Error> {
 /// - `dir`: Directory to write the file to
 /// - `contents`: IR contents to write
 ///
-/// ## Panics
+/// ## Errors
 ///
-/// Panics if the file cannot be written.
+/// Returns an error if the file cannot be written (e.g. the directory does not
+/// exist or is not writable). This runs inside the single-flight compile, so a
+/// panic here would poison the launch instead of failing it.
 fn write_ir(
     module_name: &str,
     function_name: &str,
@@ -448,11 +553,17 @@ fn write_ir(
     extension: &str,
     dir: &str,
     contents: &str,
-) {
+) -> Result<(), Error> {
     let filename = format!("{module_name}_{function_name}_{cache_hash_str}.{extension}");
     let path = PathBuf::from(dir).join(filename);
-    fs::write(path.clone(), contents).unwrap_or_else(|_| panic!("Failed to write {path:?}")); // Writes the string as bytes
+    fs::write(&path, contents).map_err(|e| {
+        Error::Anyhow(anyhow::anyhow!(
+            "failed to write the IR dump for {module_name}::{function_name} to {path:?} \
+             (dump_mlir_dir = {dir:?}): {e}"
+        ))
+    })?;
     println!("IR written to {path:?}");
+    Ok(())
 }
 
 // ── Single-flight compilation dedup is handled by once_cell::sync::OnceCell ──
@@ -552,7 +663,7 @@ fn compile_and_load_kernel(
                     "mlir",
                     path.as_str(),
                     ir_text.as_str(),
-                );
+                )?;
             }
         }
     }
@@ -567,7 +678,11 @@ fn compile_and_load_kernel(
     // then reports source=tileiras) instead of inflating stage3.
     let mut recompile_ms = 0.0;
     let stage3_start = std::time::Instant::now();
-    let module = match load_module_from_bytes(&cubin, device_id) {
+    // SAFETY: `cubin` is a complete image. It either came straight out of
+    // tileiras in this process, or from the disk cache, whose read path
+    // verifies the entry's SHA-256 payload checksum before handing the bytes
+    // back (a torn or corrupt entry is a miss, never a load).
+    let module = match unsafe { load_module_from_bytes(&cubin, device_id) } {
         Ok(module) => module,
         // A disk-served cubin the driver rejects (partial write the checksum
         // missed, driver/toolkit skew, …) must not fail the launch: evict that
@@ -591,7 +706,8 @@ fn compile_and_load_kernel(
                 )?;
                 recompile_ms = recompile_start.elapsed().as_secs_f64() * 1000.0;
                 stage2_ms += recompile_ms;
-                load_module_from_bytes(&cubin, device_id)?
+                // SAFETY: a fresh tileiras compile, complete by construction.
+                unsafe { load_module_from_bytes(&cubin, device_id) }?
             }
             Stage2Source::Tileiras => return Err(e.into()),
         },
@@ -641,36 +757,49 @@ fn compile_and_load_kernel(
 /// ensures only one thread performs compilation while others block. Once initialization completes,
 /// all threads see the same cached result.
 ///
-/// The caching key is based on the module name, function name, type generics, stride arguments,
-/// and compile-time grid dimensions, ensuring correct reuse across different specializations.
+/// The caching key is a [`TileFunctionKey`]: module and function name, generics, stride and
+/// specialization arguments, scalar hints, optional constant grid, compile options, source
+/// hash, and the device/toolchain identity, ensuring correct reuse across specializations.
 ///
 /// ## Arguments
 ///
 /// * `ctx` - Execution context containing device information
-/// * `module_asts` - Closure that produces the AST modules to compile
+/// * `kernel_ast` - Closure producing the kernel's module AST (the `__module_ast_self`
+///   generated by `#[cutile::module]`); called only on a cache miss
 /// * `module_name` - Name of the module containing the function
 /// * `function_name` - Name of the function to compile
 /// * `function_entry` - Entry point name in the compiled CUDA code
 /// * `function_generics` - Type and const generic arguments (e.g., `["f32", "256"]`)
-/// * `stride_args` - Stride information for tensor arguments
+/// * `stride_args` - Per tensor argument, which strides are 1 (`1`) or unknown (`-1`)
+/// * `spec_args` - Per tensor argument, its [`SpecializationBits`]
+/// * `scalar_hints` - Divisibility hints for integer scalar and pointer arguments
 /// * `const_grid` - Optional compile-time constant grid dimensions
+/// * `compile_options` - Compiler and tileiras options for this specialization
+/// * `source_hash` - The kernel module's `_SOURCE_HASH`
+///
+/// Returns the loaded [`Function`] together with the [`Validator`] the launcher checks the
+/// runtime arguments against.
 ///
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_kernel::compile_from_context;
+/// use cutile::tile_kernel::{compile_from_context, CompileOptions};
 ///
-/// let ctx = get_execution_context();
-/// let function = compile_from_context(
+/// let ctx = ExecutionContext::new(stream);
+/// let (function, validator) = compile_from_context(
 ///     &ctx,
-///     || vec![my_module_ast()],
+///     my_module::__module_ast_self,
 ///     "my_module",
 ///     "my_function",
-///     "my_function_kernel",
+///     "my_function_entry",
 ///     vec!["f32".to_string(), "128".to_string()],
+///     vec![("x".to_string(), vec![1])],
+///     vec![("x".to_string(), x.spec().clone())],
 ///     vec![],
-///     None
-/// );
+///     None,
+///     CompileOptions::default(),
+///     my_module::_SOURCE_HASH,
+/// )?;
 /// ```
 #[allow(clippy::too_many_arguments)]
 pub fn compile_from_context<F: Fn() -> Module>(
@@ -1426,6 +1555,244 @@ where
     UnwrapPartition { op }
 }
 
+// Partitioning and unpartitioning allocate nothing themselves, so they are
+// graph-recordable exactly when the op they wrap is.
+impl<const RANK: usize, I, DI> GraphNode for DeviceOperationPartition<RANK, I, DI>
+where
+    I: Send + IntoPartition + IntoPartitionArc,
+    DI: DeviceOp<Output = I> + GraphNode,
+{
+}
+
+impl<I: Send, DI> GraphNode for UnwrapPartition<I, DI> where
+    DI: DeviceOp<Output = Partition<I>> + GraphNode
+{
+}
+
+// ── Launcher input combinators ──────────────────────────────────────────────
+//
+// The generated launcher `my_kernel(arg0, arg1, ..)` turns each argument into
+// a DeviceOp (`IntoDeviceOp`), applies KernelOutput::prepare / KernelInput::
+// prepare to tensor params, and hands the launcher struct one op producing the
+// whole argument tuple. These three types are that op, spelled with nameable
+// types so the launcher's return type can carry it: `Launcher<.., KernelArgs<
+// (PrepareOutput<Op0, T>, PrepareInput<Op1, T>, Op2)>>`. Each implements
+// `GraphNode` only when the ops it wraps do, which is what lets
+// `impl GraphNode for Launcher<.., DI> where DI: GraphNode` hold for
+// pre-allocated inputs (`&Tensor`, `Arc<Tensor>`, `&TensorView`, partitions of
+// existing tensors, plain values — all `Value<T>`) and fail to hold for an
+// allocating op such as `api::zeros(..).partition(..)`, whose allocation node
+// would return a different address on graph replay.
+
+/// Applies [`KernelInput::prepare`] to the output of `DI`.
+pub struct PrepareInput<DI, T> {
+    op: DI,
+    _elem: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<DI, T> PrepareInput<DI, T> {
+    pub fn new(op: DI) -> Self {
+        Self {
+            op,
+            _elem: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: DType, K: KernelInput<T>, DI: DeviceOp<Output = K>> DeviceOp for PrepareInput<DI, T> {
+    type Output = K::Stored;
+
+    unsafe fn execute(self, context: &ExecutionContext) -> Result<K::Stored, DeviceError> {
+        Ok(K::prepare(self.op.execute(context)?))
+    }
+}
+
+impl<T: DType, K: KernelInput<T>, DI: DeviceOp<Output = K> + GraphNode> GraphNode
+    for PrepareInput<DI, T>
+{
+}
+
+impl<T: DType, K: KernelInput<T>, DI: DeviceOp<Output = K>> IntoFuture for PrepareInput<DI, T> {
+    type Output = Result<K::Stored, DeviceError>;
+    type IntoFuture = DeviceFuture<K::Stored, PrepareInput<DI, T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
+/// Applies [`KernelOutput::prepare`] to the output of `DI`.
+pub struct PrepareOutput<DI, T> {
+    op: DI,
+    _elem: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<DI, T> PrepareOutput<DI, T> {
+    pub fn new(op: DI) -> Self {
+        Self {
+            op,
+            _elem: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: DType, K: KernelOutput<T>, DI: DeviceOp<Output = K>> DeviceOp for PrepareOutput<DI, T> {
+    type Output = K::Stored;
+
+    unsafe fn execute(self, context: &ExecutionContext) -> Result<K::Stored, DeviceError> {
+        Ok(K::prepare(self.op.execute(context)?))
+    }
+}
+
+impl<T: DType, K: KernelOutput<T>, DI: DeviceOp<Output = K> + GraphNode> GraphNode
+    for PrepareOutput<DI, T>
+{
+}
+
+impl<T: DType, K: KernelOutput<T>, DI: DeviceOp<Output = K>> IntoFuture for PrepareOutput<DI, T> {
+    type Output = Result<K::Stored, DeviceError>;
+    type IntoFuture = DeviceFuture<K::Stored, PrepareOutput<DI, T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
+/// Executes a tuple of device operations in order and yields the tuple of
+/// their outputs — the argument op of a generated kernel launcher.
+pub struct KernelArgs<Ops>(pub Ops);
+
+macro_rules! impl_kernel_args {
+    ($(($op:ident, $out:ident)),*) => {
+        impl<$($op: DeviceOp),*> DeviceOp for KernelArgs<($($op,)*)> {
+            type Output = ($(<$op as DeviceOp>::Output,)*);
+
+            #[allow(unused_variables, clippy::unused_unit)]
+            unsafe fn execute(
+                self,
+                context: &ExecutionContext,
+            ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+                let ($($out,)*) = self.0;
+                Ok(($($out.execute(context)?,)*))
+            }
+        }
+
+        impl<$($op: GraphNode),*> GraphNode for KernelArgs<($($op,)*)> {}
+
+        impl<$($op: DeviceOp),*> IntoFuture for KernelArgs<($($op,)*)> {
+            type Output = Result<<Self as DeviceOp>::Output, DeviceError>;
+            type IntoFuture = DeviceFuture<<Self as DeviceOp>::Output, Self>;
+            fn into_future(self) -> Self::IntoFuture {
+                match with_default_device_policy(|policy| {
+                    let stream = policy.next_stream()?;
+                    Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+                }) {
+                    Ok(Ok(future)) => future,
+                    Ok(Err(e)) => DeviceFuture::failed(e),
+                    Err(e) => DeviceFuture::failed(e),
+                }
+            }
+        }
+    };
+}
+
+// Emit the `KernelArgs` impls for every arity from 0 up to the number of
+// pairs listed below. Entry kernels in the workspace currently go up to 44
+// parameters (`attention_decode_kernel_grouped` in cutile-kernels); 64 leaves
+// headroom, and a kernel beyond it fails to compile at the launcher with
+// "the trait bound `KernelArgs<...>: DeviceOp` is not satisfied".
+macro_rules! impl_kernel_args_cascade {
+    (@acc [$($acc:tt),*]) => {
+        impl_kernel_args!($($acc),*);
+    };
+    (@acc [$($acc:tt),*] $next:tt $(, $rest:tt)*) => {
+        impl_kernel_args!($($acc),*);
+        impl_kernel_args_cascade!(@acc [$($acc,)* $next] $($rest),*);
+    };
+    ($($pairs:tt),* $(,)?) => {
+        impl_kernel_args_cascade!(@acc [] $($pairs),*);
+    };
+}
+
+impl_kernel_args_cascade!(
+    (A0, a0),
+    (A1, a1),
+    (A2, a2),
+    (A3, a3),
+    (A4, a4),
+    (A5, a5),
+    (A6, a6),
+    (A7, a7),
+    (A8, a8),
+    (A9, a9),
+    (A10, a10),
+    (A11, a11),
+    (A12, a12),
+    (A13, a13),
+    (A14, a14),
+    (A15, a15),
+    (A16, a16),
+    (A17, a17),
+    (A18, a18),
+    (A19, a19),
+    (A20, a20),
+    (A21, a21),
+    (A22, a22),
+    (A23, a23),
+    (A24, a24),
+    (A25, a25),
+    (A26, a26),
+    (A27, a27),
+    (A28, a28),
+    (A29, a29),
+    (A30, a30),
+    (A31, a31),
+    (A32, a32),
+    (A33, a33),
+    (A34, a34),
+    (A35, a35),
+    (A36, a36),
+    (A37, a37),
+    (A38, a38),
+    (A39, a39),
+    (A40, a40),
+    (A41, a41),
+    (A42, a42),
+    (A43, a43),
+    (A44, a44),
+    (A45, a45),
+    (A46, a46),
+    (A47, a47),
+    (A48, a48),
+    (A49, a49),
+    (A50, a50),
+    (A51, a51),
+    (A52, a52),
+    (A53, a53),
+    (A54, a54),
+    (A55, a55),
+    (A56, a56),
+    (A57, a57),
+    (A58, a58),
+    (A59, a59),
+    (A60, a60),
+    (A61, a61),
+    (A62, a62),
+    (A63, a63)
+);
+
 // ToHostVec
 
 /// A device operation that copies a tensor from device memory to a host `Vec<T>`.
@@ -1451,10 +1818,26 @@ where
         let tensor = self.op.execute(context)?;
         let cu_deviceptr = tensor.cu_deviceptr();
         let size = tensor.size();
-        let layout = Layout::array::<T>(size).expect("overflow cannot happen");
-        let async_ptr = unsafe { alloc(layout).cast::<T>() };
-        memcpy_dtoh_async(async_ptr, cu_deviceptr, size, context.get_cuda_stream());
-        Ok(unsafe { Vec::from_raw_parts(async_ptr, size, size) })
+        // The `Vec` owns the host buffer from the start, so an early return
+        // frees it, and unlike a bare `alloc` it is well-defined for a
+        // zero-size request and never yields null.
+        let mut host = Vec::<T>::with_capacity(size);
+        if size > 0 {
+            unsafe {
+                memcpy_dtoh_async(
+                    host.as_mut_ptr(),
+                    cu_deviceptr,
+                    size,
+                    context.get_cuda_stream(),
+                )
+            }?;
+        }
+        // SAFETY: `cuMemcpyDtoHAsync` into pageable host memory (a `Vec`'s
+        // heap buffer is pageable) returns only once the copy has completed,
+        // so all `size` elements are initialized here, and `size` is exactly
+        // the capacity reserved above.
+        unsafe { host.set_len(size) };
+        Ok(host)
     }
 }
 

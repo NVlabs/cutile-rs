@@ -26,7 +26,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         generic_vars: &GenericVars,
         type_params: &HashMap<String, TypeParam>,
     ) -> Result<Option<TileRustType>, JITError> {
-        let normalized_ty = self.modules.normalize_type_aliases(ty)?;
+        // Consts named in the type resolve in the scope of the module whose
+        // source spelled it (the kernel's, or the inlined callee's).
+        let normalized_ty = self
+            .modules
+            .normalize_type_aliases_in(ty, Some(&self.current_module()))?;
         let ty = &normalized_ty;
         let _ty_debug_str = ty.to_token_stream().to_string();
         let mut ty_attrs: Option<SingleMetaList> = None;
@@ -291,8 +295,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 TypeInstance::ElementType(element_instance),
             )?));
         } else if let Some(TypeInstance::PtrType(ptr_instance)) = type_instance {
-            let Some(pointer_attrs) = self.modules.get_primitives_attrs("Pointer", "* mut E")
-            else {
+            let Some(pointer_attrs) = self.modules.get_primitives_attrs(
+                "Pointer",
+                crate::types::pointer_impl_key(ptr_instance.is_mutable),
+            ) else {
                 return self
                     .jit_error_result(&ty.span(), "misconfigured Pointer impl in core module");
             };

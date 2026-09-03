@@ -64,6 +64,7 @@ use cutile::api::{ones, zeros};
 use cutile::tensor::{Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::{PartitionOp, TileKernel, ToHostVecOp};
 use cuda_async::device_operation::*;
+use cuda_async::error::DeviceError;
 use std::sync::Arc;
 
 #[cutile::module]
@@ -76,8 +77,8 @@ mod async_add_module {
         x: &Tensor<f32, {[-1, -1]}>,
         y: &Tensor<f32, {[-1, -1]}>
     ) {
-        let tile_x = load_tile_like(x, z);
-        let tile_y = load_tile_like(y, z);
+        let tile_x = x.load_like(z);
+        let tile_y = y.load_like(z);
         z.store(tile_x + tile_y);
     }
 }

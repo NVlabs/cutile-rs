@@ -133,18 +133,17 @@ impl Drop for DeviceBuffer {
         if !matches!(self.owner, Owner::Owned) {
             return;
         }
-        unsafe {
-            // Safety: The CUDA driver is guaranteed to complete any queued async operations.
-            with_deallocator_stream(self.device_id, |stream| {
-                free_async(self.cudptr, stream);
-            })
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Failed to free device pointer on device_id={}",
-                    self.device_id
-                )
-            })
-        }
+        // A destructor has no way to report failure, and a panic here would
+        // abort the process if this drop runs during an unwind. Both a missing
+        // device context and a refused `cuMemFreeAsync` are therefore ignored:
+        // the allocation leaks until the primary context is released, which
+        // is the least bad outcome for memory the driver would not free.
+        // SAFETY: the pointer was allocated stream-ordered by this crate, and
+        // the driver completes queued work on the deallocator stream before
+        // the memory is handed out again.
+        let _ = unsafe {
+            with_deallocator_stream(self.device_id, |stream| free_async(self.cudptr, stream))
+        };
     }
 }
 

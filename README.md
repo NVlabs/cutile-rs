@@ -32,8 +32,8 @@ mod kernel {
         x: &Tensor<f32, { [-1] }>,
         y: &Tensor<f32, { [-1] }>,
     ) {
-        let tx = load_tile_like(x, z);
-        let ty = load_tile_like(y, z);
+        let tx = x.load_like(z);
+        let ty = y.load_like(z);
         z.store(tx + ty);
     }
 }
@@ -85,10 +85,11 @@ https://developer.nvidia.com/cuda-downloads
 
 ### Configure Environment
 
-Set `CUDA_TOOLKIT_PATH` to your CUDA 13.3 install directory for a reproducible
-setup. If it is unset, cuTile searches standard CUDA 13.3/13.2 install
-locations such as `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
-`/usr/local/cuda-13`, and `/usr/local/cuda`.
+Set `CUDA_TOOLKIT_PATH` (or `CUDA_HOME`, consulted second) to your CUDA 13.3
+install directory for a reproducible setup. If neither is set, cuTile
+searches standard CUDA 13.3/13.2 install locations such as
+`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`, and
+`/usr/local/cuda`.
 
 Example `.cargo/config.toml`:
 ```toml

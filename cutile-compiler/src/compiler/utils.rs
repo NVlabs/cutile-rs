@@ -69,6 +69,25 @@ pub fn cmp_ordering_attr(ordering: &str) -> NamedAttr {
     int_attr("comparison_ordering", val)
 }
 
+/// The Tile IR signedness (`"signed"` / `"unsigned"`) of a Rust integer
+/// element type, by its source name (`"u8"`, `"i32"`, `"bool"`, ...).
+///
+/// This is the ONE mapping every signedness-carrying op (`cmpi`, `divi`,
+/// `remi`, `maxi`/`mini`, `shri`, `exti`, `itof`/`ftoi`, `mmai`) must use.
+/// Tile IR widens `u8`/`u16` to `i8`/`i16` storage, so the Rust name is the
+/// only place the unsignedness survives; a site that spells its own subset
+/// of the unsigned names silently compiles `u8` values `>= 128` as negative
+/// (audit 2026-08: `compile_binary_op` and `compile_cuda_tile_op` listed
+/// only `u32`/`u64`). `usize` is deliberately absent: the DSL relabels it
+/// against `i32` (see `value_facts::int_value_domain`), so it keeps the
+/// signed lowering it always had.
+pub fn rust_int_signedness(element_type_str: &str) -> &'static str {
+    match element_type_str {
+        "bool" | "u8" | "u16" | "u32" | "u64" => "unsigned",
+        _ => "signed",
+    }
+}
+
 /// Signedness attribute.
 pub fn signedness_attr(name: &str, signedness: &str) -> NamedAttr {
     let val = match signedness {

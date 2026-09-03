@@ -1,6 +1,6 @@
 # 1. Hello World
 
-Tile kernels are functions which run as `N` copies concurrently and in parallel when invoked. The primary difference between tile-based kernels and CUDA C++ kernels is the basic unit of execution: a *tile-block*, which expresses the computation performed by a single logical *tile thread* operating over a multi-dimensional *tile of data*.
+Tile kernels are functions which run as `N` copies concurrently and in parallel when invoked. The primary difference between tile-based kernels and CUDA C++ kernels is the basic unit of execution: a *tile program* (also called a *tile block*), which expresses the computation performed by a single logical thread operating over a multi-dimensional *tile of data*.
 
 > **Note**: The distinction between parallel execution and concurrent execution is intentional: The CUDA runtime executes tile kernels concurrently, many of which may execute in parallel. While some support for inter-tile communication is possible, in-depth knowledge of the CUDA runtime is required to achieve this.
 
@@ -20,12 +20,16 @@ mod hello_world_module {
 
     #[cutile::entry()]
     fn hello_world_kernel() {
-        let pids: (i32, i32, i32) = get_tile_block_id();
-        let npids: (i32, i32, i32) = get_num_tile_blocks();
+        let pid0 = program_id(0);
+        let pid1 = program_id(1);
+        let pid2 = program_id(2);
+        let n0 = num_programs(0);
+        let n1 = num_programs(1);
+        let n2 = num_programs(2);
         cuda_tile_print!(
-            "Hello from tile <{}, {}, {}> in a grid of <{}, {}, {}> tiles!\n",
-            pids.0, pids.1, pids.2,
-            npids.0, npids.1, npids.2
+            "Hello from program <{}, {}, {}> in a grid of <{}, {}, {}> programs!\n",
+            pid0, pid1, pid2,
+            n0, n1, n2
         );
     }
 }
@@ -44,13 +48,13 @@ fn main() -> Result<(), Error> {
 **Output:**
 
 ```text
-Hello from tile <0, 0, 0> in a grid of <2, 2, 1> tiles!
-Hello from tile <1, 0, 0> in a grid of <2, 2, 1> tiles!
-Hello from tile <0, 1, 0> in a grid of <2, 2, 1> tiles!
-Hello from tile <1, 1, 0> in a grid of <2, 2, 1> tiles!
+Hello from program <0, 0, 0> in a grid of <2, 2, 1> programs!
+Hello from program <1, 0, 0> in a grid of <2, 2, 1> programs!
+Hello from program <0, 1, 0> in a grid of <2, 2, 1> programs!
+Hello from program <1, 1, 0> in a grid of <2, 2, 1> programs!
 ```
 
-Four tile threads were executed by the CUDA runtime, each printing its own coordinates.
+Four tile programs were executed by the CUDA runtime, each printing its own coordinates.
 
 ---
 
@@ -85,7 +89,7 @@ fn main() -> Result<(), Error> {
     let device = Device::new(0)?;             // Connect to GPU
     let stream = device.new_stream()?;             // Create a work queue
     let launcher = hello_world_kernel();   // Get the kernel launcher
-    launcher.grid((2, 2, 1)).sync_on(&stream)?; // Launch 2×2×1 = 4 tiles
+    launcher.grid((2, 2, 1)).sync_on(&stream)?; // Launch 2×2×1 = 4 programs
     Ok(())
 }
 ```
@@ -94,18 +98,20 @@ Host-side code sets up the GPU, specifies the kernel launch grid, and launches t
 
 ---
 
-## Tile IDs
+## Program IDs
 
-Each tile is assigned an ID corresponding to a coordinate within the 3-dimensional launch grid:
+Each tile program is assigned an ID along each axis of the 3-dimensional launch grid, following Triton's `tl.program_id(axis)` / `tl.num_programs(axis)`:
 
 ```rust
-let pids: (i32, i32, i32) = get_tile_block_id();    // This thread's (x, y, z) coordinates
-let npids: (i32, i32, i32) = get_num_tile_blocks(); // The grid dimensions
+let pid0 = program_id(0);   // This program's index along grid axis 0
+let n0 = num_programs(0);   // The grid extent along axis 0
 ```
 
-![A grid of tiles showing (x,y) coordinates](../_static/images/hello-world-grid.svg)
+For each axis `k`, `0 <= program_id(k) < num_programs(k)`. The tuple forms `get_tile_block_id()` and `get_num_tile_blocks()` return all three coordinates at once.
 
-Each tile runs the same code but with different coordinates. This is how tiles divide up work — each tile handles a different piece of data based on its ID.
+![A grid of tile programs showing (x,y) coordinates](../_static/images/hello-world-grid.svg)
+
+Each program runs the same code but with different coordinates. This is how programs divide up work — each one handles a different piece of data based on its ID.
 
 ---
 
@@ -113,9 +119,9 @@ Each tile runs the same code but with different coordinates. This is how tiles d
 
 1. **At compile time:** `#[cutile::module]` captures your Rust code as an AST.
 2. **At first kernel launch:** The AST is compiled to Tile IR bytecode → cubin (GPU binary).
-3. **Cached:** The cubin is cached, so subsequent runs are instant.
-4. **Launch:** 4 tile threads are dispatched to the GPU.
-5. **Execution:** All 4 tile threads run concurrently, each printing its coordinates.
+3. **Cached:** The compiled kernel is cached in memory for the rest of the process, so later launches of the same variant skip compilation. Caching across processes (an on-disk cubin cache) is opt-in; see [Compilation](../guide/jit-compilation.md).
+4. **Launch:** 4 tile programs are dispatched to the GPU.
+5. **Execution:** All 4 tile programs run concurrently, each printing its coordinates.
 
 ![The cuTile Rust compilation pipeline from Rust source to GPU execution](../_static/images/compilation-pipeline.svg)
 
@@ -125,10 +131,10 @@ Each tile runs the same code but with different coordinates. This is how tiles d
 
 | Concept | What It Means |
 |---------|---------------|
-| **Tile threads run concurrently** | You launch N tile threads, they all execute concurrently |
-| **Tile threads are assigned an ID** | Each tile uses its ID to work on different data |
+| **Tile programs run concurrently** | You launch N tile programs, they all execute concurrently |
+| **Tile programs are assigned IDs** | Each program uses its per-axis IDs to work on different data |
 | **Host orchestrates** | CPU code decides grid shape and launches work |
-| **Same code, different data** | The kernel is written once and executed by many tile threads |
+| **Same code, different data** | The kernel is written once and executed by many tile programs |
 
 ---
 
@@ -141,7 +147,7 @@ launcher.grid((3, 3, 1)).sync_on(&stream)?;
 ```
 
 :::{dropdown} Answer
-You should see 9 messages (3 × 3 × 1 = 9 tile threads).
+You should see 9 messages (3 × 3 × 1 = 9 tile programs).
 :::
 
 ### Exercise 2: Use the Z Dimension
@@ -152,16 +158,16 @@ Try `(2, 2, 2)` for a 3D grid. What changes?
 You'll see 8 messages. The `z` coordinate will now vary from 0 to 1.
 :::
 
-### Exercise 3: Calculate Total Tiles
+### Exercise 3: Calculate Total Programs
 
-Modify the kernel to also print the total number of tile threads.
+Modify the kernel to also print the total number of tile programs.
 
 :::{dropdown} Answer
 ```rust
-let total = npids.0 * npids.1 * npids.2;
+let total = n0 * n1 * n2;
 cuda_tile_print!(
-    "Tile <{}, {}, {}> of {} total tiles\n",
-    pids.0, pids.1, pids.2, total
+    "Program <{}, {}, {}> of {} total programs\n",
+    pid0, pid1, pid2, total
 );
 ```
 :::
