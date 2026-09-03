@@ -3,25 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! GPU device state, global kernel cache, and scheduling policy management.
+//! GPU device state and scheduling policy management.
 //!
 //! ## Architecture
 //!
-//! - **Global (process-wide)**: [`Device`] per device and compiled kernel cache are shared
-//!   across all threads via [`OnceLock`] and [`DashMap`]. This allows compilation results from
-//!   one thread (e.g. warmup) to be visible to all worker threads.
+//! - **Global (process-wide)**: one [`Device`] per device id, shared across all threads
+//!   via [`OnceLock`].
 //!
 //! - **Per-thread**: Scheduling policy and deallocator stream remain thread-local, since
 //!   different threads may want different stream assignments.
 //!
-//! - **Compilation dedup**: When multiple threads need the same kernel, only one compiles it
-//!   while the rest wait, via `DashMap<Key, Arc<OnceLock<CompiledKernel>>>`.
+//! The compiled-kernel cache and its single-flight dedup live in `cutile::tile_kernel`,
+//! since they key on a type from `cutile-compiler`.
 
 use crate::error::{device_assert, device_error, DeviceError};
 use crate::scheduling_policies::{SchedulingPolicy, StreamPoolRoundRobin};
 use cuda_core::{Device, Function, MemPool, Module, Stream};
-use dashmap::DashMap;
-use once_cell::sync::OnceCell;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -42,8 +39,14 @@ pub const DEFAULT_NUM_DEVICES: usize = 1;
 pub const DEFAULT_ROUND_ROBIN_STREAM_POOL_SIZE: usize = 4;
 
 pub trait FunctionKey: Hash {
-    /// Fast hash for in-memory cache lookup (uses `DefaultHasher`).
-    fn get_hash_string(&self) -> String {
+    /// Short human-readable digest of the key, for log lines and dump filenames.
+    ///
+    /// **Not an identity.** It is a 64-bit `DefaultHasher` output, so distinct
+    /// keys collide at a rate that matters once a process caches enough kernels,
+    /// and `DefaultHasher`'s algorithm is unspecified across Rust releases.
+    /// Caches key on the whole `Hash + Eq` value; nothing may key on this string
+    /// or persist it.
+    fn display_hash(&self) -> String {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         let hash_value: u64 = hasher.finish();
@@ -79,6 +82,11 @@ pub struct TensorParamType {
 #[derive(Debug, Clone)]
 pub struct Validator {
     pub params: Vec<ValidParamType>,
+    /// Compiler-emitted checks to run at launch, before `cuLaunchKernel`. Each
+    /// is a canonical [`crate::predicate::Predicate`] the compiler hoisted out
+    /// of the device kernel; the host evaluates it against the launched tensors'
+    /// extents. Empty unless a kernel hoists a launch-known safety check.
+    pub launch_checks: Vec<crate::predicate::LaunchCheck>,
 }
 
 // ── Global Device (process-wide, per-device singleton) ─────────────────────
@@ -107,9 +115,13 @@ fn get_or_init_device(device_id: usize) -> Result<Arc<Device>, DeviceError> {
     Ok(device)
 }
 
-// ── Global kernel cache (process-wide, cross-thread) ────────────────────────
+// ── Compiled kernels ────────────────────────────────────────────────────────
 
 /// A compiled kernel: module, function handle, and parameter validator.
+///
+/// The cache that holds these lives in `cutile::tile_kernel`, keyed on
+/// `TileFunctionKey` directly. It cannot live here: that key names types from
+/// `cutile-compiler`, which sits downstream of this crate.
 #[derive(Debug)]
 pub struct CompiledKernel {
     pub module: Arc<Module>,
@@ -117,49 +129,13 @@ pub struct CompiledKernel {
     pub validator: Arc<Validator>,
 }
 
-/// Global kernel cache. `DashMap` for cross-thread sharing; inner `OnceLock` for
-/// single-flight compilation dedup (if multiple threads need the same kernel,
-/// only one compiles while the rest wait). Uses `once_cell::sync::OnceCell`
-/// for stable fallible initialization (`get_or_try_init`).
-///
-/// Grows unbounded: no cap or LRU (cutile-python caps at 2 GB with LRU
-/// eviction). Eviction is deferred to the disk-cache follow-up.
-static KERNEL_CACHE: OnceLock<DashMap<String, Arc<OnceCell<CompiledKernel>>>> = OnceLock::new();
-
-pub fn get_kernel_cache() -> &'static DashMap<String, Arc<OnceCell<CompiledKernel>>> {
-    KERNEL_CACHE.get_or_init(DashMap::new)
-}
-
-/// Get (or create) the single-flight compilation slot for `key_str`.
-///
-/// The returned `OnceCell` lets the caller `get_or_try_init` the compile
-/// exactly once across threads. The DashMap shard lock is released before
-/// this returns, so the slow compile never holds it.
-///
-/// Hits take the read path (shard read lock, no allocation); only a miss falls
-/// back to `entry()` (write lock + owned key).
-pub fn kernel_cache_slot(key_str: &str) -> Arc<OnceCell<CompiledKernel>> {
-    let cache = get_kernel_cache();
-    if let Some(existing) = cache.get(key_str) {
-        return Arc::clone(existing.value());
-    }
-    // `get` returned None holding no lock, so the write path is deadlock-free;
-    // `or_insert_with` still resolves a concurrent insert into one slot per key.
-    Arc::clone(
-        cache
-            .entry(key_str.to_string())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .value(),
-    )
-}
-
 // ── Per-thread device state ──────────────────────────────────────────────────
 
 /// Per-thread, per-device state: scheduling policy, deallocator stream, and
 /// optional memory pool.
 ///
-/// The CUDA context and kernel cache are global (see above). This struct only
-/// holds thread-local state.
+/// The CUDA context is global (see above). This struct only holds thread-local
+/// state.
 pub struct AsyncDeviceContext {
     #[expect(dead_code, reason = "will be used when multi-device is implemented")]
     device_id: usize,
@@ -196,26 +172,30 @@ pub fn get_default_device() -> usize {
 /// lazily created on first access (with the default round-robin policy) if not
 /// explicitly added via [`init_device`].
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if contexts have already been initialized on this thread.
+/// Returns [`DeviceError::Context`] if contexts have already been initialized on
+/// this thread. The existing contexts are left untouched.
 pub fn init_device_contexts(
     default_device_id: usize,
     num_devices: usize,
 ) -> Result<(), DeviceError> {
     DEVICE_CONTEXTS.with(|ctx| {
-        device_assert(
-            default_device_id,
-            ctx.devices.replace(None).is_none(),
-            "Context already initialized.",
-        )
-    })?;
-    let devices = HashMap::with_capacity(num_devices);
-    DEVICE_CONTEXTS.with(|ctx| {
+        // `Cell<Option<_>>` has no non-consuming `is_some`, so the map has to
+        // be taken out to inspect it. Put a live map straight back: the old
+        // `replace(None).is_none()` check discarded every existing context
+        // (streams, pools, policies) while reporting "already initialized".
+        if let Some(existing) = ctx.devices.take() {
+            ctx.devices.set(Some(existing));
+            return Err(device_error(
+                default_device_id,
+                "Context already initialized.",
+            ));
+        }
         ctx.default_device.set(default_device_id);
-        ctx.devices.set(Some(devices));
-    });
-    Ok(())
+        ctx.devices.set(Some(HashMap::with_capacity(num_devices)));
+        Ok(())
+    })
 }
 
 pub fn init_device_contexts_default() -> Result<(), DeviceError> {
@@ -283,13 +263,33 @@ pub fn init_with_default_policy(
     device_assert(device_id, pred, "Device is already initialized.")
 }
 
-pub fn with_global_device_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
-where
-    F: FnOnce(&AsyncDeviceContext) -> R,
-{
+/// Holds the thread's context map while a closure runs against it, and puts it
+/// back into the thread-local `Cell` on **every** exit path, including `?`
+/// early returns and panics. Without this, a failed lookup (an invalid device
+/// ordinal, a driver error while creating the default policy) dropped the map
+/// on the floor — and with it every live stream, pool, and policy of the
+/// thread, which the next call then silently re-created from scratch.
+struct MapLease<'c> {
+    cell: &'c Cell<Option<HashMap<usize, AsyncDeviceContext>>>,
+    map: Option<HashMap<usize, AsyncDeviceContext>>,
+}
+
+impl Drop for MapLease<'_> {
+    fn drop(&mut self) {
+        self.cell.set(self.map.take());
+    }
+}
+
+/// Runs `f` against the current thread's context map, lazily initializing the
+/// map itself if this thread has none yet. The map is leased for the duration
+/// of `f` and restored afterwards (see [`MapLease`]).
+fn with_context_map<R>(
+    device_id: usize,
+    f: impl FnOnce(&mut HashMap<usize, AsyncDeviceContext>) -> Result<R, DeviceError>,
+) -> Result<R, DeviceError> {
     DEVICE_CONTEXTS.with(|ctx| {
-        let mut hashmap = match ctx.devices.take() {
-            Some(hashmap) => hashmap,
+        let map = match ctx.devices.take() {
+            Some(map) => map,
             None => {
                 init_device_contexts_default()?;
                 ctx.devices
@@ -297,15 +297,39 @@ where
                     .ok_or(device_error(device_id, "Failed to initialize context"))?
             }
         };
-        if !hashmap.contains_key(&device_id) {
-            init_with_default_policy(&mut hashmap, device_id)?;
-        }
-        let device_context = hashmap
+        let mut lease = MapLease {
+            cell: &ctx.devices,
+            map: Some(map),
+        };
+        f(lease
+            .map
+            .as_mut()
+            .expect("leased map is present until drop"))
+    })
+}
+
+/// Ensures `device_id` has a context in `map`, creating one with the default
+/// policy on first use.
+fn ensure_device_context(
+    map: &mut HashMap<usize, AsyncDeviceContext>,
+    device_id: usize,
+) -> Result<(), DeviceError> {
+    if !map.contains_key(&device_id) {
+        init_with_default_policy(map, device_id)?;
+    }
+    Ok(())
+}
+
+pub fn with_global_device_context<F, R>(device_id: usize, f: F) -> Result<R, DeviceError>
+where
+    F: FnOnce(&AsyncDeviceContext) -> R,
+{
+    with_context_map(device_id, |map| {
+        ensure_device_context(map, device_id)?;
+        let device_context = map
             .get(&device_id)
             .ok_or(device_error(device_id, "Failed to get context"))?;
-        let r = f(device_context);
-        ctx.devices.replace(Some(hashmap));
-        Ok(r)
+        Ok(f(device_context))
     })
 }
 
@@ -313,25 +337,12 @@ pub fn with_global_device_context_mut<F, R>(device_id: usize, f: F) -> Result<R,
 where
     F: FnOnce(&mut AsyncDeviceContext) -> R,
 {
-    DEVICE_CONTEXTS.with(|ctx| {
-        let mut hashmap = match ctx.devices.take() {
-            Some(hashmap) => hashmap,
-            None => {
-                init_device_contexts_default()?;
-                ctx.devices
-                    .take()
-                    .ok_or(device_error(device_id, "Failed to initialize context"))?
-            }
-        };
-        if !hashmap.contains_key(&device_id) {
-            init_with_default_policy(&mut hashmap, device_id)?;
-        }
-        let device_context = hashmap
+    with_context_map(device_id, |map| {
+        ensure_device_context(map, device_id)?;
+        let device_context = map
             .get_mut(&device_id)
             .ok_or(device_error(device_id, "Failed to get context"))?;
-        let r = f(device_context);
-        ctx.devices.replace(Some(hashmap));
-        Ok(r)
+        Ok(f(device_context))
     })
 }
 
@@ -483,6 +494,27 @@ pub fn load_module_from_file(filename: &str, device_id: usize) -> Result<Arc<Mod
     })?
 }
 
+/// Load a compiled CUDA module from an in-memory **cubin** image. Not for PTX
+/// (see [`cuda_core::Device::load_module_from_bytes`]); use
+/// [`load_module_from_ptx`] for that.
+///
+/// # Safety
+///
+/// Same contract as [`cuda_core::Device::load_module_from_bytes`]: `image`
+/// must be a complete, well-formed cubin. The driver dereferences the offsets
+/// declared in the image header, so a truncated or malformed image is read
+/// past the end of the slice.
+pub unsafe fn load_module_from_bytes(
+    image: &[u8],
+    device_id: usize,
+) -> Result<Arc<Module>, DeviceError> {
+    with_device(device_id, |device| {
+        // SAFETY: forwarded verbatim from this function's own contract.
+        let module = unsafe { device.load_module_from_bytes(image) }?;
+        Ok(module)
+    })?
+}
+
 /// JIT-compile a PTX string into a CUDA module for the given device.
 pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Module>, DeviceError> {
     with_device(device_id, |device| {
@@ -491,14 +523,59 @@ pub fn load_module_from_ptx(ptx_src: &str, device_id: usize) -> Result<Arc<Modul
     })?
 }
 
-/// Check whether a kernel with the given key has already been compiled and cached.
-pub fn contains_cuda_function(func_key: &impl FunctionKey) -> bool {
-    let key = func_key.get_hash_string();
-    let cache = get_kernel_cache();
-    if let Some(slot) = cache.get(&key) {
-        let lock: &OnceCell<CompiledKernel> = slot.value().as_ref();
-        lock.get().is_some()
-    } else {
-        false
+#[cfg(test)]
+mod context_map_tests {
+    //! Host-only tests for the thread-local context map's lifecycle. They only
+    //! need the map itself (no device is ever created successfully), so they
+    //! run on CPU-only CI; the GPU-backed variants live in
+    //! `tests/pool_allocation.rs`.
+
+    use super::*;
+
+    /// Whether this thread's context map exists, without consuming it.
+    fn context_map_is_initialized() -> bool {
+        DEVICE_CONTEXTS.with(|ctx| {
+            let map = ctx.devices.take();
+            let initialized = map.is_some();
+            ctx.devices.set(map);
+            initialized
+        })
+    }
+
+    fn on_fresh_thread<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::spawn(f).join().expect("test thread panicked");
+    }
+
+    /// A second `init_device_contexts` is rejected *and* the first map stays
+    /// alive. The old `replace(None).is_none()` check consumed the live map
+    /// while reporting the error.
+    #[test]
+    fn rejected_reinit_preserves_context_map() {
+        on_fresh_thread(|| {
+            init_device_contexts(0, 1).expect("first init");
+            assert!(context_map_is_initialized());
+            let err = init_device_contexts(0, 1).unwrap_err();
+            assert!(matches!(err, DeviceError::Context { .. }), "got {err:?}");
+            assert!(
+                context_map_is_initialized(),
+                "rejected re-init discarded the live context map"
+            );
+        });
+    }
+
+    /// A lookup that fails after the map was leased out of the `Cell` (device
+    /// 9999 cannot be created) must put the map back instead of dropping it.
+    #[test]
+    fn failed_lookup_preserves_context_map() {
+        on_fresh_thread(|| {
+            init_device_contexts(0, 1).expect("init");
+            assert!(with_global_device_context(9999, |_| ()).is_err());
+            assert!(
+                context_map_is_initialized(),
+                "failed lookup discarded the live context map"
+            );
+            assert!(with_global_device_context_mut(9999, |_| ()).is_err());
+            assert!(context_map_is_initialized());
+        });
     }
 }

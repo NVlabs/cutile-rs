@@ -52,12 +52,18 @@ impl DivHint {
     /// The result is in **bytes**: a divisor of 16 means the pointer is
     /// aligned to a 16-byte boundary. This matches cutile-python's
     /// `base_addr_divisible_by` convention.
+    ///
+    /// The alignment is computed on the full 64-bit address. Narrowing it
+    /// to `i32` first made an address whose low 32 bits are exactly
+    /// `0x8000_0000` (2 GiB-aligned mod 4 GiB) compute a NEGATIVE divisor
+    /// (`i32::MIN`), which the entry generator's `div > 1` guard then
+    /// silently rejected — losing the alignment assumption on a perfectly
+    /// aligned pointer.
     pub fn from_ptr(ptr: u64) -> Self {
-        let raw: i32 = max_pow2_divisor_unclamped(ptr as i32);
-        Self {
-            divisor: raw.min(16),
-            max: 16,
-        }
+        // trailing_zeros(0) = 64; the min(4) clamp makes zero mean "maximally
+        // aligned" (divisor 16 = 2^4), same as from_value's zero case.
+        let divisor = 1i32 << ptr.trailing_zeros().min(4);
+        Self { divisor, max: 16 }
     }
 
     /// Override the maximum clamp. Returns a new `DivHint` with
@@ -104,6 +110,13 @@ pub struct SpecializationBits {
 fn max_pow2_divisor_unclamped(val: i32) -> i32 {
     if val == 0 {
         return 16;
+    }
+    if val == i32::MIN {
+        // The one value whose lowest set bit (2^31) does not fit in a
+        // positive i32: `val & -val` returns i32::MIN itself, and a
+        // negative "divisor" downstream reads as "no divisibility". The
+        // magnitude is divisible by any representable power of two.
+        return 1 << 30;
     }
     val & val.wrapping_neg()
 }

@@ -80,7 +80,7 @@ mod load_tile_like_examples_module {
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let dim_map = const_array!(DIM_MAP);
-        let part = x.partition_permuted(const_shape![BM, BN], dim_map);
+        let part = x.partition_permuted(shape![BM, BN], dim_map);
         let tile: Tile<f32, { [BM, BN] }> = part.load([pid.0, pid.1]);
         z.store(tile);
     }

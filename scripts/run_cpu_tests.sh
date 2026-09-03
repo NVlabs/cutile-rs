@@ -26,8 +26,12 @@ run_step \
     cargo test -p cutile-compiler --test compiler2_e2e
 
 run_step \
+    "cutile-compiler JIT disk store tests" \
+    cargo test -p cutile-compiler --test jit_cache
+
+run_step \
     "cutile library tests" \
-    cargo test -p cutile --lib
+    cargo test -p cutile --lib --features experimental-tune
 
 run_step \
     "cutile doc tests" \
@@ -85,6 +89,50 @@ run_step \
 run_step \
     "cutile warmup/cache-key CPU tests" \
     cargo test -p cutile --test warmup
+
+# Shared host-side crates: the CPU-safe portion of their suites. Unit tests
+# never invoke a live driver call (a missing/driverless libcuda makes the
+# generated shims return error codes, which these tests tolerate), and the
+# three cuda-core integration targets below are compile-time contracts
+# (trybuild derive suite, DeviceCopy impl coverage, launch type contracts).
+# The GPU-dependent integration tests live in run_gpu_tests.sh.
+# `cuda_tests` is the one GPU-requiring module in the cuda-bindings suite
+# (its `init()` asserts a live `cuInit`); it runs unfiltered in
+# run_gpu_tests.sh.
+run_step \
+    "cuda-bindings unit and toolkit-discovery tests" \
+    cargo test -p cuda-bindings -- --skip cuda_tests::
+
+run_step \
+    "cuda-core unit tests" \
+    cargo test -p cuda-core --lib
+
+run_step \
+    "cuda-core compile-time contract tests" \
+    cargo test -p cuda-core \
+    --test simt_device_copy_derive \
+    --test simt_device_copy_impls \
+    --test simt_launch_contract_types
+
+# Builds the compile_fail soundness contracts (non-Send launch storage,
+# brand/rank rejection, buffer aliasing) that no other target covers.
+run_step \
+    "cuda-core doc tests" \
+    cargo test -p cuda-core --doc
+
+run_step \
+    "cuda-async unit tests" \
+    cargo test -p cuda-async --lib
+
+run_step \
+    "cuda-async doc tests" \
+    cargo test -p cuda-async --doc
+
+# Driver-free by construction: its one driver-touching case asserts the
+# Err path, which driverless shims also produce.
+run_step \
+    "cuda-async error-handling integration test" \
+    cargo test -p cuda-async --test error_handling
 
 print_summary_and_exit \
     "All CPU tests passed!" \

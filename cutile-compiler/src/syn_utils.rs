@@ -119,14 +119,23 @@ fn expr_attrs_mut(expr: &mut Expr) -> Option<&mut Vec<Attribute>> {
 impl SingleMetaList {
     /// Construct from a `syn::Attribute` that contains a meta list.
     pub fn from_attribute(attr: Attribute) -> Self {
-        let Meta::List(meta_list) = attr.meta else {
-            panic!("Unexpected attribute list {:#?}", attr.meta)
-        };
-        let tokens = proc_macro2::TokenStream::from(meta_list.tokens.clone());
-        let mut result = syn::parse2::<SingleMetaList>(tokens).unwrap();
-        result.name = Some(meta_list.path.to_token_stream().to_string());
-        result.meta_list = Some(meta_list);
-        return result;
+        match attr.meta {
+            Meta::List(meta_list) => {
+                let tokens = proc_macro2::TokenStream::from(meta_list.tokens.clone());
+                let mut result = syn::parse2::<SingleMetaList>(tokens).unwrap();
+                result.name = Some(meta_list.path.to_token_stream().to_string());
+                result.meta_list = Some(meta_list);
+                result
+            }
+            // The bare form (`#[cutile::entry]`): no arguments, every
+            // knob at its default.
+            Meta::Path(path) => Self {
+                name: Some(path.to_token_stream().to_string()),
+                meta_list: None,
+                variables: Vec::new(),
+            },
+            other => panic!("Unexpected attribute list {other:#?}"),
+        }
     }
     /// Returns the attribute path as a single string.
     pub fn name_as_str(&self) -> Option<String> {
@@ -216,8 +225,18 @@ impl SingleMetaList {
             None => None,
         }
     }
-    /// Parses a named entry as a boolean literal.
+    /// Parses a named entry as a boolean literal. The bare form
+    /// (`#[cutile::entry(unchecked_accesses)]`, a `Meta::Path`) means `true`,
+    /// as the reference documents; it used to be silently ignored because
+    /// only `name = value` entries were consulted.
     pub fn parse_bool(&self, name: &str) -> Option<bool> {
+        if self
+            .variables
+            .iter()
+            .any(|item| matches!(item, Meta::Path(path) if path.is_ident(name)))
+        {
+            return Some(true);
+        }
         let value = self.get_value(name);
         match value {
             Some(val) => {
@@ -280,26 +299,26 @@ pub fn clear_attributes(attr_names: HashSet<&str>, attrs: &mut Vec<Attribute>) -
         .collect::<Vec<Attribute>>();
 }
 
-/// Finds an attribute by path string, optionally matching only the last segment.
+/// Finds an attribute by path string, optionally matching only the last
+/// segment. Matches both the argument-list form (`#[cutile::entry(...)]`)
+/// and the bare-path form (`#[cutile::entry]`) — every argument has a
+/// default, so the bare form is the documented spelling for a kernel that
+/// needs none.
 pub fn get_attribute(
     lookup_str: &str,
     outer_attrs: &Vec<Attribute>,
     last_seg_only: bool,
 ) -> Option<Attribute> {
     for attr in outer_attrs {
-        let Meta::List(meta_list) = &attr.meta else {
-            continue;
+        let path = match &attr.meta {
+            Meta::List(meta_list) => &meta_list.path,
+            Meta::Path(path) => path,
+            _ => continue,
         };
         let parsed_str = if last_seg_only {
-            meta_list
-                .path
-                .segments
-                .last()
-                .unwrap()
-                .to_token_stream()
-                .to_string()
+            path.segments.last().unwrap().to_token_stream().to_string()
         } else {
-            meta_list.path.to_token_stream().to_string()
+            path.to_token_stream().to_string()
         };
         if parsed_str == lookup_str {
             return Some(attr.clone());

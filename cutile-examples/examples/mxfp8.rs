@@ -11,6 +11,9 @@
  * Run with: cargo run -p cutile-examples --example mxfp8
  */
 
+// Still on the deprecated `Dim::new` spelling; migrate with the examples pass.
+#![allow(deprecated)]
+
 use cutile::cuda_core::{f8e4m3fn, f8e8m0fnu};
 use cutile::prelude::*;
 use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
@@ -40,12 +43,12 @@ mod mxfp8_linear {
         let pid = get_tile_block_id();
         let k_tiles = Dim::new(x.shape()[1] / BK);
 
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BN, BK]);
-        let part_x_scales = x_scales.partition(const_shape![BM, BK_SCALES]);
-        let part_y_scales = y_scales.partition(const_shape![BN, BK_SCALES]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BN, BK]);
+        let part_x_scales = x_scales.partition(shape![BM, BK_SCALES]);
+        let part_y_scales = y_scales.partition(shape![BN, BK_SCALES]);
 
-        let mut tile_z = constant(0.0f32, const_shape![BM, BN]);
+        let mut tile_z = constant(0.0f32, shape![BM, BN]);
 
         for k_tile in k_tiles {
             let tile_x = part_x.load([pid.0, k_tile]);

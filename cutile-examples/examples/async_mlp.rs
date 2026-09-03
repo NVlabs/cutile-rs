@@ -23,8 +23,8 @@ pub mod my_kernels {
         x: &Tensor<f32, { [-1, K] }>,
         y: &Tensor<f32, { [K, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let mut tile_z = z.load();
         for i in 0i32..(K / BK) {
@@ -43,22 +43,22 @@ pub mod my_kernels {
         x: &Tensor<f32, { [-1, K] }>,
         y: &Tensor<f32, { [K] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK]);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let mut tile_z = z.load().reshape(const_shape![BM, 1]);
+        let mut tile_z = z.load().reshape(shape![BM, 1]);
         for i in 0i32..(K / BK) {
             let tile_x = part_x.load([pid.0, i]);
-            let tile_y = part_y.load([i]).reshape(const_shape![BK, 1]);
+            let tile_y = part_y.load([i]).reshape(shape![BK, 1]);
             tile_z = mma(tile_x, tile_y, tile_z);
             continue;
         }
-        z.store(tile_z.reshape(const_shape![BM]));
+        z.store(tile_z.reshape(shape![BM]));
     }
 
     #[cutile::entry()]
     fn relu<const D: i32>(input_output: &mut Tensor<f32, { [D] }>) {
-        let zero_tile: Tile<f32, { [D] }> = constant(0.0f32, const_shape![D]);
+        let zero_tile: Tile<f32, { [D] }> = constant(0.0f32, shape![D]);
         let input = input_output.load();
         input_output.store(max_tile(zero_tile, input));
     }

@@ -22,6 +22,7 @@ pub struct SMHints {
     pub num_cta_in_cga: Option<i32>,
     pub occupancy: Option<i32>,
     pub max_divisibility: Option<i32>,
+    pub num_worker_warps_per_cta: Option<i32>,
 }
 
 impl SMHints {
@@ -31,6 +32,7 @@ impl SMHints {
             num_cta_in_cga: None,
             occupancy: None,
             max_divisibility: None,
+            num_worker_warps_per_cta: None,
         }
     }
 
@@ -60,6 +62,15 @@ impl SMHints {
         self.max_divisibility = Some(get_int_hint(hint)?);
         Ok(())
     }
+
+    pub fn set_num_worker_warps_per_cta(&mut self, hint: &Expr) -> Result<(), JITError> {
+        if self.num_worker_warps_per_cta.is_some() {
+            return SourceLocation::unknown()
+                .jit_error_result("num_worker_warps_per_cta hint has already been set");
+        }
+        self.num_worker_warps_per_cta = Some(get_int_hint(hint)?);
+        Ok(())
+    }
 }
 
 fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
@@ -86,6 +97,23 @@ pub struct CompileOptions {
     pub occupancy: Option<i32>,
     pub num_cta_in_cga: Option<i32>,
     pub max_divisibility: Option<i32>,
+    pub num_worker_warps_per_cta: Option<i32>,
+    /// `tileiras` optimization level (`--opt-level`). `None` means the
+    /// default: 3, or 0 when `device_debug` is set.
+    pub opt_level: Option<u8>,
+    /// Compile for debugging (`tileiras --device-debug`): the frontend stops
+    /// hoisting bounds checks out of loops, so every check that runs on the
+    /// device sits at the source line that wrote it, and the backend
+    /// generates debug information. Checks the compiler discharged by proof
+    /// or moved to launch time never reach device code in any mode. Implies
+    /// `--opt-level 0` unless `opt_level` is set explicitly.
+    pub device_debug: bool,
+    /// Emit line-number information (`tileiras --lineinfo`) for profiler
+    /// correlation, without the rest of the debug contract.
+    pub lineinfo: bool,
+    /// Instrument memory accesses for Compute Sanitizer's memcheck tool
+    /// (`tileiras --sanitize=memcheck`).
+    pub sanitize_memcheck: bool,
 }
 
 impl CompileOptions {
@@ -105,6 +133,31 @@ impl CompileOptions {
 
     pub fn max_divisibility(mut self, max_divisibility: i32) -> Self {
         self.max_divisibility = Some(max_divisibility);
+        self
+    }
+
+    pub fn num_worker_warps_per_cta(mut self, num_worker_warps_per_cta: i32) -> Self {
+        self.num_worker_warps_per_cta = Some(num_worker_warps_per_cta);
+        self
+    }
+
+    pub fn opt_level(mut self, opt_level: u8) -> Self {
+        self.opt_level = Some(opt_level);
+        self
+    }
+
+    pub fn device_debug(mut self, device_debug: bool) -> Self {
+        self.device_debug = device_debug;
+        self
+    }
+
+    pub fn lineinfo(mut self, lineinfo: bool) -> Self {
+        self.lineinfo = lineinfo;
+        self
+    }
+
+    pub fn sanitize_memcheck(mut self, sanitize_memcheck: bool) -> Self {
+        self.sanitize_memcheck = sanitize_memcheck;
         self
     }
 }
@@ -172,6 +225,9 @@ impl OptimizationHints {
                             "num_cta_in_cga" => sm_hints_result.set_num_cta_in_cga(&hints)?,
                             "occupancy" => sm_hints_result.set_occupancy(&hints)?,
                             "max_divisibility" => sm_hints_result.set_max_divisibility(&hints)?,
+                            "num_worker_warps_per_cta" => {
+                                sm_hints_result.set_num_worker_warps_per_cta(&hints)?
+                            }
                             "allow_tma" | "latency" => {
                                 return SourceLocation::unknown().jit_error_result(&format!(
                                     "'{key}' is a per-op hint and cannot be set at the entry level. \
@@ -209,6 +265,7 @@ impl OptimizationHints {
         if options.occupancy.is_none()
             && options.num_cta_in_cga.is_none()
             && options.max_divisibility.is_none()
+            && options.num_worker_warps_per_cta.is_none()
         {
             return;
         }
@@ -228,6 +285,9 @@ impl OptimizationHints {
         }
         if let Some(max_divisibility) = options.max_divisibility {
             sm_hints.max_divisibility = Some(max_divisibility);
+        }
+        if let Some(num_worker_warps_per_cta) = options.num_worker_warps_per_cta {
+            sm_hints.num_worker_warps_per_cta = Some(num_worker_warps_per_cta);
         }
     }
 }

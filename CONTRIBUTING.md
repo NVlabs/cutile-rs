@@ -23,6 +23,7 @@ Use a prefix that describes the type of change.
 | `fix` | Bug fixes |
 | `doc` | Documentation changes |
 | `refactor` | Code refactoring (no behavior change) |
+| `perf` | Performance improvements (no functional change) |
 | `test` | Test additions or changes |
 | `ci` | CI/CD changes |
 | `chore` | Maintenance tasks |

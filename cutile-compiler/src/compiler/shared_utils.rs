@@ -31,6 +31,17 @@ pub(crate) const STACK_RED_ZONE: usize = 4 * 1024 * 1024;
 /// Size of each new stack segment when growth is needed (10 MiB).
 pub(crate) const STACK_GROW_SIZE: usize = 10 * 1024 * 1024;
 
+/// Maximum rank of a mapped partition (`MappedPartitionMut` / `iter_indices`).
+/// Matches the DSL's `variadic_struct(N = 6)` expansion ceiling.
+pub(crate) const MAX_MAPPED_PARTITION_RANK: usize = 6;
+
+/// Map-shape sentinel marking an owned axis (mirrors `cutile::tensor::OWNED`).
+///
+/// An owned axis is not traversed by the mapped work-item stream: each stream
+/// item owns the axis's full extent (subtensor-per-CTA exclusivity), and
+/// in-kernel loops traverse it with bounds-proven indices.
+pub(crate) const OWNED_MAP_DIM: i32 = 0;
+
 // ---------------------------------------------------------------------------
 // AtomicMode
 // ---------------------------------------------------------------------------
@@ -587,6 +598,39 @@ pub fn collect_mutated_variables_from_expr(expr: &Expr) -> Result<BTreeSet<Strin
     }
 }
 
+/// Does a loop body contain an early exit — `continue`, `break`, or `return`
+/// — that targets *this* loop (or the enclosing function)? Nested loops are
+/// not descended into: their `continue`/`break` only shortens their own
+/// iteration. Closures are opaque for the same reason.
+///
+/// Used to mark [`super::_value::LoopFrame::has_early_exit`]: a body that can
+/// skip the rest of an iteration does not execute every access on every
+/// iteration, so no bounds check may be hoisted out of it.
+pub fn block_has_early_exit(block: &syn::Block) -> bool {
+    use syn::visit::Visit;
+    struct Finder {
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Finder {
+        fn visit_expr_continue(&mut self, _: &'ast syn::ExprContinue) {
+            self.found = true;
+        }
+        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
+            self.found = true;
+        }
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.found = true;
+        }
+        fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
+        fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
+        fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut finder = Finder { found: false };
+    finder.visit_block(block);
+    finder.found
+}
+
 /// Collects mutated outer-scope variables from a for-loop body.
 pub fn collect_mutated_variables(
     for_expr: &syn::ExprForLoop,
@@ -598,6 +642,175 @@ pub fn collect_mutated_variables(
         result.remove(&loop_var);
     }
     Ok(result)
+}
+
+/// Set a variable's ordering token directly. A no-op if the variable is absent
+/// or carries no token field. Used to publish a loop's accumulated token to the
+/// tensor and to views written in the loop body.
+pub fn set_view_token(var: &str, token: cutile_ir::ir::Value, ctx: &mut CompilerContext) {
+    let Some(value) = ctx.vars.get(var) else {
+        return;
+    };
+    let mut new_value = value.clone();
+    let Some(meta) = new_value.type_meta.as_mut() else {
+        return;
+    };
+    let Some(field) = meta.fields.get_mut("token") else {
+        return;
+    };
+    field.value = Some(token);
+    ctx.vars.insert(var.to_string(), new_value);
+}
+
+/// Method names that write to a mutable partition/tensor view (advance its
+/// ordering token). Used to find which resources a loop body stores to, so the
+/// loop can thread and publish their tokens (token-ordering across the loop
+/// scope boundary).
+const STORE_METHOD_NAMES: &[&str] = &["store", "store_index"];
+
+/// A `.store(...)` call found in a loop body: the receiver view and whether its
+/// index varies with the loop variable (distinct per iteration → the writes are
+/// disjoint and may fork; otherwise the same address is written each iteration
+/// and the writes must be serialized).
+pub struct StoreCall {
+    pub receiver: String,
+    pub index_distinct: bool,
+}
+
+/// Collects the `.store(...)` / `.store_index(...)` calls anywhere in `block`
+/// (descending through nested control flow and `unsafe` blocks), with the
+/// receiver view and whether the store's index references `loop_var`. When
+/// `loop_var` is `None` (no simple loop variable), indices are treated as
+/// non-distinct (conservative: serialize).
+pub fn collect_store_calls(block: &syn::Block, loop_var: Option<&str>) -> Vec<StoreCall> {
+    let mut out = Vec::new();
+    for stmt in &block.stmts {
+        collect_store_calls_stmt(stmt, loop_var, &mut out);
+    }
+    out
+}
+
+fn collect_store_calls_stmt(stmt: &Stmt, loop_var: Option<&str>, out: &mut Vec<StoreCall>) {
+    match stmt {
+        Stmt::Local(local) => {
+            if let Some(init) = &local.init {
+                collect_store_calls_expr(&init.expr, loop_var, out);
+            }
+        }
+        Stmt::Expr(expr, _) => collect_store_calls_expr(expr, loop_var, out),
+        _ => {}
+    }
+}
+
+fn collect_store_calls_expr(expr: &Expr, loop_var: Option<&str>, out: &mut Vec<StoreCall>) {
+    match expr {
+        Expr::MethodCall(mc) => {
+            if STORE_METHOD_NAMES.contains(&mc.method.to_string().as_str()) {
+                if let Expr::Path(path) = &*mc.receiver {
+                    if let Some(ident) = path.path.get_ident() {
+                        // The index is the second argument: `store(tile, index)`.
+                        let index_distinct = match (loop_var, mc.args.iter().nth(1)) {
+                            (Some(lv), Some(index)) => expr_references_ident(index, lv),
+                            _ => false,
+                        };
+                        out.push(StoreCall {
+                            receiver: ident.to_string(),
+                            index_distinct,
+                        });
+                    }
+                }
+            }
+            collect_store_calls_expr(&mc.receiver, loop_var, out);
+            for arg in &mc.args {
+                collect_store_calls_expr(arg, loop_var, out);
+            }
+        }
+        Expr::Block(b) => collect_store_calls_block(&b.block, loop_var, out),
+        Expr::Unsafe(u) => collect_store_calls_block(&u.block, loop_var, out),
+        Expr::ForLoop(f) => collect_store_calls_block(&f.body, loop_var, out),
+        Expr::While(w) => collect_store_calls_block(&w.body, loop_var, out),
+        Expr::Loop(l) => collect_store_calls_block(&l.body, loop_var, out),
+        Expr::If(i) => {
+            collect_store_calls_block(&i.then_branch, loop_var, out);
+            if let Some((_, else_expr)) = &i.else_branch {
+                collect_store_calls_expr(else_expr, loop_var, out);
+            }
+        }
+        Expr::Call(c) => {
+            for arg in &c.args {
+                collect_store_calls_expr(arg, loop_var, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_store_calls_block(block: &syn::Block, loop_var: Option<&str>, out: &mut Vec<StoreCall>) {
+    for stmt in &block.stmts {
+        collect_store_calls_stmt(stmt, loop_var, out);
+    }
+}
+
+/// Whether `expr` syntactically references the identifier `name` anywhere. Used
+/// to decide whether a store's index varies with the loop variable (fork —
+/// distinct per iteration) or not (serialize — a constant/repeated address must
+/// be ordered).
+pub fn expr_references_ident(expr: &Expr, name: &str) -> bool {
+    let mut found = false;
+    references_ident_expr(expr, name, &mut found);
+    found
+}
+
+fn references_ident_expr(expr: &Expr, name: &str, found: &mut bool) {
+    if *found {
+        return;
+    }
+    if let Expr::Path(path) = expr {
+        if path.path.is_ident(name) {
+            *found = true;
+            return;
+        }
+    }
+    // Descend into the common sub-expression carriers for index expressions.
+    match expr {
+        Expr::MethodCall(mc) => {
+            references_ident_expr(&mc.receiver, name, found);
+            for arg in &mc.args {
+                references_ident_expr(arg, name, found);
+            }
+        }
+        Expr::Call(c) => {
+            references_ident_expr(&c.func, name, found);
+            for arg in &c.args {
+                references_ident_expr(arg, name, found);
+            }
+        }
+        Expr::Binary(b) => {
+            references_ident_expr(&b.left, name, found);
+            references_ident_expr(&b.right, name, found);
+        }
+        Expr::Unary(u) => references_ident_expr(&u.expr, name, found),
+        Expr::Paren(p) => references_ident_expr(&p.expr, name, found),
+        Expr::Group(g) => references_ident_expr(&g.expr, name, found),
+        Expr::Reference(r) => references_ident_expr(&r.expr, name, found),
+        Expr::Tuple(t) => {
+            for e in &t.elems {
+                references_ident_expr(e, name, found);
+            }
+        }
+        Expr::Array(a) => {
+            for e in &a.elems {
+                references_ident_expr(e, name, found);
+            }
+        }
+        Expr::Cast(c) => references_ident_expr(&c.expr, name, found),
+        Expr::Index(i) => {
+            references_ident_expr(&i.expr, name, found);
+            references_ident_expr(&i.index, name, found);
+        }
+        Expr::Field(f) => references_ident_expr(&f.base, name, found),
+        _ => {}
+    }
 }
 
 /// Collects mutated outer-scope variables from a while-loop body.
@@ -699,6 +912,49 @@ pub fn update_token(
     };
     new_token_value.value = Some(new_token);
     Ok(ctx.vars.insert(var_name, new_value))
+}
+
+/// Propagate a resource's current ordering token up its borrow link to the root
+/// tensor it views. A view roots at its tensor (`tensor_origin`), so advancing
+/// the view's token must advance the tensor's: a *later* view of the same tensor
+/// seeds its token from `get_tensor_token`, and this is what makes that later
+/// view happen-after this one's writes (the epoch boundary of the token model).
+///
+/// This runs at scope boundaries (where the view and its root tensor are both in
+/// scope), not at the store site — inside a method frame the root tensor is out
+/// of scope, so the propagation is deferred to the boundary that reconciles the
+/// view back to its caller. A no-op when the resource has no root, roots at
+/// itself (a tensor), or the root is not a live variable here.
+pub fn propagate_token_to_root(resource_var: &str, ctx: &mut CompilerContext) {
+    let Some(resource) = ctx.vars.get(resource_var) else {
+        return;
+    };
+    let Some(root) = resource.tensor_origin.clone() else {
+        return;
+    };
+    if root == resource_var {
+        return; // A tensor roots at itself; there is nothing above it to walk to.
+    }
+    let token = resource
+        .type_meta
+        .as_ref()
+        .and_then(|meta| meta.fields.get("token"))
+        .and_then(|field| field.value);
+    let Some(token) = token else {
+        return;
+    };
+    let Some(root_value) = ctx.vars.get(&root) else {
+        return;
+    };
+    let mut new_root = root_value.clone();
+    let Some(meta) = new_root.type_meta.as_mut() else {
+        return;
+    };
+    let Some(token_field) = meta.fields.get_mut("token") else {
+        return;
+    };
+    token_field.value = Some(token);
+    ctx.vars.insert(root, new_root);
 }
 
 /// Retrieves the ordering token from a variable expression's type metadata.

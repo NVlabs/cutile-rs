@@ -29,13 +29,15 @@ fn smoke_async_device_op() {
             let y_host_1 = vec![1u32; num_elements];
 
             let x_op = device_operation::with_context(|ctx: &ExecutionContext| unsafe {
-                let dptr = malloc_async(num_bytes, ctx.get_cuda_stream());
-                memcpy_htod_async(dptr, x_host_1.as_ptr(), num_elements, ctx.get_cuda_stream());
+                let dptr = malloc_async(num_bytes, ctx.get_cuda_stream()).expect("malloc x");
+                memcpy_htod_async(dptr, x_host_1.as_ptr(), num_elements, ctx.get_cuda_stream())
+                    .expect("h2d x");
                 Value::new(dptr)
             });
             let y_op = device_operation::with_context(|ctx| unsafe {
-                let dptr = malloc_async(num_bytes, ctx.get_cuda_stream());
-                memcpy_htod_async(dptr, y_host_1.as_ptr(), num_elements, ctx.get_cuda_stream());
+                let dptr = malloc_async(num_bytes, ctx.get_cuda_stream()).expect("malloc y");
+                memcpy_htod_async(dptr, y_host_1.as_ptr(), num_elements, ctx.get_cuda_stream())
+                    .expect("h2d y");
                 Value::new(dptr)
             });
 
@@ -48,13 +50,15 @@ fn smoke_async_device_op() {
                         x_dptr,
                         num_elements,
                         ctx.get_cuda_stream(),
-                    );
+                    )
+                    .expect("d2h x");
                     memcpy_dtoh_async(
                         y_host.as_mut_ptr(),
                         y_dptr,
                         num_elements,
                         ctx.get_cuda_stream(),
-                    );
+                    )
+                    .expect("d2h y");
                 }
                 Value::new(((x_host, y_host), (x_dptr, y_dptr)))
             });
@@ -69,8 +73,8 @@ fn smoke_async_device_op() {
             Value::new(dptrs)
                 .and_then_with_context(|ctx, (x_dptr, y_dptr)| {
                     unsafe {
-                        free_async(x_dptr, ctx.get_cuda_stream());
-                        free_async(y_dptr, ctx.get_cuda_stream());
+                        free_async(x_dptr, ctx.get_cuda_stream()).expect("free x");
+                        free_async(y_dptr, ctx.get_cuda_stream()).expect("free y");
                     }
                     Value::new(())
                 })

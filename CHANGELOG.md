@@ -5,7 +5,181 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.1] - 2026-09-02
+
+A single `cargo add cutile` now suffices, kernels gain Triton-parity
+program indexing and Rust-model raw pointers, and the experimental
+autotuner grows the pieces its first engine-scale consumer asked for.
+
+### Breaking changes
+
+0.3.1 ships the incompatible changes below. Each one closes a soundness or
+correctness hole found by the September audit, the case the 0.1.0 notes
+reserved for breaking changes. Projects that are not ready for them can stay
+on 0.3.0.
+
+- `Device::load_module_from_bytes` and
+  `cuda_async::device_context::load_module_from_bytes` are `unsafe fn`: the
+  driver reads header-declared offsets from the image, so a truncated cubin
+  reads past the slice.
+- The DSL ops `atomic_rmw_tko` and `atomic_cas_tko` are `unsafe fn`, like
+  `load_ptr_tko` and `store_ptr_tko`.
+- `DType` is an `unsafe trait`: implementors promise that every byte pattern
+  the device can produce for their `DTYPE` is a valid value.
+- `cuda_core::api::{malloc_async, malloc_from_pool_async, free_async,
+  memcpy_htod_async, memcpy_dtoh_async, memcpy_dtod_async, api_version}` and
+  `ExecutionContext::alloc_async` return `Result` instead of panicking, so a
+  failed device allocation can be handled or retried.
+- `Stream::launch_host_function` and `launch_host_function_with_sync_mode`
+  require `F: 'static`.
+- `api::memcpy` returns `Memcpy<'a>`, which borrows both tensors for the
+  lifetime of the operation.
+- `CudaGraph::update` accepts only `GraphNode + DeviceOp<Output = ()>` and
+  returns `Result<(), DeviceError>`.
+- Generated kernel launchers return a nameable `Launcher<…, KernelArgs<…>>`
+  instead of `impl DeviceOp` and implement `GraphNode` only when every input
+  does; `AsyncKernelLaunch::args` is no longer public.
+- `TrialLog::open` takes a `LogProvenance` (`experimental-tune`).
+- `BytecodeVersion::V13_1` is removed; the bytecode floor is CUDA 13.2.
+- Kernel programs: a `return` below the function body and a `break` inside
+  `for` are compile errors (they were silently miscompiled); integer `/`
+  rounds toward zero, as in Rust, instead of toward negative infinity; `u8`
+  and `u16` arithmetic and comparisons are unsigned. Programs that relied on
+  the old lowering produce different results.
+
+### Added
+
+- `shape![..]`: the shape constructor macro, replacing `const_shape!` (now
+  deprecated; both spellings work on both compile tracks). Runtime extents
+  keep the explicit form `Shape::<{ [-1] }> { dims: &[n] }`.
+- `x.load_like(z)`: method-form spelling of `load_tile_like(x, z)`, lowering
+  to identical Tile IR with identical bounds-check placement. Both spellings
+  remain supported; docs and examples now use the method form (#259).
+- cuda-oxide host surface: `simt` modules in `cuda-core` and `cuda-async`
+  (contexts, streams, events, device and pinned host buffers, module loading,
+  kernel launch, VMM, reclaim) and a `cuda-core-derive` crate providing
+  `#[derive(DeviceCopy)]` (#233).
+- CUDA VMM wrappers (`PhysicalAllocation`, `VirtualReservation`, `Mapping`)
+  and NVLink switch multicast (`MulticastObject`) in `cuda-core` (#202).
+- Autotuner: trial logging and resume on the `Objective` path, `require`d
+  configurations measured before the search, and kernel cache management
+  (`clear_kernel_cache`, `evict_kernel`, `retain_kernels`), all behind
+  `experimental-tune` (#239).
+- Const raw pointers (`*const T`) in kernel signatures, with `Tensor::as_ptr`,
+  `cast_const`/`cast_mut`, `cast_tile_const`/`cast_tile_mut`, and
+  `get_tensor_base`; `program_id(axis)` and `num_programs(axis)` as aliases
+  of the tile-block id and count (#240, restored by #256).
+- `CompileOptions::{device_debug, lineinfo, sanitize_memcheck, opt_level}`
+  pass `--device-debug`, `--lineinfo`, `--sanitize=memcheck`, and
+  `--opt-level` to `tileiras` and join both cache keys (#236).
+- Source locations in the bytecode debug section, with per-callee subprograms
+  and inlined call-site chains, so `--lineinfo` and `--device-debug` builds
+  attribute SASS to the kernel's `.rs` lines (#238).
+
+### Changed
+
+- The host-side crates (`cuda-bindings`, `cuda-core`, `cuda-async`) require
+  CUDA 13.0 or newer; the Tile compiler floor stays at 13.2 (#233).
+- Toolkit discovery honors `CUDA_HOME` after `CUDA_TOOLKIT_PATH`, probes
+  `targets/<dir>/include` layouts, and accepts `CUDA_TOOLKIT_TARGET_DIR` to
+  name one target tree; the host-crate tests run in the CPU and GPU test
+  scripts (#251).
+- `load_ptr_tko` and `store_ptr_tko` are `unsafe fn` (#240, restored by
+  #256).
+
+### Fixed
+
+- Integer division and remainder serialize `rounding<zero>` and inferred
+  signedness on `divi`/`remi` (#225, restored by #256).
+- Persisted tuning records carry the L2 cache key schema, so key migrations
+  are distinguishable from workspace drift (#241).
+- Pointer alignment hints use the full 64-bit device address; an address
+  whose low 32 bits were `0x8000_0000` previously lost its divisibility hint
+  (#244).
+- Generated launchers reach `cutile_compiler` through the `cutile` crate
+  root, so consumer crates without a direct `cutile-compiler` dependency
+  compile (#248).
+- Three merges reverted by stale squash merges (#240, #225, #185) are
+  re-applied (#256).
+
+## [0.3.0] - 2026-08-20
+
+This release introduces compiler optimizations that improve safe kernel
+performance, async launch performance improvements, persistent kernel
+tuning, and zero-copy interop with externally owned device memory. The
+compiler now proves each partition access at compile time or verifies it
+once at launch, and places the rare remaining check where it costs
+nothing.
+
+### Highlights
+
+- Bounds-check placement: every partition access walks one proof ladder
+  (axis provenance, static folding, declared preconditions, host-side launch
+  checks) and only then pays an in-kernel assert, hoisted to the outermost
+  provable loop preheader. Kernels indexed by loop iterands, mapped schedule
+  components, or tile-block ids typically compile with zero in-kernel checks
+  and no annotations. `PartitionMut::store` joins the checked-by-default
+  surface (`store_unchecked` is the explicit escape) at identical register
+  counts.
+- `deny_in_kernel_checks = true` on an entry turns any check that would remain
+  in the kernel into a compile error, so an assert-free kernel is a contract
+  the build enforces rather than a property to audit.
+- Partial-coverage launches: `partition_prefix` lets the launch grid cover a
+  per-axis prefix of an output partition's block grid. Exceeding the grid on
+  any axis remains a launch error, and the default `partition` keeps strict
+  equality.
+- Zero-copy interop: `Tensor::from_foreign` borrows device memory owned by an
+  external framework (cudarc, torch, VMM ranges), holding the owner alive by
+  refcount and verifying the addressable extent at construction;
+  `Tensor::borrow_raw_parts`, `Device::borrow_with_owner`, and
+  `Stream::borrow_with_owner` cover bare handles.
+- Autotuner core: declared configuration spaces, pluggable searchers,
+  resumable grid search, and provenance-checked tuning records.
+- `cutile::bench` for device-event kernel benchmarking, an opt-in persistent
+  on-disk cubin cache, a process-global single-flight kernel cache with a
+  `.compile()` warmup API, and async launch latency at parity with sync.
+- A new book chapter, Bounds-Check Placement, documents the placement rules
+  and a verification workflow: per-kernel placement counts from
+  `CUTILE_JIT_TIMING`, and diffing the emitted Tile IR against an unsafe twin
+  before running anything.
+
+### Performance results
+
+- The fully checked flash-attention prefill kernel matches its unsafe twin
+  on RTX 5090, within 2.5% of the checks-disabled floor.
+- Async launch latency is at parity with sync, and a differential harness
+  verifies that every check placement refines the outcome of checking at the
+  access site.
+- Grout, the Qwen3 inference engine from the 0.2.0 paper, now runs its
+  25-kernel default engine path with zero unchecked kernels and six one-line
+  unsafe view constructions in total, at safe-vs-unsafe parity on RTX 5090
+  and B200.
+
+### Changed
+
+- `with_bounds` and `Dim::new` are deprecated: bounds inference and declared
+  preconditions prove everything they proved, with the checks placed at
+  launch instead of in the kernel. Migration notes are on the deprecations.
+- Tile IR bytecode version selection reads the CUDA toolkit when
+  discoverable and otherwise probes `tileiras` with a representative module
+  (an entry with a `for` region and view chain), so an accepted version is
+  one real kernels compile at.
+- The `persistent_gemm` example is rewritten in the zero-annotation form and
+  compiles under `deny_in_kernel_checks = true`.
+
+### Fixed
+
+- An entry declared as bare `#[cutile::entry]`, without an argument list, was
+  silently treated as a plain function; both attribute forms are now
+  recognized.
+- Interval range facts no longer survive arithmetic that can wrap `i32`; a
+  wrapped intermediate could previously discharge a check the machine value
+  violated.
+- Bounds analysis guards division and remainder against zero divisors,
+  saturates interval arithmetic, and uses overlap analysis for `eq`/`ne`.
+- Device-op `Send` bounds, CUDA driver flag types, and aarch64 flake support.
+- Security bumps for crossbeam-epoch (RUSTSEC-2026-0204) and anyhow
+  (RUSTSEC-2026-0190).
 
 ## [0.2.0] - 2026-06-16
 
