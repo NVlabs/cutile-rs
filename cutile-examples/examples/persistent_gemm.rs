@@ -42,13 +42,13 @@ mod persistent_gemm_kernels {
         x: &Tensor<T, { [-1, -1] }>,
         y: &Tensor<T, { [-1, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
 
         for out_idx in z.iter_indices() {
             let (bid_m, bid_n) = out_idx.components();
 
-            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+            let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
             for k_tile in 0i32..num_tiles(&part_x, 1) {
                 let tile_x = part_x.load([bid_m, k_tile]);
                 let tile_y = part_y.load([k_tile, bid_n]);

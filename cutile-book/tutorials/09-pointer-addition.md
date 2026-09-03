@@ -32,7 +32,7 @@ mod my_module {
         let x_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(x_ptr, len) };
         let y_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(y_ptr, len) };
         let pid = program_id(0);
-        let tile_shape = const_shape![4i32];
+        let tile_shape = shape![4i32];
         let tile_x = x_tensor.partition(tile_shape).load([pid]);
         let tile_y = y_tensor.partition(tile_shape).load([pid]);
         z_tensor
@@ -43,7 +43,8 @@ mod my_module {
 
 use my_module::add_ptr;
 
-async fn async_main() -> Result<(), cutile::error::Error> {
+#[tokio::main]
+async fn main() -> Result<(), cutile::error::Error> {
     let len = 2usize.pow(5);
     let tile_size = 4usize;
 

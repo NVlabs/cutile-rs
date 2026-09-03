@@ -18,9 +18,10 @@ pub enum JITError {
     /// An error without source location.
     Generic(String),
     /// An error with an associated [`SourceLocation`] captured at proc macro
-    /// expansion time.  Unlike `Syn`, whose span is only meaningful inside
-    /// a proc macro context, this variant carries a concrete file/line/column
-    /// that can be displayed to the user even at JIT (runtime) compilation.
+    /// expansion time. Unlike a `proc_macro2::Span` (or a `syn::Error` built
+    /// on one), which is only meaningful inside a proc macro context, this
+    /// variant carries a concrete file/line/column that can be displayed to
+    /// the user even at JIT (runtime) compilation.
     Located(String, SourceLocation),
     /// A wrapped `anyhow::Error`.
     Anyhow(anyhow::Error),

@@ -97,14 +97,20 @@
 //! - Optimizing execution order
 //! - Parallelizing independent operations
 //!
-//! ### Type Safety
+//! ### Launch Validation
 //!
-//! Tensor shapes are tracked at compile time where possible:
+//! Partitioning records the tile shape a kernel is launched over; the launcher
+//! checks it against the compiled specialization before any GPU work:
 //!
 //! ```rust,ignore
-//! let x = api::zeros(&[256]);           // Shape known at compile time
-//! let partitioned = x.partition([64]); // Compiler checks 256 % 64 == 0
+//! let x = api::zeros(&[256]);
+//! let partitioned = x.partition([64]); // grid = ceil(256 / 64) = 4 blocks
+//! let y = api::zeros(&[250]).partition([64]); // grid = 4; the last tile is partial
 //! ```
+//!
+//! Partition shapes need not divide the tensor shape: the grid is the ceiling
+//! division per axis, and a partial edge tile is loaded and stored with bounds
+//! checks (or padding) in the kernel.
 //!
 //! ### Async Integration
 //!
@@ -137,7 +143,7 @@ use crate::tensor::{IntoPartition, Reshape, Storage, Tensor, Unpartition};
 use cuda_async::device_context::with_default_device_policy;
 use cuda_async::device_future::DeviceFuture;
 use cuda_async::device_operation::{
-    value, with_context, DeviceOp, ExecutionContext, Unzippable1, Unzippable2,
+    value, with_context, DeviceOp, ExecutionContext, GraphNode, Unzippable1, Unzippable2,
 };
 use cuda_async::error::DeviceError;
 use cuda_core::curand::{RandNormal, RandUniform, RNG};
@@ -145,7 +151,6 @@ use cuda_core::sys::CUdeviceptr;
 use cuda_core::DType;
 use cuda_core::{memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async};
 use half::f16;
-use std::alloc::{alloc, Layout};
 use std::future::IntoFuture;
 use std::sync::Arc;
 
@@ -170,8 +175,8 @@ impl<T: DType> DeviceOp for CopyDeviceToDevice<T> {
         ctx: &ExecutionContext,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let num_bytes = self.num_elements * std::mem::size_of::<T>();
-        let dst = ctx.alloc_async(num_bytes);
-        memcpy_dtod_async::<T>(dst, self.src_ptr, self.num_elements, ctx.get_cuda_stream());
+        let dst = ctx.alloc_async(num_bytes)?;
+        memcpy_dtod_async::<T>(dst, self.src_ptr, self.num_elements, ctx.get_cuda_stream())?;
         Ok(Tensor::from_raw_parts(
             dst,
             num_bytes,
@@ -225,26 +230,21 @@ pub fn dup<T: DType>(tensor: &Tensor<T>) -> impl DeviceOp<Output = Tensor<T>> {
 
 /// Copy data from `src` into `dst` without transferring ownership of either.
 ///
-/// Device-to-device copy into an existing buffer.
+/// Device-to-device copy into an existing buffer. Copies the contents of
+/// `src` into `dst`; both must have the same number of elements. No new GPU
+/// memory is allocated. `&Arc<Tensor<T>>` coerces to `&Tensor<T>` for `src`.
 ///
-/// Copies the contents of `src` into `dst`. Both must have the same number
-/// of elements. No new GPU memory is allocated.
-///
-/// Accepts any types that deref to `Tensor<T>`: `&Tensor<T>`, `&Arc<Tensor<T>>`,
-/// `Arc<Tensor<T>>`, etc.
-///
-/// # Safety
-///
-/// This function writes to `dst` through its device pointer. The caller
-/// must ensure:
-/// - No other operation reads from `dst` concurrently on a different stream.
-/// - The copy completes (via stream ordering or synchronization) before
-///   `dst` is read.
-///
-/// This is safe when used with [`CudaGraph::update`](cuda_async::cuda_graph::CudaGraph::update) (stream ordering
-/// ensures the copy completes before graph launch) and inside
-/// [`CudaGraph::scope`](cuda_async::cuda_graph::CudaGraph::scope)
-/// (capture mode records the copy as a graph node).
+/// The returned [`Memcpy`] borrows both tensors for `'a`. It holds only their
+/// device pointers, so that borrow is what ties the copy to the allocations:
+/// a copy executed after either tensor was dropped would be a device
+/// use-after-free, and the borrow checker now rejects it. `dst` is borrowed
+/// mutably, so no other host handle can read or write it while the op is
+/// alive; once the op is consumed (executed, recorded, or dropped) the borrow
+/// ends and same-stream ordering orders the copy before later consumers of
+/// `dst` — [`CudaGraph::update`](cuda_async::cuda_graph::CudaGraph::update)
+/// issues it on the graph's stream, and inside
+/// [`CudaGraph::scope`](cuda_async::cuda_graph::CudaGraph::scope) capture mode
+/// records it as a graph node.
 ///
 /// ## Panics
 ///
@@ -259,7 +259,7 @@ pub fn dup<T: DType>(tensor: &Tensor<T>) -> impl DeviceOp<Output = Tensor<T>> {
 /// // Scope capture pattern:
 /// s.record(api::memcpy(&mut input, &bufs.residual))?;
 /// ```
-pub fn memcpy<T: DType>(dst: &mut Tensor<T>, src: &Tensor<T>) -> Memcpy {
+pub fn memcpy<'a, T: DType>(dst: &'a mut Tensor<T>, src: &'a Tensor<T>) -> Memcpy<'a> {
     assert_eq!(
         src.size(),
         dst.size(),
@@ -271,35 +271,36 @@ pub fn memcpy<T: DType>(dst: &mut Tensor<T>, src: &Tensor<T>) -> Memcpy {
         src_ptr: src.cu_deviceptr(),
         dst_ptr: dst.cu_deviceptr(),
         len: dst.num_bytes(),
+        _borrow: std::marker::PhantomData,
     }
 }
 
-/// Unsafe variant of [`memcpy`] that accepts `&Tensor` for the destination.
+/// Device operation produced by [`memcpy`]: a device-to-device copy between
+/// two pre-allocated tensors that stay borrowed for `'a`.
 ///
-/// Use this in CUDA graph capture scopes and graph `update()` calls where
-/// the destination is borrowed immutably but written to through the device
-/// pointer during graph replay.
-///
-
-pub struct Memcpy {
+/// Records as a single graph node ([`GraphNode`]) — it allocates nothing.
+pub struct Memcpy<'a> {
     src_ptr: cuda_core::sys::CUdeviceptr,
     dst_ptr: cuda_core::sys::CUdeviceptr,
     len: usize,
+    /// Keeps `dst` (mutably) and `src` borrowed for as long as the bare
+    /// device pointers above are held.
+    _borrow: std::marker::PhantomData<&'a mut ()>,
 }
 
-impl DeviceOp for Memcpy {
+impl<'a> DeviceOp for Memcpy<'a> {
     type Output = ();
     unsafe fn execute(self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        memcpy_dtod_async::<u8>(self.dst_ptr, self.src_ptr, self.len, ctx.get_cuda_stream());
+        memcpy_dtod_async::<u8>(self.dst_ptr, self.src_ptr, self.len, ctx.get_cuda_stream())?;
         Ok(())
     }
 }
 
-impl cuda_async::device_operation::GraphNode for Memcpy {}
+impl<'a> GraphNode for Memcpy<'a> {}
 
-impl IntoFuture for Memcpy {
+impl<'a> IntoFuture for Memcpy<'a> {
     type Output = Result<(), DeviceError>;
-    type IntoFuture = DeviceFuture<(), Memcpy>;
+    type IntoFuture = DeviceFuture<(), Memcpy<'a>>;
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| {
             let stream = policy.next_stream()?;
@@ -333,10 +334,21 @@ impl<T: DType> DeviceOp for CopyDeviceToHostVec<T> {
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let cu_deviceptr = self.tensor.cu_deviceptr();
         let size = self.tensor.size();
-        let layout = Layout::array::<T>(size).expect("overflow cannot happen");
-        let async_ptr = unsafe { alloc(layout).cast::<T>() };
-        memcpy_dtoh_async(async_ptr, cu_deviceptr, size, ctx.get_cuda_stream());
-        Ok(unsafe { Vec::from_raw_parts(async_ptr, size, size) })
+        // The `Vec` owns the host buffer from the start, so an early return
+        // frees it, and unlike a bare `alloc` it is well-defined for a
+        // zero-size request and never yields null.
+        let mut host = Vec::<T>::with_capacity(size);
+        if size > 0 {
+            unsafe {
+                memcpy_dtoh_async(host.as_mut_ptr(), cu_deviceptr, size, ctx.get_cuda_stream())
+            }?;
+        }
+        // SAFETY: `cuMemcpyDtoHAsync` into pageable host memory (a `Vec`'s
+        // heap buffer is pageable) returns only once the copy has completed,
+        // so all `size` elements are initialized here, and `size` is exactly
+        // the capacity reserved above.
+        unsafe { host.set_len(size) };
+        Ok(host)
     }
 }
 
@@ -392,8 +404,8 @@ impl<T: DType> DeviceOp for CopyHostVecToDevice<T> {
         let num_elements = vec.len();
         let shape = vec![num_elements as i32];
         let strides = vec![1];
-        let dptr = ctx.alloc_async(element_size * num_elements);
-        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream());
+        let dptr = ctx.alloc_async(element_size * num_elements)?;
+        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream())?;
         Ok(Tensor::from_raw_parts(
             dptr,
             element_size * num_elements,
@@ -571,18 +583,6 @@ pub fn arange<T: DType>(len: usize) -> impl DeviceOp<Output = Tensor<T>> {
 /// let x = api::linspace(0.0, 1.0, 100).await; // [0.0, 0.0101..., ..., 1.0]
 /// let angles = api::linspace(0.0, 6.283, 360).await;
 /// ```
-/// Creates a 1D tensor with evenly spaced values between `start` and `stop`.
-///
-/// Similar to NumPy's `linspace`. Generates `n` values such that the first
-/// is `start` and the last is `stop` (inclusive on both ends).
-///
-/// ## Examples
-///
-/// ```rust,ignore
-/// use cutile::api;
-///
-/// let x = api::linspace(0.0, 1.0, 100).await; // [0.0, 0.0101..., ..., 1.0]
-/// ```
 pub fn linspace(start: f32, stop: f32, n: usize) -> impl DeviceOp<Output = Tensor<f32>> {
     let step = if n > 1 {
         (stop - start) / (n - 1) as f32
@@ -626,17 +626,129 @@ pub fn eye(n: usize) -> impl DeviceOp<Output = Tensor<f32>> {
 /// let rect = api::eye_rect(3, 5).await; // 3x5, ones on main diagonal
 /// ```
 pub fn eye_rect(rows: usize, cols: usize) -> impl DeviceOp<Output = Tensor<f32>> {
-    let len = rows * cols;
     let br = 16;
     let bc = 16;
-    Tensor::<f32>::uninitialized(len).then(move |t| {
-        let t2d = unsafe { t.assume_init() }
-            .reshape(&[rows, cols])
-            .expect("eye: reshape failed");
-        let result = t2d.partition([br, bc]);
-        let res = value((result,)).then(eye_apply).unzip();
-        res.0.unpartition()
-    })
+    // Checked: `rows * cols` is caller-supplied and becomes the allocation
+    // size, so a wrapped product would allocate too little for the shape.
+    let Some(len) = rows.checked_mul(cols).filter(|&len| len > 0) else {
+        return fail::<Tensor<f32>>(format!(
+            "eye_rect: shape [{rows}, {cols}] is empty or its element count overflows usize"
+        ))
+        .boxed();
+    };
+    Tensor::<f32>::uninitialized(len)
+        .then(move |t| {
+            let t2d = unsafe { t.assume_init() }
+                .reshape(&[rows, cols])
+                .expect("eye: reshape failed");
+            let result = t2d.partition([br, bc]);
+            let res = value((result,)).then(eye_apply).unzip();
+            res.0.unpartition()
+        })
+        .boxed()
+}
+
+/// Device operation that fails with `message` when executed.
+///
+/// Constructors such as [`eye_rect`] return an opaque `impl DeviceOp` and so
+/// cannot return `Result`; this lets them report invalid caller input as an
+/// `Err` on the `.sync()` / `.await` path instead of panicking eagerly.
+struct Fail<T> {
+    message: String,
+    _output: std::marker::PhantomData<fn() -> T>,
+}
+
+fn fail<T: Send>(message: impl Into<String>) -> Fail<T> {
+    Fail {
+        message: message.into(),
+        _output: std::marker::PhantomData,
+    }
+}
+
+impl<T: Send> DeviceOp for Fail<T> {
+    type Output = T;
+
+    unsafe fn execute(self, _ctx: &ExecutionContext) -> Result<T, DeviceError> {
+        Err(DeviceError::Internal(self.message))
+    }
+}
+
+impl<T: Send> IntoFuture for Fail<T> {
+    type Output = Result<T, DeviceError>;
+    type IntoFuture = DeviceFuture<T, Fail<T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
+/// Stream-ordered allocation of an uninitialized rank-1 tensor of `len`
+/// elements; the operation behind [`Tensor::uninitialized`].
+///
+/// A dedicated operation rather than a `with_context` closure so that a
+/// failed allocation (typically `CUDA_ERROR_OUT_OF_MEMORY`) is returned as the
+/// operation's error instead of panicking; callers can free memory and retry.
+pub(crate) struct AllocUninitialized<T: DType> {
+    len: usize,
+    _element: std::marker::PhantomData<fn() -> T>,
+}
+
+pub(crate) fn alloc_uninitialized<T: DType>(len: usize) -> AllocUninitialized<T> {
+    AllocUninitialized {
+        len,
+        _element: std::marker::PhantomData,
+    }
+}
+
+impl<T: DType> DeviceOp for AllocUninitialized<T> {
+    type Output = std::mem::MaybeUninit<Tensor<T>>;
+
+    unsafe fn execute(
+        self,
+        ctx: &ExecutionContext,
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+        let num_bytes = self
+            .len
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| {
+                DeviceError::Internal(format!(
+                    "tensor of {} elements of {} bytes overflows usize",
+                    self.len,
+                    std::mem::size_of::<T>()
+                ))
+            })?;
+        let ptr = ctx.alloc_async(num_bytes)?;
+        Ok(std::mem::MaybeUninit::new(unsafe {
+            Tensor::from_raw_parts(
+                ptr,
+                num_bytes,
+                ctx.get_device_id(),
+                vec![self.len as i32],
+                vec![1],
+            )
+        }))
+    }
+}
+
+impl<T: DType> IntoFuture for AllocUninitialized<T> {
+    type Output = Result<std::mem::MaybeUninit<Tensor<T>>, DeviceError>;
+    type IntoFuture = DeviceFuture<std::mem::MaybeUninit<Tensor<T>>, AllocUninitialized<T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
 }
 
 /// Converts a tensor from one element type to another (internal API).
@@ -654,7 +766,9 @@ pub fn eye_rect(rows: usize, cols: usize) -> impl DeviceOp<Output = Tensor<f32>>
 pub fn convert<FromType: DType, ToType: DType>(
     src: Arc<Tensor<FromType>>,
 ) -> impl DeviceOp<Output = Tensor<ToType>> {
-    let len = src.shape.clone().iter().product::<i32>() as usize;
+    // `size()` is the overflow-checked element count; a wrapping i32 product
+    // here would size the destination below the source.
+    let len = src.size();
     Tensor::<ToType>::uninitialized(len).then(move |t| {
         let partition_size = 128;
         let dst = unsafe { t.assume_init() }.partition([partition_size]);
@@ -665,10 +779,10 @@ pub fn convert<FromType: DType, ToType: DType>(
     })
 }
 
-/// Generates a tensor with values from a normal distribution (f16 version).
+/// Generates a tensor with values from a normal distribution.
 ///
-/// Creates an f16 tensor by first generating f32 values and then converting.
-/// This is necessary because cuRAND doesn't directly support f16 generation.
+/// Supports `f32` and `f64` natively via cuRAND; for `f16` use [`randn_f16`],
+/// which generates `f32` and converts.
 ///
 /// ## Parameters
 ///
@@ -676,10 +790,12 @@ pub fn convert<FromType: DType, ToType: DType>(
 /// - `std`: Standard deviation
 /// - `shape`: Tensor shape
 /// - `seed`: Optional random seed for reproducibility
-/// Generates a tensor with values from a normal distribution.
 ///
-/// Supports `f32` and `f64` natively via cuRAND. For `f16`, generates `f32`
-/// and converts — use `randn_f16` for that case.
+/// ## Examples
+///
+/// ```rust,ignore
+/// let x: Tensor<f32> = api::randn(0.0f32, 1.0, [256, 256], Some(42)).await?;
+/// ```
 pub fn randn<T: DType + RandNormal, const RANK: usize>(
     mean: T,
     std: T,
@@ -687,9 +803,13 @@ pub fn randn<T: DType + RandNormal, const RANK: usize>(
     seed: Option<u64>,
 ) -> impl DeviceOp<Output = Tensor<T>> {
     let len = shape.iter().product::<usize>();
-    Tensor::<T>::uninitialized(len).then(move |t| unsafe {
+    Tensor::<T>::uninitialized(len).and_then_with_context(move |ctx, t| unsafe {
         let t = t.assume_init();
-        let rng = RNG::new(seed);
+        // Generation must be ordered on the stream that allocated `t`: a fresh
+        // cuRAND generator runs on the legacy default stream, which neither
+        // waits for the stream-ordered allocation nor orders before the
+        // consumers that follow on this stream.
+        let rng = RNG::new_on_stream(seed, ctx.get_cuda_stream());
         T::generate_normal(&rng, t.cu_deviceptr(), len, mean, std);
         value(t.reshape_unchecked(&shape))
     })
@@ -726,9 +846,10 @@ pub fn rand<T: DType + RandUniform, const RANK: usize>(
     seed: Option<u64>,
 ) -> impl DeviceOp<Output = Tensor<T>> {
     let len = shape.iter().product::<usize>();
-    Tensor::<T>::uninitialized(len).then(move |t| unsafe {
+    Tensor::<T>::uninitialized(len).and_then_with_context(move |ctx, t| unsafe {
         let t = t.assume_init();
-        let rng = RNG::new(seed);
+        // Same stream-ordering requirement as `randn`.
+        let rng = RNG::new_on_stream(seed, ctx.get_cuda_stream());
         T::generate_uniform(&rng, t.cu_deviceptr(), len);
         value(t.reshape_unchecked(&shape))
     })
@@ -749,7 +870,12 @@ impl<T: DType, DI: DeviceOp<Output = Tensor<T>>> DeviceOp for ReshapeOp<Tensor<T
 
     unsafe fn execute(self, context: &ExecutionContext) -> Result<Tensor<T>, DeviceError> {
         let tensor = self.input.execute(context)?;
-        Ok(tensor.reshape_unchecked(&self.shape))
+        // Checked, like the Arc path below: the shape comes from safe user code,
+        // and an unchecked reshape would hand back a tensor whose metadata
+        // exceeds its storage — every later launch would then read past it.
+        tensor
+            .reshape(&self.shape)
+            .map_err(|e| DeviceError::Internal(e.to_string()))
     }
 }
 

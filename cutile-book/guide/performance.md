@@ -32,14 +32,14 @@ fn fused<const BM: i32, const BN: i32>(
     z: &mut Tensor<f32, { [BM, BN] }>,
     x: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     let centered = tile - reduce_max(tile, 1i32)
-        .reshape(const_shape![BM, 1])
-        .broadcast(const_shape![BM, BN]);
+        .reshape(shape![BM, 1])
+        .broadcast(shape![BM, BN]);
     let exp_x = exp(centered);
     let sum = reduce_sum(exp_x, 1i32)
-        .reshape(const_shape![BM, 1])
-        .broadcast(const_shape![BM, BN]);
+        .reshape(shape![BM, 1])
+        .broadcast(shape![BM, BN]);
     z.store(true_div(exp_x, sum));
 }
 ```
@@ -65,7 +65,7 @@ Increase arithmetic intensity by reusing loaded tiles, fusing adjacent operation
 Use `mma` and `mmaf_scaled` for matrix multiply paths. The compiler lowers supported dtype and shape combinations to Tensor Core instructions:
 
 ```rust
-let mut acc = constant(0.0f32, const_shape![BM, BN]);
+let mut acc = constant(0.0f32, shape![BM, BN]);
 for k_tile in 0i32..k_tiles {
     let tile_x = part_x.load([pid_m, k_tile]);
     let tile_y = part_y.load([k_tile, pid_n]);
@@ -78,7 +78,7 @@ For block-scaled formats such as NVFP4 and MXFP8, `mmaf_scaled` consumes low-pre
 
 ## Bounds and Mapped Partitions
 
-The preferred safe performance path for persistent or mapped traversal is a mapped output partition. The output partition produces bounded, disjoint indices, while input partitions use `with_bounds(...)` to carry the matching logical grid:
+The preferred safe performance path for persistent or mapped traversal is a mapped output partition. The output partition produces bounded, disjoint indices; input partitions are indexed with plain arrays, and the compiler infers the bounds from the loops and mapped components that produce each index:
 
 ```rust
 fn gemm_persistent<
@@ -92,20 +92,21 @@ fn gemm_persistent<
     x: &Tensor<T, { [-1, -1] }>,
     y: &Tensor<T, { [-1, -1] }>,
 ) {
-    let m = num_tiles(&z, 0);
-    let n = num_tiles(&z, 1);
-    let k = Dim::new(x.shape()[1] / BK);
-
-    let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-    let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
 
     for out_idx in z.iter_indices() {
         let (bid_m, bid_n) = out_idx.components();
-        let acc = compute_tile(bid_m, bid_n, k, &part_x, &part_y);
+        let mut acc: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
+        for k_tile in 0i32..num_tiles(&part_x, 1) {
+            acc = mma(part_x.load([bid_m, k_tile]), part_y.load([k_tile, bid_n]), acc);
+        }
         z.store(acc, out_idx);
     }
 }
 ```
+
+`with_bounds(...)`, `Dim::new(...)`, and `coord(...)` are deprecated since 0.3.0; [Bounds-Check Placement](bounds-check-placement.md) describes where the remaining checks are placed.
 
 `unchecked_accesses = true` remains available when the programmer wants to opt out of runtime bounds checks explicitly:
 

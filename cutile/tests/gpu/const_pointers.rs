@@ -38,8 +38,8 @@ mod const_ptr_module {
         // TODO (hme): document safety
         let x_view: Tensor<f32, { [-1] }> = unsafe { view_from_const(x_base, len) };
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let direct = x.load_tile(const_shape![4], [pid.0]);
-        let via_ptr = x_view.partition(const_shape![4]).load([pid.0]);
+        let direct = x.load_tile(shape![4], [pid.0]);
+        let via_ptr = x_view.partition(shape![4]).load([pid.0]);
         z.store(direct + via_ptr);
     }
 
@@ -53,7 +53,7 @@ mod const_ptr_module {
         let x_const: *const f32 = cast_const(x_mut);
         let x_view: Tensor<f32, { [-1] }> = view_from_const(x_const, len);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile = x_view.partition(const_shape![4]).load([pid.0]);
+        let tile = x_view.partition(shape![4]).load([pid.0]);
         z.store(tile);
     }
 
@@ -63,11 +63,11 @@ mod const_ptr_module {
     #[cutile::entry()]
     unsafe fn gather_through_const(z: &mut Tensor<f32, { [4] }>, x_ptr: *const f32) {
         let base: PointerTile<*const f32, { [] }> = pointer_to_tile(x_ptr);
-        let base: PointerTile<*const f32, { [1] }> = base.reshape(const_shape![1]);
-        let base: PointerTile<*const f32, { [4] }> = base.broadcast(const_shape![4]);
+        let base: PointerTile<*const f32, { [1] }> = base.reshape(shape![1]);
+        let base: PointerTile<*const f32, { [4] }> = base.broadcast(shape![4]);
         // Gather indices 0..4 reversed: element i reads x[3 - i].
-        let three = broadcast_scalar(3i32, const_shape![4]);
-        let offsets: Tile<i32, { [4] }> = three - iota(const_shape![4]);
+        let three = broadcast_scalar(3i32, shape![4]);
+        let offsets: Tile<i32, { [4] }> = three - iota(shape![4]);
         let addrs: PointerTile<*const f32, { [4] }> = addptr_tile(base, offsets);
         // The tile-level casts convert both directions as well.
         let addrs: PointerTile<*mut f32, { [4] }> = cast_tile_mut(addrs);

@@ -31,8 +31,8 @@ mod my_module {
         x: &Tensor<E, { [M, K] }>,
         y: &Tensor<E, { [K, N] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let mut tile_z = load_tile_mut(z);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let nk = num_tiles(&part_y, 0);

@@ -28,7 +28,7 @@ mod composed_warm_module {
         mut z: MappedPartitionMut<f32, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let px = x.partition(const_shape![BM, BN]);
+        let px = x.partition(shape![BM, BN]);
         for idx in z.iter_indices() {
             let (bm, bn) = idx.components();
             let t = px.load([bm, bn]);

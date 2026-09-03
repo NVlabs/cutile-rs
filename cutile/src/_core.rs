@@ -1384,7 +1384,7 @@ pub mod core {
     // ========================================================================
 
     /// Compile-time shape descriptor for tensors and tiles. Construct via
-    /// [`const_shape!`].
+    /// [`shape!`].
     #[cuda_tile::variadic_struct(N = 6, constructor = "new")]
     #[derive(Copy, Clone)]
     pub struct Shape<'a, const D: [i32; N]> {
@@ -1401,6 +1401,31 @@ pub mod core {
     }
 
     /// Construct a compile-time `Shape` from literal dims (0–4D supported).
+    ///
+    /// For the rare runtime-extent case, construct `Shape` directly:
+    /// `Shape::<{ [-1] }> { dims: &[n] }`.
+    #[macro_export]
+    macro_rules! shape {
+        () => {
+            Shape_0::const_new()
+        };
+        ($x1:literal) => {
+            Shape_1::<$x1>::const_new()
+        };
+        ($x1:literal, $x2:literal) => {
+            Shape_2::<$x1, $x2>::const_new()
+        };
+        ($x1:literal, $x2:literal, $x3:literal) => {
+            Shape_3::<$x1, $x2, $x3>::const_new()
+        };
+        ($x1:literal, $x2:literal, $x3:literal, $x4:literal) => {
+            Shape_4::<$x1, $x2, $x3, $x4>::const_new()
+        };
+    }
+    pub use shape;
+
+    /// Construct a compile-time `Shape` from literal dims (0–4D supported).
+    #[deprecated(note = "use shape![..]")]
     #[macro_export]
     macro_rules! const_shape {
         () => {
@@ -1419,6 +1444,7 @@ pub mod core {
             Shape_4::<$x1, $x2, $x3, $x4>::const_new()
         };
     }
+    #[allow(deprecated)]
     pub use const_shape;
 
     /// Compile-time index/metadata array — used for permutations and dim maps.
@@ -2764,10 +2790,20 @@ pub mod core {
 
     /// Atomic read-modify-write. `mode` selects the op (`atomic::*`),
     /// `memory_ordering` excludes `Weak`. Returns `(old_values, token)`.
+    ///
+    /// # Safety
+    /// Dereferences raw device pointers, like [`load_ptr_tko`] and
+    /// [`store_ptr_tko`]: forming and offsetting the pointer tile is safe, but
+    /// the read-modify-write is not. Every lane's address (masked lanes
+    /// excepted — they are never dereferenced) must point to a valid,
+    /// correctly-aligned `E` the kernel is allowed to write for the launch's
+    /// lifetime, and the caller upholds the memory-model contract of the
+    /// chosen `memory_ordering`/`memory_scope` with respect to every other
+    /// access to that location.
     #[doc(hidden)]
     #[cuda_tile::op(name="cuda_tile.atomic_rmw_tko", params=["pointers", "arg"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn atomic_rmw_tko<
+    pub unsafe fn atomic_rmw_tko<
         E: ElementType,
         const S: [i32; N],
         M: atomic::Mode,
@@ -2787,9 +2823,19 @@ pub mod core {
 
     /// Atomic compare-and-swap. Bitwise comparison: NaN ≠ NaN, ±0.0 distinct
     /// if their bit patterns differ. Returns `(old_values, token)`.
+    ///
+    /// # Safety
+    /// Dereferences raw device pointers, like [`load_ptr_tko`] and
+    /// [`store_ptr_tko`]: forming and offsetting the pointer tile is safe, but
+    /// the compare-and-swap is not. Every lane's address (masked lanes
+    /// excepted — they are never dereferenced) must point to a valid,
+    /// correctly-aligned `E` the kernel is allowed to write for the launch's
+    /// lifetime, and the caller upholds the memory-model contract of the
+    /// chosen `memory_ordering`/`memory_scope` with respect to every other
+    /// access to that location.
     #[cuda_tile::op(name="cuda_tile.atomic_cas_tko", params=["pointers", "cmp", "val"])]
     #[cuda_tile::variadic_op(N = 6)]
-    pub fn atomic_cas_tko<
+    pub unsafe fn atomic_cas_tko<
         E: ElementType,
         const S: [i32; N],
         O: ordering::AtomicMode,
@@ -3536,10 +3582,24 @@ pub mod core {
     }
 
     /// Type-level dispatch for `load_tile_like`.
+    /// Load from `self` the tile at the partition index this program owns
+    /// in `y`.
+    ///
+    /// Contract: `self` must have the same shape as the whole tensor behind
+    /// `y` — the full tensor the host partitioned, not `y`'s declared
+    /// per-program slab — and `y` must be a mutable output tensor the host
+    /// passed as a partition (`tensor.partition([..])` at the call site).
+    /// The launch validator relates `self`'s tile count to the grid derived
+    /// from `y`'s partition, so an input too small for the grid is rejected
+    /// at launch.
     pub trait LoadTileLike<Y> {
         type Out;
 
         fn load_tile_like(&self, y: &Y) -> Self::Out;
+
+        /// Method-form spelling of [`load_tile_like`]; same contract as the
+        /// trait.
+        fn load_like(&self, y: &Y) -> Self::Out;
     }
 
     impl<E1: ElementType, E2: ElementType, const X: [i32; 1], const S: [i32; 1]>
@@ -3568,6 +3628,10 @@ pub mod core {
                 tma::Enabled,
             );
             tile_x
+        }
+
+        fn load_like(&self, y: &Tensor<E2, S>) -> Tile<E1, S> {
+            self.load_tile_like(y)
         }
     }
 
@@ -3598,6 +3662,10 @@ pub mod core {
             );
             tile_x
         }
+
+        fn load_like(&self, y: &Tensor<E2, S>) -> Tile<E1, S> {
+            self.load_tile_like(y)
+        }
     }
 
     impl<E1: ElementType, E2: ElementType, const X: [i32; 3], const S: [i32; 3]>
@@ -3627,9 +3695,16 @@ pub mod core {
             );
             tile_x
         }
+
+        fn load_like(&self, y: &Tensor<E2, S>) -> Tile<E1, S> {
+            self.load_tile_like(y)
+        }
     }
 
-    /// Load a tile of `x` matching `y`'s shape, indexed by the current tile-block id.
+    /// Load a tile of `x` matching `y`'s shape, indexed by the current
+    /// tile-block id. `x` must have the same shape as the whole tensor
+    /// behind `y` (not `y`'s per-program slab), and `y` must be a mutable
+    /// output tensor the host passed as a partition — see [`LoadTileLike`].
     pub fn load_tile_like<X, Y>(x: &X, y: &Y) -> <X as LoadTileLike<Y>>::Out
     where
         X: LoadTileLike<Y>,
@@ -3654,7 +3729,7 @@ pub mod core {
         let ones_shape: Shape<{ [1; N] }> = Shape::<{ [1; N] }> { dims: dims };
         let dst_part: Partition<i64, { [1; N] }> = dst.partition(ones_shape);
         let dst_ptr_int: Tile<i64, { [1; N] }> = dst_part.load(idx);
-        let dst_ptr_int: Tile<i64, { [] }> = dst_ptr_int.reshape(const_shape![]);
+        let dst_ptr_int: Tile<i64, { [] }> = dst_ptr_int.reshape(shape![]);
         let dst_ptr: PointerTile<*mut T, { [] }> = int_to_ptr(dst_ptr_int);
         let dst_tensor: Tensor<T, R> =
             unsafe { make_tensor_view(dst_ptr, shape, strides, new_token_unordered()) };

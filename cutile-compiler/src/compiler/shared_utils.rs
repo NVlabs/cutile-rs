@@ -598,6 +598,39 @@ pub fn collect_mutated_variables_from_expr(expr: &Expr) -> Result<BTreeSet<Strin
     }
 }
 
+/// Does a loop body contain an early exit — `continue`, `break`, or `return`
+/// — that targets *this* loop (or the enclosing function)? Nested loops are
+/// not descended into: their `continue`/`break` only shortens their own
+/// iteration. Closures are opaque for the same reason.
+///
+/// Used to mark [`super::_value::LoopFrame::has_early_exit`]: a body that can
+/// skip the rest of an iteration does not execute every access on every
+/// iteration, so no bounds check may be hoisted out of it.
+pub fn block_has_early_exit(block: &syn::Block) -> bool {
+    use syn::visit::Visit;
+    struct Finder {
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for Finder {
+        fn visit_expr_continue(&mut self, _: &'ast syn::ExprContinue) {
+            self.found = true;
+        }
+        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
+            self.found = true;
+        }
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.found = true;
+        }
+        fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
+        fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
+        fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut finder = Finder { found: false };
+    finder.visit_block(block);
+    finder.found
+}
+
 /// Collects mutated outer-scope variables from a for-loop body.
 pub fn collect_mutated_variables(
     for_expr: &syn::ExprForLoop,

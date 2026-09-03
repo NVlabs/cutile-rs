@@ -480,7 +480,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "`Global` declarations should use immutable `static`; mutability is provided by `Global` methods",
             );
         }
-        let normalized_ty = self.modules.normalize_type_aliases(&item.ty)?;
+        let normalized_ty = self
+            .modules
+            .normalize_type_aliases_in(&item.ty, Some(module_name))?;
         let Some(type_name) = get_type_ident(&normalized_ty) else {
             return Ok(None);
         };

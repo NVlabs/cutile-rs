@@ -36,7 +36,7 @@ mod reduce_scan_ops_module {
         let sum_scalar = reduce(tile, 0i32, 0.0f32, |acc, x| acc + x);
 
         // Reshape and store
-        let sum_as_array: Tile<f32, { [1] }> = sum_scalar.reshape(const_shape![1]);
+        let sum_as_array: Tile<f32, { [1] }> = sum_scalar.reshape(shape![1]);
         result.store(sum_as_array);
     }
 
@@ -52,7 +52,7 @@ mod reduce_scan_ops_module {
         let product_scalar = reduce(tile, 0i32, 1.0f32, |acc, x| acc * x);
 
         // Reshape and store
-        let product_as_array: Tile<f32, { [1] }> = product_scalar.reshape(const_shape![1]);
+        let product_as_array: Tile<f32, { [1] }> = product_scalar.reshape(shape![1]);
         result.store(product_as_array);
     }
 
@@ -74,7 +74,7 @@ mod reduce_scan_ops_module {
         let max_scalar = reduce(tile, 0i32, f32::NEG_INFINITY, |acc, x| max(acc, x));
 
         // Reshape and store
-        let max_as_array: Tile<f32, { [1] }> = max_scalar.reshape(const_shape![1]);
+        let max_as_array: Tile<f32, { [1] }> = max_scalar.reshape(shape![1]);
         result.store(max_as_array);
     }
 
