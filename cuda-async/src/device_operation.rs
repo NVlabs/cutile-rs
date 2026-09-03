@@ -7,15 +7,15 @@
 
 use crate::device_context::{pool_for_stream, with_default_device_policy};
 use crate::device_future::DeviceFuture;
-use crate::error::{device_error, DeviceError};
+use crate::error::DeviceError;
 use crate::scheduling_policies::SchedulingPolicy;
-use cuda_core::{Device, MemPool, Stream};
-use std::cell::{Cell, UnsafeCell};
+use cuda_core::{Device, Event, MemPool, Stream};
+use std::cell::Cell;
 use std::fmt::Debug;
 use std::future::IntoFuture;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::ThreadId;
 
 // ── Thread-local execution guard ───────────────────────────────────────────
 //
@@ -28,9 +28,25 @@ thread_local! {
     static DEVICE_OP_EXECUTING: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Ownership of the thread-local execution lock.
+///
+/// Released on drop, so every exit from an executing region — a normal
+/// return, a `?` early return, or a panic unwinding out of a user closure —
+/// gives the lock back. Before this guard existed, a panic inside `execute`
+/// left `DEVICE_OP_EXECUTING` set and every later operation on the thread
+/// failed with the non-reentrant error.
+#[must_use = "dropping the guard immediately releases the execution lock"]
+pub(crate) struct ExecutionLockGuard(());
+
+impl Drop for ExecutionLockGuard {
+    fn drop(&mut self) {
+        DEVICE_OP_EXECUTING.with(|flag| flag.set(false));
+    }
+}
+
 /// Acquire the thread-local execution lock. Returns an error if another
 /// DeviceOp is already executing on this thread.
-pub(crate) fn acquire_execution_lock() -> Result<(), DeviceError> {
+pub(crate) fn acquire_execution_lock() -> Result<ExecutionLockGuard, DeviceError> {
     DEVICE_OP_EXECUTING.with(|flag| {
         if flag.get() {
             Err(DeviceError::Internal(
@@ -42,16 +58,35 @@ pub(crate) fn acquire_execution_lock() -> Result<(), DeviceError> {
             ))
         } else {
             flag.set(true);
-            Ok(())
+            Ok(ExecutionLockGuard(()))
         }
     })
 }
 
-/// Release the thread-local execution lock.
-pub(crate) fn release_execution_lock() {
-    DEVICE_OP_EXECUTING.with(|flag| {
-        flag.set(false);
-    });
+/// Temporarily gives up the execution lock for the scope of a
+/// [`then_unchecked`](DeviceOp::then_unchecked) closure.
+///
+/// On construction the thread-local flag is cleared so the closure can run
+/// `.sync()`, `.sync_on()`, or a nested `.await`; on drop (normal exit or
+/// unwind) the flag is restored to whatever it was, so the enclosing chain
+/// keeps holding the lock afterwards. Nested regions inside the closure use
+/// their own [`ExecutionLockGuard`]s and never observe this one.
+struct ExecutionLockRelease {
+    was_held: bool,
+}
+
+impl ExecutionLockRelease {
+    fn new() -> Self {
+        Self {
+            was_held: DEVICE_OP_EXECUTING.with(|flag| flag.replace(false)),
+        }
+    }
+}
+
+impl Drop for ExecutionLockRelease {
+    fn drop(&mut self) {
+        DEVICE_OP_EXECUTING.with(|flag| flag.set(self.was_held));
+    }
 }
 
 pub type DeviceOrdinal = usize;
@@ -92,11 +127,20 @@ impl ExecutionContext {
     ///
     /// # Safety
     /// The stream must be valid and not destroyed.
-    pub unsafe fn alloc_async(&self, num_bytes: usize) -> cuda_core::sys::CUdeviceptr {
-        match &self.pool {
+    ///
+    /// Fails with the driver's own diagnosis, typically
+    /// `CUDA_ERROR_OUT_OF_MEMORY`, which is not sticky: the context stays
+    /// usable, so a caller may free memory and retry (with back-off, a bounded
+    /// number of times, or by falling back to a smaller request).
+    pub unsafe fn alloc_async(
+        &self,
+        num_bytes: usize,
+    ) -> Result<cuda_core::sys::CUdeviceptr, DeviceError> {
+        let allocated = match &self.pool {
             Some(pool) => cuda_core::malloc_from_pool_async(num_bytes, pool, &self.cuda_stream),
             None => cuda_core::malloc_async(num_bytes, &self.cuda_stream),
-        }
+        };
+        Ok(allocated?)
     }
     #[expect(
         dead_code,
@@ -215,7 +259,8 @@ pub trait DeviceOp:
     ///
     /// The closure must not execute other DeviceOps (e.g., via `sync_on` or `sync`).
     /// This is enforced at runtime by the thread-local execution lock — attempting
-    /// nested execution will return a `DeviceError`.
+    /// nested execution will return a `DeviceError`. See
+    /// [`then_unchecked`](DeviceOp::then_unchecked) to opt out of that check.
     fn then<O: Send, DO, F>(self, f: F) -> AndThen<<Self as DeviceOp>::Output, Self, O, DO, F>
     where
         DO: DeviceOp<Output = O>,
@@ -226,22 +271,33 @@ pub trait DeviceOp:
             closure: f,
         }
     }
-    /// Like [`then`](DeviceOp::then), but without the thread-local execution lock.
+    /// Like [`then`](DeviceOp::then), but the closure runs with the
+    /// thread-local execution lock **released**, so it may execute other
+    /// operations: `.sync()`, `.sync_on(&stream)`, or a nested `.await`
+    /// (for example through `futures::executor::block_on`). The lock is
+    /// re-acquired when the closure returns (or unwinds), so the rest of the
+    /// chain — and the operation the closure returns — executes under the
+    /// lock as usual.
     ///
     /// # Safety
     ///
-    /// The closure must not submit GPU work to any stream other than the
-    /// chain's stream using tensors from the output. Violating this causes
-    /// CUDA data races (undefined behavior).
+    /// The lock exists to rule out cross-stream data races, and this method
+    /// removes that protection for the closure. The caller asserts that
+    /// nothing the closure executes touches, on a stream other than the
+    /// chain's, memory that is reachable from `self`'s output or otherwise
+    /// still in flight on the chain's stream. Host-only work, work on
+    /// unrelated data, and work explicitly issued on the chain's own stream
+    /// are fine. Violating this races the GPU against itself, which is
+    /// undefined behavior under CUDA.
     unsafe fn then_unchecked<O: Send, DO, F>(
         self,
         f: F,
-    ) -> AndThen<<Self as DeviceOp>::Output, Self, O, DO, F>
+    ) -> AndThenUnchecked<<Self as DeviceOp>::Output, Self, O, DO, F>
     where
         DO: DeviceOp<Output = O>,
         F: FnOnce(<Self as DeviceOp>::Output) -> DO,
     {
-        AndThen {
+        AndThenUnchecked {
             op: self,
             closure: f,
         }
@@ -317,13 +373,9 @@ pub trait DeviceOp:
         <Self as DeviceOp>::Output: Sync,
     {
         SharedDeviceOp {
-            inner: Arc::new(SharedExec {
-                computed: AtomicBool::new(false),
-                op: UnsafeCell::new(Some(Box::new(move |ctx: &ExecutionContext| unsafe {
-                    self.execute(ctx)
-                }))),
-                result: UnsafeCell::new(None),
-            }),
+            inner: Arc::new(ExecuteOnce::pending(Box::new(
+                move |ctx: &ExecutionContext| unsafe { self.execute(ctx) },
+            ))),
         }
     }
     /// Capture this operation into a replayable [`CudaGraph`](crate::cuda_graph::CudaGraph)
@@ -374,11 +426,11 @@ pub trait DeviceOp:
     /// stream are guaranteed to execute in call order. Use this when you need deterministic
     /// ordering or are debugging concurrency issues.
     fn sync_on(self, stream: &Arc<Stream>) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        acquire_execution_lock()?;
+        // Held until this function returns; released even if `execute` panics.
+        let _execution_lock = acquire_execution_lock()?;
         let ctx = ExecutionContext::new(stream.clone());
         let res = unsafe { self.execute(&ctx) };
         let sync_res = unsafe { stream.synchronize() };
-        release_execution_lock();
         sync_res?;
         res
     }
@@ -442,17 +494,209 @@ impl<T: Send> IntoFuture for BoxedDeviceOp<T> {
     }
 }
 
-// Shared (cloneable, execute-once) DeviceOp
+// ── Execute-once memoization (shared by `SharedDeviceOp` and `unzip`) ───────
 
-struct SharedExec<T: Send + Sync> {
-    computed: AtomicBool,
-    op: UnsafeCell<Option<Box<dyn FnOnce(&ExecutionContext) -> Result<T, DeviceError> + Send>>>,
-    result: UnsafeCell<Option<Arc<T>>>,
+/// Where a memoized result was produced: the stream the operation ran on and
+/// an event recorded on that stream immediately after its work.
+///
+/// A consumer that picks up the cached value on a *different* stream has no
+/// stream-order relationship to the producing work, so before the value is
+/// handed out its stream is made to wait on the event (`cuStreamWaitEvent`).
+/// Consumers on the producing stream are already ordered and skip the wait.
+struct Producer {
+    stream: Arc<Stream>,
+    event: Event,
 }
 
-// TODO (hme): document safety
-unsafe impl<T: Send + Sync> Send for SharedExec<T> {}
-unsafe impl<T: Send + Sync> Sync for SharedExec<T> {}
+impl Producer {
+    /// Records the completion event for the work just enqueued on the
+    /// context's stream.
+    fn record(ctx: &ExecutionContext) -> Result<Self, DeviceError> {
+        let stream = Arc::clone(ctx.get_cuda_stream());
+        let event = stream.device().new_event()?;
+        event.record(&stream)?;
+        Ok(Self { stream, event })
+    }
+
+    /// Orders all future work on `consumer` after the producing work.
+    fn join(&self, consumer: &Arc<Stream>) -> Result<(), DeviceError> {
+        if consumer.cu_stream() == self.stream.cu_stream() {
+            return Ok(());
+        }
+        consumer.wait_event(&self.event)?;
+        Ok(())
+    }
+}
+
+enum OnceState<Op, Out> {
+    /// Not yet executed; holds the operation.
+    Pending(Op),
+    /// Being executed by `thread`. Others wait on the condvar; the executing
+    /// thread itself re-entering is a bug reported as an error, not a
+    /// deadlock.
+    Running { thread: ThreadId },
+    /// Executed; `producer` orders consumers on other streams after the
+    /// work. `None` for values that never had GPU work behind them.
+    Done {
+        value: Out,
+        producer: Option<Producer>,
+    },
+    /// Execution failed (or the executor panicked); every consumer gets the
+    /// error. The operation was consumed and cannot be retried.
+    Failed(DeviceError),
+}
+
+/// Runs an operation exactly once across any number of concurrent callers
+/// and memoizes the outcome.
+///
+/// This replaces the former check-then-act on `UnsafeCell`s behind
+/// hand-written `Send`/`Sync` impls: two executors that both observed
+/// "not computed" both took the operation (the second got "already taken")
+/// and raced on the result cell. Here the state lives under a `Mutex`; the
+/// first caller to see `Pending` takes the operation and runs it *outside*
+/// the lock, later callers block on the condvar until it is `Done` or
+/// `Failed`. `Send`/`Sync` are derived from the field types.
+struct ExecuteOnce<Op, Out> {
+    state: Mutex<OnceState<Op, Out>>,
+    settled: Condvar,
+}
+
+impl<Op, Out> ExecuteOnce<Op, Out> {
+    fn pending(op: Op) -> Self {
+        Self {
+            state: Mutex::new(OnceState::Pending(op)),
+            settled: Condvar::new(),
+        }
+    }
+
+    /// Already settled with a value that has no GPU work behind it.
+    fn done(value: Out) -> Self {
+        Self {
+            state: Mutex::new(OnceState::Done {
+                value,
+                producer: None,
+            }),
+            settled: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, OnceState<Op, Out>> {
+        // A poisoned lock only means a holder panicked; the state machine is
+        // never left mid-transition while the lock is held.
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Stores a pre-computed value produced on `ctx`'s stream.
+    fn settle_done(&self, value: Out, ctx: &ExecutionContext) {
+        let outcome = match Producer::record(ctx) {
+            Ok(producer) => OnceState::Done {
+                value,
+                producer: Some(producer),
+            },
+            Err(error) => {
+                // Without an event, consumers on other streams could not be
+                // ordered after the producing work. The value may own memory
+                // that work still writes; releasing it now would be the
+                // in-flight-free hazard, so leak it loudly instead.
+                eprintln!(
+                    "cuda-async: leaking a memoized result after its completion \
+                     event could not be recorded: {error}"
+                );
+                std::mem::forget(value);
+                OnceState::Failed(error)
+            }
+        };
+        *self.lock() = outcome;
+        self.settled.notify_all();
+    }
+
+    /// Executes `run(op, ctx)` if this is the first caller (waiting for it
+    /// if another caller is mid-execution), then hands `take` the cached
+    /// value after ordering `ctx`'s stream behind the producing work.
+    fn execute<R>(
+        &self,
+        ctx: &ExecutionContext,
+        run: impl FnOnce(Op, &ExecutionContext) -> Result<Out, DeviceError>,
+        take: impl FnOnce(&mut Out) -> Result<R, DeviceError>,
+    ) -> Result<R, DeviceError> {
+        // `Pending` is observed at most once per `ExecuteOnce`, so `run` is
+        // called at most once; the `Option` makes that visible to the borrow
+        // checker across the loop.
+        let mut run = Some(run);
+        let mut state = self.lock();
+        loop {
+            match &*state {
+                OnceState::Pending(_) => {
+                    let running = OnceState::Running {
+                        thread: std::thread::current().id(),
+                    };
+                    let OnceState::Pending(op) = std::mem::replace(&mut *state, running) else {
+                        unreachable!("matched Pending above");
+                    };
+                    drop(state);
+                    let run = run.take().expect("Pending is observed at most once");
+                    // If `run` unwinds, settle as Failed so waiters are
+                    // released instead of blocking on `Running` forever.
+                    let mut settle_on_unwind = SettleOnUnwind { once: Some(self) };
+                    let outcome = run(op, ctx);
+                    settle_on_unwind.once = None;
+                    match outcome {
+                        Ok(value) => self.settle_done(value, ctx),
+                        Err(error) => {
+                            *self.lock() = OnceState::Failed(error);
+                            self.settled.notify_all();
+                        }
+                    }
+                    state = self.lock();
+                }
+                OnceState::Running { thread } => {
+                    if *thread == std::thread::current().id() {
+                        return Err(DeviceError::Internal(
+                            "execute-once operation re-entered from inside its own \
+                             execution (a shared or unzipped op executing itself)"
+                                .into(),
+                        ));
+                    }
+                    state = self
+                        .settled
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                OnceState::Done { .. } => break,
+                OnceState::Failed(error) => return Err(error.clone()),
+            }
+        }
+        let OnceState::Done { value, producer } = &mut *state else {
+            unreachable!("loop exits only on Done");
+        };
+        if let Some(producer) = producer {
+            producer.join(ctx.get_cuda_stream())?;
+        }
+        take(value)
+    }
+}
+
+/// Marks an `ExecuteOnce` as failed if the executing closure unwinds.
+struct SettleOnUnwind<'a, Op, Out> {
+    once: Option<&'a ExecuteOnce<Op, Out>>,
+}
+
+impl<Op, Out> Drop for SettleOnUnwind<'_, Op, Out> {
+    fn drop(&mut self) {
+        if let Some(once) = self.once {
+            *once.lock() = OnceState::Failed(DeviceError::Internal(
+                "execute-once operation panicked while executing".into(),
+            ));
+            once.settled.notify_all();
+        }
+    }
+}
+
+// Shared (cloneable, execute-once) DeviceOp
+
+type SharedOp<T> = Box<dyn FnOnce(&ExecutionContext) -> Result<T, DeviceError> + Send>;
 
 /// A cloneable, execute-once [`DeviceOp`].
 ///
@@ -462,8 +706,15 @@ unsafe impl<T: Send + Sync> Sync for SharedExec<T> {}
 ///
 /// Output is always `Arc<T>` — the result is wrapped on first execution and
 /// shared via refcount thereafter.
+///
+/// Clones may be executed concurrently from several threads: the first
+/// executor runs the operation, the others wait for it. A clone executed on
+/// a different stream than the one that produced the value has its stream
+/// wait on a completion event recorded after the producing work, so the
+/// cached value is safe to consume there. If the operation fails, every
+/// clone receives the same error.
 pub struct SharedDeviceOp<T: Send + Sync> {
-    inner: Arc<SharedExec<T>>,
+    inner: Arc<ExecuteOnce<SharedOp<T>, Arc<T>>>,
 }
 
 impl<T: Send + Sync> Clone for SharedDeviceOp<T> {
@@ -478,17 +729,11 @@ impl<T: Send + Sync> DeviceOp for SharedDeviceOp<T> {
     type Output = Arc<T>;
 
     unsafe fn execute(self, context: &ExecutionContext) -> Result<Arc<T>, DeviceError> {
-        if !self.inner.computed.load(Ordering::Acquire) {
-            let op = unsafe { (&mut *self.inner.op.get()).take() }.ok_or(DeviceError::Internal(
-                "SharedDeviceOp: operation already taken".to_string(),
-            ))?;
-            let result = op(context)?;
-            unsafe {
-                *self.inner.result.get() = Some(Arc::new(result));
-            }
-            self.inner.computed.store(true, Ordering::Release);
-        }
-        Ok(unsafe { (&*self.inner.result.get()).as_ref().unwrap().clone() })
+        self.inner.execute(
+            context,
+            |op, ctx| op(ctx).map(Arc::new),
+            |value| Ok(Arc::clone(value)),
+        )
     }
 }
 
@@ -510,13 +755,11 @@ impl<T: Send + Sync> IntoFuture for SharedDeviceOp<T> {
 /// Create a pre-computed [`SharedDeviceOp`] from an existing `Arc<T>`.
 ///
 /// The returned op is already "executed" — cloning it just bumps the refcount.
+/// No GPU work is associated with the value, so executing a clone on any
+/// stream hands it out without a cross-stream wait.
 pub fn shared<T: Send + Sync>(val: Arc<T>) -> SharedDeviceOp<T> {
     SharedDeviceOp {
-        inner: Arc::new(SharedExec {
-            computed: AtomicBool::new(true),
-            op: UnsafeCell::new(None),
-            result: UnsafeCell::new(Some(val)),
-        }),
+        inner: Arc::new(ExecuteOnce::done(val)),
     }
 }
 
@@ -668,10 +911,81 @@ where
     }
 }
 
+// AndThenUnchecked
+
+/// The combinator behind [`DeviceOp::then_unchecked`]: [`AndThen`] whose
+/// closure runs with the thread-local execution lock released.
+///
+/// `Send` is derived: the only fields are the upstream op (`DeviceOp: Send`)
+/// and the closure, which the `DeviceOp` impl requires to be `Send`.
+pub struct AndThenUnchecked<I: Send, DI, O: Send, DO, F>
+where
+    DI: DeviceOp<Output = I>,
+    DO: DeviceOp<Output = O>,
+    F: FnOnce(I) -> DO,
+{
+    op: DI,
+    closure: F,
+}
+
+impl<I: Send, DI, O: Send, DO, F> DeviceOp for AndThenUnchecked<I, DI, O, DO, F>
+where
+    DI: DeviceOp<Output = I>,
+    DO: DeviceOp<Output = O>,
+    F: FnOnce(I) -> DO + Send,
+{
+    type Output = O;
+
+    unsafe fn execute(
+        self,
+        context: &ExecutionContext,
+    ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+        let input: I = self.op.execute(context)?;
+        let output_device_op: DO = {
+            // Released for the closure only. The guard restores the lock on
+            // every exit — including a panic unwinding out of the closure —
+            // before the returned operation executes under it below.
+            let _released = ExecutionLockRelease::new();
+            (self.closure)(input)
+        };
+        output_device_op.execute(context)
+    }
+}
+
+impl<I: Send, DI, O: Send, DO, F> IntoFuture for AndThenUnchecked<I, DI, O, DO, F>
+where
+    DI: DeviceOp<Output = I>,
+    DO: DeviceOp<Output = O>,
+    F: FnOnce(I) -> DO + Send,
+{
+    type Output = Result<O, DeviceError>;
+    type IntoFuture = DeviceFuture<O, AndThenUnchecked<I, DI, O, DO, F>>;
+    fn into_future(self) -> Self::IntoFuture {
+        let stream = match with_default_device_policy(|policy| policy.next_stream()) {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) | Err(e) => return DeviceFuture::failed(e),
+        };
+        let mut f = DeviceFuture::new();
+        f.device_operation = Some(self);
+        f.execution_context = Some(ExecutionContext::new(stream));
+        f
+    }
+}
+
 // Value
 
+/// Wraps an immediate value as a completed device op.
+///
+/// `Value<T>` is `Send` exactly when `T` is — the compiler derives it, and
+/// nothing here may override that with a manual `unsafe impl Send` (one did
+/// exist, and made `Value<Rc<_>>` sendable from safe code). The doctest below
+/// fails to compile only while that stays true:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<cuda_async::device_operation::Value<std::rc::Rc<u8>>>();
+/// ```
 pub struct Value<T>(T);
-unsafe impl<T> Send for Value<T> {}
 
 impl<T> Value<T> {
     pub fn new(value: T) -> Self {
@@ -719,25 +1033,20 @@ impl From<f32> for Value<f32> {
 
 // Empty (closure)
 
-pub struct Empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> {
+pub struct Empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send> {
     closure: F,
 }
 
-pub fn empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO>(closure: F) -> Empty<O, DO, F> {
+pub fn empty<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send>(
+    closure: F,
+) -> Empty<O, DO, F> {
     Empty { closure }
-}
-
-unsafe impl<O: Send, DO, F> Send for Empty<O, DO, F>
-where
-    DO: DeviceOp<Output = O>,
-    F: FnOnce() -> DO,
-{
 }
 
 impl<O: Send, DO, F> DeviceOp for Empty<O, DO, F>
 where
     DO: DeviceOp<Output = O>,
-    F: FnOnce() -> DO,
+    F: FnOnce() -> DO + Send,
 {
     type Output = O;
 
@@ -750,7 +1059,7 @@ where
     }
 }
 
-impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO> IntoFuture for Empty<O, DO, F> {
+impl<O: Send, DO: DeviceOp<Output = O>, F: FnOnce() -> DO + Send> IntoFuture for Empty<O, DO, F> {
     type Output = Result<O, DeviceError>;
     type IntoFuture = DeviceFuture<O, Empty<O, DO, F>>;
     fn into_future(self) -> Self::IntoFuture {
@@ -947,13 +1256,9 @@ fn _unzip<T1: Send, T2: Send, DI>(input: DI) -> (SelectLeft<T1, T2, DI>, SelectR
 where
     DI: DeviceOp<Output = (T1, T2)>,
 {
-    let select = Select {
-        computed: AtomicBool::new(false),
-        input: UnsafeCell::new(Some(input)),
-        left: UnsafeCell::new(None),
-        right: UnsafeCell::new(None),
-    };
-    let select_arc = Arc::new(select);
+    let select_arc = Arc::new(Select {
+        once: ExecuteOnce::pending(input),
+    });
     let out1 = SelectLeft {
         select: select_arc.clone(),
     };
@@ -963,45 +1268,43 @@ where
 
 // Select: Execute a device operation at most once.
 
+/// Execute-once state shared by the two halves of an [`unzip`](Unzippable2::unzip).
+///
+/// Whichever half executes first runs the input; the other half waits for
+/// it if it is mid-execution (on another thread), then takes its side of the
+/// result. A half executed on a different stream than the producing one has
+/// its stream wait on the producer's completion event first. `Send`/`Sync`
+/// are derived: the input is `DeviceOp: Send` and both halves are `Send`.
 pub struct Select<T1: Send, T2: Send, DI>
 where
     DI: DeviceOp<Output = (T1, T2)>,
 {
-    computed: AtomicBool,
-    input: UnsafeCell<Option<DI>>,
-    left: UnsafeCell<Option<T1>>,
-    right: UnsafeCell<Option<T2>>,
+    once: ExecuteOnce<DI, (Option<T1>, Option<T2>)>,
 }
 
 impl<T1: Send, T2: Send, DI> Select<T1, T2, DI>
 where
     DI: DeviceOp<Output = (T1, T2)>,
 {
-    unsafe fn execute(self: &Arc<Self>, context: &ExecutionContext) -> Result<(), DeviceError> {
-        if !self.computed.load(Ordering::Acquire) {
-            // Safety: This block is guaranteed to execute at most once.
-            // Put the input in a box so the pointer is dropped when this block exits.
-            let input = unsafe { (&mut *self.input.get()).take() }.ok_or(device_error(
-                context.get_device_id(),
-                "Select operation failed.",
-            ))?;
-            let (left, right) = input.execute(context)?;
-            // Update internal state.
-            unsafe {
-                *self.left.get() = Some(left);
-                *self.right.get() = Some(right);
-            }
-            self.computed.store(true, Ordering::Release);
-        }
-        Ok(())
-    }
-    unsafe fn left(&self) -> T1 {
-        let left = unsafe { (&mut *self.left.get()).take() }.unwrap();
-        left
-    }
-    unsafe fn right(&self) -> T2 {
-        let right = unsafe { (&mut *self.right.get()).take() }.unwrap();
-        right
+    /// Runs the input if needed and hands `take` the stored halves.
+    unsafe fn execute<R>(
+        &self,
+        context: &ExecutionContext,
+        take: impl FnOnce(&mut (Option<T1>, Option<T2>)) -> Option<R>,
+        side: &'static str,
+    ) -> Result<R, DeviceError> {
+        self.once.execute(
+            context,
+            |input, ctx| {
+                let (left, right) = unsafe { input.execute(ctx) }?;
+                Ok((Some(left), Some(right)))
+            },
+            |halves| {
+                take(halves).ok_or_else(|| {
+                    DeviceError::Internal(format!("unzip: the {side} result was already taken"))
+                })
+            },
+        )
     }
 }
 
@@ -1013,8 +1316,6 @@ where
 {
     select: Arc<Select<T1, T2, DI>>,
 }
-
-unsafe impl<T1: Send, T2: Send, DI: DeviceOp<Output = (T1, T2)>> Send for SelectLeft<T1, T2, DI> {}
 
 impl<T1: Send, T2: Send, DI> IntoFuture for SelectLeft<T1, T2, DI>
 where
@@ -1044,8 +1345,8 @@ where
         self,
         context: &ExecutionContext,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        self.select.execute(context)?;
-        Ok(self.select.left())
+        self.select
+            .execute(context, |(left, _)| left.take(), "left")
     }
 }
 
@@ -1057,8 +1358,6 @@ where
 {
     select: Arc<Select<T1, T2, DI>>,
 }
-
-unsafe impl<T1: Send, T2: Send, DI: DeviceOp<Output = (T1, T2)>> Send for SelectRight<T1, T2, DI> {}
 
 impl<T1: Send, T2: Send, DI> IntoFuture for SelectRight<T1, T2, DI>
 where
@@ -1088,8 +1387,8 @@ where
         self,
         context: &ExecutionContext,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
-        self.select.execute(context)?;
-        Ok(self.select.right())
+        self.select
+            .execute(context, |(_, right)| right.take(), "right")
     }
 }
 
@@ -1476,3 +1775,19 @@ impl<T: Send + 'static> From<Vec<BoxedDeviceOp<T>>> for DeviceOpVec<T> {
 }
 
 // New names — old names kept as re-exports for backwards compatibility.
+
+#[cfg(test)]
+mod send_bounds {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    /// `DeviceOp: Send` and `DeviceFuture: Send` are public API promises —
+    /// they are what let a launch be awaited on a multi-threaded executor.
+    /// These are compile-time checks; the function body running is incidental.
+    #[test]
+    fn ops_and_futures_are_send() {
+        assert_send::<Value<std::sync::Arc<u8>>>();
+        assert_send::<crate::device_future::DeviceFuture<i32, Value<i32>>>();
+    }
+}

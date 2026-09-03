@@ -16,7 +16,8 @@
 //! - **Async execution**: Modern async/await syntax for GPU operations with automatic scheduling
 //! - **Kernel compilation**: Rust → Tile IR bytecode → cubin compilation pipeline with caching
 //! - **High-level API**: Familiar NumPy-like operations for tensor creation and manipulation
-//! - **Built-in kernels**: Optimized implementations of common operations (GEMM, matrix-vector, etc.)
+//! - **Built-in kernels**: The creation and conversion kernels behind [`api`] (`zeros`, `arange`,
+//!   `eye`, dtype conversion); reusable compute kernels live in the `cutile-kernels` crate
 //!
 //! ## Quick Start
 //!
@@ -72,8 +73,8 @@
 //! use cutile::api;
 //!
 //! // All operations are lazy — no GPU work until .await
-//! let x = api::randn(0.0, 1.0, &[1024, 1024]).await?;
-//! let y = api::randn(0.0, 1.0, &[1024, 1024]).await?;
+//! let x = api::randn(0.0f32, 1.0, [1024, 1024], None).await?;
+//! let y = api::randn(0.0f32, 1.0, [1024, 1024], None).await?;
 //!
 //! let z = gemm(
 //!     api::zeros(&[1024, 1024]).partition([128, 128]),
@@ -91,7 +92,7 @@
 //! - [`api`] - High-level tensor creation and manipulation functions
 //! - [`tensor`] - GPU tensor type, partitioning, and memory management
 //! - [`tile_kernel`] - Async execution primitives and kernel compilation infrastructure
-//! - [`kernels`] - Pre-built optimized kernels (GEMM, creation ops, etc.)
+//! - [`kernels`] - The creation and conversion kernels that back [`api`]
 //!
 //! ## Key Concepts
 //!
@@ -130,13 +131,18 @@
 //!
 //! ## Feature Flags
 //!
-//! This crate currently has no optional features.
+//! - `experimental-tune` (off by default) — enables the `cutile::tune` module: declared
+//!   search spaces, pluggable searchers, and persisted, provenance-checked autotuning
+//!   results. Experimental: its API may change in breaking ways between releases.
 //!
 //! ## Safety
 //!
 //! cuTile Rust uses unsafe code internally for FFI with CUDA and for performance-critical operations.
-//! The public API is designed to be safe, with compile-time guarantees about memory access patterns
-//! through the type system (e.g., partition shapes must divide tensor shapes evenly).
+//! The public API is designed to be safe: kernel launches are validated against the compiled
+//! specialization (element types, partition shapes, declared preconditions) before any GPU work,
+//! and partitions give each thread block a disjoint tile. Partition shapes need not divide the
+//! tensor shape — the launch grid is the ceiling division, and a partial edge tile is loaded and
+//! stored with bounds checks (or padding) rather than rejected.
 //!
 //! ## Examples
 //!
@@ -154,14 +160,14 @@
 //!
 //! ## Learning Resources
 //!
-//! For comprehensive guides and tutorials, see the [cuTile Rust Book](https://nihalpasham.github.io/cutile-book/):
-//! - **User Guide** - Complete walkthrough from hello world to advanced kernels
-//! - **Async Execution Deep Dive** - Understanding the async execution model
-//! - **Architecture & Design** - How cutile works under the hood
+//! For tutorials, the DSL reference, and the execution model, see the
+//! [cuTile Rust Book](https://nvlabs.github.io/cutile-rs/).
 
 pub mod _core;
+pub mod _tileir;
 pub mod error;
 pub use _core::core;
+pub use _tileir::tileir;
 
 // LINKING Phase B: register an additional registry entry at the public
 // `cutile::core` path so kernel `use cutile::core::*` statements resolve
@@ -178,11 +184,20 @@ static __CUTILE_REEXPORT_CORE: cutile_compiler::registry::CutileModuleEntry =
         absolute_path: "cutile::core",
         build: _core::core::__module_ast_self,
     };
+#[linkme::distributed_slice(cutile_compiler::registry::CUTILE_MODULES)]
+static __CUTILE_REEXPORT_TILEIR: cutile_compiler::registry::CutileModuleEntry =
+    cutile_compiler::registry::CutileModuleEntry {
+        absolute_path: "cutile::tileir",
+        build: _tileir::tileir::__module_ast_self,
+    };
 pub mod api;
+pub mod bench;
 pub mod kernels;
 pub mod prelude;
 pub mod tensor;
 pub mod tile_kernel;
+#[cfg(feature = "experimental-tune")]
+pub mod tune;
 pub mod utils;
 
 pub use cuda_async;
@@ -190,6 +205,9 @@ pub use cuda_core;
 pub use cuda_core::{DType, DTypeId};
 pub use cutile_compiler;
 pub use cutile_compiler::compile_api;
+/// Opt-in persistent on-disk cubin cache. Off by default; enable
+/// explicitly via [`jit_cache::enable_default`] or [`jit_cache::enable`].
+pub use cutile_compiler::jit_cache;
 pub use cutile_macro::module;
 pub use half;
 pub use num_traits;

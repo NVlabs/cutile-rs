@@ -131,15 +131,9 @@ fn test_empty_kernel_tileiras() {
     );
 
     // Run through tileiras.
-    let cubin_path = compile_tile_ir_module(&module, &gpu_name).unwrap();
-    println!("cubin: {cubin_path}");
-    assert!(
-        std::path::Path::new(&cubin_path).exists(),
-        "cubin file should exist"
-    );
-
-    // Clean up.
-    let _ = std::fs::remove_file(&cubin_path);
+    let cubin = compile_tile_ir_module(&module, &gpu_name).unwrap();
+    println!("cubin: {} bytes", cubin.len());
+    assert!(!cubin.is_empty(), "cubin image should be non-empty");
 }
 
 // =========================================================================
@@ -170,12 +164,8 @@ fn assert_tileiras_accepts(module: &Module) {
         cutile_ir::decode_bytecode(&bytecode).unwrap()
     );
 
-    let cubin_path = compile_tile_ir_module(module, &gpu_name).unwrap();
-    assert!(
-        std::path::Path::new(&cubin_path).exists(),
-        "cubin file should exist"
-    );
-    let _ = std::fs::remove_file(&cubin_path);
+    let cubin = compile_tile_ir_module(module, &gpu_name).unwrap();
+    assert!(!cubin.is_empty(), "cubin image should be non-empty");
     println!("tileiras accepted ✓");
 }
 
@@ -528,4 +518,93 @@ fn test_add_kernel_save_bytecode() {
         "Run: tileiras --gpu-name sm_120 --opt-level 0 -o /tmp/test.cubin {}",
         path.display()
     );
+}
+
+// =========================================================================
+// Kernel: print_tko with and without an ordering token
+// =========================================================================
+
+/// An entry that prints its scalar argument. With `with_token`, the print
+/// takes an ordering token and its token result is consumed by a `return`
+/// path: the encoding then needs the v13.2 flags bit and the token written
+/// after the sized `args` group, which the writer once got wrong (flag
+/// clear, token folded into the args) so every toolkit rejected it.
+fn build_print_kernel(with_token: bool) -> Module {
+    let mut module = Module::new("print_module");
+    let tile_f32 = Type::Tile(TileType {
+        shape: vec![],
+        element_type: TileElementType::Scalar(ScalarType::F32),
+    });
+    let (region_id, block_id, args) = build_single_block_region(&mut module, &[tile_f32.clone()]);
+    let mut operands = vec![args[0]];
+    let mut token_count = 0;
+    if with_token {
+        let (tok, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
+            .result(Type::Token)
+            .build(&mut module);
+        append_op(&mut module, block_id, tok);
+        operands.push(tok_res[0]);
+        token_count = 1;
+    }
+    let (print, _) = OpBuilder::new(Opcode::Print, Location::Unknown)
+        .attr("str", Attribute::String("value = %f\n".into()))
+        .attr(
+            "operandSegmentSizes",
+            Attribute::Array(vec![Attribute::i32(1), Attribute::i32(token_count)]),
+        )
+        .operands(operands.iter().copied())
+        .result(Type::Token)
+        .build(&mut module);
+    append_op(&mut module, block_id, print);
+    let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
+    append_op(&mut module, block_id, ret);
+    let (entry, _) = OpBuilder::new(Opcode::Entry, Location::Unknown)
+        .attr("sym_name", Attribute::String("print_kernel".into()))
+        .attr(
+            "function_type",
+            Attribute::Type(Type::Func(FuncType {
+                inputs: vec![tile_f32],
+                results: vec![],
+            })),
+        )
+        .region(region_id)
+        .build(&mut module);
+    module.functions.push(entry);
+    module
+}
+
+/// `print_tko` round-trips through `tileiras` at every emittable version the
+/// installed assembler accepts (the negotiated version and everything older
+/// — a 13.2 `tileiras` cannot read 13.3 images), with and without the
+/// optional token operand.
+#[test]
+fn test_print_kernel_tileiras_at_every_version() {
+    use cutile_compiler::cuda_tile_runtime_utils::{
+        run_tileiras, serialize_tile_ir_bytecode, TileirasOptions,
+    };
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    let Some(gpu_name) = tileiras_target() else {
+        eprintln!("skipping tileiras: tileiras not available");
+        return;
+    };
+    for with_token in [false, true] {
+        let module = build_print_kernel(with_token);
+        module.verify_dominance().expect("dominance");
+        module.verify_bytecode_indices().expect("indices");
+        let (_, negotiated) =
+            serialize_tile_ir_bytecode(&module).expect("negotiate a bytecode version");
+        for &version in BytecodeVersion::SUPPORTED
+            .iter()
+            .filter(|&&v| v <= negotiated)
+        {
+            let bytes = write_bytecode_version(&module, version)
+                .unwrap_or_else(|e| panic!("print kernel must encode at {version}: {e}"));
+            let cubin =
+                run_tileiras(&bytes, gpu_name, &TileirasOptions::default()).unwrap_or_else(|e| {
+                    panic!("tileiras rejected print_tko (token: {with_token}) at {version}: {e}")
+                });
+            assert!(!cubin.is_empty(), "empty cubin at {version}");
+        }
+    }
 }

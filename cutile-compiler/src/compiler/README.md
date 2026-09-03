@@ -3,10 +3,20 @@
 compiler2 translates Rust AST into tile-ir ops and emits bytecode directly —
 no LLVM/MLIR dependency. Self-sufficient for type compilation and generic resolution.
 
-## Bytecode Version: 13.3
+## Bytecode Version: negotiated per toolchain (13.2 to 13.3)
 
-The tile-ir writer emits v13.3 bytecode. This section documents the versioned
-fields the Rust writer handles.
+The `cutile-ir` writer can emit bytecode versions 13.2 and 13.3
+(`BytecodeVersion::MIN_SUPPORTED` to `BytecodeVersion::CURRENT`). The version
+actually written is negotiated per toolchain by
+`cuda_tile_runtime_utils::serialize_tile_ir_bytecode`: an explicit
+`CUTILE_BYTECODE_VERSION` (e.g. `13.2`), else the resolved toolkit's `cuda.h`
+`CUDA_VERSION`, else a probe of the resolved `tileiras`. The result is clamped
+to the emittable range; a toolkit older than CUDA 13.2 (the Tile floor) or a
+probe that cannot run is an error, not a fallback. 13.1 is not offered: the
+writer's field layouts are the 13.2 ones (see below), and a "13.1" image with
+those layouts was rejected by every toolkit.
+
+This section documents the versioned fields the Rust writer handles.
 
 ### v13.2 Changes (vs v13.1)
 
@@ -42,9 +52,9 @@ type for scaled MMA.
 ### Constant (scalar)
 
 ```rust
-use tile_ir::builder::{append_op, OpBuilder};
-use tile_ir::bytecode::Opcode;
-use tile_ir::ir::*;
+use cutile_ir::builder::{append_op, OpBuilder};
+use cutile_ir::bytecode::Opcode;
+use cutile_ir::ir::*;
 
 let result_ty = Type::Tile(TileType {
     shape: vec![],
@@ -130,9 +140,10 @@ let (op, results) = OpBuilder::new(Opcode::Print, Location::Unknown)
     .attr("str", Attribute::String("value = %i\n".into()))
     .attr("operandSegmentSizes", Attribute::Array(vec![
         Attribute::i32(1), // number of format args
-        Attribute::i32(0), // number of token args
+        Attribute::i32(1), // 1 when an ordering token operand follows the args, else 0
     ]))
     .operand(value)
+    .operand(token) // optional; sets flags bit 0 and is written after the sized args
     .result(Type::Token) // v13.2: PrintTkoOp always has 1 token result
     .build(&mut module);
 append_op(&mut module, block_id, op);
@@ -195,7 +206,7 @@ module.functions.push(entry);
 
 - **i1 constants**: True = `0xFF`, False = `0x00` (MLIR all-ones convention).
 - **Float attributes**: Encoded via `writeAPInt(bitcastToAPInt())` — signed varint for 16-64 bit, raw byte for 8-bit (F8).
-- **DenseI32Array**: `varint(len) + len * LE_i32`. Used for `permutation`, `operandSegmentSizes`.
+- **DenseI32Array**: `varint(len) + len * LE_i32`. Used for `permutation`. (`operandSegmentSizes` is never serialized: it must be an `Attribute::Array` of `Attribute::i32`, and only drives how the writer groups operands.)
 - **Inline vs self-contained attributes**: Op attributes are inline (no tag prefix). Array/Dictionary elements are self-contained (with tag).
 - **Constant pool**: `varint(data_len) + raw_bytes`, referenced by pool index from ops.
 

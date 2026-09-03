@@ -45,11 +45,11 @@ to preserve the element count and, for borrowed views, to be contiguous.
 
 | API | Description |
 |---|---|
-| `tensor.reshape(&shape)` | Consume and return `Tensor<T>` with a new shape. |
-| `(&arc_tensor).reshape(&shape)` | Return a new `Arc<Tensor<T>>` sharing the same allocation with new shape metadata. |
+| `tensor.reshape(&shape)` | Consume and return `Result<Tensor<T>, Error>` with a new shape (`Reshape` trait). |
+| `(&arc_tensor).reshape(&shape)` | Return `Result<Arc<Tensor<T>>, Error>`: a new `Arc<Tensor<T>>` sharing the same allocation with new shape metadata. |
 | `device_op.reshape(&shape)` | Reshape the `Tensor<T>` or `Arc<Tensor<T>>` produced by a `DeviceOp`. |
-| `tensor.partition(shape)` | Consume a tensor and create a mutable output partition for kernel launch. |
-| `arc_tensor.try_partition(shape)` | Consume an `Arc<Tensor<T>>` only if it has a single owner, then partition it. |
+| `tensor.partition(shape)` | Consume a tensor and create a mutable output partition for kernel launch. Panics if the tensor's storage is shared with another tensor or view (for example a `(&arc_tensor).reshape(..)` alias). |
+| `arc_tensor.try_partition(shape)` | Consume an `Arc<Tensor<T>>` only if it has a single owner (returns `Err` otherwise), then `partition` it, with the same shared-storage panic. |
 | `partition.unpartition()` | Recover the owned tensor from a partition returned by a kernel. |
 
 ```rust
@@ -63,6 +63,7 @@ let z = api::zeros::<f32>(&[32]).partition([4]);
 
 let weights: Arc<Tensor<f32>> = api::ones::<f32>(&[4, 8]).sync_on(&stream)?.into();
 let weights_2d = (&weights).reshape(&[8, 4])?;
+drop(weights); // weights_2d is now the storage's only owner; keeping `weights` alive would make `partition` panic
 let partitioned = weights_2d.try_partition([2, 4])?;
 ```
 
@@ -186,8 +187,8 @@ let host: Vec<f32> = kernel(out.partition([128]), &input)
     .sync_on(&stream)?;
 ```
 
-`api::memcpy` copies between already allocated tensors and requires source and
-destination to have the same element count. It is the usual way to update graph
+`api::memcpy` copies between already allocated tensors and panics if the source
+and destination element counts differ. It is the usual way to update graph
 input buffers before replay:
 
 ```rust
@@ -215,16 +216,21 @@ let stream = device.new_stream()?;         // A new stream owned by this device
 | `device.ordinal()` | `usize` | GPU ordinal this handle represents |
 | `device.name()` | `Result<String, DriverError>` | Device name |
 | `device.new_stream()` | `Result<Arc<Stream>, DriverError>` | Create a new stream on this device |
-| `Device::borrow_raw(...)` | `Arc<Device>` | Borrow an externally owned CUDA context/device for interop |
-| `Stream::borrow_raw(...)` | `Arc<Stream>` | Borrow an externally owned CUDA stream for interop |
-| `Module::borrow_raw(...)` / `Function::borrow_raw(...)` | CUDA module/function wrappers | Borrow externally owned CUDA handles |
+| `unsafe Device::borrow_raw(cu_ctx, cu_device, ordinal)` | `Arc<Device>` | Borrow an externally owned CUDA context/device for interop |
+| `unsafe Device::borrow_with_owner(cu_ctx, cu_device, ordinal, owner)` | `Arc<Device>` | Same, holding an `Arc<dyn ForeignOwner>` so the foreign owner outlives the handle |
+| `unsafe Stream::borrow_raw(cu_stream, &device)` | `Arc<Stream>` | Borrow an externally owned CUDA stream for interop |
+| `unsafe Stream::borrow_with_owner(cu_stream, &device, owner)` | `Arc<Stream>` | Same, holding an `Arc<dyn ForeignOwner>` |
+| `unsafe Module::borrow_raw(...)` / `unsafe Function::borrow_raw(...)` | CUDA module/function wrappers | Borrow externally owned CUDA handles |
 
 Devices are `Arc`-wrapped for sharing across threads; streams are also `Arc`-wrapped and can be passed to `.sync_on(&stream)` for explicit stream scheduling.
 
 The default round-robin scheduling policy handles stream assignment automatically for most workloads — these APIs are for when you need explicit stream control (debugging, deterministic ordering, paired with `AsyncKernelLaunch`, or overlapping compute with transfers on dedicated streams).
 
 The `borrow_raw` constructors do not take ownership of the underlying CUDA
-handles and therefore do not destroy them on drop. Use them when integrating
+handles and therefore do not destroy them on drop. They are `unsafe fn`s: the
+caller guarantees the handles stay valid for as long as the borrow is used.
+The `borrow_with_owner` variants keep an `Arc<dyn ForeignOwner>` alive so the
+owning runtime's object cannot be dropped first. Use them when integrating
 with another runtime that owns the context, stream, module, or function.
 
 ---
@@ -241,10 +247,13 @@ use cutile::tile_kernel::CompileOptions;
 let opts = CompileOptions::default()
     .occupancy(4)
     .num_cta_in_cga(2)
-    .max_divisibility(16);
+    .max_divisibility(16)
+    .num_worker_warps_per_cta(4); // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
 
 let result = my_kernel(args).compile_options(opts).grid(grid).await?;
 ```
+
+`num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]`.
 
 Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
 
@@ -255,11 +264,14 @@ methods:
 |---|---|
 | `.grid((x, y, z))` | Set an explicit runtime launch grid instead of inferring it from partitioned tensor inputs. |
 | `.const_grid((x, y, z))` | Set a compile-time constant grid, enabling grid-dependent optimizations. |
-| `.compile_options(opts)` | Override occupancy, cluster/CTA, and divisibility hints for this compilation. |
+| `.compile_options(opts)` | Override occupancy, cluster/CTA, worker-warp, and divisibility hints for this compilation. |
 | `.generics(values)` | Bind type and const generic arguments manually when they cannot be inferred. |
 
-The JIT compiler invokes `tileiras` through normal `PATH` lookup by default.
-Set `CUTILE_TILEIRAS_PATH` to use a specific binary:
+The JIT compiler resolves `tileiras` in this order: `CUTILE_TILEIRAS_PATH`
+when set, then `$CUDA_TOOLKIT_PATH/bin/tileiras`, then the default CUDA 13.2+
+install directories (`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
+`/usr/local/cuda-13`, `/usr/local/cuda`), and finally `tileiras` through
+normal `PATH` lookup. Set `CUTILE_TILEIRAS_PATH` to force a specific binary:
 
 ```bash
 CUTILE_TILEIRAS_PATH=/opt/cuda-tile/bin/tileiras cargo test -p cutile
@@ -369,7 +381,7 @@ shows which standard library or `futures` crate method inspired the design.
 
 | Combinator | Signature | Precedent | What it does |
 |---|---|---|---|
-| `.shared()` | `self → SharedDeviceOp<Self::Output>` | `FutureExt::shared` | Cloneable, execute-once; output is `Arc<T>` |
+| `.shared()` | `self → SharedDeviceOp<Self::Output>` (requires `Self: 'static`, `Output: Sync`) | `FutureExt::shared` | Cloneable, execute-once; output is `Arc<T>` |
 | `shared(arc)` | `Arc<T> → SharedDeviceOp<T>` | — | Wrap an existing `Arc` as a pre-computed `SharedDeviceOp` |
 | `.boxed()` | `self → BoxedDeviceOp<Self::Output>` | `FutureExt::boxed` | Type-erase for heterogeneous collections |
 
@@ -381,7 +393,7 @@ shows which standard library or `futures` crate method inspired the design.
 | `.sync_on(&stream)` | The explicit stream | Yes | Deterministic ordering, debugging |
 | `.await` | Default policy (round-robin) | No (suspends task) | Async production code |
 | `.into_future()` | Default policy | No (returns `DeviceFuture`) | Manual future handling |
-| `.schedule(policy)` | The policy you provide | No (returns `DeviceFuture`) | Multi-device dispatch |
+| `.schedule(&policy)` | The `Arc<dyn SchedulingPolicy>` you provide | No (returns `Result<DeviceFuture, DeviceError>`) | Multi-device dispatch |
 | `.graph()` | Default policy (round-robin) | Yes (captures + syncs) | CUDA graph capture |
 | `.graph_on(stream)` | The explicit stream | Yes (captures + syncs) | CUDA graph capture on specific stream |
 
@@ -397,10 +409,10 @@ If any kernel input is `&Tensor<T>` (borrowed), the operation is not
 
 | Kernel param | Host type | Return type |
 |---|---|---|
-| `&Tensor<T, S>` | `Tensor<T>`, `Arc<Tensor<T>>`, or `&Tensor<T>` | Same as input |
-| `&mut Tensor<T, S>` | `Partition<Tensor<T>>` or `Partition<&mut Tensor<T>>` | Same as input |
+| `&Tensor<T, S>` | `Tensor<T>`, `Arc<Tensor<T>>`, `&Tensor<T>`, or `&TensorView<T>` | Same as input |
+| `&mut Tensor<T, S>` | `Partition<Tensor<T>>`, `Partition<&mut Tensor<T>>`, or their `MappedLaunchPartition<…>` forms from `.map(..)` | Same as input |
 | Scalar (`f32`, `i32`, etc.) | Same scalar | Same scalar |
-| `*mut T` (unsafe only) | `DevicePointer<T>` | `DevicePointer<T>` |
+| `*mut T`, `*const T` (unsafe only) | `DevicePointer<T>` | `DevicePointer<T>` |
 
 The borrowed partition form (`Partition<&mut Tensor<T>>`) writes in place — no
 `unpartition()` needed. Create it with `(&mut tensor).partition(shape)`.
@@ -496,7 +508,8 @@ checks needed.
 ### `.shared()`: Clone + Execute-Once
 
 `.shared()` converts a `DeviceOp` into a `SharedDeviceOp<T>` that is
-`Clone`. The underlying operation runs **at most once**; every clone
+`Clone`. It requires the operation to be `'static` and its output to be
+`Sync`. The underlying operation runs **at most once**; every clone
 receives `Arc::clone()` of the cached result:
 
 ```rust
@@ -521,8 +534,9 @@ let w_op: SharedDeviceOp<Tensor<f32>> = shared(w);
 
 ### `.unwrap_arc()`
 
-`.shared()` and `unzip` produce `Arc<T>` outputs. When you need owned `T`
-back (e.g., to partition a tensor), use `.unwrap_arc()`:
+`.shared()` produces `Arc<T>` outputs (`unzip` keeps the tuple's element
+types). When you need owned `T` back (e.g., to partition a tensor), use
+`.unwrap_arc()`:
 
 ```rust
 let x: Arc<Tensor<f32>> = api::ones(&[1024]).shared().sync()?;
@@ -545,8 +559,11 @@ plain values:
 | `Arc<T>` | `Value<Arc<T>>` |
 | `&'a Tensor<T>` | `Value<&'a Tensor<T>>` |
 | `&Arc<T>` | `Value<Arc<T>>` (clones the Arc) |
-| `f32`, `f64`, `i32`, `i64`, `u32`, `u64`, `usize` | `Value<T>` |
-| `Partition<Tensor<T>>` | `Value<Partition<Tensor<T>>>` |
+| `&'a TensorView<'a, T>` | `Value<&'a TensorView<'a, T>>` |
+| `f32`, `f64`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize`, `bool`, `f16`, `bf16` | `Value<T>` |
+| `Partition<Tensor<T>>`, `Partition<&'a mut Tensor<T>>` | `Value<Partition<…>>` |
+| `MappedLaunchPartition<Partition<…>>` | `Value<MappedLaunchPartition<…>>` |
+| `DevicePointer<T>` | `Value<DevicePointer<T>>` |
 
 ```rust
 // All of these work as inputs to a &Tensor kernel param:
@@ -631,11 +648,11 @@ error short-circuits to the caller.
 |---|---|
 | `Driver(DriverError)` | CUDA driver call failed (OOM, invalid argument, etc.) |
 | `Context { device_id, message }` | Device context assertion failed |
-| `KernelCache(String)` | Kernel compilation or cache lookup failed |
+| `KernelCache(String)` | Declared, but no current code path constructs it |
 | `Scheduling(String)` | No stream available or policy misconfigured |
-| `Launch(String)` | Kernel launch precondition violated |
-| `Internal(String)` | Bug in cuda-async internals |
-| `Anyhow(String)` | Converted from `anyhow::Error` |
+| `Launch(String)` | A launcher-generated precondition failed (`kernel_launch_assert`: argument shapes, declared `preconditions`) |
+| `Internal(String)` | Bug in cuda-async internals, or a nested execution attempt rejected by the non-reentrancy guard |
+| `Anyhow(String)` | Converted from `anyhow::Error` or `cutile::error::Error`; JIT compilation, grid inference, and tensor errors arrive here |
 
 ### Error Handling Patterns
 
@@ -647,7 +664,10 @@ let x = api::zeros(&[1024]).sync_on(&stream)?;
 match my_kernel(args).sync_on(&stream) {
     Ok(result) => { /* use result */ }
     Err(DeviceError::Launch(msg)) => {
-        eprintln!("kernel launch failed: {msg}");
+        eprintln!("launch precondition failed: {msg}");
+    }
+    Err(DeviceError::Anyhow(msg)) => {
+        eprintln!("compile, grid, or tensor error: {msg}");
     }
     Err(e) => return Err(e.into()),
 }
@@ -734,6 +754,26 @@ All device pointers are baked in at capture time. To vary inputs, pre-allocate
 a buffer, pass it into the operation, and `memcpy` new data before each
 launch. See [Tutorial 10](../tutorials/10-cuda-graphs.md) for a
 complete walkthrough.
+
+---
+
+## Additional Public API
+
+Public host-side API not covered in the sections above:
+
+| API | Description |
+|---|---|
+| `unsafe Tensor::from_foreign(owner: Arc<dyn DeviceAllocation>, shape, strides)` | Borrow device memory owned by an external framework (cudarc, torch, VMM ranges); the owner is held alive by refcount and the addressable extent is verified at construction |
+| `unsafe Tensor::borrow_raw_parts(dptr, device_id, shape, strides)` | Borrow a bare device pointer as a `Tensor<T>` |
+| `tensor.partition_prefix(shape)` | Output partition whose launch grid may cover a per-axis prefix of the block grid (`partition` keeps strict equality) |
+| `partition.map(map_shape, num_tile_blocks)` | `MappedLaunchPartition` for persistent kernels that iterate `MappedPartitionMut` indices; the launch grid is `(num_tile_blocks, 1, 1)` |
+| `cutile::jit_cache::{enable, enable_default, disable, is_enabled, stats}` | Opt-in persistent on-disk cubin cache; off by default |
+| launcher `.compile()` / `.compile_on(&stream)` | JIT-compile and cache the specialization without launching |
+| launcher `.specialize()`, `.l1_cache_key()`, `.l2_cache_key()` | Resolve the specialization identity and the in-memory / on-disk cache keys without compiling or launching |
+| `api::meta::<T>(&shape)` | Placeholder tensor carrying shape and dtype without allocating, for `.compile()` warmups |
+| `CompileOptions::{opt_level, device_debug, lineinfo, sanitize_memcheck}` | Device compiler flags; each is part of the cache keys (see [Debugging and Profiling](../guide/debugging-and-profiling.md)) |
+| `cutile::bench::{do_bench, do_bench_paired, BenchOptions, Measurement}` | Device-event kernel timing (see [Performance](../guide/performance.md)) |
+| `cuda_async::device_context::{set_default_device, global_policy, with_device_policy}` | Set the thread's default device; read or borrow a device's scheduling policy |
 
 ---
 

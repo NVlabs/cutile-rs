@@ -10,7 +10,7 @@
 //! control flow, dispatch logic, and variable binding are identical.
 
 use super::_function::CUDATileFunctionCompiler;
-use super::_value::{BlockTerminator, CompilerContext, Mutability, TileRustValue};
+use super::_value::{BlockTerminator, CompilerContext, LoopKind, Mutability, TileRustValue};
 use super::shared_types::Kind;
 use super::shared_utils::{STACK_GROW_SIZE, STACK_RED_ZONE};
 use super::tile_rust_type::TileRustType;
@@ -35,7 +35,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         matches!(
             ident.to_string().as_str(),
-            "Tensor" | "Partition" | "BoundedPartition" | "PartitionMut" | "MappedPartitionMut"
+            "Tensor"
+                | "Partition"
+                | "BoundedPartition"
+                | "BoundedPartitionMut"
+                | "PartitionMut"
+                | "MappedPartitionMut"
         )
     }
 
@@ -236,6 +241,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     ) -> Result<Option<TileRustValue>, JITError> {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
             let _block_debug_str = block_expr.to_token_stream().to_string();
+            // Only the function body block itself may `return`; every block
+            // compiled from a clone of this context (an `if` branch, a loop
+            // body, a nested `{}`) must see `false`.
+            let is_fn_body = std::mem::replace(&mut ctx.fn_body, false);
             let mut terminator_encountered = None;
             let mut return_value: Option<TileRustValue> = None;
             let num_statements = &block_expr.stmts.len();
@@ -346,6 +355,20 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     "Executing break outside of loop is not supported.",
                                 );
                             };
+                            // `cuda_tile.for` has no early exit: a `cuda_tile.break`
+                            // nested in it is rejected by the assembler ("can only
+                            // be nested within 'cuda_tile.loop', 'cuda_tile.if'"),
+                            // so the kernel would fail at `tileiras` time with an
+                            // IR-level message. Reject it here, at the source.
+                            if ctx.innermost_loop == Some(LoopKind::For) {
+                                return self.jit_error_result(
+                                    &expr.span(),
+                                    "`break` inside a `for` loop is not supported: Tile IR `for` loops \
+                                     cannot exit early. Rewrite the loop as `while`/`loop` with an \
+                                     explicit counter, or guard the remaining body with the exit \
+                                     condition",
+                                );
+                            }
                             terminator_encountered = Some(BlockTerminator::Break);
                             let loop_carry_values = ctx.unpack_some_vars(loop_carry_var_names)?;
                             let (op_id, _) =
@@ -390,6 +413,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             ctx.vars.insert(var_name, ct_value);
                         }
                         Expr::Return(return_expr) => {
+                            // A `return` below the function body has nothing to
+                            // lower to: the enclosing block's terminator (a
+                            // `yield`/`continue`) would be emitted instead and
+                            // control would fall through to the statements after
+                            // the `if`/loop — `if idx >= n { return; } p.load([idx])`
+                            // performed the load (audit 2026-08). Reject it rather
+                            // than miscompile.
+                            if !is_fn_body {
+                                return self.jit_error_result(
+                                    &expr.span(),
+                                    "`return` is only supported at the top level of a function body; \
+                                     inside `if`/`else`, a loop, or a nested block it cannot be \
+                                     lowered (execution would fall through). Guard the remaining \
+                                     statements with the condition instead, e.g. \
+                                     `if idx < n { ... }`",
+                                );
+                            }
                             match &return_expr.expr {
                                 Some(expr) => {
                                     return_value = self.compile_expression(
@@ -445,8 +485,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Some(BlockTerminator::Yield) => {
                         let (cuda_tile_return_values, _) = {
                             if let Some(result) = &return_value {
-                                let cuda_tile_value =
-                                    result.value.expect("Failed to obtain CUDA tile value.");
+                                // A tuple, array, or struct value has no single
+                                // IR value to yield across the region boundary.
+                                let Some(cuda_tile_value) = result.value else {
+                                    return self.jit_error_result(
+                                        &block_expr.span(),
+                                        "this block produces a compound value (a tuple, array, or \
+                                         struct) as the result of an `if`/`else`, which is not \
+                                         supported; bind each component in its own `let` and \
+                                         select them separately",
+                                    );
+                                };
                                 (vec![cuda_tile_value], Some(result.ty.clone()))
                             } else {
                                 (vec![], None)

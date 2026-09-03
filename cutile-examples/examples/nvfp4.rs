@@ -47,21 +47,20 @@ mod nvfp4_linear {
         alpha: f32,
     ) {
         let pid = get_tile_block_id();
-        let k_tiles = Dim::new(x.shape()[1] / BK_PACKED);
 
-        let part_x = x.partition(const_shape![BM, BK_PACKED]);
-        let part_y = y.partition(const_shape![BN, BK_PACKED]);
-        let part_x_scales = x_scales.partition(const_shape![BM, BK_SCALES]);
-        let part_y_scales = y_scales.partition(const_shape![BN, BK_SCALES]);
+        let part_x = x.partition(shape![BM, BK_PACKED]);
+        let part_y = y.partition(shape![BN, BK_PACKED]);
+        let part_x_scales = x_scales.partition(shape![BM, BK_SCALES]);
+        let part_y_scales = y_scales.partition(shape![BN, BK_SCALES]);
 
-        let mut tile_z = constant(0.0f32, const_shape![BM, BN]);
+        let mut tile_z = constant(0.0f32, shape![BM, BN]);
 
-        for k_tile in k_tiles {
+        for k_tile in 0i32..num_tiles(&part_x, 1) {
             let tile_x_packed = part_x.load([pid.0, k_tile]);
             let tile_y_packed = part_y.load([pid.1, k_tile]);
 
-            let tile_x = tile_x_packed.unpack(const_shape![BM, BK]);
-            let tile_y = tile_y_packed.unpack(const_shape![BN, BK]).transpose();
+            let tile_x = tile_x_packed.unpack(shape![BM, BK]);
+            let tile_y = tile_y_packed.unpack(shape![BN, BK]).transpose();
 
             let tile_x_scales = part_x_scales.load([pid.0, k_tile]);
             let tile_y_scales = part_y_scales.load([pid.1, k_tile]).transpose();

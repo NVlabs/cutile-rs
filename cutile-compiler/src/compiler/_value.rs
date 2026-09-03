@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use syn::Expr;
 
 // Re-export shared types.
-pub use super::shared_types::{BlockTerminator, Mutability};
+pub use super::shared_types::{BlockTerminator, LoopKind, Mutability};
 
 /// Flattens all values in a `BTreeMap` of [`TileRustValue`]s into a linear list.
 pub fn unpack_btree_to(
@@ -63,6 +63,51 @@ impl TypeMeta {
     }
 }
 
+/// One enclosing loop, for hoisting bounds checks out of hot loop bodies.
+///
+/// `value_watermark` is the module's value count taken just before the loop
+/// body block was built: a value with a smaller index was defined before the
+/// loop and therefore dominates `preheader_block` (the block the `for` op is
+/// appended to; ops emitted there during body compilation land before it).
+#[derive(Debug, Clone)]
+pub(crate) struct LoopFrame {
+    pub(crate) preheader_block: cutile_ir::ir::BlockId,
+    /// The loop body block. Hoisting is only sound for checks emitted
+    /// directly in the body — never from nested conditional blocks, where
+    /// the guarded access may not execute on every iteration.
+    pub(crate) body_block: cutile_ir::ir::BlockId,
+    pub(crate) value_watermark: u32,
+    /// The raw induction block argument and any assumption-wrapped aliases
+    /// the loop variable was bound to.
+    pub(crate) induction_values: Vec<Value>,
+    /// Loop bounds `[lower, upper)` as preheader values.
+    pub(crate) lower: Value,
+    pub(crate) upper: Value,
+    /// True when the step is the constant 1, making `upper - 1` the exact
+    /// maximum induction value for a non-empty loop.
+    pub(crate) unit_step: bool,
+    /// True when static bounds prove the loop executes at least once
+    /// (`max(lower) < min(upper)`). Lets hoisted checks skip the vacuous-trip
+    /// guard, and lets checks hoist past this loop entirely.
+    pub(crate) known_non_empty: bool,
+    /// The induction variable's inclusive value range `[lower, upper - 1]` when
+    /// both loop bounds are compile-time constants (and the step is unit). Lets
+    /// the hoister derive an affine index's static range from its `Term` (via
+    /// `value_facts::term_range`) — discharging it as a compile-time constant
+    /// instead of a runtime strongest-instance substitution. `None` when either
+    /// bound is a runtime value.
+    pub(crate) induction_range: Option<crate::bounds::Bounds<i64>>,
+    /// True when the loop body contains an early exit (`continue`, `break`,
+    /// `return`) anywhere, including inside nested conditionals. A check
+    /// hoisted to the preheader assumes the guarded access executes on every
+    /// iteration — at the loop extremes in particular — and an early exit
+    /// breaks that: `if k >= limit { continue; }` before an access attains
+    /// only `[0, limit)`, so testing the range's extreme traps spuriously
+    /// (differential harness defect D2). No check hoists out of such a body,
+    /// and no check from an inner loop hoists across it.
+    pub(crate) has_early_exit: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionAxisOrigin {
     pub(crate) tensor: String,
@@ -98,12 +143,21 @@ pub struct TileRustValue {
     pub(crate) string_literal: Option<syn::Expr>,
     pub(crate) enum_variant: Option<String>,
     pub(crate) enum_payload: Option<Box<syn::Expr>>,
-    pub(crate) partition_origin: Option<Value>,
+    pub(crate) partition_origins: Option<Vec<Value>>,
     pub(crate) tensor_origin: Option<String>,
     pub(crate) partition_axis_origin: Option<PartitionAxisOrigin>,
     pub(crate) dim_origin: Option<DimOrigin>,
     pub(crate) index_origin: Option<DimOrigin>,
     pub(crate) bounded_axes: Option<Vec<DimOrigin>>,
+    /// `floor(numerator / divisor)` provenance for a value produced by integer
+    /// division by a constant. Analysis-side only: see [`crate::value_facts::FloorDiv`].
+    pub(crate) floor_div: Option<crate::value_facts::FloorDiv>,
+    /// Symbolic (canonical linear) form of this scalar value, when known:
+    /// `sum(coeff*atom) + constant` over induction-variable / dim atoms. The
+    /// affine fragment used by loop check-hoisting is [`Term::as_single_affine`].
+    /// Consolidates the former `AffineForm { scale, var, offset }` (its single-
+    /// `Iv`-atom special case).
+    pub(crate) term: Option<cuda_async::predicate::Term>,
 }
 
 impl TileRustValue {
@@ -120,12 +174,14 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -142,12 +198,14 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -168,12 +226,14 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -194,12 +254,14 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -216,12 +278,14 @@ impl TileRustValue {
             string_literal: Some(string_literal),
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -242,12 +306,14 @@ impl TileRustValue {
             string_literal: None,
             enum_variant: Some(variant.into()),
             enum_payload: payload.map(Box::new),
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -273,12 +339,14 @@ impl TileRustValue {
                 string_literal: None,
                 enum_variant: None,
                 enum_payload: None,
-                partition_origin: None,
+                partition_origins: None,
                 tensor_origin: None,
                 partition_axis_origin: None,
                 dim_origin: None,
                 index_origin: None,
                 bounded_axes: None,
+                floor_div: None,
+                term: None,
             },
         }
     }
@@ -296,12 +364,14 @@ impl TileRustValue {
             string_literal: Some(literal_expr),
             enum_variant: None,
             enum_payload: None,
-            partition_origin: None,
+            partition_origins: None,
             tensor_origin: None,
             partition_axis_origin: None,
             dim_origin: None,
             index_origin: None,
             bounded_axes: None,
+            floor_div: None,
+            term: None,
         }
     }
 
@@ -438,6 +508,57 @@ impl TileRustValue {
         Ok(())
     }
 
+    /// Clears every fact a control-flow join can invalidate, recursively:
+    /// interval bounds, the symbolic term, axis/index provenance, floor-div
+    /// lineage, and the structural facts (`tensor_origin`, `bounded_axes`,
+    /// `partition_origins`). Called when a value is reconstructed at a
+    /// control-flow join or loop carry, where the value it describes may
+    /// differ from the one the facts were established for — keeping them
+    /// discharged bounds checks for conditionally reassigned indices and
+    /// partitions (issue #212, both halves).
+    ///
+    /// Only type wiring survives: `kind`, `ty`, `mutability`, `type_meta`
+    /// structure, and comptime payloads — reassignment cannot change what
+    /// type the variable is. Clearing structural facts does NOT break
+    /// partitions carried across their own store loops, because repack runs
+    /// only on the mutated/captured set and storing through a partition
+    /// does not reassign the binding — such partitions never enter this
+    /// path and keep their brands.
+    pub(crate) fn invalidate_join_facts(&mut self) {
+        self.bounds = None;
+        self.term = None;
+        self.index_origin = None;
+        self.partition_axis_origin = None;
+        self.dim_origin = None;
+        self.floor_div = None;
+        self.partition_origins = None;
+        // Structural facts too: a variable reaching this path was reassigned
+        // (repack runs only on the mutated/captured set), so a branch may
+        // have pointed it at a DIFFERENT partition. Keeping `tensor_origin`
+        // or `bounded_axes` from the pre-branch template would let the
+        // cross-tensor rung bound an access against the wrong tensor's extent
+        // — an out-of-bounds access proven safe (issue #212, structural
+        // residual). A partition that is merely READ across a branch is not
+        // in the reassigned set and keeps its facts.
+        self.tensor_origin = None;
+        self.bounded_axes = None;
+        if let Some(values) = &mut self.values {
+            for v in values.iter_mut() {
+                v.invalidate_join_facts();
+            }
+        }
+        if let Some(fields) = &mut self.fields {
+            for v in fields.values_mut() {
+                v.invalidate_join_facts();
+            }
+        }
+        if let Some(type_meta) = &mut self.type_meta {
+            for v in type_meta.fields.values_mut() {
+                v.invalidate_join_facts();
+            }
+        }
+    }
+
     pub fn repack_from(
         &self,
         values: &Vec<Value>,
@@ -499,6 +620,22 @@ pub struct CompilerContext {
     pub carry_vars: Option<Vec<String>>,
     pub default_terminator: Option<BlockTerminator>,
     pub module_scope: Vec<String>,
+    /// Enclosing loops, innermost last. Lets check emission hoist
+    /// loop-invariant and induction-variable bounds checks into the
+    /// innermost loop's preheader instead of the hot loop body.
+    pub(crate) loop_frames: Vec<LoopFrame>,
+    /// True while this context compiles a function body block itself — the
+    /// kernel entry body or an inlined callee's body — which is the only
+    /// place a `return` statement is supported. `compile_block` clears it
+    /// on entry, so every nested block (an `if` branch, a loop body, a bare
+    /// `{}`/`unsafe {}` block) compiled from a clone sees `false`: a
+    /// `return` there cannot be lowered (the enclosing block's terminator
+    /// would be emitted and control would fall through) and is rejected.
+    pub(crate) fn_body: bool,
+    /// The Tile IR loop op of the innermost enclosing source loop, if any.
+    /// Inherited by nested blocks; decides whether a `break` is
+    /// representable (only inside `cuda_tile.loop`).
+    pub(crate) innermost_loop: Option<LoopKind>,
 }
 
 impl CompilerContext {
@@ -508,6 +645,9 @@ impl CompilerContext {
             carry_vars: None,
             default_terminator: None,
             module_scope: vec![],
+            loop_frames: vec![],
+            fn_body: false,
+            innermost_loop: None,
         }
     }
 
@@ -534,6 +674,9 @@ impl CompilerContext {
             carry_vars,
             default_terminator,
             module_scope,
+            loop_frames: self.loop_frames.clone(),
+            fn_body: false,
+            innermost_loop: self.innermost_loop,
         })
     }
 
@@ -561,10 +704,29 @@ impl CompilerContext {
             };
             let (mut new_value, new_pos) = value.repack_from(vars, pos)?;
             if invalidate_bounds {
-                new_value.bounds = None;
+                new_value.invalidate_join_facts();
             }
             pos = new_pos;
             self.vars.insert(key.clone(), new_value);
+        }
+        Ok(())
+    }
+
+    /// Publishes complete values from a path compiled directly into the
+    /// current block. Unlike [`Self::repack_some_vars`], this preserves the
+    /// facts established by that path because there is no control-flow join:
+    /// one compile-time-known branch is the only possible definition.
+    pub fn replace_some_vars_from(
+        &mut self,
+        keys: &[String],
+        source: &CompilerContext,
+    ) -> Result<(), JITError> {
+        for key in keys {
+            let value = source
+                .vars
+                .get(key)
+                .ok_or_else(|| JITError::Generic(format!("Variable not found {key}")))?;
+            self.vars.insert(key.clone(), value.clone());
         }
         Ok(())
     }

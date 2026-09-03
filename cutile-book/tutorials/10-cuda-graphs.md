@@ -116,9 +116,10 @@ fn build_forward(
     weights: &[LayerWeights],
     input: Arc<Tensor<f32>>,
     buffers: Vec<LayerBuffers>,
-) -> (DeviceOpVec<()>, SharedDeviceOp<Tensor<f32>>) {
-    let mut ops = Vec::with_capacity(buffers.len());
-    let mut hidden: SharedDeviceOp<Tensor<f32>> = shared(input);
+) -> (impl DeviceOp<Output = ()>, SharedDeviceOp<Tensor<f32>>) {
+    let mut ops: Vec<BoxedDeviceOp<()>> = Vec::with_capacity(buffers.len());
+    let mut hidden: SharedDeviceOp<Tensor<f32>> =
+        cuda_async::device_operation::shared(input);
 
     for (w, bufs) in weights.iter().zip(buffers) {
         // RMSNorm: hidden(1,d) × norm_w → norm(1,d)
@@ -175,7 +176,8 @@ fn build_forward(
         );
     }
 
-    (DeviceOpVec::new(ops), hidden)
+    // DeviceOpVec produces Vec<()>; discard it so the capture yields CudaGraph<()>.
+    (DeviceOpVec::new(ops).map(|_| ()), hidden)
 }
 ```
 
@@ -187,8 +189,13 @@ Key patterns to notice:
 - **`.first()`** — Kernel launches return a tuple of all arguments.
   `.first()` extracts just the output (the `&mut Tensor` parameter).
 - **`try_partition`** — Converts `Arc<Tensor<T>>` into a `Partition` by
-  proving sole ownership (Arc refcount == 1).
-- **`DeviceOpVec`** — Collects boxed ops for each layer's graph work.
+  proving sole ownership (Arc refcount == 1). It returns `Err` when the Arc
+  has other owners; the `.expect(...)` above turns that into a panic.
+  (`shared(...)` is `cuda_async::device_operation::shared`; it is not in the
+  prelude.)
+- **`DeviceOpVec`** — Collects boxed ops for each layer's graph work. Its
+  output is `Vec<()>`, so the trailing `.map(|_| ())` is what makes the
+  captured graph a `CudaGraph<()>`.
 - **No GPU work yet** — Everything above is pure graph construction.
 
 ---
@@ -354,7 +361,7 @@ Key differences from the combinator approach:
 |---|---|---|
 | Buffer ownership | `Arc<Tensor<T>>` + `try_partition` | `&mut Tensor<T>` borrows |
 | Write-then-read | Via `.shared()` + cloning | Via `record()` releasing borrows |
-| Failure mode | Runtime panic (refcount != 1) | Compile error (borrow conflict) |
+| Failure mode | Runtime `Err` from `try_partition` (refcount != 1) | Compile error (borrow conflict) |
 | Composability | Chains with `.then()`, `.map()` | Imperative sequential code |
 
 `s.record(op)` only accepts operations that implement `GraphNode` — kernel

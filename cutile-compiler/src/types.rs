@@ -419,7 +419,9 @@ impl MLIRVariadicArg {
             }
             Some(TypInstancePrimitiveType::PtrType(primitive_type)) => {
                 let rust_element_instance_ty = &primitive_type.rust_element_instance_ty;
-                if let Some(ptr_attrs) = get_primitives_attrs("Pointer", "* mut E", primitives) {
+                if let Some(ptr_attrs) =
+                    get_pointer_primitives_attrs(primitive_type.is_mutable, primitives)
+                {
                     if let Some(cuda_tile_element_type) =
                         get_cuda_tile_element_type_from_rust_primitive_str(
                             rust_element_instance_ty,
@@ -479,6 +481,36 @@ pub fn get_primitives_attrs(
         Some(item_impl) => get_meta_list("cuda_tile :: ty", &item_impl.attrs),
         None => None,
     }
+}
+
+/// The `Pointer` impl registration key for a given constness. Every
+/// consumer of pointer attrs goes through this so the `*mut`/`*const`
+/// pair never leaks into ad-hoc string keys.
+pub fn pointer_impl_key(is_mutable: bool) -> &'static str {
+    if is_mutable {
+        "* mut E"
+    } else {
+        "* const E"
+    }
+}
+
+/// The Rust-source pointer prefix for a given constness. Tile IR has a
+/// single pointer type, so constness lives only in the Rust-facing type
+/// strings built from this.
+pub fn ptr_prefix(is_mutable: bool) -> &'static str {
+    if is_mutable {
+        "* mut"
+    } else {
+        "* const"
+    }
+}
+
+/// Looks up the `Pointer` impl attrs matching the pointer's constness.
+pub fn get_pointer_primitives_attrs(
+    is_mutable: bool,
+    primitives: &HashMap<(String, String), ItemImpl>,
+) -> Option<SingleMetaList> {
+    get_primitives_attrs("Pointer", pointer_impl_key(is_mutable), primitives)
 }
 
 /// Returns `true` if the Rust type string is a registered element type.

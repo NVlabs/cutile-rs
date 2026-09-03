@@ -414,7 +414,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         method_call: &ExprMethodCall,
         info: &GlobalInfo,
     ) -> Result<cutile_ir::ir::Value, JITError> {
-        let ptr_ty = TileRustType::from_scalar_ptr(&info.element_name).ok_or_else(|| {
+        let ptr_ty = TileRustType::from_scalar_ptr(&info.element_name, true).ok_or_else(|| {
             self.jit_error(
                 &method_call.receiver.span(),
                 &format!(
@@ -480,7 +480,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "`Global` declarations should use immutable `static`; mutability is provided by `Global` methods",
             );
         }
-        let normalized_ty = self.modules.normalize_type_aliases(&item.ty)?;
+        let normalized_ty = self
+            .modules
+            .normalize_type_aliases_in(&item.ty, Some(module_name))?;
         let Some(type_name) = get_type_ident(&normalized_ty) else {
             return Ok(None);
         };
@@ -572,7 +574,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         })
     }
 
-    fn token_type(&self, generic_vars: &GenericVars) -> Result<TileRustType, JITError> {
+    pub(crate) fn token_type(&self, generic_vars: &GenericVars) -> Result<TileRustType, JITError> {
         let token_ty: Type = syn::parse_quote!(Token);
         self.compile_type(&token_ty, generic_vars, &HashMap::new())?
             .ok_or_else(|| self.jit_error(&token_ty.span(), "failed to compile Token type"))

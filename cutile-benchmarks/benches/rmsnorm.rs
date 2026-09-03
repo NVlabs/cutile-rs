@@ -61,7 +61,7 @@ mod kernels {
             let tx: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
             let tw: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
             let tout: Tile<f16, { [1, BLOCK_SIZE] }> = tx * rms * tw;
-            unsafe { out_part.store(tout, [0i32, j]) };
+            out_part.store(tout, [0i32, j]);
         }
     }
 }

@@ -36,6 +36,24 @@ fn build_kernel(name: &str) -> Module {
     module
 }
 
+fn build_kernel_with_worker_warps(name: &str, num_worker_warps_per_cta: i64) -> Module {
+    let mut module = build_kernel(name);
+    let entry = module.functions[0];
+    module.op_mut(entry).attributes.push((
+        "optimization_hints".into(),
+        Attribute::OptimizationHints(OptimizationHints {
+            entries: vec![(
+                "sm_120".into(),
+                vec![(
+                    "num_worker_warps_per_cta".into(),
+                    Attribute::i32(num_worker_warps_per_cta),
+                )],
+            )],
+        }),
+    ));
+    module
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -116,6 +134,30 @@ fn reject_unsupported_version() {
     };
     let result = write_bytecode_version(&module, old_version);
     assert!(result.is_err(), "should reject version below MIN_SUPPORTED");
+}
+
+#[test]
+fn worker_warps_hint_requires_version_13_3() {
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    let module = build_kernel_with_worker_warps("ver_worker_warps_reject", 4);
+    let error = write_bytecode_version(&module, BytecodeVersion::V13_2)
+        .expect_err("worker warps hint should require bytecode version 13.3");
+    assert!(
+        error.to_string().contains(
+            "optimization hint 'num_worker_warps_per_cta' requires bytecode version 13.3 or newer"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn worker_warps_hint_is_supported_in_version_13_3() {
+    use cutile_ir::bytecode::write_bytecode_version;
+
+    let module = build_kernel_with_worker_warps("ver_worker_warps_accept", 4);
+    write_bytecode_version(&module, BytecodeVersion::V13_3)
+        .expect("worker warps hint should be supported in bytecode version 13.3");
 }
 
 #[test]

@@ -12,18 +12,17 @@
 //! All tests hold [`common::cache_test_lock`] to prevent concurrent tests from
 //! moving the counter during the measured window.
 //!
-//! Run with `CUTILE_JIT_LOG=1 cargo test --test gpu warmup_bench -- --nocapture`
+//! Run with `CUTILE_JIT_LOG=1 cargo test -p cutile --test warmup_suite warmup_bench -- --nocapture`
 //! to see per-compile vs cache-hit logs.
 
 use crate::common;
 use cutile::api;
 use cutile::prelude::{DeviceOp, PartitionOp};
 use cutile::tile_kernel::{
-    contains_cuda_function, get_default_device, jit_compile_count, FunctionKey, TileFunctionKey,
-    TileKernel,
+    contains_cuda_function, get_default_device, jit_compile_count, TileFunctionKey, TileKernel,
 };
 use cutile_compiler::cuda_tile_runtime_utils::{
-    get_compiler_version, get_cuda_toolkit_version, get_gpu_name,
+    get_compiler_version, get_gpu_name, tileiras_fingerprint,
 };
 use cutile_compiler::specialization::SpecializationBits;
 use std::time::Instant;
@@ -78,7 +77,7 @@ fn bench_key(
         .device_id(device_id)
         .gpu_name(get_gpu_name(device_id))
         .compiler_version(get_compiler_version())
-        .cuda_toolkit_version(get_cuda_toolkit_version())
+        .tileiras_fingerprint(tileiras_fingerprint())
         .build()
 }
 
@@ -285,12 +284,13 @@ fn report(label: &str, samples: &[std::time::Duration]) {
 ///
 ///   (A) End-to-end warmed launch — real per-call latency. `jit_compile_count`
 ///       is asserted flat across the loop, so every iteration is a cache hit.
-///   (B) Build hardened key + `get_hash_string()`, no launch — the extra CPU
-///       work the hit path does before the lookup.
+///   (B) Build hardened key, no launch — the extra CPU work the hit path does
+///       before the lookup. The key *is* the lookup key now, so no digest is
+///       computed here.
 ///   (C) `get_gpu_name()` alone — cached `OnceLock` lookup + `String` clone.
 ///
 /// Run with:
-///   cargo test --test gpu warmup_bench::cache_hit_path_cost -- --nocapture
+///   cargo test -p cutile --test warmup_suite warmup_bench::cache_hit_path_cost -- --nocapture
 #[test]
 fn cache_hit_path_cost() {
     common::with_test_stack(|| {
@@ -325,19 +325,18 @@ fn cache_hit_path_cost() {
              jit_compile_count moved from {c_after_prime} to {c_after_launch}"
         );
 
-        // (B) Isolated added cost: build the hardened key + hash it, no launch.
-        // Clones are hoisted out of the timed region so we measure the build +
-        // hash (which includes get_gpu_name + version lookups), not the clones.
+        // (B) Isolated added cost: build the hardened key, no launch. Clones are
+        // hoisted out of the timed region so we measure the build (which includes
+        // get_gpu_name + version lookups), not the clones.
         let device_id = get_default_device();
         let mut key_samples = Vec::with_capacity(CPU_ITERS);
         for _ in 0..CPU_ITERS {
             let g = generics.clone();
             let s = spec_args.clone();
             let t0 = Instant::now();
-            let key = bench_key(g, s);
-            let h = std::hint::black_box(key.get_hash_string());
+            let key = std::hint::black_box(bench_key(g, s));
             key_samples.push(t0.elapsed());
-            drop(h);
+            drop(key);
         }
 
         // (C) get_gpu_name() in isolation — cached OnceLock lookup + String clone per launch.
@@ -355,7 +354,7 @@ fn cache_hit_path_cost() {
             &launch_samples,
         );
         report(
-            "(B) build hardened key + hash (added per-launch CPU)",
+            "(B) build hardened key (added per-launch CPU)",
             &key_samples,
         );
         report(
@@ -365,30 +364,30 @@ fn cache_hit_path_cost() {
     });
 }
 
-/// (B) under concurrency: runs the full hit-path build (key + hash, including
-/// `get_gpu_name()`) across thread counts. `get_gpu_name()` is now lock-free on
-/// the hot path, so any slowdown with thread count comes from the key build/hash
-/// itself, not from a lock.
+/// (B) under concurrency: runs the full hit-path key build across thread
+/// counts. `get_gpu_name()` is lock-free on the hot path, while cached
+/// `tileiras` resolution and fingerprint lookups use short-lived mutexes. This
+/// measures their aggregate contention together with the rest of key building.
 ///
 ///   threads=1 per-call ties back to (B) (~5.5µs).
-///   Flat per-call as threads grow => the path is not serialized by a lock.
+///   Flat per-call as threads grow => no material contention in the full path.
 ///
 /// Run with:
-///   cargo test --test gpu warmup_bench::hit_path_contention -- --nocapture
+///   cargo test -p cutile --test warmup_suite warmup_bench::hit_path_contention -- --nocapture
 #[test]
 fn hit_path_contention() {
     common::with_test_stack(|| {
         let _guard = common::cache_test_lock();
 
-        // Prime get_gpu_name's cache so workers hit the lock-free cached path,
-        // not the driver.
-        let _ = get_gpu_name(get_default_device());
-
         let generics = std::sync::Arc::new(vec!["f32".to_string(), "128".to_string()]);
         let spec_args = std::sync::Arc::new(vector_add_spec_args(256, 128));
 
+        // Prime the complete path so workers measure steady-state key building,
+        // not one-time GPU queries, tileiras resolution, or `--version` probing.
+        drop(bench_key((*generics).clone(), (*spec_args).clone()));
+
         const CALLS_PER_THREAD: usize = 20_000;
-        println!("\n=== hit-path (build key + hash) contention ===");
+        println!("\n=== hit-path (build key) contention ===");
         for threads in [1usize, 2, 4, 8, 16] {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
             let handles: Vec<_> = (0..threads)
@@ -401,8 +400,7 @@ fn hit_path_contention() {
                         b.wait();
                         let t0 = Instant::now();
                         for _ in 0..CALLS_PER_THREAD {
-                            let key = bench_key((*g).clone(), (*s).clone());
-                            drop(std::hint::black_box(key.get_hash_string()));
+                            drop(std::hint::black_box(bench_key((*g).clone(), (*s).clone())));
                         }
                         t0.elapsed()
                     })
@@ -425,7 +423,7 @@ fn hit_path_contention() {
         }
         println!(
             "Read as: threads=1 ties back to (B); flat per-call as threads grow \
-             => no lock inside the path is serializing it.\n"
+             => no material contention in the full key path.\n"
         );
     });
 }
