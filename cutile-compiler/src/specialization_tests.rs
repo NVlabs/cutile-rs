@@ -285,4 +285,37 @@ mod tests {
             );
         }
     }
+    /// A device address whose low 32 bits are exactly 0x8000_0000 (2 GiB
+    /// mod 4 GiB) is 16-byte aligned by any reading — but the old i32
+    /// narrowing computed divisor = i32::MIN, and the entry generator's
+    /// `div > 1` guard then silently dropped the assume_div_by. The
+    /// alignment must be computed on the full 64-bit address.
+    #[test]
+    fn ptr_at_two_gib_boundary_keeps_its_alignment() {
+        for addr in [
+            0x8000_0000u64,      // exactly the failing bit pattern
+            0x1_8000_0000u64,    // same low bits, high bits set
+            0x7f00_8000_0000u64, // realistic device address shape
+        ] {
+            let hint = DivHint::from_ptr(addr);
+            assert_eq!(
+                hint.divisor, 16,
+                "addr {addr:#x}: 2 GiB-aligned pointer must keep max divisor"
+            );
+        }
+        // Unaffected neighbors stay exact.
+        assert_eq!(DivHint::from_ptr(0x8000_0004).divisor, 4);
+        assert_eq!(DivHint::from_ptr(0x8000_0001).divisor, 1);
+        assert_eq!(DivHint::from_ptr(0).divisor, 16, "zero = maximally aligned");
+    }
+
+    /// The sibling latent case: from_value(i32::MIN) went negative through
+    /// the same `val & -val` identity. Its magnitude is a power of two, so
+    /// it clamps to the max divisor like any highly divisible value.
+    #[test]
+    fn value_divisor_is_never_negative() {
+        assert_eq!(DivHint::from_value(i32::MIN).divisor, 16);
+        assert_eq!(DivHint::from_value(-4).divisor, 4);
+        assert_eq!(DivHint::from_value(-3).divisor, 1);
+    }
 }

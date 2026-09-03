@@ -1276,7 +1276,7 @@ impl RankInstantiator {
             args.push(expr.to_token_stream().to_string());
         }
         let cga_str = format!("{{[{}]}}", args.join(", "));
-        let ty_str = if kind == "const_shape" {
+        let ty_str = if kind == "const_shape" || kind == "shape" {
             "Shape"
         } else {
             "Array"
@@ -1302,7 +1302,7 @@ impl VisitMut for RankInstantiator {
                 .last()
                 .map(|s| s.ident.to_string())
                 .unwrap_or_default();
-            if name == "const_shape" || name == "const_array" {
+            if name == "const_shape" || name == "shape" || name == "const_array" {
                 match self.expand_shape_macro(&em.mac, &name) {
                     Ok(new_expr) => {
                         *expr = new_expr;

@@ -113,7 +113,7 @@ For each Q tile (row block of the output):
 
 > **Implementation note:** The code below uses `exp2` instead of `exp` as a performance
 > optimization — `exp2` is faster on GPU hardware. To compensate, the scale factor is
-> divided by `ln(2)` so that `exp2(x / ln(2, ftz::Disabled)) = exp(x)`. The correction factor `α` and
+> divided by `ln(2)` so that `exp2(x / ln(2), ftz::Disabled) = exp(x)`. The correction factor `α` and
 > softmax numerator `P` are both computed with `exp2` using this adjusted scale.
 
 ---
@@ -146,72 +146,72 @@ mod fmha_module {
         v: &Tensor<f32, { [-1, -1, -1, -1] }>,   // (B, H, N, D)
         qk_scale: f32,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let pid0 = program_id(0);
         let h = q.shape()[1];
-        let batch_idx = pid.0 / h;
-        let head_idx = pid.0 % h;
-        let q_m_idx = pid.1;
+        let batch_idx = pid0 / h;
+        let head_idx = pid0 % h;
+        let q_m_idx = program_id(1);
 
         // Convert to exp2-friendly scale (exp2 is faster than exp on GPU)
-        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+        let two: Tile<f32, { [] }> = constant(2.0f32, shape![]);
         let log2: f32 = tile_to_scalar(log(two));
         let qk_scale: f32 = qk_scale / log2;
-        let qk_scale: Tile<f32, { [BM, BN] }> = qk_scale.broadcast(const_shape![BM, BN]);
+        let qk_scale: Tile<f32, { [BM, BN] }> = qk_scale.broadcast(shape![BM, BN]);
 
         // Online softmax state
-        let mut m_i: Tile<f32, { [BM, 1] }> = constant(f32::NEG_INFINITY, const_shape![BM, 1]);
-        let mut l_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, const_shape![BM, 1]);
-        let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, const_shape![BM, D]);
+        let mut m_i: Tile<f32, { [BM, 1] }> = constant(f32::NEG_INFINITY, shape![BM, 1]);
+        let mut l_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, shape![BM, 1]);
+        let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, shape![BM, D]);
 
         // Load Q tile once and reuse for all K,V tiles
-        let q_part: Partition<f32, { [1, 1, BM, D] }> = q.partition(const_shape![1, 1, BM, D]);
+        let q_part: Partition<f32, { [1, 1, BM, D] }> = q.partition(shape![1, 1, BM, D]);
         let tq: Tile<f32, { [1, 1, BM, D] }> = q_part.load([batch_idx, head_idx, q_m_idx, 0i32]);
-        let tq: Tile<f32, { [BM, D] }> = tq.reshape(const_shape![BM, D]);
+        let tq: Tile<f32, { [BM, D] }> = tq.reshape(shape![BM, D]);
 
         let n: i32 = k.shape()[2];
         let num_tiles: i32 = ceil_div(n, BN);
 
-        let k_part = k.partition(const_shape![1, 1, BN, D]);
-        let v_part = v.partition(const_shape![1, 1, BN, D]);
+        let k_part = k.partition(shape![1, 1, BN, D]);
+        let v_part = v.partition(shape![1, 1, BN, D]);
 
         // Stream through K,V tiles
         for j in 0i32..num_tiles {
             // Q @ K^T
             let k_tile: Tile<f32, { [BN, D] }> = k_part
                 .load([batch_idx, head_idx, j, 0i32])
-                .reshape(const_shape![BN, D]);
+                .reshape(shape![BN, D]);
             let k_tile_trans: Tile<f32, { [D, BN] }> = k_tile.transpose();
-            let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+            let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, shape![BM, BN]);
             let qk: Tile<f32, { [BM, BN] }> = mma(tq, k_tile_trans, qk);
             let qk: Tile<f32, { [BM, BN] }> = qk * qk_scale;
 
             // Update running max
             let qk_max: Tile<f32, { [BM] }> = reduce_max(qk, 1);
-            let qk_max: Tile<f32, { [BM, 1] }> = qk_max.reshape(const_shape![BM, 1]);
+            let qk_max: Tile<f32, { [BM, 1] }> = qk_max.reshape(shape![BM, 1]);
             let m_ij: Tile<f32, { [BM, 1] }> = max_tile(m_i, qk_max);
-            let qk = qk - m_ij.broadcast(const_shape![BM, BN]);
+            let qk = qk - m_ij.broadcast(shape![BM, BN]);
 
             // Softmax numerator and correction factor
             let p: Tile<f32, { [BM, BN] }> = exp2(qk, ftz::Disabled);
             let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1);
-            let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
+            let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(shape![BM, 1]);
             let alpha: Tile<f32, { [BM, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
 
             // Update running sum and rescale accumulator
             l_i = l_i * alpha + l_ij;
-            let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(const_shape![BM, D]);
+            let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(shape![BM, D]);
             acc = acc * alpha;
 
             // Accumulate P @ V
             let v_tile: Tile<f32, { [1, 1, BN, D] }> = v_part.load([batch_idx, head_idx, j, 0i32]);
-            let v_tile: Tile<f32, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+            let v_tile: Tile<f32, { [BN, D] }> = v_tile.reshape(shape![BN, D]);
             acc = mma(p, v_tile, acc);
             m_i = m_ij;
         }
 
         // Final normalization
-        acc = true_div(acc, l_i.broadcast(const_shape![BM, D]));
-        let acc = acc.reshape(const_shape![1, BM, D]);
+        acc = true_div(acc, l_i.broadcast(shape![BM, D]));
+        let acc = acc.reshape(shape![1, BM, D]);
         out.store(acc);
     }
 }
@@ -282,7 +282,7 @@ cargo run --example flash_attention
 ```
 
 ```text
-out_host.shape() = [128, 1024, 64]
+out shape = [128, 1024, 64]
 diff near zero? true: 5.96e-8
 diff near zero? true: 2.98e-8
 ... (validates against reference for all batch×head combinations)

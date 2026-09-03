@@ -14,6 +14,7 @@ pub mod device_operation;
 pub mod error;
 pub mod launch;
 mod loom_compat;
+pub mod predicate;
 pub mod prelude;
 // The real CUDA backend wraps pinned memory via `AtomicU32::from_ptr`, which is
 // incompatible with loom's swapped atomics; under `--cfg loom` the protocol is
@@ -21,6 +22,9 @@ pub mod prelude;
 #[cfg(not(loom))]
 mod reactor;
 pub mod scheduling_policies;
+/// SIMT-model async surface, copied from cuda-oxide for the shared
+/// host-crate migration. Not re-exported at the root; see the module docs.
+pub mod simt;
 mod slot_table;
 
 pub use futures;

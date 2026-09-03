@@ -25,12 +25,12 @@ mod num_tiles_kernels {
         input: &Tensor<f32, { [-1, -1] }>,
         out: &mut Tensor<i32, { [1] }>,
     ) {
-        let part = input.partition(const_shape![BM, BN]);
+        let part = input.partition(shape![BM, BN]);
         let nm: i32 = num_tiles(&part, 0);
         let nn: i32 = num_tiles(&part, 1);
         // Fold the pair of axis counts into a single scalar so the kernel
         // references both values (prevents DCE from dropping either call).
-        let combined: Tile<i32, { [1] }> = broadcast_scalar(nm * 100i32 + nn, const_shape![1]);
+        let combined: Tile<i32, { [1] }> = broadcast_scalar(nm * 100i32 + nn, shape![1]);
         out.store(combined);
     }
 
@@ -40,9 +40,9 @@ mod num_tiles_kernels {
         input: &Tensor<f32, { [-1, -1, -1] }>,
         out: &mut Tensor<i32, { [1] }>,
     ) {
-        let part = input.partition(const_shape![BM, BN, BK]);
+        let part = input.partition(shape![BM, BN, BK]);
         let nk: i32 = num_tiles(&part, 2);
-        let tile: Tile<i32, { [1] }> = broadcast_scalar(nk, const_shape![1]);
+        let tile: Tile<i32, { [1] }> = broadcast_scalar(nk, shape![1]);
         out.store(tile);
     }
 
@@ -53,10 +53,10 @@ mod num_tiles_kernels {
         out: &mut Tensor<i32, { [1] }>,
     ) {
         let tensor_shape: [i32; 2] = get_tensor_shape(input);
-        let part = input.partition(const_shape![BM, BN]);
+        let part = input.partition(shape![BM, BN]);
         let index_shape: [i32; 2] = get_index_space_shape(&part);
         let combined: i32 = tensor_shape[0] + tensor_shape[1] + index_shape[0] + index_shape[1];
-        let tile: Tile<i32, { [1] }> = broadcast_scalar(combined, const_shape![1]);
+        let tile: Tile<i32, { [1] }> = broadcast_scalar(combined, shape![1]);
         out.store(tile);
     }
 
@@ -65,7 +65,7 @@ mod num_tiles_kernels {
     fn shape_index_queries(input: &Tensor<f32, { [-1, -1] }>, out: &mut Tensor<i32, { [1] }>) {
         let m: i32 = input.shape()[0];
         let n: i32 = input.shape()[1];
-        let tile: Tile<i32, { [1] }> = broadcast_scalar(m * 100i32 + n, const_shape![1]);
+        let tile: Tile<i32, { [1] }> = broadcast_scalar(m * 100i32 + n, shape![1]);
         out.store(tile);
     }
 
@@ -79,9 +79,9 @@ mod num_tiles_kernels {
         input: &Tensor<f32, { [K] }>,
         out: &mut Tensor<f32, { [BK] }>,
     ) {
-        let part = input.partition(const_shape![BK]);
+        let part = input.partition(shape![BK]);
         let nk: i32 = num_tiles(&part, 0);
-        let mut tile: Tile<f32, { [BK] }> = broadcast_scalar(0.0f32, const_shape![BK]);
+        let mut tile: Tile<f32, { [BK] }> = broadcast_scalar(0.0f32, shape![BK]);
         for i in 0i32..nk {
             tile = tile + part.load([i]);
         }
@@ -94,9 +94,9 @@ mod num_tiles_kernels {
         input: &Tensor<f32, { [K] }>,
         out: &mut Tensor<f32, { [BK] }>,
     ) {
-        let part = input.partition(const_shape![BK]);
+        let part = input.partition(shape![BK]);
         let nk = num_tiles(&part, 0).into_dim();
-        let mut tile: Tile<f32, { [BK] }> = broadcast_scalar(0.0f32, const_shape![BK]);
+        let mut tile: Tile<f32, { [BK] }> = broadcast_scalar(0.0f32, shape![BK]);
         for i in nk {
             tile = tile + part.load([i]);
         }

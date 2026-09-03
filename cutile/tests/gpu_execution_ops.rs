@@ -30,7 +30,7 @@ mod gpu_exec_module {
     ) {
         let tile: Tile<f32, S> = load_tile_mut(input);
         let sum_scalar = reduce(tile, 0i32, 0.0f32, |acc, x| acc + x);
-        let sum_tile: Tile<f32, { [1] }> = sum_scalar.reshape(const_shape![1]);
+        let sum_tile: Tile<f32, { [1] }> = sum_scalar.reshape(shape![1]);
         result.store(sum_tile);
     }
 
@@ -42,7 +42,7 @@ mod gpu_exec_module {
     ) {
         let tile: Tile<f32, S> = load_tile_mut(input);
         let max_scalar = reduce(tile, 0i32, f32::NEG_INFINITY, |acc, x| max(acc, x));
-        let max_tile: Tile<f32, { [1] }> = max_scalar.reshape(const_shape![1]);
+        let max_tile: Tile<f32, { [1] }> = max_scalar.reshape(shape![1]);
         result.store(max_tile);
     }
 
@@ -62,7 +62,7 @@ mod gpu_exec_module {
     ) {
         let tile: Tile<f32, S> = load_tile_mut(input);
         let sum_scalar = reduce(tile, 0i32, 0.0f32, |acc, x| acc + x);
-        let sum_tile: Tile<f32, { [1] }> = sum_scalar.reshape(const_shape![1]);
+        let sum_tile: Tile<f32, { [1] }> = sum_scalar.reshape(shape![1]);
         let current: Tile<f32, { [1] }> = load_tile_mut(counter);
         let updated: Tile<f32, { [1] }> = current + sum_tile;
         counter.store(updated);
@@ -88,7 +88,7 @@ mod gpu_exec_module {
         input: &mut Tensor<f32, S>,
     ) {
         let tile: Tile<f32, S> = load_tile_mut(input);
-        let scalar_tile: Tile<f32, { [1] }> = constant(10.0f32, const_shape![1]);
+        let scalar_tile: Tile<f32, { [1] }> = constant(10.0f32, shape![1]);
         let broadcasted: Tile<f32, S> = scalar_tile.broadcast(output.shape());
         let result: Tile<f32, S> = tile + broadcasted;
         output.store(result);

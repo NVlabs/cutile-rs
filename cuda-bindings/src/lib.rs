@@ -47,6 +47,154 @@ pub fn cuda_toolkit_dir() -> String {
     env!("CUTILE_RESOLVED_CUDA_TOOLKIT_PATH").to_string()
 }
 
+/// Host-task sync modes for [`cu_launch_host_func`], defined as literals so
+/// consumers compile against any toolkit: the `CUhostTaskSyncMode` enum only
+/// exists in CUDA 13.2+ headers.
+pub const CU_HOST_TASK_BLOCKING: ::core::ffi::c_uint = 0;
+pub const CU_HOST_TASK_SPINWAIT: ::core::ffi::c_uint = 1;
+
+/// Enqueues a host function on the stream, with a sync mode where the
+/// toolkit and the driver support one.
+///
+/// CUDA 13.2 adds `cuLaunchHostFunc_v2`, whose `sync_mode` selects between
+/// the blocking default and a spin-waiting host task (lower callback latency,
+/// one busy core). Two degraded cases:
+///
+/// - **Older toolkit at build time** (`cuda.h` lacks the entry point): the
+///   call goes to `cuLaunchHostFunc` and `sync_mode` is ignored. Spin-wait is
+///   a latency optimization, so the degraded call keeps the same semantics at
+///   the default latency.
+/// - **13.2+ toolkit, older driver at run time** (the loaded libcuda has no
+///   `cuLaunchHostFunc_v2`; the loader shim reports the missing symbol as
+///   `CUDA_ERROR_NOT_FOUND`): `CU_HOST_TASK_BLOCKING` falls back to
+///   `cuLaunchHostFunc`, which *is* a blocking host task. `CU_HOST_TASK_SPINWAIT`
+///   has no equivalent there and returns `CUDA_ERROR_NOT_SUPPORTED`, so a caller
+///   who asked for spin-wait learns the driver cannot provide it instead of
+///   silently measuring the blocking path.
+///
+/// # Safety
+///
+/// Same contract as the underlying driver call: `func` and `arg` must remain
+/// valid until the callback executes, and `stream` must be a valid stream.
+pub unsafe fn cu_launch_host_func(
+    stream: CUstream,
+    func: ::core::option::Option<unsafe extern "C" fn(*mut ::core::ffi::c_void)>,
+    arg: *mut ::core::ffi::c_void,
+    sync_mode: ::core::ffi::c_uint,
+) -> CUresult {
+    #[cfg(cuda_has_cuLaunchHostFunc_v2)]
+    {
+        let v2_result = unsafe { cuLaunchHostFunc_v2(stream, func, arg, sync_mode) };
+        match host_func_v2_outcome(v2_result, sync_mode) {
+            HostFuncV2Outcome::Done(result) => result,
+            HostFuncV2Outcome::FallBackToV1 => unsafe { cuLaunchHostFunc(stream, func, arg) },
+            HostFuncV2Outcome::Unsupported => cudaError_enum_CUDA_ERROR_NOT_SUPPORTED,
+        }
+    }
+    #[cfg(not(cuda_has_cuLaunchHostFunc_v2))]
+    {
+        let _ = sync_mode;
+        unsafe { cuLaunchHostFunc(stream, func, arg) }
+    }
+}
+
+/// What [`cu_launch_host_func`] does with the `cuLaunchHostFunc_v2` shim's
+/// return code.
+#[cfg_attr(not(cuda_has_cuLaunchHostFunc_v2), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum HostFuncV2Outcome {
+    /// The driver has the entry point; its result stands, success or failure.
+    Done(CUresult),
+    /// The driver lacks `_v2`, and blocking is exactly what `cuLaunchHostFunc` does.
+    FallBackToV1,
+    /// The driver lacks `_v2`, and spin-wait has no v1 equivalent.
+    Unsupported,
+}
+
+/// The loader shim returns `CUDA_ERROR_NOT_FOUND` for a symbol the loaded
+/// libcuda does not export. The driver itself never returns that code from
+/// `cuLaunchHostFunc_v2` (its documented results are `DEINITIALIZED`,
+/// `NOT_INITIALIZED`, `INVALID_CONTEXT`, `INVALID_HANDLE` and
+/// `NOT_SUPPORTED`), so it identifies the missing entry point exactly.
+#[cfg_attr(not(cuda_has_cuLaunchHostFunc_v2), allow(dead_code))]
+fn host_func_v2_outcome(v2_result: CUresult, sync_mode: ::core::ffi::c_uint) -> HostFuncV2Outcome {
+    if v2_result != cudaError_enum_CUDA_ERROR_NOT_FOUND {
+        HostFuncV2Outcome::Done(v2_result)
+    } else if sync_mode == CU_HOST_TASK_BLOCKING {
+        HostFuncV2Outcome::FallBackToV1
+    } else {
+        HostFuncV2Outcome::Unsupported
+    }
+}
+
+#[cfg(test)]
+mod host_func_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn driver_result_stands_when_the_v2_entry_point_exists() {
+        for code in [
+            cudaError_enum_CUDA_SUCCESS,
+            cudaError_enum_CUDA_ERROR_INVALID_HANDLE,
+            cudaError_enum_CUDA_ERROR_NOT_SUPPORTED,
+        ] {
+            for mode in [CU_HOST_TASK_BLOCKING, CU_HOST_TASK_SPINWAIT] {
+                assert_eq!(
+                    host_func_v2_outcome(code, mode),
+                    HostFuncV2Outcome::Done(code),
+                    "code {code} in mode {mode} must pass through untouched"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_v2_symbol_falls_back_for_blocking_and_refuses_spinwait() {
+        assert_eq!(
+            host_func_v2_outcome(cudaError_enum_CUDA_ERROR_NOT_FOUND, CU_HOST_TASK_BLOCKING),
+            HostFuncV2Outcome::FallBackToV1
+        );
+        assert_eq!(
+            host_func_v2_outcome(cudaError_enum_CUDA_ERROR_NOT_FOUND, CU_HOST_TASK_SPINWAIT),
+            HostFuncV2Outcome::Unsupported
+        );
+        // Any future mode value is treated like spin-wait: nothing v1 can honour.
+        assert_eq!(
+            host_func_v2_outcome(cudaError_enum_CUDA_ERROR_NOT_FOUND, 7),
+            HostFuncV2Outcome::Unsupported
+        );
+    }
+}
+
+/// Reports the elapsed time in milliseconds between two recorded events.
+///
+/// CUDA 12.8 renamed the driver entry point to `cuEventElapsedTime_v2`;
+/// earlier toolkits only declare `cuEventElapsedTime`. The build script
+/// probes the resolved `cuda.h` and sets `cuda_has_cuEventElapsedTime_v2`,
+/// so callers stay source-compatible across toolkit versions. The helper
+/// exists for source compatibility with cuda-oxide's bindings, which expose
+/// the same one.
+///
+/// # Safety
+///
+/// Same contract as the underlying driver call: `elapsed_ms` must be valid
+/// for an `f32` write, and `start`/`end` must be valid event handles recorded
+/// in the current context.
+pub unsafe fn cu_event_elapsed_time(
+    elapsed_ms: *mut f32,
+    start: CUevent,
+    end: CUevent,
+) -> CUresult {
+    #[cfg(cuda_has_cuEventElapsedTime_v2)]
+    {
+        unsafe { cuEventElapsedTime_v2(elapsed_ms, start, end) }
+    }
+    #[cfg(not(cuda_has_cuEventElapsedTime_v2))]
+    {
+        unsafe { cuEventElapsedTime(elapsed_ms, start, end) }
+    }
+}
+
 #[cfg(test)]
 mod cuda_tests {
     use super::*;
@@ -91,6 +239,13 @@ mod cuda_tests {
 
     unsafe fn set_seed(gen: curandGenerator_t, seed: u64) {
         assert!(curandSetPseudoRandomGeneratorSeed(gen, c_ulonglong::from(seed)) == 0);
+    }
+
+    #[test]
+    fn cu_event_elapsed_time_helper_signature() {
+        // Compile-time check that the helper keeps the signature cuda-oxide's
+        // bindings expose.
+        let _: unsafe fn(*mut f32, CUevent, CUevent) -> CUresult = cu_event_elapsed_time;
     }
 
     #[test]

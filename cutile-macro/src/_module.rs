@@ -262,6 +262,7 @@ fn process_items(
                         parent_name,
                         function_item,
                         &type_aliases,
+                        tile_rust_crate_root,
                     )?);
                 };
                 concrete_items.push(function(
@@ -732,11 +733,109 @@ pub fn function(
 /// ## Entry Attributes
 ///
 /// Respects `#[entry(print_ir = true)]` to print the generated launcher code.
+/// Value kinds `#[cutile::entry(..)]` keys accept.
+#[derive(Clone, Copy)]
+enum EntryValueKind {
+    /// A `true` / `false` literal.
+    Bool,
+    /// A string literal.
+    Str,
+    /// An expression its consumer parses itself (`preconditions`,
+    /// `optimization_hints`), validated there.
+    Expr,
+}
+
+/// Every key `#[cutile::entry(..)]` honors, with the value kind it expects.
+///
+/// The JIT looks keys up by name and reads them as literals at first launch
+/// (`SingleMetaList::parse_bool` / `parse_string`), so a misspelled key was
+/// silently ignored and a non-literal value panicked at runtime. Both are
+/// checked here, at expansion, with a span on the offending token.
+const ENTRY_KEYS: &[(&str, EntryValueKind)] = &[
+    ("print_ir", EntryValueKind::Bool),
+    ("dump_mlir_dir", EntryValueKind::Str),
+    ("unchecked_accesses", EntryValueKind::Bool),
+    ("deny_in_kernel_checks", EntryValueKind::Bool),
+    ("preconditions", EntryValueKind::Expr),
+    ("optimization_hints", EntryValueKind::Expr),
+];
+
+fn validate_entry_attribute(item: &ItemFn) -> Result<(), Error> {
+    let Some(attr) = get_attribute("entry", &item.attrs, true) else {
+        return Ok(());
+    };
+    // The bare form `#[cutile::entry]` has nothing to check.
+    let syn::Meta::List(list) = &attr.meta else {
+        return Ok(());
+    };
+    let entries = list
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .map_err(|e| {
+            crate::error::syn_err(
+                e.span(),
+                &format!("malformed `#[cutile::entry(..)]` arguments: {e}"),
+            )
+        })?;
+    for meta in &entries {
+        // `key = value`, or a bare boolean key (`unchecked_accesses`), which
+        // the JIT reads as `true`.
+        let (path, value) = match meta {
+            syn::Meta::NameValue(name_value) => (&name_value.path, Some(&name_value.value)),
+            syn::Meta::Path(path) => (path, None),
+            syn::Meta::List(list) => {
+                return list.err(
+                    "`#[cutile::entry(..)]` arguments must be `key = value` pairs or bare \
+                     boolean keys",
+                );
+            }
+        };
+        let Some(key) = path.get_ident().map(ToString::to_string) else {
+            return path.err("`#[cutile::entry(..)]` keys must be plain identifiers");
+        };
+        let Some((_, kind)) = ENTRY_KEYS.iter().find(|(known, _)| *known == key) else {
+            let known = ENTRY_KEYS
+                .iter()
+                .map(|(k, _)| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return path.err(&format!(
+                "unknown `#[cutile::entry]` key `{key}`; expected one of {known}"
+            ));
+        };
+        let Some(value) = value else {
+            if matches!(kind, EntryValueKind::Bool) {
+                continue;
+            }
+            return path.err(&format!("`{key}` requires a value (`{key} = ...`)"));
+        };
+        let literal = match value {
+            syn::Expr::Lit(lit) => Some(&lit.lit),
+            _ => None,
+        };
+        match (kind, literal) {
+            (EntryValueKind::Bool, Some(syn::Lit::Bool(_))) => {}
+            (EntryValueKind::Bool, _) => {
+                return value.err(&format!(
+                    "`{key}` expects a boolean literal (`true` or `false`)"
+                ));
+            }
+            (EntryValueKind::Str, Some(syn::Lit::Str(_))) => {}
+            (EntryValueKind::Str, _) => {
+                return value.err(&format!("`{key}` expects a string literal"));
+            }
+            (EntryValueKind::Expr, _) => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn kernel_launcher(
     module_ident: &Ident,
     item: &ItemFn,
     type_aliases: &HashMap<String, ItemType>,
+    tile_rust_crate_root: &Ident,
 ) -> Result<TokenStream2, Error> {
+    validate_entry_attribute(item)?;
     let module_name = module_ident.to_string();
     let function_name = item.sig.ident.to_string();
     let kernel_naming = KernelNaming::new(function_name.as_str());
@@ -760,6 +859,7 @@ pub fn kernel_launcher(
         function_entry_name.as_str(),
         &launcher_name,
         &launcher_args_name,
+        tile_rust_crate_root,
     )?;
 
     let launcher_ident = Ident::new(launcher_name.as_str(), Span::call_site());
@@ -850,18 +950,20 @@ pub fn kernel_launcher(
             }
 
             // JIT-compiles and caches this specialization without launching.
+            //
+            // Runs through `sync` / `sync_on` like every other terminal: the
+            // input ops execute under the execution lock, and the stream is
+            // synchronized before the materialized inputs are dropped — they
+            // may be real tensors that an input op allocated and filled on it.
             pub fn compile(mut self) -> Result<(), DeviceError> {
                 self._compile_only = true;
-                let stream = with_default_device_policy(|policy| policy.next_stream())??;
-                let ctx = ExecutionContext::new(stream);
-                unsafe { self.execute(&ctx)?; }
+                self.sync()?;
                 Ok(())
             }
 
             pub fn compile_on(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
                 self._compile_only = true;
-                let ctx = ExecutionContext::new(stream.clone());
-                unsafe { self.execute(&ctx)?; }
+                self.sync_on(stream)?;
                 Ok(())
             }
 
@@ -873,8 +975,11 @@ pub fn kernel_launcher(
 
             /// Resolves the specialization identity for this launch on `stream` without compiling or launching the kernel.
             pub fn specialize_on(self, stream: &Arc<Stream>) -> Result<Specialization<ModuleAstFn>, DeviceError> {
-                let ctx = ExecutionContext::new(stream.clone());
-                unsafe { self._resolve_specialization(&ctx) }
+                // Same discipline as `compile_on`: resolving executes the input
+                // ops, so it takes the execution lock and drains the stream
+                // before their outputs are dropped.
+                with_context(move |ctx| value(unsafe { self._resolve_specialization(ctx) }))
+                    .sync_on(stream)?
             }
 
             pub fn l1_cache_key(self) -> Result<TileFunctionKey, DeviceError> {

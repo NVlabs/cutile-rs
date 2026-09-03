@@ -41,12 +41,24 @@ use crate::error::JITError;
 use crate::hints::CompileOptions;
 use crate::specialization::{DivHint, SpecializationBits};
 
+/// Where each checked partition access's bounds check ended up: proven at
+/// compile time (nothing emitted), hoisted to a loop preheader, or emitted
+/// in place at the access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CheckPlacementCounts {
+    pub discharged: u32,
+    pub hoisted: u32,
+    pub in_place: u32,
+}
+
 /// Compiled kernel artifacts: IR and bytecode.
 ///
 /// Produced by [`KernelCompiler::compile`]. All methods are pure Rust and
 /// do not require a GPU or CUDA driver.
 pub struct CompileArtifacts {
     module: cutile_ir::Module,
+    check_counts: CheckPlacementCounts,
+    launch_checks: Vec<cuda_async::predicate::LaunchCheck>,
 }
 
 impl CompileArtifacts {
@@ -55,10 +67,31 @@ impl CompileArtifacts {
         self.module.to_mlir_text()
     }
 
+    /// Bounds-check placement counters for the compiled kernel — the same
+    /// numbers reported on the `CUTILE_JIT_TIMING` line.
+    pub fn check_counts(&self) -> CheckPlacementCounts {
+        self.check_counts
+    }
+
+    /// Safety checks the compiler hoisted out of the kernel to launch time. The
+    /// host runs these (via `validate_launch_checks`) before each launch; here
+    /// they let a compile-only test inspect exactly what was evacuated.
+    pub fn launch_checks(&self) -> &[cuda_async::predicate::LaunchCheck] {
+        &self.launch_checks
+    }
+
     /// Serializes the compiled module to bytecode.
+    ///
+    /// This is the JIT's own serializer: the module verifiers run first, and
+    /// the image is written at the bytecode version negotiated for the
+    /// resolved `tileiras` toolchain (`CUTILE_BYTECODE_VERSION`, the
+    /// toolkit's `cuda.h`, or a probe of the binary — see
+    /// `cuda_tile_runtime_utils`), so the bytes are exactly what a launch
+    /// would hand to `tileiras`. Fails when no version can be negotiated,
+    /// e.g. no toolkit and no `tileiras` reachable.
     pub fn bytecode(&self) -> Result<Vec<u8>, JITError> {
-        cutile_ir::write_bytecode(&self.module)
-            .map_err(|e| JITError::Generic(format!("bytecode serialization failed: {e}")))
+        crate::cuda_tile_runtime_utils::serialize_tile_ir_bytecode(&self.module)
+            .map(|(bytes, _version)| bytes)
     }
 
     /// Returns a reference to the underlying `cutile_ir::Module`.
@@ -183,8 +216,11 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
     /// the runtime's L2 cache lookup would use for this specialization.
     pub fn l2_cache_key(self) -> Result<String, JITError> {
         let gpu_name = self.gpu_name.clone();
+        let tileiras_opts = crate::cuda_tile_runtime_utils::TileirasOptions::from_compile_options(
+            &self.compile_options,
+        );
         let artifacts = self.compile()?;
-        current_l2_key_for_module(artifacts.module(), &gpu_name)
+        current_l2_key_for_module(artifacts.module(), &gpu_name, &tileiras_opts)
     }
 
     /// Compiles the kernel and returns the artifacts.
@@ -225,6 +261,16 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         )?;
 
         let module = compiler.compile()?;
-        Ok(CompileArtifacts { module })
+        let check_counts = CheckPlacementCounts {
+            discharged: compiler.check_stats.discharged.get(),
+            hoisted: compiler.check_stats.hoisted.get(),
+            in_place: compiler.check_stats.in_place.get(),
+        };
+        let launch_checks = compiler.launch_checks.borrow().clone();
+        Ok(CompileArtifacts {
+            module,
+            check_counts,
+            launch_checks,
+        })
     }
 }

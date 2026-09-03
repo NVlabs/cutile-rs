@@ -77,6 +77,13 @@ const CURAND_LIB_NAMES: &[&str] = &["curand64_10.dll"];
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 const CURAND_LIB_NAMES: &[&str] = &["libcurand.so"];
 
+// The generated shims are `extern "C"`, so nothing reachable from them may
+// panic (unwinding out of extern "C" aborts). `load_api`'s expect below is
+// reachable from every shim; these make its precondition a compile-time
+// fact rather than a runtime hope.
+const _: () = assert!(!CUDA_LIB_NAMES.is_empty());
+const _: () = assert!(!CURAND_LIB_NAMES.is_empty());
+
 trait GeneratedApi: Sized {
     unsafe fn open(path: &str) -> Result<Self, libloading::Error>;
 }

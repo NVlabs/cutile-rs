@@ -12,10 +12,11 @@ fn debug_kernel<const S: [i32; 2]>(
     z: &mut Tensor<f32, S>,
     x: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let pid: (i32, i32, i32) = get_tile_block_id();
-    let tile = load_tile_like(x, z);
+    let pid0 = program_id(0);
+    let pid1 = program_id(1);
+    let tile = x.load_like(z);
 
-    cuda_tile_print!("Block ({}, {}): loaded tile\n", pid.0, pid.1);
+    cuda_tile_print!("Program ({}, {}): loaded tile\n", pid0, pid1);
     z.store(tile);
 }
 ```
@@ -25,8 +26,8 @@ GPU printing is slow and serializes tile block execution. Use it for small grids
 `cuda_tile_assert!` checks conditions inside a kernel:
 
 ```rust
-let tile = load_tile_like(x, z);
-cuda_tile_assert!(tile[0] > 0.0, "expected positive input");
+let n: i32 = x.shape()[0];
+cuda_tile_assert!(n > 0, "expected a non-empty input");
 ```
 
 ## Host Readback
@@ -73,7 +74,7 @@ For numerically sensitive kernels, test edge cases: zeros, large positive values
 
 ## Inspecting Tile IR
 
-`print_ir = true` prints the generated wrapper, source kernel, and Tile IR text during JIT compilation:
+`print_ir = true` prints the generated entry point wrapper and the Tile IR text during JIT compilation:
 
 ```rust
 #[cutile::entry(print_ir = true)]
@@ -87,19 +88,13 @@ fn debug_ir_kernel<const S: [i32; 2]>(...) { ... }
 fn debug_ir_kernel<const S: [i32; 2]>(...) { ... }
 ```
 
-`use_debug_mlir` loads hand-modified Tile IR text:
-
-```rust
-#[cutile::entry(use_debug_mlir = "/path/to/custom.mlir")]
-fn kernel_with_custom_ir<const S: [i32; 2]>(...) { ... }
-```
-
-The same compiler-stage dumps are also available with environment variables:
+Module-level dumps are also available with environment variables. They are
+written to stderr once per compiled module:
 
 | Variable | Description | Default |
 |---|---|---|
-| `CUTILE_DUMP` | Dump compiler stages (`ast`, `resolved`, `typed`, `instantiated`, `ir`, `bytecode`, or `all`) | unset |
-| `CUTILE_DUMP_FILTER` | Restrict dumps to matching function names or `module::function` paths | unset |
+| `CUTILE_DUMP` | Comma-separated stages to dump: `ir` (the Tile IR module text) and `bytecode` (alias `bc`; the encoded bytecode decoded back to text), or `all`. The `ast`, `resolved`, `typed`, and `instantiated` names are accepted but no code path emits them today | unset |
+| `CUTILE_DUMP_FILTER` | Comma-separated `module::function` paths; the dumps are per module, so only the `module` part is matched. Bare function names do not exclude any module | unset |
 
 ## Errors and Crashes
 
@@ -134,6 +129,30 @@ gdb --args ./target/debug/my_program
 ```
 
 Check the CUDA driver, CUDA Toolkit path, raw pointer lifetimes, spawned task lifetimes, and host memory use during first-launch compilation.
+
+## Debug Builds and Sanitizers
+
+`CompileOptions` selects debugging and instrumentation modes per launch. Each option is part of the JIT cache key, so a debug build and a release build never share a compiled kernel:
+
+```rust
+use cutile::tile_kernel::CompileOptions;
+
+// cuda-gdb: debug information, no optimization.
+my_kernel(args).compile_options(CompileOptions::new().device_debug(true)).sync()?;
+
+// Profiler correlation: line-number information only, full optimization.
+my_kernel(args).compile_options(CompileOptions::new().lineinfo(true)).sync()?;
+
+// Compute Sanitizer: memory-access instrumentation.
+my_kernel(args).compile_options(CompileOptions::new().sanitize_memcheck(true)).sync()?;
+```
+
+What each option does:
+
+- `device_debug(true)` passes `--device-debug` to the device compiler and implies optimization level 0 (set `opt_level` explicitly to override). The frontend also stops hoisting bounds checks out of loops, so every check that runs on the device sits at the source line that wrote it. Checks the compiler proved impossible, and checks it moved to launch time on the host, are unaffected — they never reach device code in any mode.
+- `lineinfo(true)` passes `--lineinfo`: source-line correlation for Nsight Compute and Nsight Systems without changing code generation. This is the option for profiling optimized kernels.
+- `sanitize_memcheck(true)` passes `--sanitize=memcheck` for `compute-sanitizer --tool memcheck`.
+- `opt_level(n)` selects `--opt-level` directly; the default is 3.
 
 ## Profiling
 

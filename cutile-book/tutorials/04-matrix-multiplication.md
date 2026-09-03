@@ -62,7 +62,7 @@ use cuda_core::Device;
 use std::sync::Arc;
 use cutile;
 use cutile::api;
-use cutile::candle_core::WithDType;
+use cutile::DType;
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Tensor, ToHostVec, Unpartition};
 use cutile::tile_kernel::TileKernel;
@@ -77,15 +77,16 @@ mod my_module {
         x: &Tensor<E, { [-1, K] }>,        // A matrix
         y: &Tensor<E, { [K, -1] }>,        // B matrix
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
+        let pid_m = program_id(0);
+        let pid_n = program_id(1);
 
         let mut tile_z = load_tile_mut(z);
 
         for i in 0i32..(K / BK) {
-            let tile_x = part_x.load([pid.0, i]);
-            let tile_y = part_y.load([i, pid.1]);
+            let tile_x = part_x.load([pid_m, i]);
+            let tile_y = part_y.load([i, pid_n]);
             tile_z = mma(tile_x, tile_y, tile_z);  // C += A @ B
         }
         z.store(tile_z);
@@ -98,7 +99,7 @@ fn main() -> Result<(), Error> {
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
 
-    let (bm, bn, bk): (i32, i32, i32) = (16, 16, 8);
+    let (bm, bn, bk) = (16usize, 16usize, 8usize);
     let (m, n, k) = (64usize, 64usize, 64usize);
 
     let generics = vec![
@@ -136,8 +137,8 @@ The K-loop iterates over pairs of tiles from A and B, accumulating partial produ
 
 ```rust
 for i in 0i32..(K / BK) {
-    let tile_x = part_x.load([pid.0, i]);  // Load A[row_group, i]
-    let tile_y = part_y.load([i, pid.1]);  // Load B[i, col_group]
+    let tile_x = part_x.load([pid_m, i]);  // Load A[row_group, i]
+    let tile_y = part_y.load([i, pid_n]);  // Load B[i, col_group]
     tile_z = mma(tile_x, tile_y, tile_z);  // Accumulate: C += A @ B
 }
 ```
@@ -237,8 +238,8 @@ fn gemm<E: ElementType, const BM: i32, const BN: i32, const BK: i32, const K: i3
 `BM` and `BN` are known at kernel launch time because they are embedded in the `Partition` created by `.partition([bm, bn])`. `K` is known because it appears as a dimension of the input tensors `x` and `y`. But `BK` does not appear in the type of any kernel argument — it is only used *inside* the kernel body when partitioning `x` and `y` into tiles:
 
 ```rust
-let part_x = x.partition(const_shape![BM, BK]);
-let part_y = y.partition(const_shape![BK, BN]);
+let part_x = x.partition(shape![BM, BK]);
+let part_y = y.partition(shape![BK, BN]);
 ```
 
 Since `BK` has no mapping to any host-side tensor or partition, the launcher cannot infer its value automatically. This is why GEMM requires an explicit `.generics()` call.
@@ -252,21 +253,28 @@ As a general rule: if every const generic appears somewhere in the kernel's `&Te
 The GEMM kernel above is correct but does not reach the GPU's theoretical peak
 (speed-of-light, or SoL) throughput. The recommended safe path is mapped
 persistent GEMM: the output partition produces bounded, disjoint indices, and
-the input partitions carry matching logical bounds. This avoids `unsafe` and
-does not require making full tensor dimensions const generics.
+the compiler derives the input bounds from the loops that produce each index.
+This avoids `unsafe` and does not require making full tensor dimensions const
+generics.
 
 ### Approach 1: Mapped Persistent GEMM (Safe, Recommended)
 
 Mapped output partitions expose an iterator over output tile indices. The
 indices are produced by the partition itself, so stores are bounded and
-disjoint. Input partitions can be marked with the same logical grid using
-`with_bounds(...)`:
+disjoint. The K-loop iterates `0..num_tiles(&part_x, 1)` and indexes the input
+partitions with plain arrays; the compiler infers the same bounds from the loop
+and the mapped components, and verifies the cross-tensor ties (for example
+`ceil(dim(x, 1)/BK) <= ceil(dim(y, 0)/BK)`) as launch checks before any GPU
+work. `deny_in_kernel_checks = true` turns any check that would remain in the
+kernel into a compile error, so the body is assert-free by construction:
 
 ```rust
 #[cutile::entry(
     optimization_hints = (
         sm_120 = (num_cta_in_cga = 2,),
-    )
+        sm_100 = (num_cta_in_cga = 2,),
+    ),
+    deny_in_kernel_checks = true,
 )]
 fn gemm_persistent<
     T: ElementType,
@@ -279,27 +287,27 @@ fn gemm_persistent<
     x: &Tensor<T, { [-1, -1] }>,
     y: &Tensor<T, { [-1, -1] }>,
 ) {
-    let m = num_tiles(&z, 0);
-    let n = num_tiles(&z, 1);
-    let k = Dim::new(x.shape()[1] / BK);
-
-    let part_x = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-    let part_y = y.partition(const_shape![BK, BN]).with_bounds((k, n));
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
 
     for out_idx in z.iter_indices() {
         let (bid_m, bid_n) = out_idx.components();
 
-        let mut tile_z: Tile<T, { [BM, BN] }> =
-            constant(T::ZERO, const_shape![BM, BN]);
-        for k_tile in k {
-            let tile_x = part_x.load(coord((bid_m, k_tile)));
-            let tile_y = part_y.load(coord((k_tile, bid_n)));
+        let mut tile_z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
+        for k_tile in 0i32..num_tiles(&part_x, 1) {
+            let tile_x = part_x.load([bid_m, k_tile]);
+            let tile_y = part_y.load([k_tile, bid_n]);
             tile_z = mma(tile_x, tile_y, tile_z);
         }
         z.store(tile_z, out_idx);
     }
 }
 ```
+
+`with_bounds(...)`, `Dim::new(...)`, and `coord(...)` from earlier versions of
+this kernel are deprecated since 0.3.0; see
+[Bounds-Check Placement](../guide/bounds-check-placement.md) for the placement
+rules.
 
 On the host side, `.map(...)` selects the mapped output traversal and the launch
 grid is inferred from the mapped partition:
@@ -334,13 +342,14 @@ unsafe fn gemm<T: ElementType, const BM: i32, const BN: i32, const BK: i32>(
     y: &Tensor<T, { [-1, -1] }>,
     k: i32,
 ) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
-    let pid: (i32, i32, i32) = get_tile_block_id();
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
+    let pid_m = program_id(0);
+    let pid_n = program_id(1);
     let mut tile_z: Tile<T, { [BM, BN] }> = z.load();
     for i in 0i32..(k / BK) {
-        let tile_x = part_x.load([pid.0, i]);
-        let tile_y = part_y.load([i, pid.1]);
+        let tile_x = part_x.load([pid_m, i]);
+        let tile_y = part_y.load([i, pid_n]);
         tile_z = mma(tile_x, tile_y, tile_z);
     }
     z.store(tile_z);
@@ -371,7 +380,7 @@ See [`cutile-benchmarks/benches/gemm.rs`](https://github.com/nvlabs/cutile-rs/tr
 
 The older safe performance path is to make **all** tensor dimensions static const
 generics. When the compiler knows every dimension and the launch grid at JIT
-time, it can prove direct `get_tile_block_id()` partition accesses are in bounds
+time, it can prove direct `program_id(axis)` partition accesses are in bounds
 and optimize the checks away entirely - no `unsafe` required:
 
 ```rust
@@ -385,13 +394,14 @@ fn gemm<
     x: &Tensor<E, { [M, K] }>,
     y: &Tensor<E, { [K, N] }>,
 ) {
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
     let mut tile_z = load_tile_mut(z);
-    let pid: (i32, i32, i32) = get_tile_block_id();
+    let pid_m = program_id(0);
+    let pid_n = program_id(1);
     for i in 0i32..(K / BK) {
-        let tile_x = part_x.load([pid.0, i]);
-        let tile_y = part_y.load([i, pid.1]);
+        let tile_x = part_x.load([pid_m, i]);
+        let tile_y = part_y.load([i, pid_n]);
         tile_z = mma(tile_x, tile_y, tile_z);
     }
     z.store(tile_z);
@@ -403,7 +413,7 @@ The key differences:
 - **`x: &Tensor<E, { [M, K] }>` and `y: &Tensor<E, { [K, N] }>`** — input dimensions are fully static instead of dynamic (`-1`). The compiler sees the exact shape of every tensor.
 - **No `unsafe`, no `unchecked_accesses`** — bounds checks are present in the source but the JIT compiler proves they are redundant and eliminates them during optimization.
 - **`M`, `N`, `K` are const generics** — they must be passed via `.generics()` at launch time, and every new combination creates a new compiled variant.
-- **`.const_grid(grid)`** — because all dimensions are static, the launch grid must be provided using `.const_grid()` rather than `.grid()`. The grid is computed from the output partition as usual (`let grid = z.grid()?`), but `.const_grid()` passes it as a compile-time constant so the JIT compiler can fold it into the generated code:
+- **`.const_grid(grid)`** — optional. The launch grid is inferred from the output partition as usual; `.const_grid()` additionally passes the grid as a compile-time constant, which gives the compiler exact bounds for `program_id(axis)` / `num_programs(axis)` and makes the grid part of the specialization key (each distinct grid is its own compiled variant). The grid is computed from the output partition (`let grid = z.grid()?`):
 
 ```rust
 let grid = z.grid()?;

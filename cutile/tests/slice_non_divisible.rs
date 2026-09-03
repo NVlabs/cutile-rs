@@ -25,15 +25,15 @@ mod test_kernels {
         b: &Tensor<f32, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
-        let tile_b = b.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
+        let tile_b = b.load_tile(shape![B], [pid]);
         out.store(tile_a + tile_b);
     }
 
     #[cutile::entry()]
     fn scale<const B: i32>(out: &mut Tensor<f32, { [B] }>, a: &Tensor<f32, { [-1] }>, scalar: f32) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
         let tile_s: Tile<f32, { [B] }> = scalar.broadcast(out.shape());
         out.store(tile_a * tile_s);
     }
@@ -45,7 +45,7 @@ mod test_kernels {
         a: &Tensor<f32, { [-1, -1] }>,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile_a = a.load_tile(const_shape![BM, BN], [pid.0, pid.1]);
+        let tile_a = a.load_tile(shape![BM, BN], [pid.0, pid.1]);
         out.store(tile_a);
     }
 
@@ -57,7 +57,7 @@ mod test_kernels {
         out: &mut Tensor<f32, { [BM, BN] }>,
         a: &Tensor<f32, { [-1, N] }>,
     ) {
-        let part_a = a.partition(const_shape![BM, BN]);
+        let part_a = a.partition(shape![BM, BN]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_a = part_a.load([pid.0, pid.1]);
         out.store(tile_a);
@@ -73,7 +73,7 @@ mod test_kernels {
         a: &Tensor<f32, { [N] }>,
     ) {
         let mut acc = load_tile_mut(out);
-        let part_a = a.partition(const_shape![B]);
+        let part_a = a.partition(shape![B]);
         for i in 0i32..NBLOCKS {
             let tile = part_a.load([i]);
             acc = acc + tile;
@@ -89,8 +89,8 @@ mod test_kernels {
         x: &Tensor<f32, { [-1, K] }>,
         y: &Tensor<f32, { [K, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let pid: (i32, i32, i32) = get_tile_block_id();
         let mut tile_z = load_tile_mut(z);
         for i in 0i32..(K / BK) {

@@ -192,8 +192,9 @@ let op = with_context(|ctx: &ExecutionContext| {
     let stream = ctx.get_cuda_stream();
 
     let dptr = unsafe {
-        let dptr = malloc_async(num_bytes, stream);
-        memcpy_htod_async(dptr, host_data.as_ptr(), num_elements, stream);
+        let dptr = malloc_async(num_bytes, stream).expect("device allocation");
+        memcpy_htod_async(dptr, host_data.as_ptr(), num_elements, stream)
+            .expect("host-to-device copy");
         dptr
     };
 
@@ -204,7 +205,7 @@ let dptr = op.await?;
 
 // Clean up: free the device memory on a stream.
 with_context(move |ctx: &ExecutionContext| {
-    unsafe { free_async(dptr, ctx.get_cuda_stream()) };
+    unsafe { free_async(dptr, ctx.get_cuda_stream()) }.expect("device free");
     value(())
 })
 .await?;
@@ -274,7 +275,7 @@ let function = Arc::new(module.load_function("gemm_kernel")?);
 | cuTile Python | cuTile Rust |
 |---------------|-------------|
 | `@ct.kernel` | `#[cutile::entry()]` |
-| `ct.load()` | `load_tile_like()` |
+| `ct.load()` | `x.load_like(z)` |
 | `ct.store()` | `tensor.store()` |
 | `ct.bid(0)` | Implicit via partition |
 | `ct.launch()` | Async operation + `.await` |

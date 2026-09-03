@@ -5,7 +5,7 @@
 
 //! Tile kernel compilation, caching, launching, and partitioning for CUDA device operations.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cuda_async::error::DeviceError;
 use cuda_core::DType;
 use cuda_core::{memcpy_dtoh_async, Function};
@@ -15,12 +15,11 @@ use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
     compile_bytecode_cached, env_flag_enabled, get_compiler_version, get_gpu_name,
     recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint, Stage2Source,
-    DEFAULT_OPT_LEVEL,
+    TileirasOptions,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
-use std::alloc::{alloc, Layout};
 use std::fs;
 use std::future::IntoFuture;
 use std::path::PathBuf;
@@ -62,11 +61,13 @@ fn record_jit_compile() {
 }
 
 use crate::error::*;
-use crate::tensor::{IntoPartition, IntoPartitionArc, Partition, Tensor};
+use crate::tensor::{
+    GridBound, IntoPartition, IntoPartitionArc, KernelInput, KernelOutput, Partition, Tensor,
+};
 
 pub use cuda_async::{
     device_buffer::*, device_context::*, device_future::*, device_operation::*, launch::*,
-    scheduling_policies::*,
+    predicate::*, scheduling_policies::*,
 };
 
 pub use cutile_compiler::compiler::utils::CompileOptions;
@@ -213,6 +214,16 @@ impl TileFunctionKeyBuilder {
 }
 
 impl TileFunctionKey {
+    /// The kernel's module name.
+    pub fn module_name(&self) -> &str {
+        &self.module_name
+    }
+
+    /// The kernel's function name.
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
+
     /// Start building a key with required `module_name` and `function_name`.
     /// All other fields default to empty / `None` / `default()`.
     pub fn builder(
@@ -371,8 +382,100 @@ pub fn _specialization_from_context<F: Fn() -> Module>(
 static KERNEL_CACHE: OnceLock<DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>> =
     OnceLock::new();
 
-pub fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>> {
+/// The process-global L1 cache. Crate-internal ONLY: exposing the raw
+/// `DashMap` publicly would hand out safe `.clear()`/`.remove()`/`.retain()`,
+/// which bypass the `unsafe` eviction gate below — safe code could unload a
+/// `Module` mid-launch (the exact UAF the gate prevents) or re-create the
+/// re-entrant `.retain()` deadlock. All external mutation must go through the
+/// `unsafe` eviction APIs.
+pub(crate) fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCell<CompiledKernel>>>
+{
     KERNEL_CACHE.get_or_init(DashMap::new)
+}
+
+/// Clears L1. Test-support only — `#[doc(hidden)]`, not public API, and
+/// `unsafe` for the same reason as the eviction APIs: it can unload a
+/// `Module` still executing on the GPU, so the caller must quiesce first.
+/// Tests control launch timing, so they satisfy that obligation.
+///
+/// # Safety
+/// See [`clear_kernel_cache`]: quiesce every stream that may run a cached
+/// kernel before calling.
+#[doc(hidden)]
+pub unsafe fn clear_kernel_cache_for_tests() {
+    get_kernel_cache().clear();
+}
+
+/// Removes every kernel from the process-global in-memory cache.
+///
+/// Entries removed here drop the cache's reference; the underlying CUDA
+/// module unloads (releasing its device memory) when the LAST holder
+/// drops, so host-side users are protected by refcount. What refcounts
+/// cannot see is the GPU: a launched kernel executes after the launch
+/// call returns. A tuning objective between trials is exactly the
+/// situation this API exists for: sweeps churn specializations by design,
+/// each holding device memory, while the cache is intentionally unbounded
+/// for steady-state engines (capacity policy lives in the L2 disk cache).
+///
+/// In-flight compiles are unaffected: a thread mid-compile holds its own
+/// `Arc` to its single-flight slot and completes into it; the next
+/// request for that key recompiles (or is served by the disk cache).
+///
+/// Returns the number of entries removed. Freed device bytes are not
+/// tracked host-side; per-module sizes are not observable through the
+/// driver's module API.
+///
+/// # Safety
+/// The caller must quiesce first: synchronize every stream that may still
+/// be running any cached kernel before calling. Unloading a `Module` whose
+/// grid is still executing on the device is undefined behavior, and host
+/// refcounts cannot observe in-flight GPU work — only the caller knows
+/// which streams are idle. This is why the eviction APIs are `unsafe`.
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn clear_kernel_cache() -> usize {
+    unsafe { retain_kernels(|_| false) }
+}
+
+/// Removes one specialization from the in-memory cache; returns whether
+/// it was present.
+///
+/// # Safety
+/// Same quiesce obligation as [`clear_kernel_cache`]: the caller must
+/// ensure no stream is still running this kernel before evicting it.
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn evict_kernel(key: &TileFunctionKey) -> bool {
+    get_kernel_cache().remove(key).is_some()
+}
+
+/// Keeps only specializations whose key satisfies `pred`; returns the
+/// number of entries removed.
+///
+/// `pred` may freely query the cache (`contains_cuda_function`,
+/// `evict_kernel`, or even trigger a compile): it runs with no cache lock
+/// held. Use the [`TileFunctionKey::module_name`]/
+/// [`TileFunctionKey::function_name`] accessors to scope a predicate to
+/// your own kernel.
+///
+/// # Safety
+/// Same quiesce obligation as [`clear_kernel_cache`].
+#[cfg(feature = "experimental-tune")]
+pub unsafe fn retain_kernels(mut pred: impl FnMut(&TileFunctionKey) -> bool) -> usize {
+    let cache = get_kernel_cache();
+    // Snapshot every key first, fully draining the iterator so no shard lock
+    // is held, THEN evaluate `pred` and remove. Evaluating `pred` inside
+    // `DashMap::retain` (or during iteration) holds a shard lock, so the
+    // instant the predicate re-enters the cache — a lookup, an evict, a
+    // compile — it self-deadlocks that shard, wedging every subsequent JIT
+    // lookup in the process. Useful predicates ("evict only my kernel's
+    // specializations") want exactly that re-entry.
+    let keys: Vec<TileFunctionKey> = cache.iter().map(|entry| entry.key().clone()).collect();
+    let mut removed = 0;
+    for key in keys {
+        if !pred(&key) && cache.remove(&key).is_some() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Get (or create) the single-flight compilation slot for `key`.
@@ -407,8 +510,8 @@ pub fn contains_cuda_function(key: &TileFunctionKey) -> bool {
 
 /// Reads Tile IR text from a file.
 ///
-/// This helper function reads intermediate representation files from disk, typically
-/// for debugging purposes when using `use_debug_mlir` or similar options.
+/// This helper function reads intermediate representation files from disk, the
+/// counterpart of the `dump_mlir_dir` entry attribute's [`write_ir`].
 ///
 /// ## Parameters
 ///
@@ -438,9 +541,11 @@ fn read_ir(path: String) -> Result<String, std::io::Error> {
 /// - `dir`: Directory to write the file to
 /// - `contents`: IR contents to write
 ///
-/// ## Panics
+/// ## Errors
 ///
-/// Panics if the file cannot be written.
+/// Returns an error if the file cannot be written (e.g. the directory does not
+/// exist or is not writable). This runs inside the single-flight compile, so a
+/// panic here would poison the launch instead of failing it.
 fn write_ir(
     module_name: &str,
     function_name: &str,
@@ -448,11 +553,17 @@ fn write_ir(
     extension: &str,
     dir: &str,
     contents: &str,
-) {
+) -> Result<(), Error> {
     let filename = format!("{module_name}_{function_name}_{cache_hash_str}.{extension}");
     let path = PathBuf::from(dir).join(filename);
-    fs::write(path.clone(), contents).unwrap_or_else(|_| panic!("Failed to write {path:?}")); // Writes the string as bytes
+    fs::write(&path, contents).map_err(|e| {
+        Error::Anyhow(anyhow::anyhow!(
+            "failed to write the IR dump for {module_name}::{function_name} to {path:?} \
+             (dump_mlir_dir = {dir:?}): {e}"
+        ))
+    })?;
     println!("IR written to {path:?}");
+    Ok(())
 }
 
 // ── Single-flight compilation dedup is handled by once_cell::sync::OnceCell ──
@@ -498,7 +609,7 @@ fn compile_and_load_kernel(
         scalar_hints.iter().map(|x| (x.0.as_str(), &x.1)).collect();
 
     let stage1_start = std::time::Instant::now();
-    let (tile_module, validator) = {
+    let (tile_module, validator, check_stats) = {
         let compiler = CUDATileFunctionCompiler::new(
             modules,
             module_name,
@@ -511,9 +622,21 @@ fn compile_and_load_kernel(
             gpu_name.to_string(),
             compile_options,
         )?;
-        let validator = Arc::new(compiler.get_validator());
         let tile_module = compiler.compile()?;
-        (tile_module, validator)
+        // AFTER compile, not before: the launch-check accumulator fills
+        // DURING compilation, and this snapshot is the one the generated
+        // launcher enforces. Taken early, every hoisted check is silently
+        // dropped at launch while the compiler has already discharged the
+        // in-kernel assert on its promise — out-of-bounds accesses then run
+        // unchecked (caught by the differential placement harness; pinned by
+        // `launch_checks_are_enforced_at_launch`).
+        let validator = Arc::new(compiler.get_validator());
+        let check_stats = (
+            compiler.check_stats.discharged.get(),
+            compiler.check_stats.hoisted.get(),
+            compiler.check_stats.in_place.get(),
+        );
+        (tile_module, validator, check_stats)
     };
     let stage1_ms = stage1_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -540,13 +663,14 @@ fn compile_and_load_kernel(
                     "mlir",
                     path.as_str(),
                     ir_text.as_str(),
-                );
+                )?;
             }
         }
     }
     let (bytecode, bc_version) = serialize_tile_ir_bytecode(&tile_module)?;
+    let tileiras_opts = TileirasOptions::from_compile_options(compile_options);
     let (cubin, mut stage2_source) =
-        compile_bytecode_cached(&bytecode, bc_version, gpu_name, DEFAULT_OPT_LEVEL)?;
+        compile_bytecode_cached(&bytecode, bc_version, gpu_name, &tileiras_opts)?;
     let mut stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
 
     // A retry recompile (below) runs inside the stage-3 window but is really
@@ -554,7 +678,11 @@ fn compile_and_load_kernel(
     // then reports source=tileiras) instead of inflating stage3.
     let mut recompile_ms = 0.0;
     let stage3_start = std::time::Instant::now();
-    let module = match load_module_from_bytes(&cubin, device_id) {
+    // SAFETY: `cubin` is a complete image. It either came straight out of
+    // tileiras in this process, or from the disk cache, whose read path
+    // verifies the entry's SHA-256 payload checksum before handing the bytes
+    // back (a torn or corrupt entry is a miss, never a load).
+    let module = match unsafe { load_module_from_bytes(&cubin, device_id) } {
         Ok(module) => module,
         // A disk-served cubin the driver rejects (partial write the checksum
         // missed, driver/toolkit skew, …) must not fail the launch: evict that
@@ -574,11 +702,12 @@ fn compile_and_load_kernel(
                     &key,
                     &bytecode,
                     gpu_name,
-                    DEFAULT_OPT_LEVEL,
+                    &tileiras_opts,
                 )?;
                 recompile_ms = recompile_start.elapsed().as_secs_f64() * 1000.0;
                 stage2_ms += recompile_ms;
-                load_module_from_bytes(&cubin, device_id)?
+                // SAFETY: a fresh tileiras compile, complete by construction.
+                unsafe { load_module_from_bytes(&cubin, device_id) }?
             }
             Stage2Source::Tileiras => return Err(e.into()),
         },
@@ -602,7 +731,10 @@ fn compile_and_load_kernel(
             Stage2Source::DiskCache { .. } => "disk",
         };
         eprintln!(
-            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage2_source={stage2_source} stage3_ms={stage3_ms:.3} generics={}",
+            "CUTILE_JIT_TIMING module={module_name} function={function_name} key={key_str} stage1_ms={stage1_ms:.3} stage2_ms={stage2_ms:.3} stage2_source={stage2_source} stage3_ms={stage3_ms:.3} checks_discharged={} checks_hoisted={} checks_in_place={} generics={}",
+            check_stats.0,
+            check_stats.1,
+            check_stats.2,
             generics.join(","),
         );
     }
@@ -625,36 +757,49 @@ fn compile_and_load_kernel(
 /// ensures only one thread performs compilation while others block. Once initialization completes,
 /// all threads see the same cached result.
 ///
-/// The caching key is based on the module name, function name, type generics, stride arguments,
-/// and compile-time grid dimensions, ensuring correct reuse across different specializations.
+/// The caching key is a [`TileFunctionKey`]: module and function name, generics, stride and
+/// specialization arguments, scalar hints, optional constant grid, compile options, source
+/// hash, and the device/toolchain identity, ensuring correct reuse across specializations.
 ///
 /// ## Arguments
 ///
 /// * `ctx` - Execution context containing device information
-/// * `module_asts` - Closure that produces the AST modules to compile
+/// * `kernel_ast` - Closure producing the kernel's module AST (the `__module_ast_self`
+///   generated by `#[cutile::module]`); called only on a cache miss
 /// * `module_name` - Name of the module containing the function
 /// * `function_name` - Name of the function to compile
 /// * `function_entry` - Entry point name in the compiled CUDA code
 /// * `function_generics` - Type and const generic arguments (e.g., `["f32", "256"]`)
-/// * `stride_args` - Stride information for tensor arguments
+/// * `stride_args` - Per tensor argument, which strides are 1 (`1`) or unknown (`-1`)
+/// * `spec_args` - Per tensor argument, its [`SpecializationBits`]
+/// * `scalar_hints` - Divisibility hints for integer scalar and pointer arguments
 /// * `const_grid` - Optional compile-time constant grid dimensions
+/// * `compile_options` - Compiler and tileiras options for this specialization
+/// * `source_hash` - The kernel module's `_SOURCE_HASH`
+///
+/// Returns the loaded [`Function`] together with the [`Validator`] the launcher checks the
+/// runtime arguments against.
 ///
 /// ## Examples
 ///
 /// ```rust,ignore
-/// use cutile::tile_kernel::compile_from_context;
+/// use cutile::tile_kernel::{compile_from_context, CompileOptions};
 ///
-/// let ctx = get_execution_context();
-/// let function = compile_from_context(
+/// let ctx = ExecutionContext::new(stream);
+/// let (function, validator) = compile_from_context(
 ///     &ctx,
-///     || vec![my_module_ast()],
+///     my_module::__module_ast_self,
 ///     "my_module",
 ///     "my_function",
-///     "my_function_kernel",
+///     "my_function_entry",
 ///     vec!["f32".to_string(), "128".to_string()],
+///     vec![("x".to_string(), vec![1])],
+///     vec![("x".to_string(), x.spec().clone())],
 ///     vec![],
-///     None
-/// );
+///     None,
+///     CompileOptions::default(),
+///     my_module::_SOURCE_HASH,
+/// )?;
 /// ```
 #[allow(clippy::too_many_arguments)]
 pub fn compile_from_context<F: Fn() -> Module>(
@@ -756,6 +901,156 @@ pub fn validate_grids(
     }
 }
 
+/// Validates the launch grid against every binding's [`GridBound`]:
+/// exact-coverage bindings must equal the grid; partial-coverage
+/// (`partition_prefix`) bindings must bound it per axis. `launch <= bound`
+/// per axis is the sound direction — a per-axis prefix embeds identically
+/// into the block grid, uncovered blocks are simply never visited — while
+/// `launch > bound` on ANY axis is genuine out-of-bounds and always an
+/// error. Per-axis, never total-count: delinearizing against a different
+/// grid shape would remap CTAs to the wrong blocks.
+pub fn validate_grid_bounds(grid: (u32, u32, u32), bounds: &[GridBound]) -> Result<(), Error> {
+    for bound in bounds {
+        let GridBound::Exact(expected) = bound else {
+            continue;
+        };
+        if *expected != grid {
+            return Err(Error::KernelLaunch(KernelLaunchError(format!(
+                "launch grid {:?} does not match the inferred partition grid {:?}",
+                grid, expected
+            ))));
+        }
+    }
+    for bound in bounds {
+        let GridBound::AtMost(max) = bound else {
+            continue;
+        };
+        let launch = [grid.0, grid.1, grid.2];
+        let max_axes = [max.0, max.1, max.2];
+        if let Some(axis) = (0..3).find(|&k| launch[k] > max_axes[k]) {
+            return Err(Error::KernelLaunch(KernelLaunchError(format!(
+                "launch grid {:?} exceeds the partial-coverage partition grid {:?} on axis {axis}",
+                grid, max
+            ))));
+        }
+    }
+    Ok(())
+}
+
+/// Runs the full set of launch-time checks before `cuLaunchKernel`: the
+/// built-in grid family (all partition grids match the launch grid) plus any
+/// compiler-emitted checks hoisted out of the device kernel.
+///
+/// `param_shapes[i]` is the runtime extent vector of the i-th kernel parameter
+/// (empty for non-tensor params). This is the host end of launch-time check
+/// hoisting: the compiler evacuated these checks from the kernel, so they run
+/// here once per launch instead of per-thread on the device. `validate_grids`
+/// is folded in as the first, always-present family; compiler-emitted checks
+/// are canonical [`Predicate`]s evaluated against the parameter extents.
+pub fn validate_launch(
+    launch_checks: &[LaunchCheck],
+    grid: (u32, u32, u32),
+    partition_bounds: &[GridBound],
+    param_shapes: &[Vec<i32>],
+    view_shapes: &[Vec<i32>],
+) -> Result<(), Error> {
+    // Built-in family: launch grid vs. partition grid bounds.
+    validate_grid_bounds(grid, partition_bounds)?;
+    // Compiler-emitted families (empty unless a kernel hoisted a check).
+    for check in launch_checks {
+        evaluate_launch_check(check, param_shapes, view_shapes, grid)?;
+    }
+    Ok(())
+}
+
+/// Runs only the compiler-emitted launch checks (the grid family is already
+/// validated by `infer_launch_grid`). Called from the generated launcher after
+/// grid inference, both arrays indexed in signature order (empty for
+/// non-tensor params):
+/// - `param_shapes[i]` — the i-th parameter's *root* extents (the whole
+///   tensor). Resolves [`Atom::Dim`], the frame declared `preconditions` are
+///   stated in.
+/// - `view_shapes[i]` — the i-th parameter's *kernel-visible view* extents:
+///   the partition slab for a `&mut Tensor` output, the whole tensor
+///   otherwise. Resolves [`Atom::ViewExtent`].
+/// - `launch_grid` — the grid the kernel will actually be launched with.
+///   Resolves [`Atom::NumTileBlocks`]: the block-id axiom rung discharges
+///   `tile_block_id(k)` accesses in the kernel against a launch check over
+///   this exact grid, so validating any other grid would unsound the rung.
+pub fn validate_launch_checks(
+    launch_checks: &[LaunchCheck],
+    param_shapes: &[Vec<i32>],
+    view_shapes: &[Vec<i32>],
+    launch_grid: (u32, u32, u32),
+) -> Result<(), Error> {
+    for check in launch_checks {
+        evaluate_launch_check(check, param_shapes, view_shapes, launch_grid)?;
+    }
+    Ok(())
+}
+
+/// Evaluates one hoisted [`LaunchCheck`] by interpreting its canonical
+/// [`Predicate`] against the runtime parameter extents, each atom against the
+/// array holding its frame. Fails closed: a predicate whose atoms cannot be
+/// resolved (a missing parameter/axis, or a non-launch-known `Iv` atom that
+/// should never appear here) is an error, not a silent skip.
+fn evaluate_launch_check(
+    check: &LaunchCheck,
+    param_shapes: &[Vec<i32>],
+    view_shapes: &[Vec<i32>],
+    launch_grid: (u32, u32, u32),
+) -> Result<(), Error> {
+    // Resolve each atom to its runtime value, in the atom's own frame.
+    let resolve_atom = |atom: &Atom| -> Option<i64> {
+        match atom {
+            Atom::Dim { param, axis } => param_shapes
+                .get(*param)
+                .and_then(|shape| shape.get(*axis))
+                .map(|&extent| extent as i64),
+            Atom::ViewExtent { param, axis } => view_shapes
+                .get(*param)
+                .and_then(|shape| shape.get(*axis))
+                .map(|&extent| extent as i64),
+            // ceil(root extent / tile). The mint site guarantees tile >= 1;
+            // fail closed on a malformed atom rather than dividing by zero.
+            Atom::TileCount { param, axis, tile } => {
+                if *tile < 1 {
+                    return None;
+                }
+                param_shapes
+                    .get(*param)
+                    .and_then(|shape| shape.get(*axis))
+                    .map(|&extent| (extent as i64 + *tile as i64 - 1) / *tile as i64)
+            }
+            // The grid axis extents: the host fixes the grid before launch,
+            // and the block-id axiom rung's checks are stated over it. Only
+            // three grid axes exist; anything else fails closed.
+            Atom::NumTileBlocks(k) => match k {
+                0 => Some(launch_grid.0 as i64),
+                1 => Some(launch_grid.1 as i64),
+                2 => Some(launch_grid.2 as i64),
+                _ => None,
+            },
+            // A device-runtime induction variable and the block-id register
+            // are not launch-known; they never appear in a launch check (the
+            // axiom rung replaces the block id with its grid bound), so fail
+            // closed if one somehow does.
+            Atom::Iv(_) | Atom::TileBlockId(_) => None,
+        }
+    };
+    match check.predicate.eval(&resolve_atom) {
+        Some(true) => Ok(()),
+        Some(false) => Err(Error::KernelLaunch(KernelLaunchError(format!(
+            "launch check failed: {}",
+            check.cause
+        )))),
+        None => Err(Error::KernelLaunch(KernelLaunchError(format!(
+            "launch check has unresolved operands (extent unavailable at launch): {}",
+            check.cause
+        )))),
+    }
+}
+
 /// Infers the launch grid for a kernel from partitioned tensor inputs.
 ///
 /// If a grid is explicitly specified (non-zero), it is used directly. Otherwise, the grid
@@ -768,24 +1063,36 @@ pub fn validate_grids(
 /// grids from different inputs don't match.
 pub fn infer_launch_grid(
     grid: (u32, u32, u32),
-    inferred_grids: &[(u32, u32, u32)],
+    bounds: &[GridBound],
 ) -> Result<(u32, u32, u32), Error> {
+    let exact: Vec<(u32, u32, u32)> = bounds
+        .iter()
+        .filter_map(|b| match b {
+            GridBound::Exact(g) => Some(*g),
+            GridBound::AtMost(_) => None,
+        })
+        .collect();
     if grid != (0, 0, 0) {
         // A launch grid was specified.
-        if !inferred_grids.is_empty() {
-            validate_grids(grid, inferred_grids).with_context(|| {
-                "Specified launch grid does not match inferred tensor partition grid"
-            })?;
-        }
+        validate_grid_bounds(grid, bounds)?;
         return Ok(grid);
     }
-    // Try to infer launch grid.
-    if inferred_grids.is_empty() {
-        return kernel_launch_error_result("Launch grid required.");
+    // Try to infer the launch grid. Only an EXACT binding can define it: a
+    // partial-coverage binding is an upper bound, and inferring the bound
+    // itself would silently reconstruct full coverage — the thing the
+    // caller opted out of.
+    if exact.is_empty() {
+        if bounds.is_empty() {
+            return kernel_launch_error_result("Launch grid required.");
+        }
+        return kernel_launch_error_result(
+            "Launch grid required: a partial-coverage (partition_prefix) binding \
+             only bounds the grid; specify the grid explicitly or bind with \
+             partition().",
+        );
     }
-    let grid = inferred_grids[0];
-    validate_grids(grid, inferred_grids)
-        .with_context(|| "Inferred tensor partition grids do not match")?;
+    let grid = exact[0];
+    validate_grid_bounds(grid, bounds)?;
     Ok(grid)
 }
 
@@ -913,12 +1220,9 @@ where
     /// Sets the runtime compile options (occupancy, num_cta_in_cga).
     fn compile_options(self, options: CompileOptions) -> Self;
     /// Infers the launch grid from partitioned tensor inputs, or uses the explicit grid.
-    fn infer_launch_grid(
-        &self,
-        inferred_grids: &[(u32, u32, u32)],
-    ) -> Result<(u32, u32, u32), Error> {
+    fn infer_launch_grid(&self, bounds: &[GridBound]) -> Result<(u32, u32, u32), Error> {
         let grid = self.get_launch_grid();
-        infer_launch_grid(grid, inferred_grids)
+        infer_launch_grid(grid, bounds)
     }
     /// Returns the currently configured launch grid dimensions.
     fn get_launch_grid(&self) -> (u32, u32, u32);
@@ -1251,6 +1555,244 @@ where
     UnwrapPartition { op }
 }
 
+// Partitioning and unpartitioning allocate nothing themselves, so they are
+// graph-recordable exactly when the op they wrap is.
+impl<const RANK: usize, I, DI> GraphNode for DeviceOperationPartition<RANK, I, DI>
+where
+    I: Send + IntoPartition + IntoPartitionArc,
+    DI: DeviceOp<Output = I> + GraphNode,
+{
+}
+
+impl<I: Send, DI> GraphNode for UnwrapPartition<I, DI> where
+    DI: DeviceOp<Output = Partition<I>> + GraphNode
+{
+}
+
+// ── Launcher input combinators ──────────────────────────────────────────────
+//
+// The generated launcher `my_kernel(arg0, arg1, ..)` turns each argument into
+// a DeviceOp (`IntoDeviceOp`), applies KernelOutput::prepare / KernelInput::
+// prepare to tensor params, and hands the launcher struct one op producing the
+// whole argument tuple. These three types are that op, spelled with nameable
+// types so the launcher's return type can carry it: `Launcher<.., KernelArgs<
+// (PrepareOutput<Op0, T>, PrepareInput<Op1, T>, Op2)>>`. Each implements
+// `GraphNode` only when the ops it wraps do, which is what lets
+// `impl GraphNode for Launcher<.., DI> where DI: GraphNode` hold for
+// pre-allocated inputs (`&Tensor`, `Arc<Tensor>`, `&TensorView`, partitions of
+// existing tensors, plain values — all `Value<T>`) and fail to hold for an
+// allocating op such as `api::zeros(..).partition(..)`, whose allocation node
+// would return a different address on graph replay.
+
+/// Applies [`KernelInput::prepare`] to the output of `DI`.
+pub struct PrepareInput<DI, T> {
+    op: DI,
+    _elem: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<DI, T> PrepareInput<DI, T> {
+    pub fn new(op: DI) -> Self {
+        Self {
+            op,
+            _elem: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: DType, K: KernelInput<T>, DI: DeviceOp<Output = K>> DeviceOp for PrepareInput<DI, T> {
+    type Output = K::Stored;
+
+    unsafe fn execute(self, context: &ExecutionContext) -> Result<K::Stored, DeviceError> {
+        Ok(K::prepare(self.op.execute(context)?))
+    }
+}
+
+impl<T: DType, K: KernelInput<T>, DI: DeviceOp<Output = K> + GraphNode> GraphNode
+    for PrepareInput<DI, T>
+{
+}
+
+impl<T: DType, K: KernelInput<T>, DI: DeviceOp<Output = K>> IntoFuture for PrepareInput<DI, T> {
+    type Output = Result<K::Stored, DeviceError>;
+    type IntoFuture = DeviceFuture<K::Stored, PrepareInput<DI, T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
+/// Applies [`KernelOutput::prepare`] to the output of `DI`.
+pub struct PrepareOutput<DI, T> {
+    op: DI,
+    _elem: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<DI, T> PrepareOutput<DI, T> {
+    pub fn new(op: DI) -> Self {
+        Self {
+            op,
+            _elem: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: DType, K: KernelOutput<T>, DI: DeviceOp<Output = K>> DeviceOp for PrepareOutput<DI, T> {
+    type Output = K::Stored;
+
+    unsafe fn execute(self, context: &ExecutionContext) -> Result<K::Stored, DeviceError> {
+        Ok(K::prepare(self.op.execute(context)?))
+    }
+}
+
+impl<T: DType, K: KernelOutput<T>, DI: DeviceOp<Output = K> + GraphNode> GraphNode
+    for PrepareOutput<DI, T>
+{
+}
+
+impl<T: DType, K: KernelOutput<T>, DI: DeviceOp<Output = K>> IntoFuture for PrepareOutput<DI, T> {
+    type Output = Result<K::Stored, DeviceError>;
+    type IntoFuture = DeviceFuture<K::Stored, PrepareOutput<DI, T>>;
+    fn into_future(self) -> Self::IntoFuture {
+        match with_default_device_policy(|policy| {
+            let stream = policy.next_stream()?;
+            Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+        }) {
+            Ok(Ok(future)) => future,
+            Ok(Err(e)) => DeviceFuture::failed(e),
+            Err(e) => DeviceFuture::failed(e),
+        }
+    }
+}
+
+/// Executes a tuple of device operations in order and yields the tuple of
+/// their outputs — the argument op of a generated kernel launcher.
+pub struct KernelArgs<Ops>(pub Ops);
+
+macro_rules! impl_kernel_args {
+    ($(($op:ident, $out:ident)),*) => {
+        impl<$($op: DeviceOp),*> DeviceOp for KernelArgs<($($op,)*)> {
+            type Output = ($(<$op as DeviceOp>::Output,)*);
+
+            #[allow(unused_variables, clippy::unused_unit)]
+            unsafe fn execute(
+                self,
+                context: &ExecutionContext,
+            ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+                let ($($out,)*) = self.0;
+                Ok(($($out.execute(context)?,)*))
+            }
+        }
+
+        impl<$($op: GraphNode),*> GraphNode for KernelArgs<($($op,)*)> {}
+
+        impl<$($op: DeviceOp),*> IntoFuture for KernelArgs<($($op,)*)> {
+            type Output = Result<<Self as DeviceOp>::Output, DeviceError>;
+            type IntoFuture = DeviceFuture<<Self as DeviceOp>::Output, Self>;
+            fn into_future(self) -> Self::IntoFuture {
+                match with_default_device_policy(|policy| {
+                    let stream = policy.next_stream()?;
+                    Ok(DeviceFuture::scheduled(self, ExecutionContext::new(stream)))
+                }) {
+                    Ok(Ok(future)) => future,
+                    Ok(Err(e)) => DeviceFuture::failed(e),
+                    Err(e) => DeviceFuture::failed(e),
+                }
+            }
+        }
+    };
+}
+
+// Emit the `KernelArgs` impls for every arity from 0 up to the number of
+// pairs listed below. Entry kernels in the workspace currently go up to 44
+// parameters (`attention_decode_kernel_grouped` in cutile-kernels); 64 leaves
+// headroom, and a kernel beyond it fails to compile at the launcher with
+// "the trait bound `KernelArgs<...>: DeviceOp` is not satisfied".
+macro_rules! impl_kernel_args_cascade {
+    (@acc [$($acc:tt),*]) => {
+        impl_kernel_args!($($acc),*);
+    };
+    (@acc [$($acc:tt),*] $next:tt $(, $rest:tt)*) => {
+        impl_kernel_args!($($acc),*);
+        impl_kernel_args_cascade!(@acc [$($acc,)* $next] $($rest),*);
+    };
+    ($($pairs:tt),* $(,)?) => {
+        impl_kernel_args_cascade!(@acc [] $($pairs),*);
+    };
+}
+
+impl_kernel_args_cascade!(
+    (A0, a0),
+    (A1, a1),
+    (A2, a2),
+    (A3, a3),
+    (A4, a4),
+    (A5, a5),
+    (A6, a6),
+    (A7, a7),
+    (A8, a8),
+    (A9, a9),
+    (A10, a10),
+    (A11, a11),
+    (A12, a12),
+    (A13, a13),
+    (A14, a14),
+    (A15, a15),
+    (A16, a16),
+    (A17, a17),
+    (A18, a18),
+    (A19, a19),
+    (A20, a20),
+    (A21, a21),
+    (A22, a22),
+    (A23, a23),
+    (A24, a24),
+    (A25, a25),
+    (A26, a26),
+    (A27, a27),
+    (A28, a28),
+    (A29, a29),
+    (A30, a30),
+    (A31, a31),
+    (A32, a32),
+    (A33, a33),
+    (A34, a34),
+    (A35, a35),
+    (A36, a36),
+    (A37, a37),
+    (A38, a38),
+    (A39, a39),
+    (A40, a40),
+    (A41, a41),
+    (A42, a42),
+    (A43, a43),
+    (A44, a44),
+    (A45, a45),
+    (A46, a46),
+    (A47, a47),
+    (A48, a48),
+    (A49, a49),
+    (A50, a50),
+    (A51, a51),
+    (A52, a52),
+    (A53, a53),
+    (A54, a54),
+    (A55, a55),
+    (A56, a56),
+    (A57, a57),
+    (A58, a58),
+    (A59, a59),
+    (A60, a60),
+    (A61, a61),
+    (A62, a62),
+    (A63, a63)
+);
+
 // ToHostVec
 
 /// A device operation that copies a tensor from device memory to a host `Vec<T>`.
@@ -1276,10 +1818,26 @@ where
         let tensor = self.op.execute(context)?;
         let cu_deviceptr = tensor.cu_deviceptr();
         let size = tensor.size();
-        let layout = Layout::array::<T>(size).expect("overflow cannot happen");
-        let async_ptr = unsafe { alloc(layout).cast::<T>() };
-        memcpy_dtoh_async(async_ptr, cu_deviceptr, size, context.get_cuda_stream());
-        Ok(unsafe { Vec::from_raw_parts(async_ptr, size, size) })
+        // The `Vec` owns the host buffer from the start, so an early return
+        // frees it, and unlike a bare `alloc` it is well-defined for a
+        // zero-size request and never yields null.
+        let mut host = Vec::<T>::with_capacity(size);
+        if size > 0 {
+            unsafe {
+                memcpy_dtoh_async(
+                    host.as_mut_ptr(),
+                    cu_deviceptr,
+                    size,
+                    context.get_cuda_stream(),
+                )
+            }?;
+        }
+        // SAFETY: `cuMemcpyDtoHAsync` into pageable host memory (a `Vec`'s
+        // heap buffer is pageable) returns only once the copy has completed,
+        // so all `size` elements are initialized here, and `size` is exactly
+        // the capacity reserved above.
+        unsafe { host.set_len(size) };
+        Ok(host)
     }
 }
 
@@ -1313,6 +1871,112 @@ pub trait ToHostVecOp<T: DType> {
 }
 
 impl<T: DType, DI> ToHostVecOp<T> for DI where DI: DeviceOp<Output = Tensor<T>> {}
+
+#[cfg(test)]
+mod launch_check_tests {
+    use super::*;
+
+    fn nonzero(param: usize, axis: usize) -> LaunchCheck {
+        LaunchCheck {
+            predicate: Predicate::nonzero(Term::atom(Atom::Dim { param, axis })),
+            cause: "extent > 0".to_string(),
+        }
+    }
+
+    fn view_nonzero(param: usize, axis: usize) -> LaunchCheck {
+        LaunchCheck {
+            predicate: Predicate::nonzero(Term::atom(Atom::ViewExtent { param, axis })),
+            cause: "view extent > 0".to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_checks_run_only_the_grid_family() {
+        // Matching grids pass; no compiler checks means no extent evaluation.
+        assert!(validate_launch(&[], (4, 1, 1), &[GridBound::Exact((4, 1, 1))], &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn grid_family_still_rejects_mismatched_partition_grid() {
+        assert!(validate_launch(&[], (4, 1, 1), &[GridBound::Exact((2, 1, 1))], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn dim_nonzero_passes_for_positive_extent() {
+        let shapes = vec![vec![128, 256]];
+        assert!(validate_launch(&[nonzero(0, 0)], (1, 1, 1), &[], &shapes, &[]).is_ok());
+    }
+
+    #[test]
+    fn dim_nonzero_rejects_zero_extent() {
+        let shapes = vec![vec![0, 256]];
+        assert!(validate_launch(&[nonzero(0, 0)], (1, 1, 1), &[], &shapes, &[]).is_err());
+    }
+
+    #[test]
+    fn dim_nonzero_fails_closed_on_missing_parameter() {
+        // Check references param 1 axis 0, but only one param was supplied.
+        let shapes = vec![vec![128]];
+        assert!(validate_launch(&[nonzero(1, 0)], (1, 1, 1), &[], &shapes, &[]).is_err());
+    }
+
+    #[test]
+    fn each_atom_resolves_against_its_own_frame() {
+        // Root says 256 rows; the kernel-visible view (the per-CTA slab) says
+        // zero. A root-frame check passes while the view-frame check rejects:
+        // the frames are not interchangeable, and the atom picks the array.
+        let roots = vec![vec![256, 256]];
+        let views = vec![vec![0, 256]];
+        assert!(validate_launch(&[nonzero(0, 0)], (1, 1, 1), &[], &roots, &views).is_ok());
+        assert!(validate_launch(&[view_nonzero(0, 0)], (1, 1, 1), &[], &roots, &views).is_err());
+    }
+
+    #[test]
+    fn view_atoms_fail_closed_without_view_shapes() {
+        let roots = vec![vec![256, 256]];
+        assert!(validate_launch(&[view_nonzero(0, 0)], (1, 1, 1), &[], &roots, &[]).is_err());
+    }
+
+    #[test]
+    fn prefix_bound_admits_a_per_axis_prefix_and_nothing_more() {
+        use GridBound::{AtMost, Exact};
+        // Equal and per-axis-smaller launches pass; exceeding ANY axis fails.
+        assert!(validate_grid_bounds((3, 2, 1), &[AtMost((3, 2, 1))]).is_ok());
+        assert!(validate_grid_bounds((2, 2, 1), &[AtMost((3, 2, 1))]).is_ok());
+        assert!(validate_grid_bounds((2, 1, 1), &[AtMost((3, 2, 1))]).is_ok());
+        assert!(validate_grid_bounds((4, 1, 1), &[AtMost((3, 2, 1))]).is_err());
+        assert!(validate_grid_bounds((1, 3, 1), &[AtMost((3, 2, 1))]).is_err());
+        // Per-axis, never total-count: 6 = 3*2 total blocks but the wrong
+        // shape must be rejected (delinearization would remap CTAs).
+        assert!(validate_grid_bounds((6, 1, 1), &[AtMost((3, 2, 1))]).is_err());
+        // Exact bindings keep strict equality even alongside a prefix one.
+        assert!(validate_grid_bounds((2, 1, 1), &[Exact((3, 1, 1)), AtMost((3, 1, 1))]).is_err());
+        assert!(validate_grid_bounds((3, 1, 1), &[Exact((3, 1, 1)), AtMost((4, 1, 1))]).is_ok());
+    }
+
+    #[test]
+    fn prefix_bound_cannot_define_the_launch_grid() {
+        use GridBound::{AtMost, Exact};
+        // Inference needs an exact binding; a bound alone is not a grid.
+        let err = infer_launch_grid((0, 0, 0), &[AtMost((3, 1, 1))]).unwrap_err();
+        assert!(
+            err.to_string().contains("partial-coverage"),
+            "the error should say why inference refused: {err}"
+        );
+        // With an exact sibling, inference works and the bound still gates.
+        assert_eq!(
+            infer_launch_grid((0, 0, 0), &[Exact((3, 1, 1)), AtMost((4, 1, 1))]).unwrap(),
+            (3, 1, 1)
+        );
+        assert!(infer_launch_grid((0, 0, 0), &[Exact((3, 1, 1)), AtMost((2, 1, 1))]).is_err());
+        // An explicit grid validates against both kinds.
+        assert_eq!(
+            infer_launch_grid((2, 1, 1), &[AtMost((3, 1, 1))]).unwrap(),
+            (2, 1, 1)
+        );
+        assert!(infer_launch_grid((4, 1, 1), &[AtMost((3, 1, 1))]).is_err());
+    }
+}
 
 #[cfg(test)]
 mod tests {

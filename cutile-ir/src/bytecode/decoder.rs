@@ -94,9 +94,9 @@ pub fn decode_bytecode(data: &[u8]) -> Result<String> {
         }
     }
 
-    // Debug section (just report size for now).
+    // Debug section.
     if let Some(payload) = sections.get(Section::Debug as u8) {
-        writeln!(out, "=== Debug ({} bytes) ===", payload.len()).unwrap();
+        parse_debug_section(payload, &strings, &mut out)?;
     }
 
     Ok(out)
@@ -276,6 +276,130 @@ impl<'a> Reader<'a> {
 // =========================================================================
 // String section parser
 // =========================================================================
+
+/// Parses and pretty-prints the Debug section: per-function attribute-id
+/// lists plus the interned attribute table (tag byte + varint fields; see
+/// the writer's `write_debug_section` for the layout).
+fn parse_debug_section(payload: &[u8], strings: &[String], out: &mut String) -> Result<()> {
+    use super::enums::DebugTag;
+
+    let mut r = Reader::new(payload);
+    // Counts come from attacker-controllable varints: cap pre-allocation by
+    // what the payload could physically hold, so a huge count fails at the
+    // read below instead of aborting on allocation.
+    let cap = |n: usize| n.min(payload.len());
+    let num_functions = r.read_varint()? as usize;
+    r.skip_padding(4)?;
+    let mut index_offsets = Vec::with_capacity(cap(num_functions));
+    for _ in 0..num_functions {
+        index_offsets.push(r.read_le_u32()? as usize);
+    }
+    let num_indices = r.read_varint()? as usize;
+    r.skip_padding(8)?;
+    let mut attr_ids = Vec::with_capacity(cap(num_indices));
+    for _ in 0..num_indices {
+        let bytes = r.read_bytes(8)?;
+        attr_ids.push(u64::from_le_bytes(bytes.try_into().unwrap()));
+    }
+
+    let attr_count = r.read_varint()? as usize;
+    r.skip_padding(4)?;
+    let mut attr_offsets = Vec::with_capacity(cap(attr_count));
+    for _ in 0..attr_count {
+        attr_offsets.push(r.read_le_u32()? as usize);
+    }
+    let attr_data = r.read_bytes(r.remaining())?;
+
+    writeln!(out, "=== Debug ({num_functions} functions) ===").unwrap();
+    let s = |idx: u64| -> &str {
+        strings
+            .get(idx as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("<bad string index>")
+    };
+    for i in 0..attr_count {
+        let start = attr_offsets[i];
+        let end = if i + 1 < attr_count {
+            attr_offsets[i + 1]
+        } else {
+            attr_data.len()
+        };
+        if start >= end || end > attr_data.len() {
+            return Err(err("debug attribute offsets out of range"));
+        }
+        let mut a = Reader::new(&attr_data[start..end]);
+        let tag = a.read_byte()?;
+        write!(out, "  di[{}] = ", i + 1).unwrap();
+        match tag {
+            t if t == DebugTag::DIFile as u8 => {
+                let name = a.read_varint()?;
+                let dir = a.read_varint()?;
+                writeln!(out, "DIFile(name={:?}, dir={:?})", s(name), s(dir)).unwrap();
+            }
+            t if t == DebugTag::DICompileUnit as u8 => {
+                writeln!(out, "DICompileUnit(file=di[{}])", a.read_varint()?).unwrap();
+            }
+            t if t == DebugTag::DILexicalBlock as u8 => {
+                let scope = a.read_varint()?;
+                let file = a.read_varint()?;
+                let line = a.read_varint()?;
+                let col = a.read_varint()?;
+                writeln!(
+                    out,
+                    "DILexicalBlock(scope=di[{scope}], file=di[{file}], {line}:{col})"
+                )
+                .unwrap();
+            }
+            t if t == DebugTag::DILoc as u8 => {
+                let scope = a.read_varint()?;
+                let file = a.read_varint()?;
+                let line = a.read_varint()?;
+                let col = a.read_varint()?;
+                writeln!(out, "DILoc(scope=di[{scope}], {:?}:{line}:{col})", s(file)).unwrap();
+            }
+            t if t == DebugTag::DISubprogram as u8 => {
+                let file = a.read_varint()?;
+                let line = a.read_varint()?;
+                let name = a.read_varint()?;
+                let linkage = a.read_varint()?;
+                let cu = a.read_varint()?;
+                let scope_line = a.read_varint()?;
+                writeln!(
+                    out,
+                    "DISubprogram(file=di[{file}], line={line}, name={:?}, linkage={:?}, cu=di[{cu}], scope_line={scope_line})",
+                    s(name),
+                    s(linkage),
+                )
+                .unwrap();
+            }
+            t if t == DebugTag::CallSite as u8 => {
+                let callee = a.read_varint()?;
+                let caller = a.read_varint()?;
+                writeln!(out, "CallSite(callee=di[{callee}], caller=di[{caller}])").unwrap();
+            }
+            t if t == DebugTag::Unknown as u8 => {
+                writeln!(out, "Unknown").unwrap();
+            }
+            t => return Err(err(&format!("unknown debug attribute tag {t}"))),
+        }
+    }
+    for (i, &start) in index_offsets.iter().enumerate() {
+        let end = if i + 1 < num_functions {
+            index_offsets[i + 1]
+        } else {
+            num_indices
+        };
+        if start > end || end > attr_ids.len() {
+            return Err(err("debug index offsets out of range"));
+        }
+        let ids: Vec<String> = attr_ids[start..end]
+            .iter()
+            .map(|id| format!("{id}"))
+            .collect();
+        writeln!(out, "  fn {i}: [{}]", ids.join(", ")).unwrap();
+    }
+    Ok(())
+}
 
 fn parse_string_section(payload: Option<&[u8]>) -> Result<Vec<String>> {
     let Some(data) = payload else {
