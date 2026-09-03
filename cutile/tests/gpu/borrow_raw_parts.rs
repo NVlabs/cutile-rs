@@ -32,8 +32,8 @@ fn borrow_raw_parts_does_not_free_foreign_memory() {
 
         // Foreign framework owns this allocation for the whole test.
         let mem = unsafe {
-            let m = malloc_async(bytes, &stream);
-            memcpy_htod_async(m, host_in.as_ptr(), N, &stream);
+            let m = malloc_async(bytes, &stream).expect("malloc");
+            memcpy_htod_async(m, host_in.as_ptr(), N, &stream).expect("h2d enqueue");
             stream.synchronize().expect("h2d");
             m
         };
@@ -55,14 +55,14 @@ fn borrow_raw_parts_does_not_free_foreign_memory() {
         // The foreign memory is still valid and unchanged after all the drops.
         let mut host_out = [0.0f32; N];
         unsafe {
-            memcpy_dtoh_async(host_out.as_mut_ptr(), mem, N, &stream);
+            memcpy_dtoh_async(host_out.as_mut_ptr(), mem, N, &stream).expect("d2h enqueue");
             stream.synchronize().expect("d2h");
         }
         assert!(host_out.iter().all(|&v| v == 3.0));
 
         // The owner frees its own memory exactly once.
         unsafe {
-            free_async(mem, &stream);
+            free_async(mem, &stream).expect("free enqueue");
             stream.synchronize().expect("free");
         }
     });
@@ -79,7 +79,9 @@ struct Owner {
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        unsafe { free_async(self.dptr, &self.stream) };
+        // A destructor cannot report a refused free; the flag is what the
+        // test observes.
+        let _ = unsafe { free_async(self.dptr, &self.stream) };
         self.dropped.store(true, Ordering::SeqCst);
     }
 }
@@ -111,8 +113,8 @@ fn from_foreign_keep_alive_holds_owner() {
         let dropped = Arc::new(AtomicBool::new(false));
         let owner: Arc<dyn DeviceAllocation> = Arc::new(Owner {
             dptr: unsafe {
-                let m = malloc_async(bytes, &stream);
-                memcpy_htod_async(m, host_in.as_ptr(), N, &stream);
+                let m = malloc_async(bytes, &stream).expect("malloc");
+                memcpy_htod_async(m, host_in.as_ptr(), N, &stream).expect("h2d enqueue");
                 stream.synchronize().expect("h2d");
                 m
             },

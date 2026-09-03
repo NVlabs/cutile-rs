@@ -14,7 +14,7 @@ fn debug_kernel<const S: [i32; 2]>(
 ) {
     let pid0 = program_id(0);
     let pid1 = program_id(1);
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
 
     cuda_tile_print!("Program ({}, {}): loaded tile\n", pid0, pid1);
     z.store(tile);
@@ -26,8 +26,8 @@ GPU printing is slow and serializes tile block execution. Use it for small grids
 `cuda_tile_assert!` checks conditions inside a kernel:
 
 ```rust
-let tile = load_tile_like(x, z);
-cuda_tile_assert!(tile[0] > 0.0, "expected positive input");
+let n: i32 = x.shape()[0];
+cuda_tile_assert!(n > 0, "expected a non-empty input");
 ```
 
 ## Host Readback
@@ -74,7 +74,7 @@ For numerically sensitive kernels, test edge cases: zeros, large positive values
 
 ## Inspecting Tile IR
 
-`print_ir = true` prints the generated wrapper, source kernel, and Tile IR text during JIT compilation:
+`print_ir = true` prints the generated entry point wrapper and the Tile IR text during JIT compilation:
 
 ```rust
 #[cutile::entry(print_ir = true)]
@@ -88,19 +88,13 @@ fn debug_ir_kernel<const S: [i32; 2]>(...) { ... }
 fn debug_ir_kernel<const S: [i32; 2]>(...) { ... }
 ```
 
-`use_debug_mlir` loads hand-modified Tile IR text:
-
-```rust
-#[cutile::entry(use_debug_mlir = "/path/to/custom.mlir")]
-fn kernel_with_custom_ir<const S: [i32; 2]>(...) { ... }
-```
-
-The same compiler-stage dumps are also available with environment variables:
+Module-level dumps are also available with environment variables. They are
+written to stderr once per compiled module:
 
 | Variable | Description | Default |
 |---|---|---|
-| `CUTILE_DUMP` | Dump compiler stages (`ast`, `resolved`, `typed`, `instantiated`, `ir`, `bytecode`, or `all`) | unset |
-| `CUTILE_DUMP_FILTER` | Restrict dumps to matching function names or `module::function` paths | unset |
+| `CUTILE_DUMP` | Comma-separated stages to dump: `ir` (the Tile IR module text) and `bytecode` (alias `bc`; the encoded bytecode decoded back to text), or `all`. The `ast`, `resolved`, `typed`, and `instantiated` names are accepted but no code path emits them today | unset |
+| `CUTILE_DUMP_FILTER` | Comma-separated `module::function` paths; the dumps are per module, so only the `module` part is matched. Bare function names do not exclude any module | unset |
 
 ## Errors and Crashes
 

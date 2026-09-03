@@ -84,8 +84,8 @@ mod type_inference_sanity_module {
         seq_len: i32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let source_part = source.partition(const_shape![1, 1, 8]);
-        let mut out_part = out.partition_mut(const_shape![1, 1, 8]);
+        let source_part = source.partition(shape![1, 1, 8]);
+        let mut out_part = out.partition_mut(shape![1, 1, 8]);
         let s_start: i32 = pid.1 * 4i32;
         if s_start < seq_len {
             for s_local in 0i32..4i32 {
@@ -93,7 +93,7 @@ mod type_inference_sanity_module {
                 if s_global < seq_len {
                     let tile = source_part
                         .load([s_global, pid.0, pid.2])
-                        .reshape(const_shape![1, 1, 8]);
+                        .reshape(shape![1, 1, 8]);
                     out_part.store(tile, [0i32, s_local, 0i32]);
                 }
             }
@@ -107,15 +107,15 @@ mod type_inference_sanity_module {
         flag: i32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let source_part = source.partition(const_shape![1, 1, 8]);
+        let source_part = source.partition(shape![1, 1, 8]);
         let tile = if flag > 0i32 {
             source_part
                 .load([pid.0, pid.1, pid.2])
-                .reshape(const_shape![1, 1, 8])
+                .reshape(shape![1, 1, 8])
         } else {
             source_part
                 .load([pid.0, pid.1, pid.2])
-                .reshape(const_shape![1, 1, 8])
+                .reshape(shape![1, 1, 8])
         };
         out.store(tile);
     }
@@ -123,7 +123,7 @@ mod type_inference_sanity_module {
     #[cutile::entry()]
     fn struct_literal_field_kernel(out: &mut Tensor<f32, { [4] }>) {
         let carrier = TileCarrier {
-            tile: constant(1.0f32, const_shape![4]),
+            tile: constant(1.0f32, shape![4]),
         };
         out.store(carrier.tile);
     }
@@ -133,10 +133,10 @@ mod type_inference_sanity_module {
         source: &Tensor<f32, { [-1] }>,
         out: &mut Tensor<f32, { [4] }>,
     ) {
-        let part = source.partition(const_shape![4]);
+        let part = source.partition(shape![4]);
         let pair = (
-            part.load([0i32]).reshape(const_shape![4]),
-            part.load([1i32]).reshape(const_shape![4]),
+            part.load([0i32]).reshape(shape![4]),
+            part.load([1i32]).reshape(shape![4]),
         );
         let (first, _second) = pair;
         out.store(first);
@@ -149,28 +149,28 @@ mod type_inference_sanity_module {
         // reaches the method argument, not which element it selects.
         let values = [0i32, 0i32, 0i32];
         let idx = values[1];
-        let tile = constant(1.0f32, const_shape![4]);
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         out_part.store(tile, [idx]);
     }
 
     #[cutile::entry()]
     fn step_by_loop_local_kernel(out: &mut Tensor<f32, { [4] }>) {
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         // One tile, so one iteration: `step_by` lowering is the subject here.
         for i in (0i32..1i32).step_by(1) {
-            let tile = constant(1.0f32, const_shape![4]);
+            let tile = constant(1.0f32, shape![4]);
             out_part.store(tile, [i]);
         }
     }
 
     #[cutile::entry()]
     fn step_by_cast_usize_kernel(out: &mut Tensor<f32, { [4] }>) {
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         let step = 1i32;
         // One tile, so one iteration; the cast in `step_by` is the subject.
         for i in (0i32..1i32).step_by(step as usize) {
-            let tile = constant(1.0f32, const_shape![4]);
+            let tile = constant(1.0f32, shape![4]);
             out_part.store(tile, [i]);
         }
     }
@@ -180,7 +180,7 @@ mod type_inference_sanity_module {
         let tile = if flag > 0i32 {
             return;
         } else {
-            constant(1.0f32, const_shape![4])
+            constant(1.0f32, shape![4])
         };
         out.store(tile);
     }
@@ -191,8 +191,8 @@ mod type_inference_sanity_module {
         out: &mut Tensor<f32, { [4] }>,
         flag: i32,
     ) {
-        let part = source.partition(const_shape![4]);
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let part = source.partition(shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         let default_int = 7;
         let default_float = 3.0;
         let _default_int_tile: Tile<i32, { [] }> = scalar_to_tile(default_int);
@@ -202,7 +202,7 @@ mod type_inference_sanity_module {
             let indices = [0, i, 2];
             let idx = indices[1];
             let tile: Tile<f32, { [4] }> = if 0 < flag {
-                constant(1.0, const_shape![4])
+                constant(1.0, shape![4])
             } else {
                 part.load([idx])
             };
@@ -221,7 +221,7 @@ mod type_inference_sanity_module {
         let resolved_f32 = expect_f32(float_alias);
         let _resolved_f32_tile: Tile<f32, { [] }> = scalar_to_tile(resolved_f32);
 
-        let tile = constant(1.0, const_shape![4]);
+        let tile = constant(1.0, shape![4]);
         let tile = expect_tile_f32x4(tile);
         out.store(tile);
     }
@@ -233,7 +233,7 @@ mod type_inference_sanity_module {
         let _sum = lhs + rhs;
         let _resolved_lhs = expect_i64(lhs);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -244,7 +244,7 @@ mod type_inference_sanity_module {
         let _joined = if flag { lhs } else { rhs };
         let _resolved_lhs = expect_i64(lhs);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -253,7 +253,7 @@ mod type_inference_sanity_module {
         let lhs = 0;
         let _pair = (if flag { lhs } else { 1i64 }, 2i64);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -268,7 +268,7 @@ mod type_inference_sanity_module {
             2i64,
         );
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -277,7 +277,7 @@ mod type_inference_sanity_module {
         let idx = [0, 1][0];
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -287,7 +287,7 @@ mod type_inference_sanity_module {
         let idx = values[0];
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -297,7 +297,7 @@ mod type_inference_sanity_module {
         let idx = values[0];
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -306,7 +306,7 @@ mod type_inference_sanity_module {
         let idx = (0,).0;
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -316,7 +316,7 @@ mod type_inference_sanity_module {
         let idx = pair.0;
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -327,7 +327,7 @@ mod type_inference_sanity_module {
         idx = 1i64;
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -339,7 +339,7 @@ mod type_inference_sanity_module {
         let resolved_acc = expect_f32(acc);
         let _acc_tile: Tile<f32, { [] }> = scalar_to_tile(resolved_acc);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -348,7 +348,7 @@ mod type_inference_sanity_module {
         let idx = 0i32 as u32;
         let _resolved_idx = expect_u32(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -360,13 +360,13 @@ mod type_inference_sanity_module {
             let _resolved_idx = expect_i64(idx);
         }
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
     #[cutile::entry()]
     fn reduce_closure_body_typeck_kernel(out: &mut Tensor<f32, { [4] }>) {
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         let _sum = reduce(tile, 0i32, 0.0f32, |acc, x| {
             let y = acc + x;
             y
@@ -376,7 +376,7 @@ mod type_inference_sanity_module {
 
     #[cutile::entry()]
     fn signature_driven_closure_typeck_kernel(out: &mut Tensor<f32, { [4] }>) {
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         let _same = signature_closure_probe(tile, |acc, x| {
             let y = acc + x;
             y
@@ -389,8 +389,8 @@ mod type_inference_sanity_module {
         source: &Tensor<f32, { [-1] }>,
         out: &mut Tensor<f32, { [4] }>,
     ) {
-        let part = source.partition(const_shape![4]);
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let part = source.partition(shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         let mut i = 0;
         while i < 1i32 {
             let tile = part.load([i]);
@@ -404,8 +404,8 @@ mod type_inference_sanity_module {
         source: &Tensor<f32, { [-1] }>,
         out: &mut Tensor<f32, { [4] }>,
     ) {
-        let part = source.partition(const_shape![4]);
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let part = source.partition(shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         let mut i = 0;
         loop {
             let tile = part.load([i]);
@@ -424,7 +424,7 @@ mod type_inference_sanity_module {
         let resolved_scale = expect_f32(scale);
         let _scale_tile: Tile<f32, { [] }> = scalar_to_tile(resolved_scale);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -434,7 +434,7 @@ mod type_inference_sanity_module {
         let _resolved_idx = expect_i64(idx);
         let _scale_tile: Tile<f32, { [] }> = scalar_to_tile(scale);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -444,7 +444,7 @@ mod type_inference_sanity_module {
         let _resolved_idx = expect_i64(idx);
         let _other_passthrough = other;
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -454,15 +454,15 @@ mod type_inference_sanity_module {
         let [idx, other] = values;
         let _other_tile: Tile<i32, { [] }> = scalar_to_tile(other);
 
-        let tile = constant(1.0f32, const_shape![4]);
-        let mut out_part = out.partition_mut(const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
+        let mut out_part = out.partition_mut(shape![4]);
         out_part.store(tile, [idx]);
     }
 
     #[cutile::entry()]
     fn struct_pattern_field_kernel(out: &mut Tensor<f32, { [4] }>) {
         let carrier = TileCarrier {
-            tile: constant(1.0f32, const_shape![4]),
+            tile: constant(1.0f32, shape![4]),
         };
         let TileCarrier { tile } = carrier;
         out.store(tile);
@@ -473,13 +473,13 @@ mod type_inference_sanity_module {
         const IDX: i64 = 0;
         let _resolved_idx = expect_i64(IDX);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
     #[cutile::entry()]
     fn option_constructor_context_kernel(out: &mut Tensor<f32, { [4] }>) {
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         let some: Option<Tile<f32, { [4] }>> = Some(tile);
         let none: Option<Tile<f32, { [4] }>> = None;
         let _some = expect_option_tile_f32x4(some);
@@ -492,7 +492,7 @@ mod type_inference_sanity_module {
         let _by_ref = expect_i64(out.trait_by_ref());
         let _by_mut = expect_i64(out.trait_by_mut());
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -503,7 +503,7 @@ mod type_inference_sanity_module {
     ) {
         let _by_ref = expect_i64(input.trait_by_ref());
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
@@ -512,20 +512,20 @@ mod type_inference_sanity_module {
         let idx = <AssocConstHost as HasI64Const>::VALUE;
         let _resolved_idx = expect_i64(idx);
 
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
     #[cutile::entry()]
     fn generic_associated_const_bound_kernel<T: ElementType>(out: &mut Tensor<T, { [4] }>) {
         let zero = T::ZERO;
-        let tile: Tile<T, { [4] }> = constant(zero, const_shape![4]);
+        let tile: Tile<T, { [4] }> = constant(zero, shape![4]);
         out.store(tile);
     }
 
     #[cutile::entry()]
     fn generic_qself_associated_const_bound_kernel<T: ElementType>(out: &mut Tensor<T, { [4] }>) {
-        let tile: Tile<T, { [4] }> = constant(<T as ElementType>::ZERO, const_shape![4]);
+        let tile: Tile<T, { [4] }> = constant(<T as ElementType>::ZERO, shape![4]);
         out.store(tile);
     }
 
@@ -534,7 +534,7 @@ mod type_inference_sanity_module {
     where
         T: ElementType,
     {
-        let tile: Tile<T, { [4] }> = constant(T::ZERO, const_shape![4]);
+        let tile: Tile<T, { [4] }> = constant(T::ZERO, shape![4]);
         out.store(tile);
     }
 
@@ -545,7 +545,7 @@ mod type_inference_sanity_module {
         scalar: ScalarAlias,
     ) {
         let _scalar: ScalarAlias = scalar;
-        let part = input.partition(const_shape![4]);
+        let part = input.partition(shape![4]);
         out.store(part.load([0i32]));
     }
 
@@ -557,7 +557,7 @@ mod type_inference_sanity_module {
 
     #[cutile::entry()]
     fn global_const_shape_kernel(out: &mut Tensor<f32, { [GLOBAL_DIM] }>) {
-        let tile = constant(1.0f32, const_shape![GLOBAL_DIM]);
+        let tile = constant(1.0f32, shape![GLOBAL_DIM]);
         out.store(tile);
     }
 
@@ -566,19 +566,19 @@ mod type_inference_sanity_module {
         if GLOBAL_FLAG {
             let _flag = GLOBAL_FLAG;
         }
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 
     #[cutile::entry()]
     fn global_scalar_const_kernel(out: &mut Tensor<f32, { [4] }>) {
-        let tile = constant(GLOBAL_SCALE, const_shape![4]);
+        let tile = constant(GLOBAL_SCALE, shape![4]);
         out.store(tile);
     }
 
     #[cutile::entry()]
     fn cga_index_const_shape_kernel<const S: [i32; 3]>(out: &mut Tensor<f32, { [S[0], S[2]] }>) {
-        let tile: Tile<f32, { [S[0], S[2]] }> = constant(1.0f32, const_shape![S[0], S[2]]);
+        let tile: Tile<f32, { [S[0], S[2]] }> = constant(1.0f32, shape![S[0], S[2]]);
         out.store(tile);
     }
 
@@ -587,7 +587,7 @@ mod type_inference_sanity_module {
         if DO_STORE {
             let _flag = DO_STORE;
         }
-        let tile = constant(1.0f32, const_shape![4]);
+        let tile = constant(1.0f32, shape![4]);
         out.store(tile);
     }
 }

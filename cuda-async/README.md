@@ -68,9 +68,19 @@ let (a, b) = zip!(op_a, op_b).sync()?;
 // Transform output without GPU work.
 let doubled = op.map(|x| x * 2);
 
-// Cloneable, execute-once.
+// Cloneable, execute-once. Clones may be executed concurrently (even from
+// several threads): the first executor runs the op, the rest wait for it,
+// and a clone consumed on another stream is ordered after the producing
+// work through a CUDA event.
 let shared = op.shared();
 ```
+
+A `.then()` closure runs under a per-thread execution lock and may not
+execute other operations (`.sync()`, `.sync_on()`, a nested `.await`); doing
+so returns a `DeviceError` rather than racing streams against each other.
+`unsafe { op.then_unchecked(|x| ...) }` releases the lock for the closure
+only, for callers who can vouch that nothing in it touches, on another
+stream, memory still in flight on the chain's stream.
 
 ## Scheduling
 
@@ -92,13 +102,67 @@ let future = my_kernel(out, input).schedule(&policy)?;
 Operations chained with `.then()` share a single stream and always
 execute in order. Operations on different streams may overlap.
 
+## Execution and Completion
+
+`.sync()` / `.sync_on()` submit the work and block on `cuStreamSynchronize`.
+`.await` submits the work on the first poll and then resolves in one of
+three ways, in order:
+
+1. **Inline spin.** The stream is polled with `cuStreamQuery` for a short
+   budget, so microsecond-scale pipelines resolve at `sync`-like latency
+   without a waker round trip. `CUDA_ASYNC_SPIN_BUDGET_US` sets the budget
+   in microseconds (default `20`); `CUDA_ASYNC_SPIN_BUDGET_US=0` disables the
+   spin and forces every pipeline through the notification path below (the
+   correctness tests use this so the reactor is actually exercised).
+2. **Flag-write reactor** (default notification path). Completion is a
+   `cuStreamWriteValue32` into a slot of pinned host memory enqueued after
+   the work; one process-wide `cuda-async-reactor` thread scans the armed
+   slots and wakes the futures, parking when nothing is in flight. The
+   wake-up cost is amortized across all in-flight pipelines instead of a
+   driver-thread hop per pipeline.
+3. **Host callback** (`cuLaunchHostFunc`) when the reactor is unavailable
+   (slot pool exhausted, stream mem-ops unsupported), or always when
+   selected explicitly: `CUDA_ASYNC_HOST_SYNC=spin` (or `spinwait`) uses
+   `CU_HOST_TASK_SPINWAIT`, `CUDA_ASYNC_HOST_SYNC=block` (or `blocking`)
+   uses `CU_HOST_TASK_BLOCKING`. These modes bypass the reactor so all
+   three paths can be compared from one build.
+
+Both environment variables are read once, on first use.
+
+### Device faults
+
+A fault on the device (illegal address, `trap`, an assert) is a sticky
+error that kills the process's CUDA context. On the default paths an
+awaiting future resolves with `Err(DeviceError::Driver(..))` instead of
+hanging: the inline spin surfaces the error it sees, and the reactor
+probes the streams of slots that stop making progress, retires the ones
+the driver reports as faulted, and wakes their futures, which observe the
+error on re-poll. The explicit `CUDA_ASYNC_HOST_SYNC` modes rely on the
+driver running the host function, which it does not do for a faulted
+context; a future awaiting through them may not resolve after a fault.
+
+### Cancellation (dropping a future)
+
+Dropping a `DeviceFuture` never cancels GPU work that was already
+submitted; kernels run to completion. What the drop decides is when the
+host releases the resources that work still uses. A future dropped after
+its first poll but before completion therefore **waits for its stream to
+drain** before dropping its undelivered output (tensors, `Vec<T>` DMA
+targets, borrowed inputs). If the wait cannot be performed — the context
+has faulted, or the stream is recording a graph — the output is leaked
+with a message on stderr rather than freed under a running kernel. A
+future dropped before its first poll submitted nothing and waits for
+nothing. See the `DeviceFuture` type docs for why the wait is synchronous
+(outputs may borrow the caller's buffers, so they are not `'static`).
+
 ## CUDA Graphs
 
 `CudaGraph<T>` captures a `DeviceOp` into a replayable CUDA graph using
 [stream capture](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html#creating-a-graph-using-stream-capture):
 
 ```rust
-// Capture: executes once, records all GPU work into a graph.
+// Capture: records all GPU work into a graph. Nothing runs yet; the
+// output's buffers are computed by the first launch.
 let forward_op = build_forward(&cfg, &weights, input.clone(), buffers);
 let mut graph = forward_op.graph_on(stream.clone())?;
 let buffers = graph.take_output().unwrap();
@@ -106,14 +170,20 @@ let buffers = graph.take_output().unwrap();
 // Replay loop — single driver call per iteration.
 for token in tokens {
     graph.update(api::memcpy(&mut input_buf, &token))?;
-    graph.launch().sync_on(&stream)?;
+    graph.launch().sync_on(graph.stream())?;
 }
 ```
 
 All device pointers are baked in at capture time. To vary inputs, copy
 new data into pre-allocated buffers via `graph.update(op)` before each
-`graph.launch()`. `launch()` returns a [`DeviceOp`] — use `.sync_on()`,
-`.sync()`, or `.await` to control when and where the graph executes.
+`graph.launch()`; `update` accepts unit-output `GraphNode`s (kernel
+launches, `memcpy`) and issues them on the graph's stream, so they are
+ordered before a launch that runs on that same stream — not before one
+scheduled elsewhere. `launch()` returns a [`DeviceOp`] that shares
+ownership of the instantiated graph — use `.sync_on()`, `.sync()`, or
+`.await` to control when and where the graph executes. Capture holds the
+execution lock (no nested `.sync()` inside the captured op) and always
+ends the capture, even if the op fails or panics.
 
 ## API Argument Conventions
 
@@ -134,3 +204,11 @@ Run the crate tests with:
 ```bash
 cargo test -p cuda-async
 ```
+
+The unit tests, doctests, and `tests/error_handling.rs` are host-only. The
+other integration binaries need a GPU; `tests/device_fault.rs` deliberately
+faults the device (a sticky error that kills the process's context), which
+is why it holds a single test and runs as its own process. To exercise the
+reactor rather than the inline spin, run the GPU tests with
+`CUDA_ASYNC_SPIN_BUDGET_US=0`; to exercise the host-callback fallback, add
+`CUDA_ASYNC_HOST_SYNC=spin` (or `block`).

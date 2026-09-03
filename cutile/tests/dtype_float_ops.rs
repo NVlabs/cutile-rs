@@ -29,8 +29,8 @@ mod float_add_module {
         b: &Tensor<f16, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
-        let tile_b = b.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
+        let tile_b = b.load_tile(shape![B], [pid]);
         out.store(tile_a + tile_b);
     }
 
@@ -41,8 +41,8 @@ mod float_add_module {
         b: &Tensor<bf16, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
-        let tile_b = b.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
+        let tile_b = b.load_tile(shape![B], [pid]);
         out.store(tile_a + tile_b);
     }
 
@@ -53,8 +53,8 @@ mod float_add_module {
         b: &Tensor<f32, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
-        let tile_b = b.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
+        let tile_b = b.load_tile(shape![B], [pid]);
         out.store(tile_a + tile_b);
     }
 
@@ -65,8 +65,8 @@ mod float_add_module {
         b: &Tensor<f64, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
-        let tile_b = b.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
+        let tile_b = b.load_tile(shape![B], [pid]);
         out.store(tile_a + tile_b);
     }
 

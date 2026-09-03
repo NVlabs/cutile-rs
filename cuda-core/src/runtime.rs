@@ -179,11 +179,23 @@ impl PartialEq for Device {
 }
 impl Eq for Device {}
 
+/// The driver indexes devices with a C `int`. An ordinal that does not fit is
+/// not a device at all; `as c_int` would wrap it onto some other device's
+/// index, so it is rejected up front with `CUDA_ERROR_INVALID_DEVICE`.
+fn ordinal_to_c_int(ordinal: usize) -> Result<c_int, DriverError> {
+    c_int::try_from(ordinal)
+        .map_err(|_| DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_DEVICE))
+}
+
 impl Device {
     /// Creates a new owned device on the specified ordinal.
+    ///
+    /// Errors with `CUDA_ERROR_INVALID_DEVICE` (before touching the driver)
+    /// when `ordinal` does not fit the driver's `int` ordinal type.
     pub fn new(ordinal: usize) -> Result<Arc<Self>, DriverError> {
+        let cu_ordinal = ordinal_to_c_int(ordinal)?;
         unsafe { init(0)? };
-        let cu_device = device::get(ordinal as c_int)?;
+        let cu_device = device::get(cu_ordinal)?;
         let cu_ctx = unsafe { primary_ctx::retain(cu_device) }?;
         let device = Arc::new(Device {
             cu_device,
@@ -208,7 +220,12 @@ impl Device {
     ///
     /// The caller must ensure:
     /// - `cu_ctx` points to a valid retained `CUcontext` for `cu_device`
-    /// - The handles outlive the returned `Device`
+    /// - The handles outlive the returned `Device` **and everything derived
+    ///   from it**. Streams from [`new_stream`](Self::new_stream) hold the
+    ///   device alive and, because the device is borrowed, are never parked in
+    ///   the process-wide stream pool: each is synchronized and destroyed
+    ///   against `cu_ctx` when it drops (see [`Stream`]). `cu_ctx` must
+    ///   therefore still be valid when the last such stream drops.
     /// - No concurrent destruction of the handles
     pub unsafe fn borrow_raw(cu_ctx: *mut c_void, cu_device: c_int, ordinal: usize) -> Arc<Self> {
         Arc::new(Device {
@@ -257,10 +274,12 @@ impl Device {
     }
 
     /// Returns the raw `CUdevice` handle for a given ordinal without
-    /// creating a full `Device` (no context retained).
+    /// creating a full `Device` (no context retained). Rejects an ordinal
+    /// that does not fit `c_int` like [`new`](Self::new) does.
     pub fn raw_device(ordinal: usize) -> Result<cuda_bindings::CUdevice, DriverError> {
+        let cu_ordinal = ordinal_to_c_int(ordinal)?;
         unsafe { init(0)? };
-        device::get(ordinal as c_int)
+        device::get(cu_ordinal)
     }
 
     /// Get the `ordinal` index of the device this is on.
@@ -314,13 +333,23 @@ impl Device {
     }
 
     /// Creates a new non-blocking CUDA stream on this device.
+    ///
+    /// On an owned device the handle may be one parked by an earlier stream's
+    /// drop (see [`Stream`]). On a borrowed device it is always freshly
+    /// created: the pool is keyed by ordinal alone and holds handles from the
+    /// primary contexts this crate retains, which need not be the context the
+    /// external owner handed to [`borrow_raw`](Self::borrow_raw).
     pub fn new_stream(self: &Arc<Self>) -> Result<Arc<Stream>, DriverError> {
         self.bind_to_thread()?;
-        let pooled = stream_pool()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get_mut(&self.ordinal)
-            .and_then(Vec::pop);
+        let pooled = if self.owned {
+            stream_pool()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_mut(&self.ordinal)
+                .and_then(Vec::pop)
+        } else {
+            None
+        };
         let cu_stream = match pooled {
             Some(handle) => handle as cuda_bindings::CUstream,
             None => stream::create(stream::StreamKind::NonBlocking)?,
@@ -374,7 +403,18 @@ impl Device {
     /// builds a `CString`. The ELF-magic check below rejects a non-cubin image
     /// (an empty slice included) with `CUDA_ERROR_INVALID_IMAGE` rather than
     /// letting the driver over-read.
-    pub fn load_module_from_bytes(
+    ///
+    /// # Safety
+    ///
+    /// `image` must be a **complete, well-formed cubin**. `cuModuleLoadData`
+    /// takes no length: the driver dereferences the section and program-header
+    /// offsets declared inside the image, so a truncated or otherwise malformed
+    /// image is read past the end of the slice (a truncated cubin segfaults
+    /// inside libcuda). The ELF-magic check only rules out non-ELF input; it
+    /// cannot validate those offsets, so the caller must know the bytes are the
+    /// whole artifact — produced by the compiler in this process, or read back
+    /// from a store whose per-entry checksum verified.
+    pub unsafe fn load_module_from_bytes(
         self: &Arc<Self>,
         image: &[u8],
     ) -> Result<Arc<Module>, DriverError> {
@@ -387,6 +427,8 @@ impl Device {
             ));
         }
         self.bind_to_thread()?;
+        // SAFETY: the caller guarantees a complete cubin, so every offset the
+        // driver follows from the header lands inside `image`.
         let cu_module = unsafe { module::load_data(image.as_ptr().cast()) }?;
         Ok(Arc::new(Module {
             cu_module,
@@ -549,10 +591,26 @@ pub struct PoolMemStats {
 
 /// A CUDA stream handle.
 ///
-/// Can be **owned** (created via [`Device::new_stream`], destroyed on drop),
-/// **borrowed** (created via [`Stream::borrow_raw`], does NOT destroy on drop),
-/// or **foreign** (created via [`Stream::borrow_with_owner`], holds a liveness
-/// token so the external owner outlives it).
+/// Can be **owned** (created via [`Device::new_stream`]), **borrowed** (created
+/// via [`Stream::borrow_raw`], does NOT destroy on drop), or **foreign**
+/// (created via [`Stream::borrow_with_owner`], holds a liveness token so the
+/// external owner outlives it).
+///
+/// Dropping an owned stream blocks in `cuStreamSynchronize` until the work
+/// enqueued on it has drained. What happens to the handle next depends on the
+/// device it was created on:
+///
+/// - On an **owned** device the handle is *not* destroyed: it is parked in a
+///   process-wide, per-ordinal pool and handed out again by the next
+///   [`Device::new_stream`] on that ordinal (see `stream_pool` for why). The
+///   last owned `Device` for the ordinal discards the pool entry, and the
+///   primary-context release reclaims the handles.
+/// - On a **borrowed** device ([`Device::borrow_raw`] /
+///   [`Device::borrow_with_owner`]) the handle is destroyed, under the
+///   teardown lock. It must never enter the pool: the pool is keyed by
+///   ordinal only, so an owned `Device` created later for the same ordinal
+///   would pop a handle belonging to a context the external owner may already
+///   have destroyed.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stream {
     pub(crate) cu_stream: cuda_bindings::CUstream,
@@ -629,6 +687,19 @@ impl Event {
         unsafe { crate::cudarc_shim::event::synchronize(self.cu_event) }
     }
 
+    /// Queries completion without blocking: `Ok(true)` once all work
+    /// captured by the most recent [`record`](Self::record) has completed
+    /// (or the event was never recorded), `Ok(false)` while it is still in
+    /// flight. Any other driver result is returned as the error.
+    pub fn query(&self) -> Result<bool, DriverError> {
+        // Safety: the handle is valid by construction.
+        match unsafe { crate::cudarc_shim::event::query(self.cu_event) } {
+            Ok(()) => Ok(true),
+            Err(DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_NOT_READY)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Milliseconds elapsed on the device between this event and `end`
     /// (called on the start event, `torch.cuda.Event` convention:
     /// `start.elapsed_time(&end)`).
@@ -670,11 +741,11 @@ impl Device {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        if !self.owned {
+        if !self.owned || self.cu_stream.is_null() {
             return;
         }
         let _ = self.device.bind_to_thread();
-        if !self.cu_stream.is_null() {
+        if self.device.owned {
             // Never destroyed (see `stream_pool`): drain, then return the
             // handle for reuse by the next `new_stream` on this device.
             let _ = unsafe { stream::synchronize(self.cu_stream) };
@@ -684,6 +755,15 @@ impl Drop for Stream {
                 .entry(self.device.ordinal)
                 .or_default()
                 .push(self.cu_stream as usize);
+        } else {
+            // Borrowed device: the pool is keyed by ordinal only, so parking
+            // this handle would let an owned `Device` created later for the
+            // same ordinal pop a stream from a context the external owner may
+            // by then have destroyed (reproduced as a segfault). Destroy it
+            // instead, serialized with the other destructive driver calls.
+            let _guard = teardown_lock();
+            let _ = unsafe { stream::synchronize(self.cu_stream) };
+            let _ = unsafe { stream::destroy(self.cu_stream) };
         }
     }
 }
@@ -765,47 +845,114 @@ impl Stream {
         stream::query(self.cu_stream)
     }
 
+    /// Makes all work subsequently enqueued on this stream wait until
+    /// `event` has completed (`cuStreamWaitEvent`). This is the
+    /// cross-stream dependency primitive: record an event on the producing
+    /// stream, then have the consuming stream wait on it.
+    ///
+    /// Errors with `CUDA_ERROR_INVALID_VALUE` if the event belongs to a
+    /// different device than this stream.
+    pub fn wait_event(&self, event: &Event) -> Result<(), DriverError> {
+        if event.device.ordinal() != self.device.ordinal() {
+            return Err(DriverError(
+                cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_VALUE,
+            ));
+        }
+        // Safety: both handles are valid by construction (RAII wrappers),
+        // and the same-device check above pins them to one context.
+        unsafe {
+            stream::wait_event(
+                self.cu_stream,
+                event.cu_event,
+                cuda_bindings::CUevent_wait_flags_enum_CU_EVENT_WAIT_DEFAULT,
+            )
+        }
+    }
+
     /// Enqueues a host-side callback to execute after all prior stream work completes.
+    ///
+    /// The driver runs `host_func` on one of its own threads once everything
+    /// enqueued on this stream before the call has finished. Two rules carry
+    /// over from `cuLaunchHostFunc`:
+    ///
+    /// - **The callback must not call CUDA APIs.** The driver may report
+    ///   `CUDA_ERROR_NOT_PERMITTED`, or simply deadlock its own work queue.
+    ///   Use the callback to signal the host (an atomic store, a channel send,
+    ///   a waker), never to enqueue or wait on GPU work.
+    /// - **Panics are caught and discarded.** Unwinding out of the
+    ///   `extern "C"` trampoline would abort the process, and the driver has
+    ///   no channel to report a failed callback, so a panicking `host_func`
+    ///   is silently swallowed.
+    ///
+    /// The closure is boxed and handed to the driver as user data, which is
+    /// why `F: 'static`. On `Ok` the trampoline reclaims the box when the
+    /// callback fires; on `Err` the driver never invokes the callback, so the
+    /// box is reclaimed here and the closure's captures are dropped.
     ///
     /// # Safety
     /// The caller must ensure the parent device's context is current on
     /// the calling thread.
-    pub unsafe fn launch_host_function<F: FnOnce() + Send>(
+    pub unsafe fn launch_host_function<F: FnOnce() + Send + 'static>(
         &self,
         host_func: F,
     ) -> Result<(), DriverError> {
-        let boxed_host_func = Box::new(host_func);
-        stream::launch_host_function(
-            self.cu_stream,
-            Self::callback_wrapper::<F>,
-            Box::into_raw(boxed_host_func) as *mut c_void,
-        )
+        Self::enqueue_boxed(host_func, |func, arg| unsafe {
+            stream::launch_host_function(self.cu_stream, func, arg)
+        })
     }
 
     /// Like [`launch_host_function`](Self::launch_host_function) but with an
     /// explicit host-task sync mode (`CU_HOST_TASK_BLOCKING` /
-    /// `CU_HOST_TASK_SPINWAIT`) via `cuLaunchHostFunc_v2`.
+    /// `CU_HOST_TASK_SPINWAIT`) via `cuLaunchHostFunc_v2`. Same callback
+    /// rules: no CUDA calls inside `host_func`, panics are caught and
+    /// discarded, and a refused launch reclaims the boxed closure.
     ///
     /// # Safety
     /// The caller must ensure the parent device's context is current on
     /// the calling thread.
-    pub unsafe fn launch_host_function_with_sync_mode<F: FnOnce() + Send>(
+    pub unsafe fn launch_host_function_with_sync_mode<F: FnOnce() + Send + 'static>(
         &self,
         host_func: F,
         sync_mode: ::core::ffi::c_uint,
     ) -> Result<(), DriverError> {
-        let boxed_host_func = Box::new(host_func);
-        stream::launch_host_function_v2(
-            self.cu_stream,
-            Self::callback_wrapper::<F>,
-            Box::into_raw(boxed_host_func) as *mut c_void,
-            sync_mode,
-        )
+        Self::enqueue_boxed(host_func, |func, arg| unsafe {
+            stream::launch_host_function_v2(self.cu_stream, func, arg, sync_mode)
+        })
     }
 
-    unsafe extern "C" fn callback_wrapper<F: FnOnce() + Send>(callback: *mut c_void) {
+    /// Boxes `host_func`, hands the trampoline and the box to `enqueue`, and
+    /// reclaims the box if the driver refuses the launch.
+    ///
+    /// Ownership of the box passes to the driver only on a successful
+    /// enqueue: that is the one case in which the trampoline — the box's
+    /// other reclaimer — will ever run. On `Err` nothing else will free it, so
+    /// without this step the closure and everything it captured (a waker, a
+    /// channel sender, an `Arc`) would leak.
+    fn enqueue_boxed<F: FnOnce() + Send + 'static>(
+        host_func: F,
+        enqueue: impl FnOnce(unsafe extern "C" fn(*mut c_void), *mut c_void) -> Result<(), DriverError>,
+    ) -> Result<(), DriverError> {
+        let user_data = Box::into_raw(Box::new(host_func)).cast::<c_void>();
+        let result = enqueue(Self::callback_wrapper::<F>, user_data);
+        if result.is_err() {
+            // SAFETY: `user_data` is the `Box<F>` leaked above, and a refused
+            // launch never runs the trampoline, so this is its only reclaim.
+            drop(unsafe { Box::from_raw(user_data.cast::<F>()) });
+        }
+        result
+    }
+
+    /// `extern "C"` trampoline the driver invokes on a driver-internal thread
+    /// when the host function fires. Reconstructs the `Box<F>` leaked by
+    /// [`enqueue_boxed`](Self::enqueue_boxed) and calls the closure, catching
+    /// panics so nothing unwinds across the C ABI boundary.
+    ///
+    /// # Safety
+    /// `callback` must be the pointer `enqueue_boxed` produced for an `F`
+    /// closure, and must be passed here exactly once (double free otherwise).
+    unsafe extern "C" fn callback_wrapper<F: FnOnce() + Send + 'static>(callback: *mut c_void) {
         let _ = std::panic::catch_unwind(|| {
-            let callback: Box<F> = Box::from_raw(callback as *mut F);
+            let callback: Box<F> = unsafe { Box::from_raw(callback.cast::<F>()) };
             callback();
         });
     }
@@ -929,5 +1076,213 @@ impl Function {
     /// The caller must not use the handle after the parent module is dropped.
     pub unsafe fn cu_function(&self) -> cuda_bindings::CUfunction {
         self.cu_function
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts how often the closure it is captured by runs and how often it
+    /// is dropped, so a test can tell "reclaimed" (dropped once, never run)
+    /// from "leaked" (never dropped) and from "double-freed" (dropped twice).
+    struct Probe {
+        calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Probe {
+        fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let probe = Probe {
+                calls: calls.clone(),
+                drops: drops.clone(),
+            };
+            (probe, calls, drops)
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn refused_host_function_launch_reclaims_the_boxed_closure() {
+        let (probe, calls, drops) = Probe::new();
+        let refused = DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_HANDLE);
+
+        let result = Stream::enqueue_boxed(
+            move || {
+                probe.calls.fetch_add(1, Ordering::SeqCst);
+            },
+            |_trampoline, _user_data| Err(refused),
+        );
+
+        assert_eq!(result, Err(refused), "the driver's error must surface");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a refused launch never runs"
+        );
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "the closure and its captures must be dropped exactly once"
+        );
+    }
+
+    #[test]
+    fn accepted_host_function_launch_hands_the_box_to_the_trampoline() {
+        let (probe, calls, drops) = Probe::new();
+
+        // Stand in for the driver: accept the launch and fire the callback.
+        let result = Stream::enqueue_boxed(
+            move || {
+                probe.calls.fetch_add(1, Ordering::SeqCst);
+            },
+            |trampoline, user_data| {
+                // SAFETY: `user_data` is the box `enqueue_boxed` just leaked
+                // for this trampoline, and this is its one invocation.
+                unsafe { trampoline(user_data) };
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the callback runs once");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "the trampoline is the sole reclaimer on success: no leak, no double free"
+        );
+    }
+
+    fn has_gpu() -> bool {
+        Device::device_count().map(|n| n > 0).unwrap_or(false)
+    }
+
+    /// The stream pool is process-wide and keyed by ordinal, so the tests that
+    /// assert on its contents for ordinal 0 must not overlap: a concurrent
+    /// test's `new_stream` pops, and its `Device` drop discards the whole
+    /// entry. Nothing else in this test binary touches the pool.
+    fn pool_tests_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Snapshot of the parked handles for `ordinal`.
+    fn pooled_handles(ordinal: usize) -> Vec<usize> {
+        stream_pool()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&ordinal)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn borrow(owner: &Arc<Device>) -> Arc<Device> {
+        // SAFETY: `owner` retains the primary context for the duration of
+        // every test below, and nothing destroys it concurrently.
+        unsafe {
+            Device::borrow_raw(
+                owner.cu_ctx().cast(),
+                owner.cu_device() as c_int,
+                owner.ordinal(),
+            )
+        }
+    }
+
+    #[test]
+    fn ordinals_beyond_c_int_are_rejected_not_truncated() {
+        let invalid = DriverError(cuda_bindings::cudaError_enum_CUDA_ERROR_INVALID_DEVICE);
+        // Checked before `cuInit`, so this holds with or without a driver.
+        assert_eq!(Device::new(usize::MAX).err(), Some(invalid));
+        assert_eq!(Device::raw_device(usize::MAX).err(), Some(invalid));
+        // The first ordinal past `c_int` would have wrapped to device 0.
+        let wraps_to_zero = (c_int::MAX as usize) + 1 + (c_int::MAX as usize) + 1;
+        assert_eq!(Device::new(wraps_to_zero).err(), Some(invalid));
+        assert_eq!(ordinal_to_c_int(0), Ok(0));
+        assert_eq!(ordinal_to_c_int(c_int::MAX as usize), Ok(c_int::MAX));
+    }
+
+    #[test]
+    fn owned_device_streams_are_parked_and_reused() {
+        if !has_gpu() {
+            return;
+        }
+        let _serialized = pool_tests_lock();
+        let owner = Device::new(0).unwrap();
+        let first = owner.new_stream().unwrap();
+        let handle = first.cu_stream() as usize;
+        drop(first);
+        assert!(
+            pooled_handles(0).contains(&handle),
+            "an owned device's stream is parked, not destroyed"
+        );
+        let second = owner.new_stream().unwrap();
+        assert_eq!(second.cu_stream() as usize, handle, "and handed out again");
+    }
+
+    #[test]
+    fn borrowed_device_streams_never_enter_the_pool() {
+        if !has_gpu() {
+            return;
+        }
+        let _serialized = pool_tests_lock();
+        let owner = Device::new(0).unwrap();
+        // Seed the pool with a handle from the owned device so that a
+        // borrowed `new_stream` that consulted the pool would be caught.
+        let parked = {
+            let seed = owner.new_stream().unwrap();
+            seed.cu_stream() as usize
+        };
+        assert!(pooled_handles(0).contains(&parked));
+
+        let borrowed = borrow(&owner);
+        let stream = borrowed.new_stream().unwrap();
+        let handle = stream.cu_stream() as usize;
+        assert_ne!(
+            handle, parked,
+            "a borrowed device must not pop a pooled handle: the pool's handles \
+             belong to contexts this crate retained, not to the borrowed one"
+        );
+        assert!(
+            pooled_handles(0).contains(&parked),
+            "and leaves the pool as it was"
+        );
+
+        unsafe { stream.synchronize() }.unwrap();
+        drop(stream);
+        assert!(
+            !pooled_handles(0).contains(&handle),
+            "a borrowed device's stream must be destroyed on drop, never parked \
+             where a later owned Device for this ordinal could pop it"
+        );
+        assert!(pooled_handles(0).contains(&parked));
+    }
+
+    #[test]
+    fn panicking_host_function_is_caught_and_still_reclaimed() {
+        let (probe, calls, drops) = Probe::new();
+
+        let result = Stream::enqueue_boxed(
+            move || {
+                probe.calls.fetch_add(1, Ordering::SeqCst);
+                panic!("callback panic must not cross the C ABI");
+            },
+            |trampoline, user_data| {
+                // SAFETY: as above; the trampoline must swallow the panic.
+                unsafe { trampoline(user_data) };
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

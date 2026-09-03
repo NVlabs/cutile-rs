@@ -186,7 +186,18 @@ impl Display for DTypeId {
 }
 
 /// A primitive type that can be stored in a `Tensor` or passed as a scalar kernel argument.
-pub trait DType: Send + Sync + Copy + Debug + 'static {
+///
+/// # Safety
+///
+/// Implementors promise that **every byte sequence the device can produce for
+/// `Self::DTYPE` is a valid `Self`**. Host code reads device memory back as
+/// `Self` without validation (a `to_host_vec` copy, a borrowed tensor's
+/// elements), so an invalid bit pattern would be undefined behaviour the
+/// moment it is read. For the integer and floating-point types every bit
+/// pattern is valid. For `bool` the promise rests on device code storing only
+/// `0` or `1`: the DSL guarantees that for the kernels it compiles, and any
+/// foreign memory borrowed as a `Tensor<bool>` must uphold it too.
+pub unsafe trait DType: Send + Sync + Copy + Debug + 'static {
     /// The runtime data type identifier for this scalar type.
     const DTYPE: DTypeId;
     /// Returns the zero value for this scalar type.
@@ -198,7 +209,8 @@ pub trait DType: Send + Sync + Copy + Debug + 'static {
 macro_rules! impl_dtype {
     ($($ty:ty => $variant:ident, $zero:expr, $one:expr),* $(,)?) => {
         $(
-            impl DType for $ty {
+            // SAFETY: see the invocation below.
+            unsafe impl DType for $ty {
                 const DTYPE: DTypeId = DTypeId::$variant;
                 fn zero() -> Self { $zero }
                 fn one() -> Self { $one }
@@ -207,6 +219,12 @@ macro_rules! impl_dtype {
     }
 }
 
+// SAFETY: every bit pattern is a valid value for each type below — the
+// integers by definition, the IEEE and reduced-precision floats because NaN
+// payloads and non-canonical encodings are still values, and the `repr(
+// transparent)` wrappers because they are plain `u8`/`u32` — except `bool`,
+// whose only valid patterns are 0 and 1; the device side guarantees those
+// (see the trait's `# Safety` section).
 impl_dtype!(
     bool => Bool, false, true,
     u8 => U8, 0, 1,

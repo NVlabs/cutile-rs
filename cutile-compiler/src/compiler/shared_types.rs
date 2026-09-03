@@ -50,6 +50,23 @@ pub enum BlockTerminator {
 }
 
 // ---------------------------------------------------------------------------
+// LoopKind — which Tile IR loop op the innermost enclosing loop lowers to
+// ---------------------------------------------------------------------------
+
+/// The Tile IR op the innermost enclosing source loop lowers to. Decides
+/// which early exits a block may emit: `cuda_tile.break` is only valid
+/// inside `cuda_tile.loop` (and the `cuda_tile.if` regions nested in it),
+/// never inside `cuda_tile.for`, which has no early exit at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopKind {
+    /// A `for` over a range, dimension, or mapped-partition schedule:
+    /// `cuda_tile.for`.
+    For,
+    /// `while` / `loop`: `cuda_tile.loop`.
+    Loop,
+}
+
+// ---------------------------------------------------------------------------
 // Mutability — mutability state of a variable binding
 // ---------------------------------------------------------------------------
 

@@ -21,9 +21,9 @@ mod global_kernels {
     #[cutile::entry()]
     fn update_counter_ordered(out: &mut Tensor<i32, { [1] }>) {
         let (old_value, _load_token) = COUNTER.load(ordering::Acquire, scope::Device);
-        let next_value = old_value + constant(1i32, const_shape![]);
+        let next_value = old_value + constant(1i32, shape![]);
         let _store_token = COUNTER.store(next_value, ordering::Release, scope::Device);
-        out.store(old_value.reshape(const_shape![1]));
+        out.store(old_value.reshape(shape![1]));
     }
 }
 

@@ -5,7 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.1] - 2026-09-02
+
+A single `cargo add cutile` now suffices, kernels gain Triton-parity
+program indexing and Rust-model raw pointers, and the experimental
+autotuner grows the pieces its first engine-scale consumer asked for.
+
+### Breaking changes
+
+0.3.1 ships the incompatible changes below. Each one closes a soundness or
+correctness hole found by the September audit, the case the 0.1.0 notes
+reserved for breaking changes. Projects that are not ready for them can stay
+on 0.3.0.
+
+- `Device::load_module_from_bytes` and
+  `cuda_async::device_context::load_module_from_bytes` are `unsafe fn`: the
+  driver reads header-declared offsets from the image, so a truncated cubin
+  reads past the slice.
+- The DSL ops `atomic_rmw_tko` and `atomic_cas_tko` are `unsafe fn`, like
+  `load_ptr_tko` and `store_ptr_tko`.
+- `DType` is an `unsafe trait`: implementors promise that every byte pattern
+  the device can produce for their `DTYPE` is a valid value.
+- `cuda_core::api::{malloc_async, malloc_from_pool_async, free_async,
+  memcpy_htod_async, memcpy_dtoh_async, memcpy_dtod_async, api_version}` and
+  `ExecutionContext::alloc_async` return `Result` instead of panicking, so a
+  failed device allocation can be handled or retried.
+- `Stream::launch_host_function` and `launch_host_function_with_sync_mode`
+  require `F: 'static`.
+- `api::memcpy` returns `Memcpy<'a>`, which borrows both tensors for the
+  lifetime of the operation.
+- `CudaGraph::update` accepts only `GraphNode + DeviceOp<Output = ()>` and
+  returns `Result<(), DeviceError>`.
+- Generated kernel launchers return a nameable `Launcher<…, KernelArgs<…>>`
+  instead of `impl DeviceOp` and implement `GraphNode` only when every input
+  does; `AsyncKernelLaunch::args` is no longer public.
+- `TrialLog::open` takes a `LogProvenance` (`experimental-tune`).
+- `BytecodeVersion::V13_1` is removed; the bytecode floor is CUDA 13.2.
+- Kernel programs: a `return` below the function body and a `break` inside
+  `for` are compile errors (they were silently miscompiled); integer `/`
+  rounds toward zero, as in Rust, instead of toward negative infinity; `u8`
+  and `u16` arithmetic and comparisons are unsigned. Programs that relied on
+  the old lowering produce different results.
+
+### Added
+
+- `shape![..]`: the shape constructor macro, replacing `const_shape!` (now
+  deprecated; both spellings work on both compile tracks). Runtime extents
+  keep the explicit form `Shape::<{ [-1] }> { dims: &[n] }`.
+- `x.load_like(z)`: method-form spelling of `load_tile_like(x, z)`, lowering
+  to identical Tile IR with identical bounds-check placement. Both spellings
+  remain supported; docs and examples now use the method form (#259).
+- cuda-oxide host surface: `simt` modules in `cuda-core` and `cuda-async`
+  (contexts, streams, events, device and pinned host buffers, module loading,
+  kernel launch, VMM, reclaim) and a `cuda-core-derive` crate providing
+  `#[derive(DeviceCopy)]` (#233).
+- CUDA VMM wrappers (`PhysicalAllocation`, `VirtualReservation`, `Mapping`)
+  and NVLink switch multicast (`MulticastObject`) in `cuda-core` (#202).
+- Autotuner: trial logging and resume on the `Objective` path, `require`d
+  configurations measured before the search, and kernel cache management
+  (`clear_kernel_cache`, `evict_kernel`, `retain_kernels`), all behind
+  `experimental-tune` (#239).
+- Const raw pointers (`*const T`) in kernel signatures, with `Tensor::as_ptr`,
+  `cast_const`/`cast_mut`, `cast_tile_const`/`cast_tile_mut`, and
+  `get_tensor_base`; `program_id(axis)` and `num_programs(axis)` as aliases
+  of the tile-block id and count (#240, restored by #256).
+- `CompileOptions::{device_debug, lineinfo, sanitize_memcheck, opt_level}`
+  pass `--device-debug`, `--lineinfo`, `--sanitize=memcheck`, and
+  `--opt-level` to `tileiras` and join both cache keys (#236).
+- Source locations in the bytecode debug section, with per-callee subprograms
+  and inlined call-site chains, so `--lineinfo` and `--device-debug` builds
+  attribute SASS to the kernel's `.rs` lines (#238).
+
+### Changed
+
+- The host-side crates (`cuda-bindings`, `cuda-core`, `cuda-async`) require
+  CUDA 13.0 or newer; the Tile compiler floor stays at 13.2 (#233).
+- Toolkit discovery honors `CUDA_HOME` after `CUDA_TOOLKIT_PATH`, probes
+  `targets/<dir>/include` layouts, and accepts `CUDA_TOOLKIT_TARGET_DIR` to
+  name one target tree; the host-crate tests run in the CPU and GPU test
+  scripts (#251).
+- `load_ptr_tko` and `store_ptr_tko` are `unsafe fn` (#240, restored by
+  #256).
+
+### Fixed
+
+- Integer division and remainder serialize `rounding<zero>` and inferred
+  signedness on `divi`/`remi` (#225, restored by #256).
+- Persisted tuning records carry the L2 cache key schema, so key migrations
+  are distinguishable from workspace drift (#241).
+- Pointer alignment hints use the full 64-bit device address; an address
+  whose low 32 bits were `0x8000_0000` previously lost its divisibility hint
+  (#244).
+- Generated launchers reach `cutile_compiler` through the `cutile` crate
+  root, so consumer crates without a direct `cutile-compiler` dependency
+  compile (#248).
+- Three merges reverted by stale squash merges (#240, #225, #185) are
+  re-applied (#256).
 
 ## [0.3.0] - 2026-08-20
 

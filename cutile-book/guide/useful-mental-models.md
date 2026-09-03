@@ -24,8 +24,8 @@ fn add<const S: [i32; 2]>(
     a: &Tensor<f32, { [-1, -1] }>,
     b: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile_a = load_tile_like(a, c);
-    let tile_b = load_tile_like(b, c);
+    let tile_a = a.load_like(c);
+    let tile_b = b.load_like(c);
     c.store(tile_a + tile_b);
 }
 ```
@@ -61,7 +61,7 @@ Inside a kernel, the program id selects the logical region:
 
 ```rust
 let pid_m = program_id(0);
-let part_x = x.partition(const_shape![BM, BK]);
+let part_x = x.partition(shape![BM, BK]);
 let tile_x = part_x.load([pid_m, k_tile]);
 ```
 
@@ -81,7 +81,7 @@ NVIDIA GPUs have several memory levels:
 In cuTile Rust, you load from tensors in HBM and compute on tiles in registers. The Tile IR compiler and runtime decide how to stage data through shared memory, caches, threads, warps, Tensor Cores, and Tensor Memory Accelerator (TMA) instructions when those mechanisms are useful.
 
 ```rust
-let tile = load_tile_like(x, z); // HBM -> tile.
+let tile = x.load_like(z); // HBM -> tile.
 let y = tile * 2.0f32;           // Register-resident computation.
 z.store(y);                      // Tile -> HBM.
 ```

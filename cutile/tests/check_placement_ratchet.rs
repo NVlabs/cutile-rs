@@ -37,10 +37,10 @@ mod ratchet_module {
     fn branded_static<const N: i32, const B: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let cols = Dim::new(N / B);
         let mut p = out
-            .partition_mut(const_shape![1, B])
+            .partition_mut(shape![1, B])
             .with_bounds((Dim::new(1), cols));
         for j in cols {
-            let t: Tile<f32, { [1, B] }> = constant(0.0, const_shape![1, B]);
+            let t: Tile<f32, { [1, B] }> = constant(0.0, shape![1, B]);
             p.store(t, coord((0i32, j)));
         }
     }
@@ -54,7 +54,7 @@ mod ratchet_module {
     ) {
         let m = Dim::new(x.shape()[0] / BM);
         let n = Dim::new(x.shape()[1] / BN);
-        let p = x.partition(const_shape![BM, BN]).with_bounds((m, n));
+        let p = x.partition(shape![BM, BN]).with_bounds((m, n));
         for i in m {
             for j in n {
                 let t = p.load(coord((i, j)));
@@ -67,7 +67,7 @@ mod ratchet_module {
     /// constant/static rung discharges everything.
     #[cutile::entry]
     fn plain_static_loop<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [256] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         for j in 0i32..4i32 {
             let t = p.load([j]);
             z.store(t);
@@ -82,7 +82,7 @@ mod ratchet_module {
         x: &Tensor<f32, { [-1] }>,
         n: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         for j in 0i32..n {
             let t = p.load([j]);
             z.store(t);
@@ -97,7 +97,7 @@ mod ratchet_module {
         x: &Tensor<f32, { [-1] }>,
         idx: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let t = p.load([idx]);
         z.store(t);
     }
@@ -115,11 +115,11 @@ mod ratchet_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let py = y.partition(const_shape![BK, BN]);
+        let px = x.partition(shape![BM, BK]);
+        let py = y.partition(shape![BK, BN]);
         for index in z.iter_indices() {
             let (bid_m, bid_n) = index.components();
-            let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, const_shape![BM, BN]);
+            let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, shape![BM, BN]);
             for k in 0i32..4i32 {
                 let tx = px.load([bid_m, k]);
                 let ty = py.load([k, bid_n]);
