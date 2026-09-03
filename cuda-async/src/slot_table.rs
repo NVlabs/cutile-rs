@@ -3,10 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Lock-free completion-slot protocol shared by the flag-write reactor.
+//! Completion-slot protocol shared by the flag-write reactor.
 //!
-//! This is the CUDA-free core of [`crate::reactor`]: the active-slot bitmap,
-//! the single-producer/single-consumer payload handoff, and the free list.
+//! This is the CUDA-free core of [`crate::reactor`]: the active-slot bitmap
+//! and the single-producer/single-consumer payload handoff (both lock-free;
+//! the scanner's hot path takes no lock), plus the free list, which is a
+//! small mutex touched only to claim a slot and to recycle retired ones.
 //! It is generic over the payload type and over a [`FlagArray`] backend so the
 //! exact same protocol code runs three ways: against CUDA pinned memory in
 //! production, against plain atomics under `loom` model checking, and against
@@ -33,6 +35,10 @@ pub(crate) trait FlagArray {
 /// read by the scanner after the bit is observed. The `Sync` impl is sound
 /// only under that single-producer/single-consumer discipline.
 struct SlotCell<P>(UnsafeCell<Option<P>>);
+
+/// A dead-payload probe for [`SlotTable::scan_probing`]: where retired dead
+/// payloads go, and the predicate that judges an armed, unlanded payload.
+type Probe<'a, P> = (&'a mut Vec<P>, &'a mut dyn FnMut(&P) -> bool);
 
 unsafe impl<P: Send> Sync for SlotCell<P> {}
 
@@ -124,6 +130,27 @@ impl<P: Send, F: FlagArray> SlotTable<P, F> {
     /// flight). Takes the free-list lock only to recycle, never while the
     /// payloads are woken by the caller.
     pub(crate) fn scan_once(&self, woken: &mut Vec<P>) -> bool {
+        self.scan_inner(woken, None)
+    }
+
+    /// Like [`scan_once`](Self::scan_once), but additionally retires armed
+    /// slots whose flag has *not* landed and whose payload `is_dead` reports
+    /// as dead, into `dead`. The CUDA reactor uses this to resolve slots on a
+    /// faulted stream, whose flag write will never execute; the predicate is
+    /// the (driver-querying, hence rate-limited) part, kept out of the plain
+    /// hot-path scan. Unused in some cfgs (the loom model only needs
+    /// `scan_once`).
+    #[allow(dead_code)]
+    pub(crate) fn scan_probing(
+        &self,
+        woken: &mut Vec<P>,
+        dead: &mut Vec<P>,
+        is_dead: &mut dyn FnMut(&P) -> bool,
+    ) -> bool {
+        self.scan_inner(woken, Some((dead, is_dead)))
+    }
+
+    fn scan_inner(&self, woken: &mut Vec<P>, mut probe: Option<Probe<'_, P>>) -> bool {
         let mut any_active = false;
         let mut retired: Vec<usize> = Vec::new();
         for word in 0..self.active.len() {
@@ -141,15 +168,27 @@ impl<P: Send, F: FlagArray> SlotTable<P, F> {
                 if slot >= self.num_slots {
                     break;
                 }
-                if self.flags.flag(slot).load(Ordering::Acquire) == 1 {
+                let landed = self.flags.flag(slot).load(Ordering::Acquire) == 1;
+                // Sole consumer: the bit was set (happens-before), and the
+                // slot cannot be re-claimed until recycled below, so the
+                // `with_mut` accesses here cannot race the producer.
+                let dead = !landed
+                    && match probe.as_mut() {
+                        Some((_, is_dead)) => self.payload[slot]
+                            .0
+                            .with_mut(|p| unsafe { (*p).as_ref().is_some_and(&mut **is_dead) }),
+                        None => false,
+                    };
+                if landed || dead {
                     self.active[word].fetch_and(!(1u64 << bit), Ordering::AcqRel);
-                    // Sole consumer: the bit was set (happens-before), and the
-                    // slot cannot be re-claimed until recycled below, so this
-                    // `with_mut` cannot race the producer.
                     let taken = self.payload[slot].0.with_mut(|p| unsafe { (*p).take() });
                     retired.push(slot);
-                    if let Some(waker) = taken {
-                        woken.push(waker);
+                    if let Some(payload) = taken {
+                        if landed {
+                            woken.push(payload);
+                        } else if let Some((dead_out, _)) = probe.as_mut() {
+                            dead_out.push(payload);
+                        }
                     }
                 }
             }
@@ -346,6 +385,58 @@ mod tests {
         assert_eq!(table.lock_free().len(), SLOTS, "slots leaked");
     }
 
+    /// A probing scan retires a slot whose flag has not landed when the
+    /// predicate declares its payload dead (a faulted stream in the reactor):
+    /// the payload goes to `dead`, not `woken`; a landed slot in the same
+    /// pass still goes to `woken`; an armed, live, unlanded slot stays armed;
+    /// retired slots of both kinds are recycled and counted out of `n_armed`.
+    /// Deterministic, no threads.
+    #[cfg(not(loom))]
+    #[test]
+    fn probing_scan_retires_dead_slots_and_keeps_live_ones() {
+        // Exactly three slots, all armed below, so the free list is empty
+        // until the scans recycle.
+        const SLOTS: usize = 3;
+        const DEAD: usize = 7;
+        const LANDED: usize = 8;
+        const LIVE: usize = 9;
+        let table = SlotTable::<usize, MockFlags>::new(SLOTS, mock_flags(SLOTS));
+
+        let arm = |token: usize| {
+            let slot = table.claim().expect("slot");
+            table.reset_flag(slot);
+            table.publish(slot, token);
+            slot
+        };
+        let _dead_slot = arm(DEAD);
+        let landed_slot = arm(LANDED);
+        let _live_slot = arm(LIVE);
+        table.flags.flag(landed_slot).store(1, Ordering::Release);
+        assert!(!table.is_idle());
+
+        // A plain scan never retires an unlanded slot, dead or not.
+        let mut woken = Vec::new();
+        assert!(table.scan_once(&mut woken));
+        assert_eq!(woken, vec![LANDED]);
+        assert!(!table.is_idle(), "two unlanded slots remain armed");
+
+        let mut dead = Vec::new();
+        let mut probed = Vec::new();
+        assert!(table.scan_probing(&mut woken, &mut dead, &mut |&token| {
+            probed.push(token);
+            token == DEAD
+        }));
+        assert_eq!(woken, vec![LANDED], "nothing new landed");
+        assert_eq!(dead, vec![DEAD], "only the dead payload is retired");
+        assert_eq!(probed.len(), 2, "each unlanded slot is probed once");
+        assert!(!table.is_idle(), "the live slot is still armed");
+
+        // Recycled: the dead slot and the landed slot are claimable again.
+        assert!(table.claim().is_some());
+        assert!(table.claim().is_some());
+        assert_eq!(table.claim(), None, "only the two retired slots recycled");
+    }
+
     /// Pool exhaustion is signalled by `claim() -> None`, which is what the
     /// reactor keys on to fall back to the host-callback path. Recycling a
     /// retired slot restores capacity. Deterministic, no threads.
@@ -383,8 +474,10 @@ mod tests {
 /// real `SlotTable`. Combinatorial over two orthogonal axes — unpark policy
 /// (always vs llist-style empty→wake) and scanner idle behavior (park vs
 /// never-park spin) — across a saturated and a bursty registration regime.
-/// The `n_armed` counter used by the empty→wake policy is kept in the harness
-/// so `SlotTable` (loom/miri-verified) is untouched.
+/// The harness keeps its own `n_armed` counter for the empty→wake toggle so
+/// both policies can still be compared; the shipped `SlotTable` has since
+/// adopted an `n_armed` of its own (see `publish` / `is_idle`), which this
+/// bench does not consult.
 ///
 /// Run: `cargo test -p cuda-async --release --lib ab_reactor_variants -- --nocapture --ignored`
 #[cfg(all(test, not(loom), not(miri)))]

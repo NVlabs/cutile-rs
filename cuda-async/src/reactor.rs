@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Flag-write completion reactor (feature `reactor`).
+//! Flag-write completion reactor (always compiled in; runtime-selectable via
+//! `CUDA_ASYNC_HOST_SYNC`, see [`crate::device_future`]).
 //!
 //! Replaces per-completion `cuLaunchHostFunc` callbacks with a
 //! `cuStreamWriteValue32` into a slot of pinned host memory at pipeline end,
@@ -12,23 +13,43 @@
 //! wakeup cost amortizes across all in-flight pipelines instead of paying a
 //! driver-thread hop per pipeline.
 //!
-//! The lock-free harvest protocol — the active-slot bitmap, the
-//! single-producer/single-consumer payload handoff, and the free list — lives
-//! in [`crate::slot_table`], CUDA-free and model-checked under `loom`/`miri`.
-//! This module is the thin CUDA binding: it owns the pinned flag slab, the
-//! device write that arms a slot, and the scanner thread.
+//! The harvest protocol — the active-slot bitmap, the
+//! single-producer/single-consumer payload handoff (both lock-free), and the
+//! mutex-guarded free list — lives in [`crate::slot_table`], CUDA-free and
+//! model-checked under `loom`/`miri`. This module is the thin CUDA binding:
+//! it owns the pinned flag slab, the device write that arms a slot, and the
+//! scanner thread.
+//!
+//! # Faulted streams
+//!
+//! A device fault (illegal address, `trap`, ...) kills the context; the
+//! armed flag writes on that context never execute, so their slots would
+//! stay armed forever, the awaiting futures would never resolve, and the
+//! scanner — gated on "anything armed" — would never park. Once the scanner
+//! has spun without progress for a while it therefore probes the stream of
+//! every still-armed slot (rate-limited, one driver query per distinct
+//! stream per probe): a stream the driver reports an error for is retired
+//! and its future is woken *without* being marked complete, so its next poll
+//! observes the driver error itself (see `DeviceFuture::poll`). A capturing
+//! stream is never queried (that would invalidate the capture).
 
-use crate::device_future::StreamCallbackState;
+use crate::device_future::{probe_stream, StreamCallbackState, StreamHealth};
 use crate::error::DeviceError;
 use crate::slot_table::{FlagArray, SlotTable};
+use cuda_core::Stream;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const NUM_SLOTS: usize = 1024;
 /// Spin passes over the active set before yielding between scans.
 const SPIN_PASSES: u32 = 10_000;
+/// While armed slots make no progress, how often their streams are probed
+/// for a fault. Long-running kernels pay one `cuStreamQuery` per distinct
+/// stream per interval; a faulted stream resolves within about an interval.
+const STALE_PROBE_INTERVAL: Duration = Duration::from_millis(2);
 
 /// Completion flags backed by CUDA pinned memory. `host` is the CPU-visible
 /// mapping the scanner loads; the device writes `1` into the same bytes
@@ -51,8 +72,15 @@ impl FlagArray for CudaFlags {
     }
 }
 
+/// What a slot carries: the waker to fire, and the stream whose flag write
+/// completes the slot (kept alive, and probed if the slot goes stale).
+struct Registration {
+    waker_state: Arc<StreamCallbackState>,
+    stream: Arc<Stream>,
+}
+
 struct Reactor {
-    table: SlotTable<Arc<StreamCallbackState>, CudaFlags>,
+    table: SlotTable<Registration, CudaFlags>,
     /// Device-side alias of the flag slab (CU_MEMHOSTALLOC_DEVICEMAP).
     dptr: cuda_bindings::CUdeviceptr,
     scanner: thread::Thread,
@@ -109,14 +137,16 @@ fn scan_loop() {
         thread::yield_now();
     };
     let mut idle_passes: u32 = 0;
-    let mut woken: Vec<Arc<StreamCallbackState>> = Vec::new();
+    let mut woken: Vec<Registration> = Vec::new();
+    let mut faulted: Vec<Registration> = Vec::new();
+    let mut last_probe = Instant::now();
     loop {
         reactor.table.scan_once(&mut woken);
         if !woken.is_empty() {
             // Wakers fire outside any lock the scan held, so a registration
             // is never blocked behind a waking phase.
-            for state in woken.drain(..) {
-                state.signal();
+            for reg in woken.drain(..) {
+                reg.waker_state.signal();
             }
             idle_passes = 0;
             continue;
@@ -133,15 +163,63 @@ fn scan_loop() {
             // was the scan-lock contention — so parking wins on idle CPU.
             thread::park();
             idle_passes = 0;
+            last_probe = Instant::now();
             continue;
         }
         idle_passes += 1;
         if idle_passes < SPIN_PASSES {
             std::hint::spin_loop();
-        } else {
-            thread::yield_now();
+            continue;
         }
+        // Slow phase: something has been armed for a while without landing.
+        // Either a long kernel, or a stream whose flag write will never
+        // execute because the context faulted. Probe periodically so the
+        // latter resolves instead of pinning this thread in yield forever.
+        if last_probe.elapsed() >= STALE_PROBE_INTERVAL {
+            last_probe = Instant::now();
+            probe_stale_slots(&reactor.table, &mut woken, &mut faulted);
+            for reg in woken.drain(..) {
+                reg.waker_state.signal();
+            }
+            for reg in faulted.drain(..) {
+                // Wake without completing: the poll observes the fault.
+                reg.waker_state.wake();
+            }
+        }
+        thread::yield_now();
     }
+}
+
+/// One probing pass: retires slots whose flag has landed into `woken`, and
+/// slots whose stream the driver reports faulted into `faulted`. Each
+/// distinct stream is queried once per pass.
+fn probe_stale_slots(
+    table: &SlotTable<Registration, CudaFlags>,
+    woken: &mut Vec<Registration>,
+    faulted: &mut Vec<Registration>,
+) {
+    let mut memo: Vec<(cuda_bindings::CUstream, bool)> = Vec::new();
+    table.scan_probing(woken, faulted, &mut |reg: &Registration| {
+        let handle = reg.stream.cu_stream();
+        if let Some((_, dead)) = memo.iter().find(|(h, _)| *h == handle) {
+            return *dead;
+        }
+        let dead = stream_is_faulted(&reg.stream);
+        memo.push((handle, dead));
+        dead
+    });
+}
+
+/// Whether the driver reports an error for `stream`. Conservative: if the
+/// device cannot be bound on this thread the slot is left armed for a later
+/// probe, and a capturing or merely busy stream is never dead. A retired
+/// slot's flag write can no longer land — the error is the context's sticky
+/// fault — so recycling the slot cannot be clobbered by a late device write.
+fn stream_is_faulted(stream: &Stream) -> bool {
+    if stream.device().bind_to_thread().is_err() {
+        return false;
+    }
+    matches!(probe_stream(stream), StreamHealth::Faulted(_))
 }
 
 /// Registers a completion slot for work already submitted on `stream`:
@@ -152,7 +230,7 @@ fn scan_loop() {
 /// # Safety
 /// `stream` must be valid and the owning context current on this thread.
 pub(crate) unsafe fn register(
-    stream: cuda_bindings::CUstream,
+    stream: &Arc<Stream>,
     waker_state: Arc<StreamCallbackState>,
 ) -> Result<(), DeviceError> {
     let reactor = reactor()?;
@@ -162,7 +240,7 @@ pub(crate) unsafe fn register(
         .ok_or_else(|| internal("reactor slot pool exhausted".into()))?;
     reactor.table.reset_flag(slot);
     let addr = reactor.dptr + (slot * std::mem::size_of::<u32>()) as u64;
-    let code = cuda_bindings::cuStreamWriteValue32_v2(stream, addr, 1, 0);
+    let code = cuda_bindings::cuStreamWriteValue32_v2(stream.cu_stream(), addr, 1, 0);
     if code != cuda_bindings::cudaError_enum_CUDA_SUCCESS {
         reactor.table.release(slot);
         return Err(internal(format!("cuStreamWriteValue32 failed: {code}")));
@@ -171,7 +249,11 @@ pub(crate) unsafe fn register(
     // from idle to active (the scanner may be parked). At higher registration
     // rates the scanner is already awake and the skipped unparks avoid
     // cross-core `Parker` contention (+38% throughput in the A/B).
-    if reactor.table.publish(slot, waker_state) {
+    let registration = Registration {
+        waker_state,
+        stream: Arc::clone(stream),
+    };
+    if reactor.table.publish(slot, registration) {
         reactor.scanner.unpark();
     }
     Ok(())

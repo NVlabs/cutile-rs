@@ -60,19 +60,19 @@ mod my_module {
         y: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let tile_x: Tile<f32, { [BM, BN] }> = load_tile_like(x, y);
+        let tile_x: Tile<f32, { [BM, BN] }> = x.load_like(y);
 
         // Find max per row (for numerical stability)
         let tile_x_max: Tile<f32, { [BM] }> = reduce_max(tile_x, 1i32);
         let tile_x_max: Tile<f32, { [BM, BN] }> =
-            tile_x_max.reshape(const_shape![BM, 1]).broadcast(y.shape());
+            tile_x_max.reshape(shape![BM, 1]).broadcast(y.shape());
 
         // Subtract max and exponentiate
         let num: Tile<f32, { [BM, BN] }> = exp(tile_x - tile_x_max);
 
         // Sum per row
         let denom: Tile<f32, { [BM] }> = reduce_sum(num, 1);
-        let denom = denom.reshape(const_shape![BM, 1]).broadcast(y.shape());
+        let denom = denom.reshape(shape![BM, 1]).broadcast(y.shape());
 
         // Divide
         y.store(num / denom);
@@ -86,7 +86,7 @@ fn main() -> Result<(), Error> {
     let stream = device.new_stream()?;
 
     let (m, n) = (4usize, 8usize);
-    let (bm, bn) = (2i32, n as i32);
+    let (bm, bn) = (2usize, n);
 
     let input: Arc<Tensor<f32>> = arange(m * n).sync_on(&stream)?.into();
     let x: Arc<Tensor<f32>> = input.dup().sync_on(&stream)?.reshape(&[m, n])?.into();
@@ -134,7 +134,7 @@ After reduction, reshape and broadcast to match the original tile:
 // [BM] → [BM, 1] → [BM, BN]
 let tile_x_max: Tile<f32, { [BM, BN] }> =
     tile_x_max
-    .reshape(const_shape![BM, 1])   // [2] → [2, 1]
+    .reshape(shape![BM, 1])   // [2] → [2, 1]
     .broadcast(y.shape());           // [2, 1] → [2, 8]
 ```
 
@@ -146,7 +146,7 @@ Fused kernels load once, compute everything in registers, and store once:
 
 ```rust
 // 1. LOAD once
-let tile = load_tile_like(input, output);
+let tile = input.load_like(output);
 
 // 2. ALL COMPUTATION in registers
 let step1 = reduce_max(tile, axis);
@@ -194,7 +194,7 @@ fn softmax_with_temp<const BM: i32, const BN: i32>(
     x: &Tensor<f32, {[-1, -1]}>,
     temperature: f32,  // Higher = more uniform, Lower = more peaked
 ) {
-    let tile_x = load_tile_like(x, y);
+    let tile_x = x.load_like(y);
     let scaled = tile_x / temperature.broadcast(y.shape());
     // ... rest of softmax ...
 }

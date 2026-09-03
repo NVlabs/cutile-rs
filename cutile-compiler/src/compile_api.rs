@@ -81,9 +81,17 @@ impl CompileArtifacts {
     }
 
     /// Serializes the compiled module to bytecode.
+    ///
+    /// This is the JIT's own serializer: the module verifiers run first, and
+    /// the image is written at the bytecode version negotiated for the
+    /// resolved `tileiras` toolchain (`CUTILE_BYTECODE_VERSION`, the
+    /// toolkit's `cuda.h`, or a probe of the binary — see
+    /// `cuda_tile_runtime_utils`), so the bytes are exactly what a launch
+    /// would hand to `tileiras`. Fails when no version can be negotiated,
+    /// e.g. no toolkit and no `tileiras` reachable.
     pub fn bytecode(&self) -> Result<Vec<u8>, JITError> {
-        cutile_ir::write_bytecode(&self.module)
-            .map_err(|e| JITError::Generic(format!("bytecode serialization failed: {e}")))
+        crate::cuda_tile_runtime_utils::serialize_tile_ir_bytecode(&self.module)
+            .map(|(bytes, _version)| bytes)
     }
 
     /// Returns a reference to the underlying `cutile_ir::Module`.

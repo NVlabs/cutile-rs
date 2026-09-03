@@ -19,7 +19,8 @@ use super::shared_types::Kind;
 use super::shared_utils::{get_tile_bop_from_rust_bop, TileBinaryOp};
 use super::tile_rust_type::TileRustType;
 use super::utils::{
-    cmp_ordering_attr, cmp_pred_attr, flag_attr, rounding_mode_attr, signedness_attr, NamedAttr,
+    cmp_ordering_attr, cmp_pred_attr, flag_attr, rounding_mode_attr, rust_int_signedness,
+    signedness_attr, NamedAttr,
 };
 use crate::error::JITError;
 use crate::generics::GenericVars;
@@ -83,7 +84,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 | TileBinaryOp::Ge
         );
         let is_logical = matches!(bin_expr.op, syn::BinOp::And(_) | syn::BinOp::Or(_));
-        let lhs_return_type = if is_comparison || is_logical {
+        if is_logical {
+            return self.compile_short_circuit_op(
+                module,
+                block_id,
+                bin_expr,
+                generic_vars,
+                ctx,
+                matches!(bin_expr.op, syn::BinOp::And(_)),
+            );
+        }
+        let lhs_return_type = if is_comparison {
             None
         } else {
             return_type.clone()
@@ -103,9 +114,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         }
         let lhs = lhs.unwrap();
-        let rhs_return_type = if is_logical {
-            None
-        } else if is_comparison {
+        let rhs_return_type = if is_comparison {
             Some(lhs.ty.clone())
         } else {
             return_type.clone().or_else(|| Some(lhs.ty.clone()))
@@ -136,6 +145,183 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return_type,
             &bin_expr.span(),
         )?))
+    }
+
+    /// `&&`/`||` operands must be scalar `bool`s: a primitive whose Rust type
+    /// is `bool` and whose IR value is not a shaped tile (rustc already
+    /// rejects tile operands; this guards the compiler's own callers).
+    fn require_scalar_bool(
+        &self,
+        module: &Module,
+        value: &TileRustValue,
+        side: &str,
+        op_name: &str,
+        side_span: &proc_macro2::Span,
+    ) -> Result<(), JITError> {
+        let is_bool = matches!(&value.ty.rust_ty, syn::Type::Path(p) if p.path.is_ident("bool"));
+        let is_scalar = value.value.is_some_and(
+            |v| !matches!(module.value_type(v), Type::Tile(tile) if !tile.shape.is_empty()),
+        );
+        if value.kind != Kind::PrimitiveType || !is_bool || !is_scalar {
+            return self.jit_error_result(
+                side_span,
+                &format!(
+                    "the {side} operand of `{op_name}` must be a scalar `bool`, got `{}`; \
+                     use `&`/`|` for element-wise tile logic",
+                    value.ty.rust_ty.to_token_stream()
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Lowers `a && b` / `a || b` with Rust's short-circuit semantics.
+    ///
+    /// The right operand is compiled into the `then` (`&&`) or `else` (`||`)
+    /// region of a `cuda_tile.if` on the left operand, so it executes only
+    /// when the left operand does not already decide the result — exactly
+    /// as in Rust. The former lowering evaluated both sides eagerly and
+    /// combined them with `andi`/`ori`, which executed e.g. the `idx % n` in
+    /// `n != 0 && idx % n == 0` for `n == 0` (audit 2026-08).
+    ///
+    /// A compile-time-known left operand folds the whole expression the way
+    /// Rust's own evaluation would: the right side is compiled inline when it
+    /// decides the result, and never compiled when it does not.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_short_circuit_op(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        bin_expr: &ExprBinary,
+        generic_vars: &GenericVars,
+        ctx: &mut CompilerContext,
+        is_and: bool,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        let op_name = if is_and { "&&" } else { "||" };
+        let span = bin_expr.span();
+        let bool_ty = syn::parse2::<syn::Type>("bool".parse().unwrap()).unwrap();
+        let bool_tr_ty = self
+            .compile_type(&bool_ty, generic_vars, &HashMap::new())?
+            .ok_or_else(|| self.jit_error(&span, "failed to compile the `bool` type"))?;
+        let Some(lhs) =
+            self.compile_expression(module, block_id, &bin_expr.left, generic_vars, ctx, None)?
+        else {
+            return self.jit_error_result(
+                &bin_expr.left.span(),
+                &format!("failed to compile the left-hand side of `{op_name}`"),
+            );
+        };
+        self.require_scalar_bool(module, &lhs, "left", op_name, &bin_expr.left.span())?;
+        // Any assignment on the right would have to be threaded through the
+        // conditional region as a carried value; nothing needs that today.
+        let mutated = super::shared_utils::collect_mutated_variables_from_expr(&bin_expr.right)?;
+        if let Some(name) = mutated.iter().next() {
+            return self.jit_error_result(
+                &bin_expr.right.span(),
+                &format!(
+                    "assignment to `{name}` inside the right-hand side of `{op_name}` is not \
+                     supported; move it before the expression"
+                ),
+            );
+        }
+        let tile_op = if is_and {
+            TileBinaryOp::BitAnd
+        } else {
+            TileBinaryOp::BitOr
+        };
+        // Compile-time-known left operand: fold exactly as Rust evaluates.
+        if let Some(bounds) = lhs.bounds.filter(|b| b.is_exact()) {
+            let lhs_true = bounds.start != 0;
+            let rhs_decides = lhs_true == is_and;
+            if !rhs_decides {
+                // `false && b` / `true || b`: `b` is never evaluated.
+                return Ok(Some(lhs));
+            }
+            let Some(rhs) = self.compile_expression(
+                module,
+                block_id,
+                &bin_expr.right,
+                generic_vars,
+                ctx,
+                None,
+            )?
+            else {
+                return self.jit_error_result(
+                    &bin_expr.right.span(),
+                    &format!("failed to compile the right-hand side of `{op_name}`"),
+                );
+            };
+            self.require_scalar_bool(module, &rhs, "right", op_name, &bin_expr.right.span())?;
+            return Ok(Some(rhs));
+        }
+        let Some(cond) = lhs.value else {
+            return self.jit_error_result(
+                &bin_expr.left.span(),
+                &format!("left-hand side of `{op_name}` did not produce a value"),
+            );
+        };
+        // The region that evaluates `b`: `then` for `&&`, `else` for `||`.
+        let (rhs_block_id, _) = cutile_ir::builder::build_block(module, &[]);
+        let mut rhs_vars = ctx.clone();
+        rhs_vars.default_terminator = None;
+        rhs_vars.carry_vars = None;
+        let Some(rhs) = self.compile_expression(
+            module,
+            rhs_block_id,
+            &bin_expr.right,
+            generic_vars,
+            &mut rhs_vars,
+            None,
+        )?
+        else {
+            return self.jit_error_result(
+                &bin_expr.right.span(),
+                &format!("failed to compile the right-hand side of `{op_name}`"),
+            );
+        };
+        self.require_scalar_bool(module, &rhs, "right", op_name, &bin_expr.right.span())?;
+        let rhs_value = rhs.value.expect("checked by require_scalar_bool");
+        let result_ty = module.value_type(rhs_value).clone();
+        let (rhs_yield, _) = OpBuilder::new(Opcode::Yield, self.ir_location(&span))
+            .operand(rhs_value)
+            .build(module);
+        append_op(module, rhs_block_id, rhs_yield);
+        let rhs_region = module.alloc_region(cutile_ir::ir::Region {
+            blocks: vec![rhs_block_id],
+        });
+        // The region taken when `a` decides: yields the deciding constant
+        // (`false` for `&&`, `true` for `||`).
+        let (const_block_id, _) = cutile_ir::builder::build_block(module, &[]);
+        let deciding = self.compile_bool_constant(module, const_block_id, generic_vars, !is_and)?;
+        let deciding_value = deciding
+            .value
+            .ok_or_else(|| self.jit_error(&span, "failed to compile a `bool` constant"))?;
+        let (const_yield, _) = OpBuilder::new(Opcode::Yield, self.ir_location(&span))
+            .operand(deciding_value)
+            .build(module);
+        append_op(module, const_block_id, const_yield);
+        let const_region = module.alloc_region(cutile_ir::ir::Region {
+            blocks: vec![const_block_id],
+        });
+        let (then_region, else_region) = if is_and {
+            (rhs_region, const_region)
+        } else {
+            (const_region, rhs_region)
+        };
+        let (if_op, results) = OpBuilder::new(Opcode::If, self.ir_location(&span))
+            .operand(cond)
+            .result(result_ty)
+            .region(then_region)
+            .region(else_region)
+            .build(module);
+        append_op(module, block_id, if_op);
+        // Value facts: the interval lattice is the same truth table the eager
+        // lowering had; the symbolic term does not apply to booleans.
+        let facts =
+            value_facts::transfer(&tile_op, &lhs, &rhs, value_facts::int_value_domain("bool"));
+        let mut result = TileRustValue::new_value_kind_like(results[0], bool_tr_ty);
+        result.bounds = facts.bounds;
+        Ok(Some(result))
     }
 
     pub fn compile_binary_op_from_values(
@@ -217,10 +403,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
         let mut is_cmp = false;
-        let signedness_str = match operand_rust_element_type.as_str() {
-            "bool" | "u32" | "u64" => "unsigned",
-            _ => "signed",
-        };
+        let signedness_str = rust_int_signedness(operand_rust_element_type.as_str());
         let sign_attr = signedness_attr("signedness", signedness_str);
         // Build the operation (allocates in module) but do NOT append to the
         // block yet. The old compiler defers `.build()` + `append_operation`
@@ -281,13 +464,24 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             .result(operand_result_ty.clone())
                             .build(module),
                         TileBinaryOp::Div => {
+                            // Rust `/` truncates toward zero, and every analysis
+                            // that models it (`bounds::Div`, the exact-range
+                            // constant fold, `value_facts::FloorDiv`) uses Rust
+                            // semantics, so the device op must round toward zero
+                            // too. The former `negative_inf` (floor) lowering
+                            // disagreed with the analysis for negative dividends
+                            // and is rejected by the Tile IR verifier for
+                            // unsigned operands. `RoundingMode::Zero == 1`.
                             // DivI uses "rounding" (not "rounding_mode") in bytecode
                             OpBuilder::new(Opcode::DivI, self.ir_location(span))
                                 .operand(lhs_value)
                                 .operand(rhs_value)
                                 .result(operand_result_ty.clone())
                                 .attr(sign_attr.0, sign_attr.1)
-                                .attr("rounding", Attribute::i32(2)) // negative_inf
+                                .attr(
+                                    "rounding",
+                                    Attribute::i32(cutile_ir::ir::RoundingMode::Zero as i64),
+                                )
                                 .build(module)
                         }
                         TileBinaryOp::CeilDiv => {
@@ -297,7 +491,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 .operand(rhs_value)
                                 .result(operand_result_ty.clone())
                                 .attr(sign_attr.0, sign_attr.1)
-                                .attr("rounding", Attribute::i32(3)) // positive_inf
+                                .attr(
+                                    "rounding",
+                                    Attribute::i32(cutile_ir::ir::RoundingMode::PositiveInf as i64),
+                                )
                                 .build(module)
                         }
                         TileBinaryOp::BitAnd => {

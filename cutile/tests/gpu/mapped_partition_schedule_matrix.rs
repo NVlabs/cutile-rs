@@ -34,7 +34,7 @@ mod schedule_matrix_kernels {
     ) {
         for index in z.iter_indices() {
             let coords = index.coords();
-            let tile: Tile<i32, { [BN] }> = broadcast_scalar(coords[0], const_shape![BN]);
+            let tile: Tile<i32, { [BN] }> = broadcast_scalar(coords[0], shape![BN]);
             z.store(tile, index);
         }
     }
@@ -47,7 +47,7 @@ mod schedule_matrix_kernels {
         for index in z.iter_indices() {
             let (c0, c1) = index.components();
             let flat: i32 = c0 * g1 + c1;
-            let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(flat, const_shape![BM, BN]);
+            let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(flat, shape![BM, BN]);
             z.store(tile, index);
         }
     }
@@ -66,8 +66,7 @@ mod schedule_matrix_kernels {
         for index in z.iter_indices() {
             let (c0, c1, c2) = index.components();
             let flat: i32 = (c0 * g1 + c1) * g2 + c2;
-            let tile: Tile<i32, { [B0, B1, B2] }> =
-                broadcast_scalar(flat, const_shape![B0, B1, B2]);
+            let tile: Tile<i32, { [B0, B1, B2] }> = broadcast_scalar(flat, shape![B0, B1, B2]);
             z.store(tile, index);
         }
     }
@@ -84,7 +83,7 @@ mod schedule_matrix_kernels {
         for index in z.iter_indices_within([(start_tile, n_tiles), (0i32, -1i32)]) {
             let (c0, c1) = index.components();
             let flat: i32 = c0 * g1 + c1;
-            let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(flat, const_shape![BM, BN]);
+            let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(flat, shape![BM, BN]);
             z.store(tile, index);
         }
     }
@@ -100,7 +99,7 @@ mod schedule_matrix_kernels {
         for index in z.iter_indices_within([(start_tile, -1i32), (0i32, -1i32)]) {
             let (c0, c1) = index.components();
             let flat: i32 = c0 * g1 + c1;
-            let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(flat, const_shape![BM, BN]);
+            let tile: Tile<i32, { [BM, BN] }> = broadcast_scalar(flat, shape![BM, BN]);
             z.store(tile, index);
         }
     }
@@ -115,9 +114,9 @@ mod schedule_matrix_kernels {
         pos: &Tensor<i32, { [1] }>,
         n_tiles: i32,
     ) {
-        let pos_tile: Tile<i32, { [1] }> = pos.partition(const_shape![1]).load([0i32]);
-        let pos_scalar: i32 = tile_to_scalar(pos_tile.reshape(const_shape![]));
-        let part_k = new_k.partition(const_shape![1, BS, BD]);
+        let pos_tile: Tile<i32, { [1] }> = pos.partition(shape![1]).load([0i32]);
+        let pos_scalar: i32 = tile_to_scalar(pos_tile.reshape(shape![]));
+        let part_k = new_k.partition(shape![1, BS, BD]);
         for index in k_cache.iter_indices_within_with(
             [(0i32, -1i32), (pos_scalar, n_tiles), (0i32, -1i32)],
             &v_cache,
@@ -141,7 +140,7 @@ mod schedule_matrix_kernels {
         new_k: &Tensor<f32, { [-1, -1, -1] }>,
         seq_len: i32,
     ) {
-        let part_k = new_k.partition(const_shape![1, BS, BD]);
+        let part_k = new_k.partition(shape![1, BS, BD]);
         for index in k_cache
             .iter_indices_within_with([(0i32, -1i32), (0i32, seq_len), (0i32, -1i32)], &v_cache)
         {
@@ -160,7 +159,7 @@ mod schedule_matrix_kernels {
         mut z: MappedPartitionMut<f32, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BN]);
+        let part_x = x.partition(shape![BM, BN]);
         for index in z.iter_indices() {
             let (c0, c1) = index.components();
             let tile = part_x.load([c0, c1]);
@@ -180,7 +179,7 @@ mod schedule_matrix_kernels {
         mut z: MappedPartitionMut<f32, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BN]);
+        let part_x = x.partition(shape![BM, BN]);
         for index in z.iter_indices() {
             let (c0, c1) = index.components();
             let tile = part_x.load_pipelined::<L>([c0, c1]);

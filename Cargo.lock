@@ -41,7 +41,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
 dependencies = [
- "object",
+ "object 0.37.3",
 ]
 
 [[package]]
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-async"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -424,12 +424,13 @@ dependencies = [
  "half",
  "loom",
  "once_cell",
+ "rustc-hash 2.1.2",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "cuda-bindings"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bindgen 0.69.5",
  "libloading",
@@ -441,16 +442,28 @@ dependencies = [
 
 [[package]]
 name = "cuda-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cuda-bindings",
+ "cuda-core-derive",
  "half",
+ "oxide-artifacts",
+ "trybuild",
+]
+
+[[package]]
+name = "cuda-core-derive"
+version = "0.3.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
 name = "cuda-tile-rs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bindgen 0.71.1",
  "cmake",
@@ -458,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "cutile"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -478,11 +491,12 @@ dependencies = [
  "sha2",
  "syn",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]
 name = "cutile-benchmarks"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "cuda-async",
@@ -494,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-compiler"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -514,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-examples"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -529,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-ir"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "half",
  "indexmap",
@@ -538,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-kernels"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cutile",
  "cutile-compiler",
@@ -546,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-macro"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "convert_case",
  "cutile-compiler",
@@ -1250,6 +1264,18 @@ dependencies = [
 
 [[package]]
 name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "memchr",
+]
+
+[[package]]
+name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
@@ -1268,6 +1294,15 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
+name = "oxide-artifacts"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74d9a941c0c43d2dceaf25f5c9ca4c9f9cceb28dfa5e4e3cfd14e476f003e7c9"
+dependencies = [
+ "object 0.36.7",
+]
 
 [[package]]
 name = "parking_lot"

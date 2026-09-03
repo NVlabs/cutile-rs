@@ -18,8 +18,8 @@ fn add<const S: [i32; 2]>(
     x: &Tensor<f32, { [-1, -1] }>,
     y: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile_x = load_tile_like(x, z);
-    let tile_y = load_tile_like(y, z);
+    let tile_x = x.load_like(z);
+    let tile_y = y.load_like(z);
     z.store(tile_x + tile_y);
 }
 ```
@@ -35,7 +35,7 @@ The output tensor is mutable and already partitioned by the host launcher. The i
 `Tile<E, S>` is an immutable register-resident array fragment. Tile operations create new tiles instead of mutating the original value:
 
 ```rust
-let tile = load_tile_like(x, z);
+let tile = x.load_like(z);
 let shifted = tile + 1.0f32;
 let scaled = shifted * 2.0f32;
 z.store(scaled);
@@ -64,7 +64,7 @@ Read-only inputs do not need host-side partitioning. Inside the kernel, partitio
 
 ```rust
 let pid_m = program_id(0);
-let part_x = x.partition(const_shape![BM, BK]);
+let part_x = x.partition(shape![BM, BK]);
 let tile_x = part_x.load([pid_m, i]);
 ```
 
@@ -88,21 +88,21 @@ fn normalize<const S: [i32; 2]>(
     z: &mut Tensor<f32, S>,          // Static tile shape from partition.
     x: &Tensor<f32, { [-1, -1] }>,   // Runtime full tensor shape.
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     z.store(tile);
 }
 ```
 
 Static shapes let the compiler check operations and optimize layout. Dynamic dimensions let the same compiled variant handle different full tensor sizes. The common pattern is static output tile shape and dynamic read-only input shape.
 
-Const generic arrays such as `const S: [i32; 2]` and `const_shape![BM, BK]` carry tile dimensions through the type system. Changing a const generic value can create a new compiled variant.
+Const generic arrays such as `const S: [i32; 2]` and `shape![BM, BK]` carry tile dimensions through the type system. Changing a const generic value can create a new compiled variant.
 
 ## Loading, Computing, Storing
 
-`load_tile_like(input, output)` loads a read-only tensor region matching the output tensor's tile shape and tile-block coordinates. For explicit device-side partitions, call `partition.load(index)`:
+`input.load_like(output)` loads a read-only tensor region matching the output tensor's tile shape and tile-block coordinates. For explicit device-side partitions, call `partition.load(index)`:
 
 ```rust
-let part_x = x.partition(const_shape![BM, BK]);
+let part_x = x.partition(shape![BM, BK]);
 let tile_x = part_x.load([pid_m, k_tile]);
 ```
 
@@ -126,12 +126,12 @@ The DSL API reference has complete signatures. These are the operation families 
 
 | Category | Examples |
 |---|---|
-| Load and store | `load_tile_like`, `load_tile_mut`, `Partition::load`, `Tensor::store` |
+| Load and store | `load_like` (method form of `load_tile_like`), `load_tile_mut`, `Partition::load`, `Tensor::store` |
 | Arithmetic | `+`, `-`, `*`, `/`, `fma`, `true_div` |
 | Math | `exp`, `log`, `sqrt`, `rsqrt`, `sin`, `cos`, `tanh` |
 | Reduction and scan | `reduce_max`, `reduce_sum`, `reduce_min`, `scan` |
 | Matrix multiply | `mma`, `mmaf_scaled` |
-| Shape manipulation | `reshape`, `broadcast`, `transpose`, `const_shape!` |
+| Shape manipulation | `reshape`, `broadcast`, `transpose`, `shape!` |
 | Comparison | `gt_tile`, `ge_tile`, `lt_tile`, `le_tile`, `eq_tile`, `select` |
 | Creation and conversion | `constant`, `iota`, `convert_tile`, `pack`, `unpack` |
 
@@ -144,7 +144,7 @@ Broadcasting expands a scalar or smaller tile to match a larger tile shape. It f
 ```rust
 let bias: Tile<f32, { [1, BN] }> = ...;
 let x: Tile<f32, { [BM, BN] }> = ...;
-let y = x + bias.broadcast(const_shape![BM, BN]);
+let y = x + bias.broadcast(shape![BM, BN]);
 ```
 
 Reductions collapse one axis. Reshape the reduced result before broadcasting it back:
@@ -154,14 +154,14 @@ fn softmax<const BM: i32, const BN: i32>(
     x: Tile<f32, { [BM, BN] }>,
 ) -> Tile<f32, { [BM, BN] }> {
     let max = reduce_max(x, 1i32)
-        .reshape(const_shape![BM, 1])
-        .broadcast(const_shape![BM, BN]);
+        .reshape(shape![BM, 1])
+        .broadcast(shape![BM, BN]);
     let stable = x - max;
 
     let exp_x = exp(stable);
     let sum = reduce_sum(exp_x, 1i32)
-        .reshape(const_shape![BM, 1])
-        .broadcast(const_shape![BM, BN]);
+        .reshape(shape![BM, 1])
+        .broadcast(shape![BM, BN]);
 
     true_div(exp_x, sum)
 }
@@ -190,10 +190,10 @@ fn tiled_gemm<
     let pid_n = program_id(1);
     let k_tiles = x.shape()[1] / BK;
 
-    let part_x = x.partition(const_shape![BM, BK]);
-    let part_y = y.partition(const_shape![BK, BN]);
+    let part_x = x.partition(shape![BM, BK]);
+    let part_y = y.partition(shape![BK, BN]);
 
-    let mut acc = constant(0.0f32, const_shape![BM, BN]);
+    let mut acc = constant(0.0f32, shape![BM, BN]);
     for k_tile in 0i32..k_tiles {
         let tile_x = part_x.load([pid_m, k_tile]);
         let tile_y = part_y.load([k_tile, pid_n]);
@@ -232,7 +232,7 @@ fn scale<E: ElementType, const S: [i32; 2]>(
     x: &Tensor<E, { [-1, -1] }>,
     alpha: E,
 ) {
-    let tile = load_tile_like(x, z);
+    let tile = x.load_like(z);
     z.store(tile * alpha);
 }
 ```

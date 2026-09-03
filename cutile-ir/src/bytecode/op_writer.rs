@@ -326,18 +326,25 @@ pub(super) fn write_op_body(
             write_operands(op, w, ctx, true)?;
         }
 
-        // ----- Print: result count + v13.2 flags + attributes + variadic operands -----
+        // ----- Print: result count + flags + `str` + sized `args` + optional token -----
+        // Reference (`writePrintTkoOp`): the flags word has bit 0 set when the
+        // optional `token` operand is present; the `args` group is written with
+        // its size, and the token follows it unsized. The former writer left
+        // the flag clear and folded the token into the sized group, so a
+        // `print_tko` with an ordering token mis-parsed in every toolkit.
         Print => {
             w.write_varint(op.result_types.len() as u64);
             write_result_types(op, w, ctx)?;
-            // v13.2: flags field (bit 0 = has token operand)
-            // The token is the last operand if present; we check via
-            // the "has_token" attr or by result count (token result).
-            let flags = 0u64; // TODO: set bit 0 if token present
-            w.write_varint(flags);
+            let (num_args, has_token) = print_operand_groups(op, ctx);
+            w.write_varint(if has_token { 1 } else { 0 });
             write_inline_attr(op, "str", w, ctx)?;
-            write_operands(op, w, ctx, true)?;
-            // v13.2: optional token operand (not written if flags bit 0 is 0)
+            w.write_varint(num_args as u64);
+            for &operand in &op.operands[..num_args] {
+                w.write_varint(operand_index(op, operand, ctx)?);
+            }
+            if has_token {
+                w.write_varint(operand_index(op, op.operands[num_args], ctx)?);
+            }
         }
 
         // ----- Variadic results + regions -----
@@ -576,15 +583,39 @@ fn write_operands(
         w.write_varint(op.operands.len() as u64);
     }
     for &operand in &op.operands {
-        let idx = ctx.value_map.get(&operand).copied().ok_or_else(|| {
-            Error::BytecodeWrite(format!(
-                "operand {:?} not found in value map for op {:?}",
-                operand, op.opcode
-            ))
-        })?;
-        w.write_varint(idx);
+        w.write_varint(operand_index(op, operand, ctx)?);
     }
     Ok(())
+}
+
+/// The bytecode value index of `operand`, which must already be defined.
+fn operand_index(op: &Operation, operand: crate::ir::Value, ctx: &WriterCtx) -> Result<u64> {
+    ctx.value_map.get(&operand).copied().ok_or_else(|| {
+        Error::BytecodeWrite(format!(
+            "operand {:?} not found in value map for op {:?}",
+            operand, op.opcode
+        ))
+    })
+}
+
+/// Splits a `print_tko` op's operands into `(number of format args, has token)`.
+///
+/// Uses `operandSegmentSizes` when the builder recorded it (the compiler
+/// always does); otherwise the token is recognized by its type — it is the
+/// only operand a `print_tko` can have of type `token`, and it is always
+/// last.
+fn print_operand_groups(op: &Operation, ctx: &WriterCtx) -> (usize, bool) {
+    if find_op_attr(op, "operandSegmentSizes").is_some() {
+        let sizes = operand_segment_sizes(op);
+        let num_args = sizes.first().copied().unwrap_or(0).max(0) as usize;
+        let has_token = sizes.get(1).copied().unwrap_or(0) > 0;
+        return (num_args.min(op.operands.len()), has_token);
+    }
+    let has_token = op
+        .operands
+        .last()
+        .is_some_and(|&v| matches!(ctx.module.value_type(v), crate::ir::Type::Token));
+    (op.operands.len() - usize::from(has_token), has_token)
 }
 
 fn write_operand_group(
@@ -834,5 +865,123 @@ fn flag_if_operand_group(op: &Operation, group_idx: usize, bit: u32) -> u64 {
         1u64 << bit
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::writer::{
+        ConstantManager, DebugInfoCollector, StringManager, TypeManager, WriterCtx,
+    };
+    use super::*;
+    use crate::builder::{append_op, build_single_block_region, OpBuilder};
+    use crate::bytecode::enums::BytecodeVersion;
+    use crate::ir::{Location, Module, ScalarType, TileElementType, TileType, Type};
+
+    fn tile_f32() -> Type {
+        Type::Tile(TileType {
+            shape: vec![],
+            element_type: TileElementType::Scalar(ScalarType::F32),
+        })
+    }
+
+    /// Serializes the body of the single op in `block` with a fresh context
+    /// whose value map numbers the block arguments 0, 1, ...
+    fn op_body_bytes(module: &Module, args: &[crate::ir::Value], op: crate::ir::OpId) -> Vec<u8> {
+        let mut ctx = WriterCtx {
+            module,
+            version: BytecodeVersion::CURRENT,
+            value_map: args
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (v, i as u64))
+                .collect(),
+            next_idx: args.len() as u64,
+            strings: StringManager::new(),
+            types: TypeManager::new(),
+            constants: ConstantManager::new(),
+            debug: DebugInfoCollector::new(),
+        };
+        let mut w = EncodingWriter::new();
+        write_op_body(module.op(op), &mut w, &mut ctx).expect("write_op_body");
+        w.into_bytes()
+    }
+
+    /// `print_tko` with an ordering token: flags bit 0 set, the sized `args`
+    /// group, then the token unsized — the reference `writePrintTkoOp`
+    /// layout. The former writer cleared the flag and folded the token into
+    /// the sized group.
+    #[test]
+    fn print_with_token_sets_the_flag_and_writes_the_token_after_the_args() {
+        let mut module = Module::new("print_token");
+        let (_region, block, args) =
+            build_single_block_region(&mut module, &[tile_f32(), Type::Token]);
+        let (op, _) = OpBuilder::new(Opcode::Print, Location::Unknown)
+            .attr("str", Attribute::String("v=%f\n".into()))
+            .attr(
+                "operandSegmentSizes",
+                Attribute::Array(vec![Attribute::i32(1), Attribute::i32(1)]),
+            )
+            .operand(args[0])
+            .operand(args[1])
+            .result(Type::Token)
+            .build(&mut module);
+        append_op(&mut module, block, op);
+        // [result count = 1][result type idx = 0][flags = 1][str idx = 0]
+        // [args size = 1][arg idx = 0][token idx = 1]
+        assert_eq!(
+            op_body_bytes(&module, &args, op),
+            vec![0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01]
+        );
+    }
+
+    /// Without a token the flag stays clear and nothing follows the args.
+    /// The token is recognized by type when `operandSegmentSizes` is absent.
+    #[test]
+    fn print_without_token_clears_the_flag() {
+        for with_segment_sizes in [true, false] {
+            let mut module = Module::new("print_no_token");
+            let (_region, block, args) =
+                build_single_block_region(&mut module, &[tile_f32(), tile_f32()]);
+            let mut builder = OpBuilder::new(Opcode::Print, Location::Unknown)
+                .attr("str", Attribute::String("a=%f b=%f\n".into()))
+                .operand(args[0])
+                .operand(args[1])
+                .result(Type::Token);
+            if with_segment_sizes {
+                builder = builder.attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![Attribute::i32(2), Attribute::i32(0)]),
+                );
+            }
+            let (op, _) = builder.build(&mut module);
+            append_op(&mut module, block, op);
+            // [1][type 0][flags 0][str 0][args size 2][0][1]
+            assert_eq!(
+                op_body_bytes(&module, &args, op),
+                vec![0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01],
+                "with_segment_sizes = {with_segment_sizes}"
+            );
+        }
+    }
+
+    /// A token operand is found by type when the builder recorded no
+    /// segment sizes.
+    #[test]
+    fn print_token_is_inferred_from_its_type_without_segment_sizes() {
+        let mut module = Module::new("print_inferred");
+        let (_region, block, args) =
+            build_single_block_region(&mut module, &[tile_f32(), Type::Token]);
+        let (op, _) = OpBuilder::new(Opcode::Print, Location::Unknown)
+            .attr("str", Attribute::String("v=%f\n".into()))
+            .operand(args[0])
+            .operand(args[1])
+            .result(Type::Token)
+            .build(&mut module);
+        append_op(&mut module, block, op);
+        assert_eq!(
+            op_body_bytes(&module, &args, op),
+            vec![0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01]
+        );
     }
 }

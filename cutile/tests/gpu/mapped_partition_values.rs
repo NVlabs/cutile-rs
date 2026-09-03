@@ -23,7 +23,7 @@ mod mapped_value_kernels {
         mut z: MappedPartitionMut<T, { [1, BS, BD] }, MAP_SHAPE>,
         x: &Tensor<T, { [-1, -1, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![1, BS, BD]);
+        let part_x = x.partition(shape![1, BS, BD]);
         for index in z.iter_indices() {
             let (bid_b, bid_s, bid_d) = index.components();
             let tile = part_x.load([bid_b, bid_s, bid_d]);
@@ -36,7 +36,7 @@ mod mapped_value_kernels {
         mut z: MappedPartitionMut<T, { [BN] }, MAP_SHAPE>,
         x: &Tensor<T, { [-1] }>,
     ) {
-        let part_x = x.partition(const_shape![BN]);
+        let part_x = x.partition(shape![BN]);
         for index in z.iter_indices() {
             let coords = index.coords();
             let tile = part_x.load([coords[0]]);
@@ -55,7 +55,7 @@ mod mapped_value_kernels {
         mut doubled_out: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<T, { [-1, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BN]);
+        let part_x = x.partition(shape![BM, BN]);
         for index in out.iter_indices_with(&doubled_out) {
             let (bid_m, bid_n) = index.components();
             let tile = part_x.load([bid_m, bid_n]);
@@ -73,7 +73,7 @@ mod mapped_value_kernels {
         start_tile: i32,
         n_tiles: i32,
     ) {
-        let part_x = x.partition(const_shape![BM, BN]);
+        let part_x = x.partition(shape![BM, BN]);
         for index in z.iter_indices_within([(start_tile, n_tiles), (0i32, -1i32)]) {
             let (bid_m, bid_n) = index.components();
             let tile = part_x.load([bid_m, bid_n]);
@@ -96,7 +96,7 @@ mod mapped_value_kernels {
         start_tile: i32,
         n_tiles: i32,
     ) {
-        let part_x = x.partition(const_shape![BM, BN]);
+        let part_x = x.partition(shape![BM, BN]);
         for index in
             out.iter_indices_within_with([(start_tile, n_tiles), (0i32, -1i32)], &doubled_out)
         {
@@ -113,7 +113,7 @@ mod mapped_value_kernels {
         mut z: MappedPartitionMut<T, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<T, { [-1, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BN]);
+        let part_x = x.partition(shape![BM, BN]);
         for index in z.iter_indices() {
             let (bid_m, bid_n) = index.components();
             let tile = part_x.load_pipelined::<4>([bid_m, bid_n]);

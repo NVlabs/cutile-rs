@@ -20,8 +20,8 @@ mod my_module {
         b: &Tensor<f32, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape!(S), [pid]);
-        let tile_b = b.load_tile(const_shape!(S), [pid]);
+        let tile_a = a.load_tile(shape!(S), [pid]);
+        let tile_b = b.load_tile(shape!(S), [pid]);
         c.store(tile_a + tile_b);
     }
 }

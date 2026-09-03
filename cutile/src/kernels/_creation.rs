@@ -114,23 +114,23 @@ pub mod creation {
 
         // Row indices: [row_offset, row_offset+1, ..., row_offset+BR-1]
         // broadcast to [BR, BC]
-        let row_iota: Tile<i32, { [BR] }> = iota(const_shape![BR]);
-        let row_base: Tile<i32, { [BR] }> = broadcast_scalar(row_offset, const_shape![BR]);
+        let row_iota: Tile<i32, { [BR] }> = iota(shape![BR]);
+        let row_base: Tile<i32, { [BR] }> = broadcast_scalar(row_offset, shape![BR]);
         let rows: Tile<i32, { [BR] }> = row_iota + row_base;
-        let rows_2d: Tile<i32, { [BR, 1] }> = rows.reshape(const_shape![BR, 1]);
-        let rows_bc: Tile<i32, { [BR, BC] }> = rows_2d.broadcast(const_shape![BR, BC]);
+        let rows_2d: Tile<i32, { [BR, 1] }> = rows.reshape(shape![BR, 1]);
+        let rows_bc: Tile<i32, { [BR, BC] }> = rows_2d.broadcast(shape![BR, BC]);
 
         // Col indices: [col_offset, col_offset+1, ..., col_offset+BC-1]
         // broadcast to [BR, BC]
-        let col_iota: Tile<i32, { [BC] }> = iota(const_shape![BC]);
-        let col_base: Tile<i32, { [BC] }> = broadcast_scalar(col_offset, const_shape![BC]);
+        let col_iota: Tile<i32, { [BC] }> = iota(shape![BC]);
+        let col_base: Tile<i32, { [BC] }> = broadcast_scalar(col_offset, shape![BC]);
         let cols: Tile<i32, { [BC] }> = col_iota + col_base;
-        let cols_2d: Tile<i32, { [1, BC] }> = cols.reshape(const_shape![1, BC]);
-        let cols_bc: Tile<i32, { [BR, BC] }> = cols_2d.broadcast(const_shape![BR, BC]);
+        let cols_2d: Tile<i32, { [1, BC] }> = cols.reshape(shape![1, BC]);
+        let cols_bc: Tile<i32, { [BR, BC] }> = cols_2d.broadcast(shape![BR, BC]);
 
         let is_diag: Tile<bool, { [BR, BC] }> = eq_tile(rows_bc, cols_bc);
-        let ones: Tile<f32, { [BR, BC] }> = constant(1.0f32, const_shape![BR, BC]);
-        let zeros: Tile<f32, { [BR, BC] }> = constant(0.0f32, const_shape![BR, BC]);
+        let ones: Tile<f32, { [BR, BC] }> = constant(1.0f32, shape![BR, BC]);
+        let zeros: Tile<f32, { [BR, BC] }> = constant(0.0f32, shape![BR, BC]);
         tensor.store(select(is_diag, ones, zeros));
     }
 }

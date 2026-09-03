@@ -26,8 +26,8 @@ mod my_module {
         x: &Tensor<f32, {[-1, -1]}>,     // Input: dynamic shape (full tensor)
         y: &Tensor<f32, {[-1, -1]}>      // Input: dynamic shape (full tensor)
     ) {
-        let tile_x = load_tile_like(x, z);  // Load a tile from x using z's partitioning
-        let tile_y = load_tile_like(y, z);  // Load a tile from y using z's partitioning
+        let tile_x = x.load_like(z);  // Load a tile from x using z's partitioning
+        let tile_y = y.load_like(z);  // Load a tile from y using z's partitioning
         z.store(tile_x + tile_y);              // Add and store result
     }
 }
@@ -82,23 +82,23 @@ let z = zeros(&[32, 32]).sync_on(&stream)?.partition([4, 4]);
 
 Mutable tensors **must** be partitioned on the host side before kernel launch. This guarantees that each tile block writes to a disjoint sub-region — satisfying Rust's exclusive access requirement for mutable memory. The host-side `Partition` also determines the launch grid: cutile automatically infers that an 8×8 partition means 64 tile blocks.
 
-On the host side, the generated launcher expects a `Partition<Tensor<T>>` for every `&mut Tensor` parameter, so you always call `.partition(...)` before passing the tensor.
+On the host side, the generated launcher expects a partition for every `&mut Tensor` parameter — `Partition<Tensor<T>>` from `tensor.partition(...)`, `Partition<&mut Tensor<T>>` from `(&mut tensor).partition(...)`, or a mapped partition — so you always call `.partition(...)` before passing the tensor.
 
 ### Device-Side Partitioning (Available for `&Tensor`)
 
-Read-only inputs are passed as `Arc<Tensor<T>>` on the host side — no host-side partitioning required. Multiple tile blocks can safely read from the same or overlapping regions, so there is no exclusive-access constraint to enforce.
+Read-only inputs are passed as `&Tensor<T>`, `Tensor<T>`, `Arc<Tensor<T>>`, or `&TensorView<T>` on the host side — no host-side partitioning required. Multiple tile blocks can safely read from the same or overlapping regions, so there is no exclusive-access constraint to enforce.
 
-Instead, read-only tensors can be partitioned **inside the kernel** using `.partition(const_shape![M, N])`:
+Instead, read-only tensors can be partitioned **inside the kernel** using `.partition(shape![M, N])`:
 
 ```rust
 // Device-side: partition a read-only tensor inside the kernel.
-let part_x = x.partition(const_shape![BM, BK]);
+let part_x = x.partition(shape![BM, BK]);
 let tile = part_x.load([i, j]);
 ```
 
 This is more flexible — the same `&Tensor` can be partitioned in different ways within the same kernel (e.g., in GEMM, `x` and `y` use different partition shapes).
 
-In this tutorial, we use `load_tile_like(x, z)` instead of explicit device-side partitioning. This convenience function partitions `x` using the same shape and coordinates as `z`, which is the common case for element-wise operations. Later tutorials (starting with [matrix multiplication](./04-matrix-multiplication.md)) use explicit device-side partitioning when inputs need different access patterns.
+In this tutorial, we use `x.load_like(z)` instead of explicit device-side partitioning. This convenience function partitions `x` using the same shape and coordinates as `z`, which is the common case for element-wise operations. Later tutorials (starting with [matrix multiplication](./04-matrix-multiplication.md)) use explicit device-side partitioning when inputs need different access patterns.
 
 ### Putting It Together
 
@@ -118,13 +118,13 @@ fn add<const S: [i32; 2]>(
     x: &Tensor<f32, {[-1, -1]}>,  // Full input tensor
     y: &Tensor<f32, {[-1, -1]}>   // Full input tensor
 ) {
-    let tile_x = load_tile_like(x, z);
-    let tile_y = load_tile_like(y, z);
+    let tile_x = x.load_like(z);
+    let tile_y = y.load_like(z);
     z.store(tile_x + tile_y);
 }
 ```
 
-`load_tile_like(x, z)` loads a tile from `x` using the same tile shape (`S`=4×4) and coordinates (tile thread id) as `z`.
+`x.load_like(z)` loads a tile from `x` using the same tile shape (`S`=4×4) and coordinates (tile thread id) as `z`.
 
 ![How load_tile_like calculates which region to load](../_static/images/vector-addition-load-tile.svg)
 
@@ -133,7 +133,7 @@ Compare to CUDA C++:
 | Task | CUDA C++ | cuTile Rust |
 |------|----------|-----------|
 | Calculate thread index | `int i = blockIdx.x * blockDim.x + threadIdx.x;` | Not needed |
-| Calculate global offset | Manual pointer arithmetic | `load_tile_like()` |
+| Calculate global offset | Manual pointer arithmetic | `x.load_like(z)` |
 | Bounds checking | `if (i < n) { ... }` | Built-in |
 | Coalesced memory access | Manual, error-prone | Automatic |
 
@@ -164,10 +164,10 @@ fn my_kernel(...) {
 | Concept | What It Means |
 |---------|---------------|
 | **Host-side partitioning** | `.partition([M, N])` on the host — required for `&mut Tensor` to ensure exclusive write access and determine the launch grid |
-| **Device-side partitioning** | `.partition(const_shape![M, N])` inside the kernel — available for `&Tensor`, flexible access patterns |
+| **Device-side partitioning** | `.partition(shape![M, N])` inside the kernel — available for `&Tensor`, flexible access patterns |
 | **Static shape `S`** | The tile shape carried in the compiled variant |
 | **Dynamic shape `[-1, -1]`** | Dynamic tensor shape; does not create a new compiled variant when tensor shape changes |
-| **load_tile_like** | Convenience for element-wise ops: loads from input using the same partitioning and mapping as the output |
+| **load_like** | Convenience for element-wise ops: loads from the input using the same partitioning and mapping as the output (also available as the free function `load_tile_like`). The input must have the same shape as the whole output tensor — the tensor the host partitioned, not the per-program sub-tensor — and the output must be a partitioned mutable tensor |
 | **Load/Store pattern** | Load → Compute → Store is the GPU kernel idiom |
 
 ---
@@ -195,7 +195,7 @@ Modify the kernel to add three tensors: `z = x + y + w`.
 :::{dropdown} Hint
 Add a third input parameter and load three tiles:
 ```rust
-let tile_w = load_tile_like(w, z);
+let tile_w = w.load_like(z);
 z.store(tile_x + tile_y + tile_w);
 ```
 :::
@@ -210,4 +210,4 @@ Try `partition([4, 8])` — rectangular tiles. Does it still work?
 
 - [Tensors and Tiles](../guide/tensors-and-tiles.md) — partitioning, load/store, and tile arithmetic
 - [Useful Mental Models](../guide/useful-mental-models.md) — tile blocks and grid geometry
-- [DSL API](../reference/dsl-api.md) — full signatures for `load_tile_like`, `store`, and the arithmetic operators used here
+- [DSL API](../reference/dsl-api.md) — full signatures for `load_like`, `store`, and the arithmetic operators used here

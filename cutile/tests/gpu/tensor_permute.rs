@@ -44,9 +44,9 @@ mod my_module {
 
         let dim_map = const_array!(DIM_MAP);
         let src_part: Partition<T, { [BB, BH, BD, BM] }> =
-            src.partition_permuted(const_shape![BB, BH, BD, BM], dim_map);
+            src.partition_permuted(shape![BB, BH, BD, BM], dim_map);
         let src_tile: Tile<T, { [BB, BH, BD, BM] }> = src_part.load([b_idx, h_idx, d_idx, m_idx]);
-        let src_tile = src_tile.reshape(const_shape![BBH, BD, BM]);
+        let src_tile = src_tile.reshape(shape![BBH, BD, BM]);
         dst.store(src_tile);
     }
 }
