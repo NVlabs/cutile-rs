@@ -195,18 +195,104 @@ fn memory_scope_value(scope: &str) -> Option<i64> {
     }
 }
 
+fn extract_forwarded_zst_type_name(
+    expr: &Expr,
+    ctx: &CompilerContext,
+    generic_args: &GenericVars,
+    param_name: &str,
+) -> Result<String, JITError> {
+    let direct = super::shared_utils::extract_zst_type_name(expr, param_name)?;
+    let Expr::Path(path_expr) = expr else {
+        return Ok(direct);
+    };
+    if path_expr.path.segments.len() != 1 {
+        return Ok(direct);
+    }
+    let Some(value) = ctx.vars.get(&direct) else {
+        return Ok(direct);
+    };
+    let Some(type_ident) = get_type_ident(&value.ty.rust_ty) else {
+        return Ok(direct);
+    };
+    let type_name = type_ident.to_string();
+    let Some(concrete_type) = generic_args.inst_types.get(&type_name) else {
+        return Ok(type_name);
+    };
+    let concrete_type = syn::parse_str::<Type>(concrete_type).map_err(|error| {
+        JITError::Generic(format!(
+            "failed to parse concrete type `{concrete_type}` for `{param_name}`: {error}"
+        ))
+    })?;
+    get_type_ident(&concrete_type)
+        .map(|ident| ident.to_string())
+        .ok_or_else(|| {
+            JITError::Generic(format!(
+                "failed to resolve concrete type `{}` for `{param_name}`",
+                concrete_type.to_token_stream()
+            ))
+        })
+}
+
 fn extract_optional_zst_type_name(
     expr: &Expr,
     ctx: &CompilerContext,
+    generic_args: &GenericVars,
     param_name: &str,
 ) -> Result<Option<String>, JITError> {
     match super::shared_utils::resolve_option_arg(expr, ctx) {
-        Some(inner) => super::shared_utils::extract_zst_type_name(&inner, param_name).map(Some),
+        Some(inner) => {
+            extract_forwarded_zst_type_name(&inner, ctx, generic_args, param_name).map(Some)
+        }
         None => Ok(None),
     }
 }
 
-fn extract_latency_cycles(expr: &Expr, generic_args: &GenericVars) -> Result<i32, JITError> {
+fn latency_cycles_from_arguments(
+    arguments: &syn::PathArguments,
+    generic_args: &GenericVars,
+) -> Result<i32, JITError> {
+    let syn::PathArguments::AngleBracketed(args) = arguments else {
+        return JITError::generic("`latency` must specify a const generic, e.g. `Latency::<4>`");
+    };
+    let Some(argument) = args.args.first() else {
+        return JITError::generic("`latency` must specify a const generic cycle count");
+    };
+    match argument {
+        syn::GenericArgument::Const(Expr::Lit(ExprLit {
+            lit: Lit::Int(int_lit),
+            ..
+        })) => int_lit
+            .base10_parse::<i32>()
+            .map_err(|error| JITError::Generic(format!("invalid latency value: {error}"))),
+        syn::GenericArgument::Const(Expr::Path(path_expr)) => {
+            let ident = get_ident_from_path_expr(path_expr);
+            generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "`latency`: const generic `{ident}` has no resolved value"
+                ))
+            })
+        }
+        syn::GenericArgument::Type(Type::Path(type_path)) => {
+            let Some(ident) = type_path.path.get_ident() else {
+                return JITError::generic(
+                    "`latency` const generic must be an integer literal or const param",
+                );
+            };
+            generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "`latency`: const generic `{ident}` has no resolved value"
+                ))
+            })
+        }
+        _ => JITError::generic("`latency` const generic must be an integer literal or const param"),
+    }
+}
+
+fn extract_latency_cycles(
+    expr: &Expr,
+    generic_args: &GenericVars,
+    ctx: &CompilerContext,
+) -> Result<i32, JITError> {
     let Expr::Path(path_expr) = expr else {
         return JITError::generic(&format!(
             "`latency` must be a Latency<N> unit-struct path, got `{}`",
@@ -216,35 +302,27 @@ fn extract_latency_cycles(expr: &Expr, generic_args: &GenericVars) -> Result<i32
     let Some(segment) = path_expr.path.segments.last() else {
         return JITError::generic("`latency` path has no segments");
     };
-    if segment.ident != "Latency" {
-        return JITError::generic(&format!(
-            "`latency` must use `Latency<N>`, got `{}`",
-            expr.to_token_stream()
-        ));
+    if segment.ident == "Latency" {
+        return latency_cycles_from_arguments(&segment.arguments, generic_args);
     }
-    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return JITError::generic("`latency` must specify a const generic, e.g. `Latency::<4>`");
-    };
-    let Some(syn::GenericArgument::Const(cycles_expr)) = args.args.first() else {
-        return JITError::generic("`latency` must specify a const generic cycle count");
-    };
-    match cycles_expr {
-        Expr::Lit(ExprLit {
-            lit: Lit::Int(int_lit),
-            ..
-        }) => int_lit
-            .base10_parse::<i32>()
-            .map_err(|e| JITError::Generic(format!("invalid latency value: {e}"))),
-        Expr::Path(path_expr) => {
-            let ident = crate::syn_utils::get_ident_from_path_expr(path_expr);
-            generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
-                JITError::Generic(format!(
-                    "`latency`: const generic `{ident}` has no resolved value"
-                ))
-            })
+    if path_expr.path.segments.len() == 1 {
+        if let Some(value) = ctx.vars.get(&segment.ident.to_string()) {
+            if let Type::Path(type_path) = &value.ty.rust_ty {
+                if let Some(type_segment) = type_path.path.segments.last() {
+                    if type_segment.ident == "Latency" {
+                        return latency_cycles_from_arguments(
+                            &type_segment.arguments,
+                            generic_args,
+                        );
+                    }
+                }
+            }
         }
-        _ => JITError::generic("`latency` const generic must be an integer literal or const param"),
     }
+    JITError::generic(&format!(
+        "`latency` must use `Latency<N>`, got `{}`",
+        expr.to_token_stream()
+    ))
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
@@ -819,11 +897,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         };
 
-        let memory_ordering =
-            super::shared_utils::extract_zst_type_name(&call_expr.args[1], "memory_ordering")?;
+        let memory_ordering = extract_forwarded_zst_type_name(
+            &call_expr.args[1],
+            ctx,
+            generic_args,
+            "memory_ordering",
+        )?;
         let memory_ordering_value: i64 = match memory_ordering.as_str() { "Weak" => 0, "Relaxed" => 1, "Acquire" => 2, _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `load_ptr_tko: '{}'. Valid: Weak, Relaxed, Acquire", memory_ordering)) };
 
-        let memory_scope = extract_optional_zst_type_name(&call_expr.args[2], ctx, "memory_scope")?;
+        let memory_scope =
+            extract_optional_zst_type_name(&call_expr.args[2], ctx, generic_args, "memory_scope")?;
         let memory_scope_value = match memory_scope.as_deref() {
             Some(scope) => Some(memory_scope_value(scope).ok_or_else(|| {
                 self.jit_error(
@@ -911,7 +994,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        let latency = extract_latency_cycles(&call_expr.args[6], generic_args)?;
+        let latency = extract_latency_cycles(&call_expr.args[6], generic_args, ctx)?;
         if latency > 0 {
             hint_params.insert("latency".to_string(), latency);
         }
@@ -1010,11 +1093,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .jit_error_result(&call_expr.args[1].span(), "unable to compile tile value");
         };
 
-        let memory_ordering =
-            super::shared_utils::extract_zst_type_name(&call_expr.args[2], "memory_ordering")?;
+        let memory_ordering = extract_forwarded_zst_type_name(
+            &call_expr.args[2],
+            ctx,
+            generic_args,
+            "memory_ordering",
+        )?;
         let memory_ordering_value: i64 = match memory_ordering.as_str() { "Weak" => 0, "Relaxed" => 1, "Release" => 3, _ => return self.jit_error_result(&call_expr.span(), &format!("invalid `memory_ordering` for `store_ptr_tko: '{}'. Valid: Weak, Relaxed, Release", memory_ordering)) };
 
-        let memory_scope = extract_optional_zst_type_name(&call_expr.args[3], ctx, "memory_scope")?;
+        let memory_scope =
+            extract_optional_zst_type_name(&call_expr.args[3], ctx, generic_args, "memory_scope")?;
         let memory_scope_value = match memory_scope.as_deref() {
             Some(scope) => Some(memory_scope_value(scope).ok_or_else(|| {
                 self.jit_error(
@@ -1049,7 +1137,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        let latency = extract_latency_cycles(&call_expr.args[6], generic_args)?;
+        let latency = extract_latency_cycles(&call_expr.args[6], generic_args, ctx)?;
         if latency > 0 {
             hint_params.insert("latency".to_string(), latency);
         }
