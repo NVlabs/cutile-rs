@@ -31,19 +31,20 @@ mod my_module {
         let mut z_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(z_ptr, len) };
         let x_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(x_ptr, len) };
         let y_tensor: Tensor<T, { [-1] }> = unsafe { get_tensor(y_ptr, len) };
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile_shape = const_shape![4i32];
-        let tile_x = x_tensor.partition(tile_shape).load([pid.0]);
-        let tile_y = y_tensor.partition(tile_shape).load([pid.0]);
+        let pid = program_id(0);
+        let tile_shape = shape![4i32];
+        let tile_x = x_tensor.partition(tile_shape).load([pid]);
+        let tile_y = y_tensor.partition(tile_shape).load([pid]);
         z_tensor
             .partition_mut(tile_shape)
-            .store(tile_x + tile_y, [pid.0]);
+            .store(tile_x + tile_y, [pid]);
     }
 }
 
 use my_module::add_ptr;
 
-async fn async_main() -> Result<(), cutile::error::Error> {
+#[tokio::main]
+async fn main() -> Result<(), cutile::error::Error> {
     let len = 2usize.pow(5);
     let tile_size = 4usize;
 

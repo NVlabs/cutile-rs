@@ -11,11 +11,12 @@
 
 use super::_function::CUDATileFunctionCompiler;
 use super::_value::{
-    BlockTerminator, CompilerContext, DimOrigin, LoopFrame, PartitionAxisOrigin, TileRustValue,
+    BlockTerminator, CompilerContext, DimOrigin, LoopFrame, LoopKind, PartitionAxisOrigin,
+    TileRustValue,
 };
 use super::shared_types::Kind;
 use super::shared_utils::{
-    collect_mutated_variables, collect_mutated_variables_from_block,
+    block_has_early_exit, collect_mutated_variables, collect_mutated_variables_from_block,
     collect_mutated_variables_from_expr, collect_mutated_variables_loop,
     collect_mutated_variables_while, dedup, update_outer_block_type_meta, TileBinaryOp,
     MAX_MAPPED_PARTITION_RANK, OWNED_MAP_DIM, STACK_GROW_SIZE, STACK_RED_ZONE,
@@ -1747,6 +1748,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         self.bind_serialized_views(&token_accumulators, &mut for_variables);
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
+        for_variables.innermost_loop = Some(LoopKind::For);
         // Persistent tile-id loop: the step is the physical grid size, so
         // induction-substitution hoisting stays off (unit_step = false), but
         // loop-invariant checks in the body can still move to the preheader.
@@ -1761,6 +1763,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // Non-unit step: `[lower, upper - 1]` is not the induction range.
             induction_range: None,
             known_non_empty: false,
+            has_early_exit: block_has_early_exit(&for_expr.body),
         });
 
         let tile_id = TileRustValue::new_primitive(loop_block_args[0], i32_ty.clone(), None);
@@ -2216,6 +2219,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
+        for_variables.innermost_loop = Some(LoopKind::For);
 
         self.compile_block(
             module,
@@ -2406,6 +2410,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             "internal: failed to produce step value for for-loop",
                         )
                     })?;
+                    // The step when it is a compile-time constant (always for
+                    // the unit-step form, which compiles the constant `1`).
+                    let step_const: Option<i64> =
+                        step_value.bounds.filter(|b| b.is_exact()).map(|b| b.start);
+                    if let Some(step) = step_const {
+                        if step <= 0 {
+                            return self.jit_error_result(
+                                &maybe_step_expr.map_or(for_expr.span(), |e| e.span()),
+                                &format!("`step_by` requires a positive step, got {step}"),
+                            );
+                        }
+                    }
 
                     // We skip verifying the op here and just require that each mutated mutable vars:
                     // 1. Is passed as an operand.
@@ -2445,20 +2461,47 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         // Subtract upper bound by 1, since it is the open end of the interval [start, end).
                         let mut iterand_val = match (iterand_lower_const, iterand_upper_const) {
                             (Some(iterand_lower_const), Some(iterand_upper_const)) => {
-                                let bounds = Bounds::new(
+                                // `[lower, upper - 1]` over-approximates what a stepped
+                                // loop attains: `(0..10).step_by(4)` visits {0, 4, 8},
+                                // never 9. The interval fact must describe the ATTAINED
+                                // set, because the static fold and the hoisted check test
+                                // its extremes as values the loop reaches (audit 2026-08:
+                                // "9 < 9" over nine tiles). With a constant step and an
+                                // exact start the last attained value is
+                                // `start + step * floor((end - 1 - start) / step)`; for a
+                                // runtime step or an inexact start the residue class is
+                                // unknown, so no interval fact is kept. The assumption
+                                // below is emitted either way — it is a true
+                                // over-approximation, and the device may use it.
+                                let over_approx = Bounds::new(
                                     iterand_lower_const.start,
                                     iterand_upper_const.end - 1,
                                 );
+                                let attained = match step_const {
+                                    Some(1) => Some(over_approx),
+                                    Some(step) if iterand_lower_const.is_exact() => {
+                                        let start = iterand_lower_const.start;
+                                        let last = over_approx.end;
+                                        let last_attained = if last >= start {
+                                            start + step * ((last - start) / step)
+                                        } else {
+                                            start
+                                        };
+                                        Some(Bounds::new(start, last_attained))
+                                    }
+                                    _ => None,
+                                };
+                                let assumed = attained.unwrap_or(over_approx);
                                 let mut iterand_val = self.compile_value_assumption(
                                     module,
                                     loop_block_id,
                                     iterand_val,
                                     "assume_bounds",
-                                    &[bounds.start as i32, bounds.end as i32],
+                                    &[assumed.start as i32, assumed.end as i32],
                                     iterand_ty,
                                     &for_expr.span(),
                                 )?;
-                                iterand_val.bounds = Some(bounds);
+                                iterand_val.bounds = attained;
                                 iterand_val
                             }
                             (Some(iterand_lower_const), None) => self.compile_value_assumption(
@@ -2548,12 +2591,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             unit_step,
                             induction_range,
                             known_non_empty,
+                            has_early_exit: block_has_early_exit(&for_expr.body),
                         });
                         for_variables.vars.insert(iterand_name, iterand_val);
                     }
                     for_variables.carry_vars = Some(loop_carry_vars.clone());
                     for_variables.default_terminator = Some(BlockTerminator::Continue);
-                    // TODO (hme): Support returns?
+                    for_variables.innermost_loop = Some(LoopKind::For);
+                    // `return` inside the body is rejected by `compile_block`
+                    // (it cannot be lowered); `break` too, since `cuda_tile.for`
+                    // has no early exit.
                     self.compile_block(
                         module,
                         loop_block_id,
@@ -2613,6 +2660,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     loop_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
                     loop_variables.carry_vars = Some(loop_carry_vars.clone());
                     loop_variables.default_terminator = Some(BlockTerminator::Continue);
+                    loop_variables.innermost_loop = Some(LoopKind::Loop);
 
                     // Evaluate condition
                     let Some(TileRustValue {
@@ -2720,6 +2768,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     loop_variables.repack_some_vars(&loop_carry_vars, &block_args, true)?;
                     loop_variables.carry_vars = Some(loop_carry_vars.clone());
                     loop_variables.default_terminator = Some(BlockTerminator::Continue);
+                    loop_variables.innermost_loop = Some(LoopKind::Loop);
 
                     // Execute loop body (must contain break to exit)
                     // The body should handle its own terminator (break/continue)
@@ -2876,8 +2925,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         )?;
                         let (branch_result_type, return_type) = {
                             if let Some(result) = result {
-                                let cuda_tile_value =
-                                    result.value.expect("Failed to obtain CUDA tile value.");
+                                let Some(cuda_tile_value) = result.value else {
+                                    return self.jit_error_result(
+                                        &if_expr.then_branch.span(),
+                                        "an `if`/`else` cannot produce a compound value (a tuple, \
+                                         array, or struct); bind each component in its own `let`",
+                                    );
+                                };
                                 let result_ty = module.value_type(cuda_tile_value).clone();
                                 (vec![result_ty], Some(result.ty.clone()))
                             } else {
@@ -2907,8 +2961,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             )?;
                             let (_cuda_tile_return_values, return_type) = {
                                 if let Some(result) = result {
-                                    let cuda_tile_value =
-                                        result.value.expect("Failed to obtain CUDA tile value.");
+                                    let Some(cuda_tile_value) = result.value else {
+                                        return self.jit_error_result(
+                                            &else_expr.span(),
+                                            "an `if`/`else` cannot produce a compound value (a \
+                                             tuple, array, or struct); bind each component in its \
+                                             own `let`",
+                                        );
+                                    };
                                     (vec![cuda_tile_value], Some(result.ty.clone()))
                                 } else {
                                     (vec![], None)
@@ -3991,12 +4051,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let last_seg = last_seg.unwrap();
                     let mac_name = last_seg.ident.to_string();
                     Ok(match mac_name.as_str() {
-                        "const_shape" | "const_array" => {
+                        "const_shape" | "shape" | "const_array" => {
                             // TODO (hme): Remove special case for const_shape here
                             //  and on the proc-macro side (rank_instantiation.rs).
                             let args = self.const_shape_macro_args(mac_expr, generic_vars, ctx)?;
                             let cga_str = format!("{{[{}]}}", args.join(", "));
-                            let ty_str = if mac_name == "const_shape" {
+                            let ty_str = if mac_name == "const_shape" || mac_name == "shape" {
                                 "Shape"
                             } else {
                                 "Array"

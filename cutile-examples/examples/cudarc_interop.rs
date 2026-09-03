@@ -39,7 +39,7 @@ mod foreign {
     impl Buffer {
         pub fn alloc(elems: usize, stream: &Arc<Stream>) -> Arc<Self> {
             let len_bytes = elems * std::mem::size_of::<f32>();
-            let dptr = unsafe { malloc_async(len_bytes, stream) };
+            let dptr = unsafe { malloc_async(len_bytes, stream) }.expect("device allocation");
             Arc::new(Self {
                 dptr,
                 len_bytes,
@@ -52,7 +52,8 @@ mod foreign {
     impl Drop for Buffer {
         fn drop(&mut self) {
             // The framework frees its own memory when its last handle drops.
-            unsafe { free_async(self.dptr, &self.stream) };
+            // A destructor cannot report a refused free, so the error is dropped.
+            let _ = unsafe { free_async(self.dptr, &self.stream) };
             println!("  [foreign] freed {:#x}", self.dptr);
         }
     }
@@ -82,8 +83,8 @@ mod tile_add {
         x: &Tensor<f32, { [-1] }>,
         y: &Tensor<f32, { [-1] }>,
     ) {
-        let tx = load_tile_like(x, z);
-        let ty = load_tile_like(y, z);
+        let tx = x.load_like(z);
+        let ty = y.load_like(z);
         z.store(tx + ty);
     }
 }
@@ -101,8 +102,8 @@ fn main() -> Result<(), Error> {
     let z = foreign::Buffer::alloc(N, &stream);
     let ones = [1.0f32; N];
     unsafe {
-        memcpy_htod_async(x.device_ptr(), ones.as_ptr(), N, &stream);
-        memcpy_htod_async(y.device_ptr(), ones.as_ptr(), N, &stream);
+        memcpy_htod_async(x.device_ptr(), ones.as_ptr(), N, &stream)?;
+        memcpy_htod_async(y.device_ptr(), ones.as_ptr(), N, &stream)?;
     }
 
     // cutile borrows the foreign memory — no copy. Validity and liveness are
@@ -133,7 +134,7 @@ fn main() -> Result<(), Error> {
     // Read the result back out of the (still-live) foreign z buffer.
     let mut host = [0.0f32; N];
     unsafe {
-        memcpy_dtoh_async(host.as_mut_ptr(), z_dptr, N, &stream);
+        memcpy_dtoh_async(host.as_mut_ptr(), z_dptr, N, &stream)?;
         stream.synchronize()?;
     }
     assert!(host.iter().all(|v| *v == 2.0));

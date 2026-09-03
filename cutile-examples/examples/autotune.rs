@@ -31,7 +31,7 @@ mod my_module {
         out: &mut Tensor<f32, { [1, N] }>,
         eps: f32,
     ) {
-        let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
+        let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = shape![1, BLOCK_SIZE];
         let num_tiles: i32 = N / BLOCK_SIZE;
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row = pid.0;
@@ -43,7 +43,7 @@ mod my_module {
             rms = rms + tx * tx;
         }
         let rms: Tile<f32, { [1] }> = reduce_sum(rms, 1i32);
-        let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
+        let rms: Tile<f32, { [] }> = rms.reshape(shape![]);
         let rms: f32 = tile_to_scalar(rms);
         let n: f32 = convert_scalar(N);
         let rms: f32 = 1.0f32 / (rms / n + eps);
@@ -52,7 +52,7 @@ mod my_module {
         let rms: f32 = tile_to_scalar(rms);
         let rms: Tile<f32, { [1, BLOCK_SIZE] }> = rms.broadcast(tile_shape);
 
-        let w_part: Partition<f32, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
+        let w_part: Partition<f32, { [BLOCK_SIZE] }> = w.partition(shape![BLOCK_SIZE]);
         let mut out_part: PartitionMut<f32, { [1, BLOCK_SIZE] }> =
             unsafe { out.partition_mut(tile_shape) };
         for j in 0i32..num_tiles {

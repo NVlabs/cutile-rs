@@ -18,6 +18,7 @@ use crate::passes::name_resolution::NameResolver;
 use crate::syn_utils::*;
 use quote::ToTokens;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use syn::spanned::Spanned;
 use syn::{
     Expr, ExprMethodCall, GenericArgument, GenericParam, ImplItem, ImplItemFn, ItemConst, ItemFn,
@@ -51,6 +52,11 @@ pub struct CUDATileModules {
     /// Deps are trusted infrastructure; their internal imports are
     /// implementation details, not user-facing.
     pub(crate) use_catalog: crate::use_classifier::UseCatalog,
+
+    /// The module passed to [`Self::from_kernel`], whose scope resolves the
+    /// consts named in kernel-level types (parameter shapes, `static`
+    /// globals). `None` for the legacy `new` constructor.
+    pub(crate) kernel_module: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,10 +94,19 @@ impl CUDATileModules {
         self.name_resolver.type_aliases()
     }
 
-    /// Flat map of all constants: name → ItemConst.
-    /// Compatibility shim.
+    /// Flat map of all constants: name → ItemConst. Last definition wins for
+    /// a name several modules define; anything that resolves a const for a
+    /// particular module must use [`Self::consts_visible_from`]. Kept for the
+    /// legacy `new` constructor, which has no kernel module to scope by.
     pub fn consts(&self) -> &HashMap<String, ItemConst> {
         self.name_resolver.consts()
+    }
+
+    /// The constants visible from `module`, by name: its own definitions,
+    /// then its imports, then core, then a unique (or unanimous) global
+    /// definition. See [`NameResolver::resolve_const`].
+    pub fn consts_visible_from(&self, module: &str) -> Rc<HashMap<String, ItemConst>> {
+        self.name_resolver.consts_visible_from(module)
     }
 
     /// Flat map of all static items: name → ItemStatic.
@@ -118,23 +133,40 @@ impl CUDATileModules {
         self.name_resolver.functions()
     }
 
-    /// Expand DSL-visible type aliases in a Rust type.
+    /// Expand DSL-visible type aliases and const paths in a Rust type, with
+    /// consts resolved from the kernel module's scope (see
+    /// [`Self::normalize_type_aliases_in`]). Modules built with the legacy
+    /// `new` constructor have no kernel module and fall back to the flat map.
     pub fn normalize_type_aliases(&self, ty: &Type) -> Result<Type, JITError> {
+        self.normalize_type_aliases_in(ty, self.kernel_module.as_deref())
+    }
+
+    /// Expand DSL-visible type aliases in a Rust type, then replace paths to
+    /// module-level consts (`Tensor<f32, {[N]}>`) with the definition visible
+    /// from `module` — the module whose source spelled the type.
+    pub fn normalize_type_aliases_in(
+        &self,
+        ty: &Type,
+        module: Option<&str>,
+    ) -> Result<Type, JITError> {
+        let normalize_error = |msg: String| {
+            SourceLocation::unknown().jit_error(&format!(
+                "failed to normalize type `{}`: {msg}",
+                ty.to_token_stream()
+            ))
+        };
         let normalized = crate::type_aliases::normalize_type_aliases(ty, self.type_aliases())
-            .map_err(|msg| {
-                SourceLocation::unknown().jit_error(&format!(
-                    "failed to normalize type `{}`: {msg}",
-                    ty.to_token_stream()
-                ))
-            })?;
-        crate::type_aliases::normalize_const_paths_in_type(&normalized, self.consts()).map_err(
-            |msg| {
-                SourceLocation::unknown().jit_error(&format!(
-                    "failed to normalize type `{}`: {msg}",
-                    ty.to_token_stream()
-                ))
-            },
-        )
+            .map_err(normalize_error)?;
+        let scoped;
+        let consts: &HashMap<String, ItemConst> = match module {
+            Some(module) => {
+                scoped = self.consts_visible_from(module);
+                &scoped
+            }
+            None => self.consts(),
+        };
+        crate::type_aliases::normalize_const_paths_in_type(&normalized, consts)
+            .map_err(normalize_error)
     }
 
     /// Return the import-catalog hint message for `name` if the name was
@@ -190,9 +222,10 @@ impl CUDATileModules {
             name_resolver,
             span_bases,
             // Legacy `new` doesn't have a single kernel module to walk;
-            // import-catalog enrichment is unavailable for callers on this
-            // path. New code should use `from_kernel`.
+            // import-catalog enrichment and const scoping are unavailable
+            // for callers on this path. New code should use `from_kernel`.
             use_catalog: HashMap::new(),
+            kernel_module: None,
         })
     }
 
@@ -265,6 +298,7 @@ impl CUDATileModules {
 
         let mut working_set: Vec<Module> = vec![kernel];
         let kernel_path = working_set[0].absolute_path().to_string();
+        let kernel_module = working_set[0].name().to_string();
         // `registry_visited` skips redundant work when the same registry
         // key is pulled in from multiple use statements. `module_visited`
         // dedupes by the built module's actual absolute_path so two
@@ -347,6 +381,7 @@ impl CUDATileModules {
 
         let mut modules = Self::new(working_set)?;
         modules.use_catalog = use_catalog;
+        modules.kernel_module = Some(kernel_module);
         Ok(modules)
     }
 }

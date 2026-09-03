@@ -3,35 +3,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Debug dump tooling for inspecting compiler state after each pass.
+//! Debug dump tooling for inspecting compiler output, printed to stderr.
 //!
 //! Controlled by environment variables:
-//! - `CUTILE_DUMP` — comma-separated list of stages to dump, or `"all"`
+//! - `CUTILE_DUMP` — comma-separated list of stages to dump, or `"all"`.
+//!   Two stages are emitted today, both once per compiled module, from the
+//!   bytecode serializer (`cuda_tile_runtime_utils::serialize_tile_ir_bytecode`):
+//!   `ir` (the cutile-ir module as MLIR-like text) and `bytecode` (alias
+//!   `bc`; the encoded image decoded back to text). The pass-level names
+//!   `ast`, `resolved`, `typed`, and `instantiated` are accepted but no pass
+//!   emits them yet, so they produce no output.
 //! - `CUTILE_DUMP_FILTER` — comma-separated list of function names or
-//!   module-qualified paths (`my_module::my_kernel`)
+//!   module-qualified paths (`my_module::my_kernel`). The emitted stages are
+//!   module-level dumps, so a filter narrows them by its *module* part: a
+//!   qualified entry must name the module (its function part is not
+//!   consulted), and a bare function name matches every module.
 //!
 //! ```bash
 //! CUTILE_DUMP=ir cargo test -p cutile --test my_test
-//! CUTILE_DUMP=resolved,typed CUTILE_DUMP_FILTER=my_module::add cargo test ...
+//! CUTILE_DUMP=ir,bytecode CUTILE_DUMP_FILTER=my_module::add cargo test ...
 //! ```
+//!
+//! `TILE_IR_DUMP` (any value) is a legacy alias for `CUTILE_DUMP=ir`.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
 /// A stage in the compilation pipeline that can be dumped.
+///
+/// Only [`Self::Ir`] and [`Self::Bytecode`] have an emitter today; the other
+/// names are reserved for per-pass dumps and are parsed but never produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DumpStage {
-    /// Raw syn AST before any passes.
+    /// Raw syn AST before any passes. Reserved: not emitted yet.
     Ast,
-    /// After name resolution (paths resolved).
+    /// After name resolution (paths resolved). Reserved: not emitted yet.
     Resolved,
-    /// After type inference (types annotated).
+    /// After type inference (types annotated). Reserved: not emitted yet.
     Typed,
-    /// After monomorphization (no generics remain).
+    /// After monomorphization (no generics remain). Reserved: not emitted yet.
     Instantiated,
-    /// cutile-ir Module, pretty-printed.
+    /// cutile-ir Module, pretty-printed. Emitted per module.
     Ir,
-    /// Encoded bytecode, decoded to human-readable text.
+    /// Encoded bytecode, decoded to human-readable text. Emitted per module.
     Bytecode,
 }
 

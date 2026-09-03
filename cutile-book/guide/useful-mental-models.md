@@ -24,24 +24,24 @@ fn add<const S: [i32; 2]>(
     a: &Tensor<f32, { [-1, -1] }>,
     b: &Tensor<f32, { [-1, -1] }>,
 ) {
-    let tile_a = load_tile_like(a, c);
-    let tile_b = load_tile_like(b, c);
+    let tile_a = a.load_like(c);
+    let tile_b = b.load_like(c);
     c.store(tile_a + tile_b);
 }
 ```
 
 The kernel describes what happens to one tile-shaped region. The compiler and runtime map that work onto CUDA execution units.
 
-## Tile Blocks and Tile Threads
+## Tile Programs and Tile Blocks
 
-A tile block is the logical unit of concurrent execution. Each tile block runs the entry function once and processes one region of the output. It can query its coordinates and the total launch grid:
+A tile program is the logical unit of concurrent execution. Each tile program runs the entry function once and processes one region of the output. It can query its per-axis grid coordinates and extents:
 
 ```rust
-let pid: (i32, i32, i32) = get_tile_block_id();
-let grid: (i32, i32, i32) = get_num_tile_blocks();
+let pid0 = program_id(0);
+let n0 = num_programs(0);
 ```
 
-The terms tile block and tile thread refer to the same logical unit. The API uses `get_tile_block_id()` and `get_num_tile_blocks()`.
+The terms tile program, tile block, and tile thread refer to the same logical unit. The API uses `program_id(axis)` and `num_programs(axis)`; the tuple forms `get_tile_block_id()` and `get_num_tile_blocks()` return all three axes at once.
 
 Tile blocks that fit on available Streaming Multiprocessors run at the same time. The full set of tile blocks is concurrent: their relative order is unspecified, and kernels must not depend on one tile block running before another unless an explicit synchronization mechanism exists outside the kernel.
 
@@ -57,12 +57,12 @@ Grid:            (ceil(128 / 32), ceil(256 / 64), 1)
 
 Tensor dimension 0 maps to grid `x`, dimension 1 maps to grid `y`, and dimension 2 maps to grid `z`. For tensors of lower rank, trailing grid dimensions are 1.
 
-Inside a kernel, the tile block id selects the logical region:
+Inside a kernel, the program id selects the logical region:
 
 ```rust
-let pid: (i32, i32, i32) = get_tile_block_id();
-let part_x = x.partition(const_shape![BM, BK]);
-let tile_x = part_x.load([pid.0, k_tile]);
+let pid_m = program_id(0);
+let part_x = x.partition(shape![BM, BK]);
+let tile_x = part_x.load([pid_m, k_tile]);
 ```
 
 For mutable outputs, the selected sub-tensor is passed directly to the tile block.
@@ -81,7 +81,7 @@ NVIDIA GPUs have several memory levels:
 In cuTile Rust, you load from tensors in HBM and compute on tiles in registers. The Tile IR compiler and runtime decide how to stage data through shared memory, caches, threads, warps, Tensor Cores, and Tensor Memory Accelerator (TMA) instructions when those mechanisms are useful.
 
 ```rust
-let tile = load_tile_like(x, z); // HBM -> tile.
+let tile = x.load_like(z); // HBM -> tile.
 let y = tile * 2.0f32;           // Register-resident computation.
 z.store(y);                      // Tile -> HBM.
 ```

@@ -2221,7 +2221,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             return Ok(None);
         };
         let ty_name = match name.as_str() {
-            "const_shape" => "Shape",
+            "const_shape" | "shape" => "Shape",
             "const_array" => "Array",
             _ => return Ok(None),
         };
@@ -2638,7 +2638,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let ty = self
             .compiler
             .modules
-            .normalize_type_aliases(&static_item.ty)?;
+            .normalize_type_aliases_in(&static_item.ty, Some(&def_id.module))?;
         let Some(type_name) = get_type_ident(&ty) else {
             return Ok(None);
         };
@@ -4223,7 +4223,7 @@ fn type_is_resolvable(
 ) -> bool {
     let normalized_ty = compiler
         .modules
-        .normalize_type_aliases(ty)
+        .normalize_type_aliases_in(ty, Some(&compiler.current_module()))
         .unwrap_or_else(|_| ty.clone());
     let ty = &normalized_ty;
     match ty {
@@ -4281,7 +4281,7 @@ fn type_is_fully_known(
 ) -> bool {
     let normalized_ty = compiler
         .modules
-        .normalize_type_aliases(ty)
+        .normalize_type_aliases_in(ty, Some(&compiler.current_module()))
         .unwrap_or_else(|_| ty.clone());
     let ty = &normalized_ty;
     match ty {

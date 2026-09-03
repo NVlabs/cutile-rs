@@ -27,7 +27,7 @@ mod access_soundness_module {
         x: &Tensor<f32, { [-1] }>,
         idx: i32,
     ) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         let t = p.load([idx]);
         z.store(t);
     }
@@ -36,7 +36,7 @@ mod access_soundness_module {
     /// produces a negative block index.
     #[cutile::entry]
     fn negative_loop_start<const B: i32>(z: &mut Tensor<f32, { [B] }>, x: &Tensor<f32, { [-1] }>) {
-        let p = x.partition(const_shape![B]);
+        let p = x.partition(shape![B]);
         for j in -2i32..4i32 {
             let t = p.load([j]);
             z.store(t);
@@ -56,7 +56,7 @@ mod access_soundness_module {
         mut z: MappedPartitionMut<f32, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let xp = x.partition_permuted(const_shape![BM, BN], const_array![1, 0]);
+        let xp = x.partition_permuted(shape![BM, BN], const_array![1, 0]);
         for index in z.iter_indices() {
             let (bid_m, _bid_n) = index.components();
             let t = xp.load([bid_m, 0i32]);
@@ -75,7 +75,7 @@ mod access_soundness_module {
         mut z: MappedPartitionMut<f32, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let xp = x.partition_permuted(const_shape![BM, BN], const_array![1, 0]);
+        let xp = x.partition_permuted(shape![BM, BN], const_array![1, 0]);
         for index in z.iter_indices() {
             let (bid_m, _bid_n) = index.components();
             let t = xp.load([bid_m, 0i32]);
@@ -92,8 +92,8 @@ mod access_soundness_module {
         x: &Tensor<f32, { [-1] }>,
         flag: i32,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..num_tiles(&p, 0) {
             let mut j = i;
             if flag > 0i32 {
@@ -118,12 +118,12 @@ mod access_soundness_module {
         b: &Tensor<f32, { [-1] }>,
         flag: i32,
     ) {
-        let pw = w.partition(const_shape![B]);
-        let mut p = a.partition(const_shape![B]);
+        let pw = w.partition(shape![B]);
+        let mut p = a.partition(shape![B]);
         if flag > 0i32 {
-            p = b.partition(const_shape![B]);
+            p = b.partition(shape![B]);
         }
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..num_tiles(&pw, 0) {
             acc = acc + p.load([i]);
         }
@@ -140,8 +140,8 @@ mod access_soundness_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = max(i * -2_000_000_000i32, i);
             acc = acc + p.load([index]);
@@ -157,8 +157,8 @@ mod access_soundness_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = (i * 2_000_000_000i32) % 1_000i32;
             acc = acc + p.load([index]);
@@ -174,8 +174,8 @@ mod access_soundness_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [48] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..3i32 {
             let index = max(i * -2_000_000_000i32, i);
             acc = acc + p.load([index]);
@@ -201,7 +201,7 @@ mod access_soundness_module {
             } else {
                 same = index;
             }
-            let tile: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+            let tile: Tile<f32, { [B] }> = constant(0.0, shape![B]);
             z.store(tile, same);
         }
     }
@@ -215,8 +215,8 @@ mod access_soundness_module {
         z: &mut Tensor<f32, { [B] }>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let p = x.partition(const_shape![B]);
-        let mut acc: Tile<f32, { [B] }> = constant(0.0, const_shape![B]);
+        let p = x.partition(shape![B]);
+        let mut acc: Tile<f32, { [B] }> = constant(0.0, shape![B]);
         for i in 0i32..num_tiles(&p, 0) {
             let mut index = i;
             if true {

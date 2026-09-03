@@ -32,7 +32,7 @@ mod my_module {
         let x_tensor: Tensor<T, { [-1] }> = get_tensor(x_ptr, len);
         let y_tensor: Tensor<T, { [-1] }> = get_tensor(y_ptr, len);
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile_shape = const_shape![4i32];
+        let tile_shape = shape![4i32];
         let tile_x = x_tensor.partition(tile_shape).load([pid.0]);
         let tile_y = y_tensor.partition(tile_shape).load([pid.0]);
         z_tensor

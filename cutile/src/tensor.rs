@@ -33,7 +33,9 @@
 //!
 //! Key features:
 //! - **Grid inference**: Automatically calculates launch grid from partition shape
-//! - **Shape validation**: Ensures tensor shape is evenly divisible by partition shape
+//! - **Partial tiles**: The grid is the ceiling division `shape / partition_shape` per
+//!   axis, so an extent that is not a multiple of the partition shape gets a partial
+//!   edge tile (bounds-checked or padded in the kernel) rather than being rejected
 //! - **Zero-cost abstraction**: No runtime overhead, just metadata
 //!
 //! ## Traits
@@ -205,7 +207,6 @@ use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
 use cuda_async::device_buffer::{DeviceAllocation, DeviceBuffer, DevicePointer};
-use cuda_async::device_operation;
 use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::{DType, DTypeId};
@@ -428,43 +429,28 @@ impl<T: DType> Partition<Tensor<T>> {
 
     /// Calculates the CUDA launch grid dimensions based on the partition.
     ///
-    /// The grid is computed as `tensor_shape / partition_shape` for each dimension.
-    /// Supports 1D, 2D, and 3D tensors.
+    /// The grid is the ceiling division `tensor_shape / partition_shape` per
+    /// dimension, so a tensor whose extent is not a multiple of the partition
+    /// shape gets a partial edge tile rather than being rejected. Supports 1D,
+    /// 2D, and 3D tensors.
     ///
     /// ## Examples
     ///
     /// ```rust,ignore
     /// let x = api::zeros(&[256]).partition([64]);
-    /// assert_eq!(x.grid(), (4, 1, 1));
+    /// assert_eq!(x.grid()?, (4, 1, 1));
     ///
-    /// let y = api::zeros(&[128, 256]).partition([32, 64]);
-    /// assert_eq!(y.grid(), (4, 4, 1));
+    /// let y = api::zeros(&[100, 256]).partition([32, 64]);
+    /// assert_eq!(y.grid()?, (4, 4, 1)); // 100 / 32 rounds up to 4
     /// ```
     ///
-    /// ## Panics
+    /// ## Errors
     ///
-    /// Panics if the tensor rank is greater than 3.
+    /// Returns `Err` if the tensor rank is greater than 3, a tensor dimension
+    /// is not positive, a partition dimension is zero, or the partition rank
+    /// differs from the tensor rank.
     pub fn grid(&self) -> Result<(u32, u32, u32), Error> {
-        if !self.object.shape.iter().all(|&x| x > 0) {
-            return tensor_error_result("Shape dimensions must be positive.");
-        }
-        let shape: Vec<u32> = self.object.shape.iter().map(|&x| x as u32).collect();
-        let partition_shape: Vec<u32> = self.partition_shape.iter().map(|&x| x as u32).collect();
-        let rank = shape.len();
-        match rank {
-            1 => Ok((u32::div_ceil(shape[0], partition_shape[0]), 1, 1)),
-            2 => Ok((
-                u32::div_ceil(shape[0], partition_shape[0]),
-                u32::div_ceil(shape[1], partition_shape[1]),
-                1,
-            )),
-            3 => Ok((
-                u32::div_ceil(shape[0], partition_shape[0]),
-                u32::div_ceil(shape[1], partition_shape[1]),
-                u32::div_ceil(shape[2], partition_shape[2]),
-            )),
-            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
-        }
+        partition_launch_grid(&self.object.shape, &self.partition_shape)
     }
 }
 
@@ -526,51 +512,6 @@ pub trait IntoPartitionArc {
         Self: Sized;
 }
 
-/// A multi-dimensional array stored in GPU memory.
-///
-/// `Tensor` is the primary type for working with GPU data in cuTile Rust. It wraps a
-/// [`DeviceBuffer`] with shape and stride information, providing a typed, multi-dimensional
-/// view of GPU memory.
-///
-/// ## Memory Management
-///
-/// Tensors share GPU memory ownership through `Arc<DeviceBuffer>`. Memory is automatically
-/// freed when the last reference is dropped. For shared tensor ownership, use
-/// `Arc<Tensor<T>>`, which enables zero-copy views over the same storage.
-///
-/// ## Examples
-///
-/// ### Creating tensors
-///
-/// ```rust,ignore
-/// use cutile::api;
-///
-/// // Create tensors using the API
-/// let x = api::zeros::<f32>(&[1024]).await;
-/// let y = api::ones::<f32>(&[512, 512]).await;
-/// let z = api::arange::<i32>(256).await;
-/// ```
-///
-/// ### Copying and reshaping
-///
-/// ```rust,ignore
-/// let x: Tensor<f32> = api::zeros(&[1024]).await;
-///
-/// // Duplicate to create a new tensor with the same data
-/// let y: Tensor<f32> = x.dup().await;
-///
-/// // Reshape (must preserve total size)
-/// let reshaped = y.reshape(&[32, 32]); // 1024 = 32 * 32
-/// ```
-///
-/// ### Transferring to host
-///
-/// ```rust,ignore
-/// use cutile::tensor::ToHostVec;
-///
-/// let gpu_tensor = api::arange::<f32>(100).await;
-/// let cpu_vec: Vec<f32> = gpu_tensor.to_host_vec().await;
-/// ```
 pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
 
 /// Backing storage for a [`Tensor`].
@@ -645,6 +586,54 @@ impl Storage {
     }
 }
 
+/// A multi-dimensional array stored in GPU memory.
+///
+/// `Tensor` is the primary type for working with GPU data in cuTile Rust. It pairs a
+/// shared backing storage (a [`DeviceBuffer`], or metadata only for [`crate::api::meta`])
+/// with shape, stride, and specialization metadata, providing a typed, multi-dimensional
+/// view of GPU memory.
+///
+/// ## Memory Management
+///
+/// The backing storage is reference counted: it is freed when the last tensor that
+/// shares it is dropped. Zero-copy views over the same storage are created through
+/// `Arc<Tensor<T>>` ([`Reshape`] for `&Arc<Tensor<T>>`, [`Tensor::reinterpret`]) or
+/// by borrowing ([`Tensor::view`], [`Tensor::slice`]). Mutable partitioning requires
+/// the storage to be unshared.
+///
+/// ## Examples
+///
+/// ### Creating tensors
+///
+/// ```rust,ignore
+/// use cutile::api;
+///
+/// // Create tensors using the API
+/// let x = api::zeros::<f32>(&[1024]).await;
+/// let y = api::ones::<f32>(&[512, 512]).await;
+/// let z = api::arange::<i32>(256).await;
+/// ```
+///
+/// ### Copying and reshaping
+///
+/// ```rust,ignore
+/// let x: Tensor<f32> = api::zeros(&[1024]).await;
+///
+/// // Duplicate to create a new tensor with the same data
+/// let y: Tensor<f32> = x.dup().await;
+///
+/// // Reshape (must preserve total size and be contiguous)
+/// let reshaped = y.reshape(&[32, 32])?; // 1024 = 32 * 32
+/// ```
+///
+/// ### Transferring to host
+///
+/// ```rust,ignore
+/// use cutile::tensor::ToHostVec;
+///
+/// let gpu_tensor = api::arange::<f32>(100).await;
+/// let cpu_vec: Vec<f32> = gpu_tensor.to_host_vec().await;
+/// ```
 #[derive(Debug)]
 pub struct Tensor<T: DType> {
     pub(crate) storage: Arc<Storage>,
@@ -696,6 +685,78 @@ fn checked_num_bytes_i32<T>(shape: &[i32]) -> Result<usize, Error> {
     checked_num_elements_i32(shape)?
         .checked_mul(size_of::<T>())
         .ok_or_else(|| crate::error::tensor_error("Tensor byte size overflowed usize."))
+}
+
+// Launch grid for a partition binding: the ceiling division of every tensor axis by the
+// matching partition axis, so a partial edge tile still gets a block. Both shapes are
+// caller-supplied, so every step is checked: a zero partition axis would divide by zero,
+// a rank mismatch would index past the shorter vector, and a non-positive tensor axis
+// has no blocks to launch.
+fn partition_launch_grid(
+    shape: &[i32],
+    partition_shape: &[usize],
+) -> Result<(u32, u32, u32), Error> {
+    if shape.iter().any(|&d| d <= 0) {
+        return tensor_error_result(&format!(
+            "Shape dimensions must be positive, got {shape:?}."
+        ));
+    }
+    if partition_shape.len() != shape.len() {
+        return tensor_error_result(&format!(
+            "Partition rank {} does not match tensor rank {} (partition shape {partition_shape:?}, tensor shape {shape:?}).",
+            partition_shape.len(),
+            shape.len(),
+        ));
+    }
+    if partition_shape.contains(&0) {
+        return tensor_error_result(&format!(
+            "Partition dimensions must be positive, got {partition_shape:?}."
+        ));
+    }
+    let axis = |i: usize| -> Result<u32, Error> {
+        // `shape[i] > 0` was checked above, so the cast is lossless.
+        let extent = shape[i] as u32;
+        let tile = u32::try_from(partition_shape[i]).map_err(|_| {
+            crate::error::tensor_error(&format!(
+                "Partition dimension {} exceeds u32::MAX.",
+                partition_shape[i]
+            ))
+        })?;
+        Ok(extent.div_ceil(tile))
+    };
+    match shape.len() {
+        1 => Ok((axis(0)?, 1, 1)),
+        2 => Ok((axis(0)?, axis(1)?, 1)),
+        3 => Ok((axis(0)?, axis(1)?, axis(2)?)),
+        _ => tensor_error_result("Mutable tensor must be at most rank 3."),
+    }
+}
+
+// Validates that `target` is a legal zero-copy reinterpretation of a tensor or view whose
+// metadata is `(shape, strides)`. The source must be contiguous row-major — a view assumes
+// contiguous strides for `target`, which address different elements over any other
+// layout — and both sides must describe the same byte size. The comparison uses
+// overflow-checked `usize` arithmetic: a caller-supplied shape can make a wrapping `i32`
+// product (or an `as i32` truncation) agree with the current element count while
+// describing billions of elements beyond the backing storage.
+fn validate_view_shape_for<T>(
+    shape: &[i32],
+    strides: &[i32],
+    target: &[usize],
+) -> Result<(), Error> {
+    if strides != contiguous_strides(shape) {
+        return tensor_error_result(&format!(
+            "Zero-copy tensor views require contiguous storage (shape {shape:?}, strides {strides:?})."
+        ));
+    }
+    let target_num_bytes = checked_num_bytes::<T>(target)?;
+    let current_num_bytes = checked_num_bytes_i32::<T>(shape)?;
+    if target_num_bytes != current_num_bytes {
+        return tensor_error_result(&format!(
+            "View shape must preserve tensor size: {target:?} does not have the same number of elements as {shape:?}."
+        ));
+    }
+    Ok(())
 }
 
 // Largest byte extent any element of `(shape, strides)` addresses from the base
@@ -833,6 +894,12 @@ impl<T: DType> Tensor<T> {
     ///   caller's to enforce.
     /// - **Freeing.** cutile never frees a borrowed allocation; the owner frees
     ///   it exactly once, after all cutile work above has completed.
+    /// - **Bit validity.** Every element the memory holds — now and after any
+    ///   write the owner makes — must be a valid `T`, as the `# Safety`
+    ///   section of [`DType`](cuda_core::DType) requires. This is automatic
+    ///   for integer and floating-point `T`; for `T = bool` the owner must
+    ///   store only `0` or `1`, since host code reads the bytes back as `bool`
+    ///   without validation.
     ///
     /// [`Device::borrow_raw`]: cuda_core::Device::borrow_raw
     /// [`Stream::borrow_raw`]: cuda_core::Stream::borrow_raw
@@ -882,6 +949,11 @@ impl<T: DType> Tensor<T> {
     ///   may read or write them; while cutile work **reads** them, no other
     ///   party may write them. "Until the work completes" means past the
     ///   final stream synchronize / `.await`, not the builder-call return.
+    /// - The memory must hold valid `T` values, as the `# Safety` section of
+    ///   [`DType`](cuda_core::DType) requires: automatic for integer and
+    ///   floating-point `T`, but a `Tensor<bool>` over foreign memory requires
+    ///   the owner to store only `0` or `1`, because host code reads the bytes
+    ///   back as `bool` without validation.
     ///
     /// Constructing two tensors over the same allocation and using either as
     /// a mutable output is a data race the type system cannot see: distinct
@@ -955,14 +1027,7 @@ impl<T: DType> Tensor<T> {
     // Validates that a zero-copy view keeps the same logical byte size and starts from
     // a layout that this implementation can safely reinterpret as contiguous.
     fn validate_view_shape(&self, shape: &[usize]) -> Result<(), Error> {
-        if !self.is_contiguous() {
-            return tensor_error_result("Zero-copy tensor views require contiguous storage.");
-        }
-        let target_num_bytes = checked_num_bytes::<T>(shape)?;
-        if target_num_bytes != self.typed_num_bytes() {
-            return tensor_error_result("View shape must preserve tensor size.");
-        }
-        Ok(())
+        validate_view_shape_for::<T>(&self.shape, &self.strides, shape)
     }
 
     // Validates zero-copy reinterpret by checking total byte size and target-type
@@ -986,10 +1051,16 @@ impl<T: DType> Tensor<T> {
         Ok(())
     }
 
-    // Mutable partitioning is only sound when no other tensor/view aliases the backing storage.
+    // Mutable partitioning is only sound when no other tensor/view aliases the backing
+    // storage: a second `Arc<Tensor>` over the same allocation (reshape_shared,
+    // reinterpret, into_shared_alias) could be read by a concurrent launch.
+    fn has_unique_storage(&self) -> bool {
+        Arc::strong_count(&self.storage) == 1
+    }
+
     fn assert_unique_storage(&self) {
         assert!(
-            Arc::strong_count(&self.storage) == 1,
+            self.has_unique_storage(),
             "Cannot create mutable partition from shared tensor storage."
         );
     }
@@ -1015,18 +1086,9 @@ impl<T: DType> Tensor<T> {
     /// ```
     pub fn uninitialized(len: usize) -> impl DeviceOp<Output = MaybeUninit<Self>> {
         assert!(len > 0, "Non-zero length required.");
-        device_operation::with_context(move |ctx| {
-            let num_bytes = len * size_of::<T>();
-            value(MaybeUninit::new(unsafe {
-                Self::from_raw_parts(
-                    ctx.alloc_async(num_bytes),
-                    num_bytes,
-                    ctx.get_device_id(),
-                    vec![len as i32],
-                    vec![1],
-                )
-            }))
-        })
+        // A failed device allocation is the operation's error, not a panic;
+        // see `api::AllocUninitialized`.
+        crate::api::alloc_uninitialized::<T>(len)
     }
 
     pub fn dtype(&self) -> DTypeId {
@@ -1217,11 +1279,7 @@ pub trait Reshape {
 impl<T: DType> Reshape for Tensor<T> {
     type Output = Tensor<T>;
     fn reshape(self, shape: &[usize]) -> Result<Tensor<T>, Error> {
-        let current_elems: i32 = self.shape.iter().product();
-        let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
-        if new_elems != current_elems {
-            return tensor_error_result("reshape: new shape must preserve element count.");
-        }
+        self.validate_view_shape(shape)?;
         Ok(self.reshape_unchecked(shape))
     }
 }
@@ -1272,14 +1330,7 @@ impl<'a, T: DType> TensorView<'a, T> {
     }
     /// Re-view with a different shape.
     pub fn view(&self, shape: &[usize]) -> Result<TensorView<'_, T>, Error> {
-        if self.strides != contiguous_strides(&self.shape) {
-            return tensor_error_result("view: cannot reshape a non-contiguous view.");
-        }
-        let current_elems: i32 = self.shape.iter().product();
-        let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
-        if new_elems != current_elems {
-            return tensor_error_result("view: new shape must preserve element count.");
-        }
+        validate_view_shape_for::<T>(&self.shape, &self.strides, shape)?;
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
@@ -1339,11 +1390,7 @@ impl<T: DType> Tensor<T> {
     /// The view borrows `self` — the tensor can't be mutated while the
     /// view exists. No allocation or copy.
     pub fn view(&self, shape: &[usize]) -> Result<TensorView<'_, T>, Error> {
-        let current_elems: i32 = self.shape.iter().product();
-        let new_elems: i32 = shape.iter().map(|&x| x as i32).product();
-        if new_elems != current_elems {
-            return tensor_error_result("view: new shape must preserve element count.");
-        }
+        self.validate_view_shape(shape)?;
         let new_shape: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
         let new_strides = contiguous_strides(&new_shape);
         let spec = compute_spec(
@@ -1458,6 +1505,11 @@ impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
     ) -> Partition<&'a mut Tensor<T>> {
         let partition_shape = partition_shape.to_vec();
         let partition_strides: Vec<usize> = self.strides.iter().map(|&s| s as usize).collect();
+        // Same invariant as the owned `IntoPartition` path: `&mut` proves
+        // exclusivity of this handle, not of the storage — an `Arc<Tensor>`
+        // alias produced by reshape_shared/reinterpret/into_shared_alias can
+        // still be a live kernel input.
+        self.assert_unique_storage();
         Partition {
             object: self,
             partition_shape,
@@ -1473,26 +1525,7 @@ impl<'a, T: DType> Partition<&'a mut Tensor<T>> {
     }
 
     pub fn grid(&self) -> Result<(u32, u32, u32), Error> {
-        if !self.object.shape.iter().all(|&x| x > 0) {
-            return tensor_error_result("Shape dimensions must be positive.");
-        }
-        let shape: Vec<u32> = self.object.shape.iter().map(|&x| x as u32).collect();
-        let partition_shape: Vec<u32> = self.partition_shape.iter().map(|&x| x as u32).collect();
-        let rank = shape.len();
-        match rank {
-            1 => Ok((u32::div_ceil(shape[0], partition_shape[0]), 1, 1)),
-            2 => Ok((
-                u32::div_ceil(shape[0], partition_shape[0]),
-                u32::div_ceil(shape[1], partition_shape[1]),
-                1,
-            )),
-            3 => Ok((
-                u32::div_ceil(shape[0], partition_shape[0]),
-                u32::div_ceil(shape[1], partition_shape[1]),
-                u32::div_ceil(shape[2], partition_shape[2]),
-            )),
-            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
-        }
+        partition_launch_grid(&self.object.shape, &self.partition_shape)
     }
 }
 
@@ -1525,6 +1558,13 @@ impl<T: DType> TryPartition<T> for Arc<Tensor<T>> {
         let tensor = Arc::try_unwrap(self).map_err(|_| {
             crate::error::tensor_error("try_partition: Arc<Tensor> has multiple owners")
         })?;
+        // The documented contract is `Err`, not the panic `partition` raises,
+        // when another tensor or view still shares the backing storage.
+        if !tensor.has_unique_storage() {
+            return tensor_error_result(
+                "try_partition: tensor storage is shared with other tensors or views",
+            );
+        }
         Ok(tensor.partition(partition_shape))
     }
 }
@@ -1666,12 +1706,6 @@ use cuda_async::launch::AsyncKernelLaunch;
 // Abstracts over Partition<Tensor<T>> and Partition<&mut Tensor<T>> so the
 // macro-generated launcher accepts both for &mut Tensor params.
 
-/// How a `&mut Tensor` kernel param is stored during execution and recovered.
-///
-/// | Input | Stored | Returned |
-/// |---|---|---|
-/// | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` |
-/// | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` |
 /// A partition binding's constraint on the launch grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridBound {
@@ -1703,6 +1737,13 @@ pub trait KernelOutputStored<T: DType>: Send {
     fn shape_as_i32(&self) -> Vec<i32>;
 }
 
+/// How a `&mut Tensor` kernel param is stored during execution and recovered.
+///
+/// | Input | Stored | Returned |
+/// |---|---|---|
+/// | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` |
+/// | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` |
+/// | `MappedLaunchPartition<Partition<..>>` | `MappedLaunchPartition<Partition<..>>` | `Partition<..>` |
 pub trait KernelOutput<T: DType>: Send + Sized {
     type Stored: KernelOutputStored<T>;
     type Returned: Send;
@@ -1738,26 +1779,7 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
         }
     }
     fn grid(&self) -> Result<(u32, u32, u32), Error> {
-        let shape: Vec<u32> = self.shape_as_i32().iter().map(|&x| x as u32).collect();
-        let pshape: Vec<u32> = self
-            .partition_shape_as_i32()
-            .iter()
-            .map(|&x| x as u32)
-            .collect();
-        match shape.len() {
-            1 => Ok((u32::div_ceil(shape[0], pshape[0]), 1, 1)),
-            2 => Ok((
-                u32::div_ceil(shape[0], pshape[0]),
-                u32::div_ceil(shape[1], pshape[1]),
-                1,
-            )),
-            3 => Ok((
-                u32::div_ceil(shape[0], pshape[0]),
-                u32::div_ceil(shape[1], pshape[1]),
-                u32::div_ceil(shape[2], pshape[2]),
-            )),
-            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
-        }
+        partition_launch_grid(&self.object.shape, &self.partition_shape)
     }
     fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
@@ -1809,26 +1831,7 @@ impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
         }
     }
     fn grid(&self) -> Result<(u32, u32, u32), Error> {
-        let shape: Vec<u32> = self.shape_as_i32().iter().map(|&x| x as u32).collect();
-        let pshape: Vec<u32> = self
-            .partition_shape_as_i32()
-            .iter()
-            .map(|&x| x as u32)
-            .collect();
-        match shape.len() {
-            1 => Ok((u32::div_ceil(shape[0], pshape[0]), 1, 1)),
-            2 => Ok((
-                u32::div_ceil(shape[0], pshape[0]),
-                u32::div_ceil(shape[1], pshape[1]),
-                1,
-            )),
-            3 => Ok((
-                u32::div_ceil(shape[0], pshape[0]),
-                u32::div_ceil(shape[1], pshape[1]),
-                u32::div_ceil(shape[2], pshape[2]),
-            )),
-            _ => tensor_error_result("Mutable tensor must be at most rank 3."),
-        }
+        partition_launch_grid(&self.object.shape, &self.partition_shape)
     }
     fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
@@ -2199,6 +2202,125 @@ mod tests {
         let _t = unsafe {
             Tensor::<f32>::from_foreign(owner, vec![i32::MAX, i32::MAX], vec![i32::MAX, i32::MAX])
         };
+    }
+
+    // Metadata-only tensor for the view/reshape validation tests: `from_meta`
+    // allocates nothing and its device pointer is never read on these paths.
+    fn meta_f32(shape: &[i32]) -> Tensor<f32> {
+        Tensor::<f32>::from_meta(shape.to_vec(), 0)
+    }
+
+    #[test]
+    fn reshape_and_view_accept_same_size_contiguous_shapes() {
+        let t = meta_f32(&[8]);
+        assert!(t.view(&[2, 4]).is_ok());
+        assert!(t.view(&[2, 4]).unwrap().view(&[4, 2]).is_ok());
+        let t = t.reshape(&[2, 2, 2]).unwrap();
+        assert_eq!(t.shape(), &[2, 2, 2]);
+        assert!(t.is_contiguous());
+    }
+
+    #[test]
+    fn reshape_and_view_reject_element_count_mismatch() {
+        assert!(meta_f32(&[8]).reshape(&[3, 3]).is_err());
+        assert!(meta_f32(&[8]).view(&[5]).is_err());
+        assert!(meta_f32(&[8]).view(&[2, 4]).unwrap().view(&[3]).is_err());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn reshape_and_view_reject_shapes_whose_i32_product_wraps() {
+        // Every dimension fits an i32, but the i32 product wraps to exactly 8:
+        // (2^30 + 1) * 8 = 2^33 + 8 ≡ 8 (mod 2^32). The former wrapping
+        // comparison accepted this for an 8-element tensor, producing metadata
+        // that addresses ~8.6e9 elements over 32 bytes of storage.
+        let wrapping = [(1usize << 30) + 1, 8];
+        // A single dimension above i32::MAX truncates to 8 under `as i32`.
+        let truncating = [(1usize << 32) + 8];
+        let t = meta_f32(&[8]);
+        for bad in [&wrapping[..], &truncating[..]] {
+            assert!(t.view(bad).is_err(), "view accepted {bad:?}");
+            assert!(
+                t.view(&[2, 4]).unwrap().view(bad).is_err(),
+                "TensorView::view accepted {bad:?}"
+            );
+        }
+        assert!(meta_f32(&[8]).reshape(&wrapping).is_err());
+        assert!(meta_f32(&[8]).reshape(&truncating).is_err());
+    }
+
+    #[test]
+    fn launch_grid_is_the_ceiling_division() {
+        assert_eq!(meta_f32(&[256]).partition([64]).grid().unwrap(), (4, 1, 1));
+        // Partial edge tiles launch a block: 100 / 32 rounds up to 4.
+        assert_eq!(
+            meta_f32(&[100, 256]).partition([32, 64]).grid().unwrap(),
+            (4, 4, 1)
+        );
+        let mut t = meta_f32(&[8, 8, 8]);
+        assert_eq!(
+            KernelOutputStored::grid(&(&mut t).partition([4, 8, 3])).unwrap(),
+            (2, 1, 3)
+        );
+    }
+
+    #[test]
+    fn launch_grid_rejects_zero_partition_dimension_and_rank_mismatch() {
+        // Zero partition axis: formerly a divide-by-zero panic in div_ceil.
+        let err = meta_f32(&[16]).partition([0]).grid().unwrap_err();
+        assert!(err.to_string().contains("Partition dimensions"), "{err}");
+        let err = meta_f32(&[16, 16]).partition([8, 0]).grid().unwrap_err();
+        assert!(err.to_string().contains("Partition dimensions"), "{err}");
+        // Partition rank below the tensor rank: formerly an index-out-of-bounds panic.
+        let err = meta_f32(&[16, 16]).partition([8]).grid().unwrap_err();
+        assert!(err.to_string().contains("rank"), "{err}");
+        // The same checks hold on the launcher-facing KernelOutputStored path.
+        let mut t = meta_f32(&[16]);
+        assert!(KernelOutputStored::grid(&(&mut t).partition([0])).is_err());
+        assert!(meta_f32(&[2, 2, 2, 2])
+            .partition([1, 1, 1, 1])
+            .grid()
+            .is_err());
+    }
+
+    #[test]
+    fn borrowed_mutable_partition_requires_unique_storage() {
+        let mut t = meta_f32(&[8]);
+        // SAFETY: metadata-only; the alias is never launched or dereferenced.
+        let _alias = unsafe { t.into_shared_alias() };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = (&mut t).partition([8]);
+        }));
+        assert!(
+            result.is_err(),
+            "a &mut partition over shared storage must be rejected"
+        );
+    }
+
+    #[test]
+    fn try_partition_returns_err_for_shared_storage() {
+        let t = meta_f32(&[8]);
+        // SAFETY: metadata-only; the alias is never launched or dereferenced.
+        let _alias = unsafe { t.into_shared_alias() };
+        let err = Arc::new(t)
+            .try_partition([8])
+            .err()
+            .expect("shared storage must be an Err, not a panic");
+        assert!(err.to_string().contains("shared"), "{err}");
+        // Unique storage partitions fine.
+        assert!(Arc::new(meta_f32(&[8])).try_partition([8]).is_ok());
+    }
+
+    #[test]
+    fn reshape_and_view_reject_non_contiguous_source() {
+        // 4 elements at stride 2 address 7 f32 = 28 bytes; the tensor is not
+        // contiguous, so a contiguous-stride view would read other elements.
+        let owner: Arc<dyn DeviceAllocation> = Arc::new(FakeAlloc { len_bytes: 28 });
+        // SAFETY: metadata-only test; the pointer is never dereferenced.
+        let strided = unsafe { Tensor::<f32>::from_foreign(owner, vec![4], vec![2]) };
+        assert!(!strided.is_contiguous());
+        assert!(strided.view(&[2, 2]).is_err());
+        assert!(strided.reshape(&[2, 2]).is_err());
     }
 
     #[test]
