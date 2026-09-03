@@ -12,10 +12,14 @@ cargo test -p cuda-async --release --lib ab_reactor_variants -- --nocapture --ig
 
 Two orthogonal axes, tested as a full matrix:
 
-- **Unpark policy** — `always` (current: unpark the scanner on every
+- **Unpark policy** — `always` (then current: unpark the scanner on every
   registration) vs `empty→wake` (llist-style: unpark only on the idle→active
-  transition, tracked by a harness-side `n_armed` counter so `SlotTable` is
-  untouched).
+  transition). At measurement time the `n_armed` counter behind `empty→wake`
+  lived in the harness so `SlotTable` stayed untouched; since the policy was
+  adopted, `SlotTable` carries its own `n_armed` (`publish` reports the
+  idle→active transition, `is_idle` gates the scanner's park), and the
+  harness keeps a separate counter only so both policies can still be
+  toggled against the shipped table.
 - **Scanner idle** — `park` (current) vs `never-park` (hot spin).
 
 Two workload regimes: **saturated** (8 threads registering + completing as

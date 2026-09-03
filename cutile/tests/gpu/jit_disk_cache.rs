@@ -283,8 +283,9 @@ fn disk_cache_recompiles_after_driver_rejection() {
         // Corrupt the payload while keeping the header valid.
         corrupt_entry_payload(&files[0]);
 
-        // Clear the in-memory cache so the real launch must consult the disk store.
-        cutile::tile_kernel::get_kernel_cache().clear();
+        // Clear the in-memory cache so the real launch must consult the disk
+        // store. Safe here: no launches are in flight at this point in the test.
+        unsafe { cutile::tile_kernel::clear_kernel_cache_for_tests() };
 
         let backend_before = jit_backend_compile_count();
         let hits_before = jit_disk_hit_count();

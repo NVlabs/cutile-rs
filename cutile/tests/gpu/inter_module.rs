@@ -38,7 +38,7 @@ mod my_kernels {
         input: &Tensor<f32, { [-1] }>,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid.0]);
+        let tile: Tile<f32, S> = input.load_tile(shape!(S), [pid.0]);
         let activated: Tile<f32, S> = relu(tile);
         output.store(square(activated));
     }
@@ -46,7 +46,7 @@ mod my_kernels {
     #[cutile::entry()]
     fn apply_relu<const S: [i32; 1]>(output: &mut Tensor<f32, S>, input: &Tensor<f32, { [-1] }>) {
         let pid: (i32, i32, i32) = get_tile_block_id();
-        let tile: Tile<f32, S> = input.load_tile(const_shape!(S), [pid.0]);
+        let tile: Tile<f32, S> = input.load_tile(shape!(S), [pid.0]);
         output.store(relu(tile));
     }
 }

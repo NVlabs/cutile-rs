@@ -91,9 +91,9 @@ mod tensor_and_matrix_ops_module {
 
     #[cutile::entry()]
     fn raw_mmai_kernel(output: &mut Tensor<i64, { [16, 16] }>) {
-        let lhs: Tile<i8, { [16, 32] }> = constant(1i8, const_shape![16, 32]);
-        let rhs: Tile<i8, { [32, 16] }> = constant(1i8, const_shape![32, 16]);
-        let acc: Tile<i32, { [16, 16] }> = constant(0i32, const_shape![16, 16]);
+        let lhs: Tile<i8, { [16, 32] }> = constant(1i8, shape![16, 32]);
+        let rhs: Tile<i8, { [32, 16] }> = constant(1i8, shape![32, 16]);
+        let acc: Tile<i32, { [16, 16] }> = constant(0i32, shape![16, 16]);
 
         let result_i32: Tile<i32, { [16, 16] }> =
             mmai(lhs, rhs, acc, signedness::Signed, signedness::Unsigned);
@@ -104,9 +104,9 @@ mod tensor_and_matrix_ops_module {
 
     #[cutile::entry()]
     fn raw_mmaf_kernel(output: &mut Tensor<f32, { [16, 16] }>) {
-        let lhs: Tile<f32, { [16, 8] }> = constant(1.0f32, const_shape![16, 8]);
-        let rhs: Tile<f32, { [8, 16] }> = constant(1.0f32, const_shape![8, 16]);
-        let acc: Tile<f32, { [16, 16] }> = constant(0.0f32, const_shape![16, 16]);
+        let lhs: Tile<f32, { [16, 8] }> = constant(1.0f32, shape![16, 8]);
+        let rhs: Tile<f32, { [8, 16] }> = constant(1.0f32, shape![8, 16]);
+        let acc: Tile<f32, { [16, 16] }> = constant(0.0f32, shape![16, 16]);
 
         let result: Tile<f32, { [16, 16] }> = mmaf(lhs, rhs, acc);
 
@@ -118,7 +118,7 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<f32, { [8, 16] }>,
         input: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let source: Tile<f32, { [16, 8] }> = load_tile(input, const_shape![16, 8], [0, 0]);
+        let source: Tile<f32, { [16, 8] }> = load_tile(input, shape![16, 8], [0, 0]);
         let result: Tile<f32, { [8, 16] }> = source.transpose();
         output.store(result);
     }
@@ -128,7 +128,7 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<f4e2m1fnx2, { [32] }>,
         input: &Tensor<f4e2m1fnx2, { [-1] }>,
     ) {
-        let bytes: Tile<f4e2m1fnx2, { [32] }> = load_tile(input, const_shape![32], [0]);
+        let bytes: Tile<f4e2m1fnx2, { [32] }> = load_tile(input, shape![32], [0]);
         let f4s: Tile<f4e2m1fn, { [64] }> = unpack(bytes);
         let packed: Tile<f4e2m1fnx2, { [32] }> = pack(f4s);
         output.store(packed);
@@ -139,10 +139,9 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<f4e2m1fnx2, { [16, 32] }>,
         input: &Tensor<f4e2m1fnx2, { [-1, -1] }>,
     ) {
-        let bytes_2d: Tile<f4e2m1fnx2, { [16, 32] }> =
-            load_tile(input, const_shape![16, 32], [0, 0]);
-        let f4s: Tile<f4e2m1fn, { [16, 64] }> = bytes_2d.unpack(const_shape![16, 64]);
-        let packed: Tile<f4e2m1fnx2, { [16, 32] }> = f4s.pack(const_shape![16, 32]);
+        let bytes_2d: Tile<f4e2m1fnx2, { [16, 32] }> = load_tile(input, shape![16, 32], [0, 0]);
+        let f4s: Tile<f4e2m1fn, { [16, 64] }> = bytes_2d.unpack(shape![16, 64]);
+        let packed: Tile<f4e2m1fnx2, { [16, 32] }> = f4s.pack(shape![16, 32]);
         output.store(packed);
     }
 
@@ -151,7 +150,7 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<f4e2m1fnx2, { [32] }>,
         input: &Tensor<u8, { [-1] }>,
     ) {
-        let bytes: Tile<u8, { [32] }> = load_tile(input, const_shape![32], [0]);
+        let bytes: Tile<u8, { [32] }> = load_tile(input, shape![32], [0]);
         let f4s: Tile<f4e2m1fn, { [64] }> = unpack(bytes);
         let packed: Tile<f4e2m1fnx2, { [32] }> = pack(f4s);
         output.store(packed);
@@ -162,11 +161,11 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<f16, { [8, 8] }>,
         input: &Tensor<f16, { [-1, -1] }>,
     ) {
-        let src: Tile<f16, { [8, 8] }> = load_tile(input, const_shape![8, 8], [0, 0]);
-        let flat: Tile<f16, { [64] }> = reshape(src, const_shape![64]);
+        let src: Tile<f16, { [8, 8] }> = load_tile(input, shape![8, 8], [0, 0]);
+        let flat: Tile<f16, { [64] }> = reshape(src, shape![64]);
         let packed: Tile<u8, { [128] }> = pack(flat);
         let unpacked: Tile<f16, { [64] }> = unpack(packed);
-        let result: Tile<f16, { [8, 8] }> = reshape(unpacked, const_shape![8, 8]);
+        let result: Tile<f16, { [8, 8] }> = reshape(unpacked, shape![8, 8]);
         output.store(result);
     }
 
@@ -175,7 +174,7 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<i32, { [16] }>,
         input: &Tensor<f32, { [-1] }>,
     ) {
-        let src: Tile<f32, { [16] }> = load_tile(input, const_shape![16], [0]);
+        let src: Tile<f32, { [16] }> = load_tile(input, shape![16], [0]);
         let packed: Tile<u8, { [64] }> = pack(src);
         let result: Tile<i32, { [16] }> = unpack(packed);
         output.store(result);
@@ -186,7 +185,7 @@ mod tensor_and_matrix_ops_module {
         output: &mut Tensor<i32, { [16] }>,
         input: &Tensor<i32, { [-1] }>,
     ) {
-        let words: Tile<i32, { [16] }> = load_tile(input, const_shape![16], [0]);
+        let words: Tile<i32, { [16] }> = load_tile(input, shape![16], [0]);
         let bytes: Tile<u8, { [64] }> = pack(words);
         let nibbles: Tile<i4, { [128] }> = unpack(bytes);
         let repacked: Tile<u8, { [64] }> = pack(nibbles);
@@ -202,18 +201,18 @@ mod tensor_and_matrix_ops_module {
         lhs_scale: &Tensor<f8e4m3fn, { [-1, -1] }>,
         rhs_scale: &Tensor<f8e4m3fn, { [-1, -1] }>,
     ) {
-        let lhs_words_tile: Tile<i32, { [32] }> = load_tile(lhs_words, const_shape![32], [0]);
+        let lhs_words_tile: Tile<i32, { [32] }> = load_tile(lhs_words, shape![32], [0]);
         let lhs_bytes: Tile<u8, { [128] }> = pack(lhs_words_tile);
         let lhs_flat: Tile<f4e2m1fn, { [256] }> = unpack(lhs_bytes);
-        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_flat.reshape(const_shape![16, 16]);
+        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_flat.reshape(shape![16, 16]);
 
-        let rhs_words_tile: Tile<i32, { [32] }> = load_tile(rhs_words, const_shape![32], [0]);
+        let rhs_words_tile: Tile<i32, { [32] }> = load_tile(rhs_words, shape![32], [0]);
         let rhs_bytes: Tile<u8, { [128] }> = pack(rhs_words_tile);
         let rhs_flat: Tile<f4e2m1fn, { [256] }> = unpack(rhs_bytes);
-        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_flat.reshape(const_shape![16, 16]);
+        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_flat.reshape(shape![16, 16]);
 
-        let lscale: Tile<f8e4m3fn, { [16, 1] }> = load_tile(lhs_scale, const_shape![16, 1], [0, 0]);
-        let rscale: Tile<f8e4m3fn, { [1, 16] }> = load_tile(rhs_scale, const_shape![1, 16], [0, 0]);
+        let lscale: Tile<f8e4m3fn, { [16, 1] }> = load_tile(lhs_scale, shape![16, 1], [0, 0]);
+        let rscale: Tile<f8e4m3fn, { [1, 16] }> = load_tile(rhs_scale, shape![1, 16], [0, 0]);
         let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
 
         let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs, rhs, acc, lscale, rscale);
@@ -228,14 +227,12 @@ mod tensor_and_matrix_ops_module {
         lhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
         rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
     ) {
-        let lhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(lhs_bytes, const_shape![128], [0]);
-        let rhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(rhs_bytes, const_shape![128], [0]);
-        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_raw.unpack(const_shape![16, 16]);
-        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_raw.unpack(const_shape![16, 16]);
-        let lscale: Tile<f8e8m0fnu, { [16, 1] }> =
-            load_tile(lhs_scale, const_shape![16, 1], [0, 0]);
-        let rscale: Tile<f8e8m0fnu, { [1, 16] }> =
-            load_tile(rhs_scale, const_shape![1, 16], [0, 0]);
+        let lhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(lhs_bytes, shape![128], [0]);
+        let rhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(rhs_bytes, shape![128], [0]);
+        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_raw.unpack(shape![16, 16]);
+        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_raw.unpack(shape![16, 16]);
+        let lscale: Tile<f8e8m0fnu, { [16, 1] }> = load_tile(lhs_scale, shape![16, 1], [0, 0]);
+        let rscale: Tile<f8e8m0fnu, { [1, 16] }> = load_tile(rhs_scale, shape![1, 16], [0, 0]);
         let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
 
         let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs, rhs, acc, lscale, rscale);
@@ -250,12 +247,12 @@ mod tensor_and_matrix_ops_module {
         lhs_scale: &Tensor<f8e4m3fn, { [-1, -1] }>,
         rhs_scale: &Tensor<f8e4m3fn, { [-1, -1] }>,
     ) {
-        let lhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(lhs_bytes, const_shape![128], [0]);
-        let rhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(rhs_bytes, const_shape![128], [0]);
-        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_raw.unpack(const_shape![16, 16]);
-        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_raw.unpack(const_shape![16, 16]);
-        let lscale: Tile<f8e4m3fn, { [16, 1] }> = load_tile(lhs_scale, const_shape![16, 1], [0, 0]);
-        let rscale: Tile<f8e4m3fn, { [1, 16] }> = load_tile(rhs_scale, const_shape![1, 16], [0, 0]);
+        let lhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(lhs_bytes, shape![128], [0]);
+        let rhs_raw: Tile<f4e2m1fnx2, { [128] }> = load_tile(rhs_bytes, shape![128], [0]);
+        let lhs: Tile<f4e2m1fn, { [16, 16] }> = lhs_raw.unpack(shape![16, 16]);
+        let rhs: Tile<f4e2m1fn, { [16, 16] }> = rhs_raw.unpack(shape![16, 16]);
+        let lscale: Tile<f8e4m3fn, { [16, 1] }> = load_tile(lhs_scale, shape![16, 1], [0, 0]);
+        let rscale: Tile<f8e4m3fn, { [1, 16] }> = load_tile(rhs_scale, shape![1, 16], [0, 0]);
         let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
 
         let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs, rhs, acc, lscale, rscale);
@@ -270,12 +267,10 @@ mod tensor_and_matrix_ops_module {
         lhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
         rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1] }>,
     ) {
-        let lhs_tile: Tile<f8e4m3fn, { [16, 64] }> = load_tile(lhs, const_shape![16, 64], [0, 0]);
-        let rhs_tile: Tile<f8e4m3fn, { [64, 16] }> = load_tile(rhs, const_shape![64, 16], [0, 0]);
-        let lscale: Tile<f8e8m0fnu, { [16, 2] }> =
-            load_tile(lhs_scale, const_shape![16, 2], [0, 0]);
-        let rscale: Tile<f8e8m0fnu, { [2, 16] }> =
-            load_tile(rhs_scale, const_shape![2, 16], [0, 0]);
+        let lhs_tile: Tile<f8e4m3fn, { [16, 64] }> = load_tile(lhs, shape![16, 64], [0, 0]);
+        let rhs_tile: Tile<f8e4m3fn, { [64, 16] }> = load_tile(rhs, shape![64, 16], [0, 0]);
+        let lscale: Tile<f8e8m0fnu, { [16, 2] }> = load_tile(lhs_scale, shape![16, 2], [0, 0]);
+        let rscale: Tile<f8e8m0fnu, { [2, 16] }> = load_tile(rhs_scale, shape![2, 16], [0, 0]);
         let acc: Tile<f32, { [16, 16] }> = load_tile_mut(output);
 
         let result: Tile<f32, { [16, 16] }> = mmaf_scaled(lhs_tile, rhs_tile, acc, lscale, rscale);
@@ -291,13 +286,13 @@ mod tensor_and_matrix_ops_module {
         rhs_scale: &Tensor<f8e8m0fnu, { [-1, -1, -1] }>,
     ) {
         let lhs_tile: Tile<f8e4m3fn, { [2, 16, 64] }> =
-            load_tile(lhs, const_shape![2, 16, 64], [0, 0, 0]);
+            load_tile(lhs, shape![2, 16, 64], [0, 0, 0]);
         let rhs_tile: Tile<f8e4m3fn, { [2, 64, 16] }> =
-            load_tile(rhs, const_shape![2, 64, 16], [0, 0, 0]);
+            load_tile(rhs, shape![2, 64, 16], [0, 0, 0]);
         let lscale: Tile<f8e8m0fnu, { [2, 16, 2] }> =
-            load_tile(lhs_scale, const_shape![2, 16, 2], [0, 0, 0]);
+            load_tile(lhs_scale, shape![2, 16, 2], [0, 0, 0]);
         let rscale: Tile<f8e8m0fnu, { [2, 2, 16] }> =
-            load_tile(rhs_scale, const_shape![2, 2, 16], [0, 0, 0]);
+            load_tile(rhs_scale, shape![2, 2, 16], [0, 0, 0]);
         let acc: Tile<f32, { [2, 16, 16] }> = load_tile_mut(output);
 
         let result: Tile<f32, { [2, 16, 16] }> =

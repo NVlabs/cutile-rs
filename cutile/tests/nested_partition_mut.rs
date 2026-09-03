@@ -33,7 +33,7 @@ mod nested_partition_mut_module {
         let row = pid.0;
         let block = pid.1;
 
-        let input_part: Partition<f32, { [1, BLOCK] }> = input.partition(const_shape![1, BLOCK]);
+        let input_part: Partition<f32, { [1, BLOCK] }> = input.partition(shape![1, BLOCK]);
         let tile: Tile<f32, { [1, BLOCK] }> = input_part.load([row, block]);
         out.store(tile);
     }
@@ -46,9 +46,8 @@ mod nested_partition_mut_module {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row = pid.0;
 
-        let input_part: Partition<f32, { [1, BLOCK] }> = input.partition(const_shape![1, BLOCK]);
-        let mut out_part: PartitionMut<f32, { [1, BLOCK] }> =
-            out.partition_mut(const_shape![1, BLOCK]);
+        let input_part: Partition<f32, { [1, BLOCK] }> = input.partition(shape![1, BLOCK]);
+        let mut out_part: PartitionMut<f32, { [1, BLOCK] }> = out.partition_mut(shape![1, BLOCK]);
 
         for j in 0i32..((N + BLOCK - 1) / BLOCK) {
             let tile: Tile<f32, { [1, BLOCK] }> = input_part.load([row, j]);
@@ -65,10 +64,9 @@ mod nested_partition_mut_module {
         let row = pid.0;
         let head = pid.1;
 
-        let input_part: Partition<f32, { [1, 1, BLOCK] }> =
-            input.partition(const_shape![1, 1, BLOCK]);
+        let input_part: Partition<f32, { [1, 1, BLOCK] }> = input.partition(shape![1, 1, BLOCK]);
         let mut out_part: PartitionMut<f32, { [1, 1, BLOCK] }> =
-            out.partition_mut(const_shape![1, 1, BLOCK]);
+            out.partition_mut(shape![1, 1, BLOCK]);
 
         for j in 0i32..((N + BLOCK - 1) / BLOCK) {
             let tile: Tile<f32, { [1, 1, BLOCK] }> = input_part.load([row, head, j]);

@@ -151,11 +151,6 @@ pub struct BytecodeVersion {
 }
 
 impl BytecodeVersion {
-    pub const V13_1: Self = Self {
-        major: 13,
-        minor: 1,
-        tag: 0,
-    };
     pub const V13_2: Self = Self {
         major: 13,
         minor: 2,
@@ -171,11 +166,17 @@ impl BytecodeVersion {
     pub const CURRENT: Self = Self::V13_3;
 
     /// Oldest version this writer can emit.
-    pub const MIN_SUPPORTED: Self = Self::V13_1;
+    ///
+    /// 13.2 is the Tile floor: `tileiras` ships with CUDA 13.2, and the
+    /// writer's field layouts (the `for` flags word, the `print_tko` token
+    /// result and flags, the `neg_i` overflow and `tanh` rounding attributes)
+    /// are the 13.2 ones. A "13.1" image written with those layouts was
+    /// rejected by every toolkit, so 13.1 is not offered.
+    pub const MIN_SUPPORTED: Self = Self::V13_2;
 
     /// All emittable versions, oldest to newest. Used to probe the installed
     /// `tileiras` for the newest bytecode version it accepts.
-    pub const SUPPORTED: [Self; 3] = [Self::V13_1, Self::V13_2, Self::V13_3];
+    pub const SUPPORTED: [Self; 2] = [Self::V13_2, Self::V13_3];
 }
 
 impl std::fmt::Display for BytecodeVersion {

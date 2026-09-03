@@ -78,7 +78,12 @@ pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) stride_args: HashMap<String, Vec<i32>>,
     pub(crate) generic_vars: GenericVars,
     pub(crate) validator: Validator,
-    pub(crate) module_name_stack: Vec<String>,
+    /// Module scopes, outermost first: the kernel's module at index 0 (the
+    /// span base every diagnostic resolves against), then one entry per
+    /// inline expansion in progress, pushed by [`Self::push_module_scope`].
+    /// The innermost entry is the module whose source is being compiled,
+    /// which is what module-level `const` names resolve against.
+    pub(crate) module_name_stack: RefCell<Vec<String>>,
     pub(crate) typeck_results: RefCell<Option<crate::passes::type_inference::TypeckResults>>,
     /// Inline expansions currently in progress, innermost last. While
     /// non-empty, [`Self::ir_location`] scopes each op to the callee's own
@@ -119,6 +124,16 @@ pub(crate) enum CallFrame {
 pub(crate) struct CallSiteGuard<'a>(&'a RefCell<Vec<CallFrame>>);
 
 impl Drop for CallSiteGuard<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().pop();
+    }
+}
+
+/// Pops the innermost module scope on drop (see
+/// [`CUDATileFunctionCompiler::push_module_scope`]).
+pub(crate) struct ModuleScopeGuard<'a>(&'a RefCell<Vec<String>>);
+
+impl Drop for ModuleScopeGuard<'_> {
     fn drop(&mut self) {
         self.0.borrow_mut().pop();
     }
@@ -525,10 +540,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .map(|(k, v)| (k.to_string(), v.to_vec()))
             .collect::<HashMap<_, _>>();
 
-        // 8. Create GenericVars.
+        // 8. Create GenericVars. `from_flat` has no span of its own; point
+        // its diagnostics (too few / malformed host-supplied generics) at the
+        // kernel's generic parameter list.
         let mut generic_vars =
-            GenericVars::from_flat(&function.sig.generics, function_generic_args)?;
-        Self::add_module_const_vars_from_modules(modules, &mut generic_vars);
+            GenericVars::from_flat(&function.sig.generics, function_generic_args).map_err(
+                |err| match err {
+                    JITError::Located(message, location) if !location.is_known() => modules
+                        .resolve_span(module_name, &function.sig.generics.span())
+                        .jit_error(&message),
+                    other => other,
+                },
+            )?;
+        Self::add_module_const_vars_from_modules(modules, module_name, &mut generic_vars);
 
         // 9. generate_entry_point.
         let spec_args_map: HashMap<String, crate::specialization::SpecializationBits> = spec_args
@@ -628,7 +652,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             validator,
             generic_vars,
             stride_args,
-            module_name_stack: vec![module_name.to_string()],
+            module_name_stack: RefCell::new(vec![module_name.to_string()]),
             typeck_results: RefCell::new(None),
             call_site_stack: RefCell::new(Vec::new()),
             check_stats: CheckHoistStats::default(),
@@ -639,15 +663,26 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     // Error helper methods
     // -----------------------------------------------------------------------
 
+    /// Adds the module-level `const`s visible from the module currently being
+    /// compiled (see [`Self::current_module`]) as generic variables.
     pub(crate) fn add_module_const_vars(&self, generic_vars: &mut GenericVars) {
-        Self::add_module_const_vars_from_modules(self.modules, generic_vars);
+        Self::add_module_const_vars_from_modules(
+            self.modules,
+            &self.current_module(),
+            generic_vars,
+        );
     }
 
+    /// Adds the `const`s visible from `module` — its own, its imports, core,
+    /// then a unique global definition — as generic variables. Scoped per
+    /// module: a helper module's `N` must not stand in for the kernel's `N`
+    /// (or vice versa), which the flat, last-indexed-wins map allowed.
     fn add_module_const_vars_from_modules(
         modules: &CUDATileModules,
+        module: &str,
         generic_vars: &mut GenericVars,
     ) {
-        for (name, item) in modules.consts() {
+        for (name, item) in modules.consts_visible_from(module).iter() {
             if generic_vars.var_type(name).is_some() {
                 continue;
             }
@@ -659,10 +694,28 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
     }
 
+    /// The module whose source is being compiled right now: the kernel's
+    /// module, or the callee's module inside an inline expansion.
+    pub(crate) fn current_module(&self) -> String {
+        self.module_name_stack
+            .borrow()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| self.module_name.clone())
+    }
+
+    /// Enters `module`'s scope for the duration of the returned guard (an
+    /// inline expansion of one of its functions or methods), so that its
+    /// `const`s and the consts named in its types resolve in its own scope.
+    pub(crate) fn push_module_scope(&self, module: &str) -> ModuleScopeGuard<'_> {
+        self.module_name_stack.borrow_mut().push(module.to_string());
+        ModuleScopeGuard(&self.module_name_stack)
+    }
+
     pub(crate) fn span_base(&self) -> SpanBase {
-        let current_module = &self.module_name_stack[0];
+        let stack = self.module_name_stack.borrow();
         self.modules
-            .get_span_base(current_module)
+            .get_span_base(&stack[0])
             .cloned()
             .unwrap_or_default()
     }
@@ -1045,6 +1098,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         ctx.default_terminator = Some(BlockTerminator::Return);
+        ctx.fn_body = true;
 
         let mut typed_fn_item = fn_item.clone();
         crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);

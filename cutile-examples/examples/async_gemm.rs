@@ -29,8 +29,8 @@ mod my_module {
         x: &Tensor<E2, { [-1, K] }>,
         y: &Tensor<E2, { [K, -1] }>,
     ) {
-        let part_x = x.partition(const_shape![BM, BK]);
-        let part_y = y.partition(const_shape![BK, BN]);
+        let part_x = x.partition(shape![BM, BK]);
+        let part_y = y.partition(shape![BK, BN]);
         let pid = get_tile_block_id();
         let mut tile_z = z.load();
         for i in 0i32..(K / BK) {

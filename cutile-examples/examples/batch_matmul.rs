@@ -25,21 +25,21 @@ mod my_module {
         let m_idx = pid.1;
         let n_idx = pid.2;
 
-        let a_part: Partition<E, { [1, BM, BK] }> = a.partition(const_shape![1, BM, BK]);
-        let b_part: Partition<E, { [1, BK, BN] }> = b.partition(const_shape![1, BK, BN]);
+        let a_part: Partition<E, { [1, BM, BK] }> = a.partition(shape![1, BM, BK]);
+        let b_part: Partition<E, { [1, BK, BN] }> = b.partition(shape![1, BK, BN]);
 
         let acc_val: E = convert_scalar(0i32);
-        let mut acc: Tile<E, { [BM, BN] }> = broadcast_scalar(acc_val, const_shape![BM, BN]);
+        let mut acc: Tile<E, { [BM, BN] }> = broadcast_scalar(acc_val, shape![BM, BN]);
         for k_idx in 0i32..(K / BK) {
             let a_tile: Tile<E, { [BM, BK] }> = a_part
                 .load([batch_idx, m_idx, k_idx])
-                .reshape(const_shape![BM, BK]);
+                .reshape(shape![BM, BK]);
             let b_tile: Tile<E, { [BK, BN] }> = b_part
                 .load([batch_idx, k_idx, n_idx])
-                .reshape(const_shape![BK, BN]);
+                .reshape(shape![BK, BN]);
             acc = mma(a_tile, b_tile, acc);
         }
-        c.store(acc.reshape(const_shape![1, BM, BN]));
+        c.store(acc.reshape(shape![1, BM, BN]));
     }
 }
 

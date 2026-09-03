@@ -21,15 +21,15 @@ mod my_module {
         b: &Tensor<f32, { [-1] }>,
     ) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
-        let tile_b = b.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
+        let tile_b = b.load_tile(shape![B], [pid]);
         out.store(tile_a + tile_b);
     }
 
     #[cutile::entry()]
     fn scale<const B: i32>(out: &mut Tensor<f32, { [B] }>, a: &Tensor<f32, { [-1] }>, scalar: f32) {
         let pid = get_tile_block_id().0;
-        let tile_a = a.load_tile(const_shape![B], [pid]);
+        let tile_a = a.load_tile(shape![B], [pid]);
         let s: Tile<f32, { [B] }> = scalar.broadcast(out.shape());
         out.store(tile_a * s);
     }

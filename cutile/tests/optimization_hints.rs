@@ -21,15 +21,17 @@ mod opt_hints_module {
         let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
-        let (loaded, _tok): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            None,
-            Latency::<4>,
-        );
+        let (loaded, _tok): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                None,
+                Latency::<4>,
+            )
+        };
         output.store(loaded);
     }
 
@@ -39,15 +41,17 @@ mod opt_hints_module {
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
         let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
         let vals: Tile<f32, S> = constant(1.0f32, output.shape());
-        let _tok: Token = store_ptr_tko(
-            ptrs,
-            vals,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            Latency::<2>,
-        );
+        let _tok: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                vals,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                Latency::<2>,
+            )
+        };
         output.store(vals);
     }
 
@@ -63,28 +67,32 @@ mod opt_hints_module {
         let mask_opt: Option<Tile<bool, S>> = None;
         let padding_opt: Option<f32> = None;
         let token_none: Option<Token> = None;
-        let (loaded, _tok): (Tile<f32, S>, Token) = load_ptr_tko(
-            ptrs,
-            ordering::Relaxed,
-            scope_opt,
-            mask_opt,
-            padding_opt,
-            token_none,
-            Latency::<0>,
-        );
+        let (loaded, _tok): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                scope_opt,
+                mask_opt,
+                padding_opt,
+                token_none,
+                Latency::<0>,
+            )
+        };
 
         let token: Token = new_token_unordered();
         let token_some: Option<Token> = Some(token);
         let scope_none: Option<scope::TileBlock> = None;
-        let _store_tok: Token = store_ptr_tko(
-            ptrs,
-            loaded,
-            ordering::Weak,
-            scope_none,
-            None,
-            token_some,
-            Latency::<0>,
-        );
+        let _store_tok: Token = unsafe {
+            store_ptr_tko(
+                ptrs,
+                loaded,
+                ordering::Weak,
+                scope_none,
+                None,
+                token_some,
+                Latency::<0>,
+            )
+        };
 
         output.store(loaded);
     }
@@ -171,7 +179,7 @@ mod opt_hints_module {
         z: &mut Tensor<f32, S>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let part = x.partition(const_shape!(S));
+        let part = x.partition(shape!(S));
         let tile = part.load_pipelined::<6>([0]);
         z.store(tile);
     }
@@ -182,7 +190,7 @@ mod opt_hints_module {
         z: &mut Tensor<f32, S>,
         x: &Tensor<f32, { [-1] }>,
     ) {
-        let part = x.partition(const_shape!(S));
+        let part = x.partition(shape!(S));
         let tile = part.load_pipelined::<L>([0]);
         z.store(tile);
     }
@@ -195,8 +203,8 @@ mod opt_hints_module {
         x: &Tensor<f32, { [-1] }>,
         y: &Tensor<f32, { [-1] }>,
     ) {
-        let part_x = x.partition(const_shape!(S));
-        let part_y = y.partition(const_shape!(S));
+        let part_x = x.partition(shape!(S));
+        let part_y = y.partition(shape!(S));
         let tile_x = part_x.load_pipelined::<3>([0]);
         let tile_y = part_y.load_pipelined::<9>([0]);
         z.store(tile_x + tile_y);
@@ -211,7 +219,7 @@ mod opt_hints_module {
     ) {
         let m = Dim::new(x.shape()[0] / BM);
         let n = Dim::new(x.shape()[1] / BN);
-        let part = x.partition(const_shape![BM, BN]).with_bounds((m, n));
+        let part = x.partition(shape![BM, BN]).with_bounds((m, n));
         for i in m {
             for j in n {
                 let tile = part.load_pipelined::<7>(coord((i, j)));
@@ -228,10 +236,10 @@ mod opt_hints_module {
     #[cutile::entry]
     fn two_stmt_with_bounds<const N: i32, const B: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let cols = Dim::new(N / B);
-        let out_part = out.partition_mut(const_shape![1, B]);
+        let out_part = out.partition_mut(shape![1, B]);
         let mut out_part = out_part.with_bounds((Dim::new(1), cols));
         for j in cols {
-            let t: Tile<f32, { [1, B] }> = constant(0.0, const_shape![1, B]);
+            let t: Tile<f32, { [1, B] }> = constant(0.0, shape![1, B]);
             out_part.store(t, coord((0i32, j)));
         }
     }
@@ -254,8 +262,8 @@ mod opt_hints_module {
         let m = Dim::new(x.shape()[0] / BM);
         let k = Dim::new(x.shape()[1] / BK);
         let n = Dim::new(y.shape()[1] / BM);
-        let xp = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-        let yp = y.partition(const_shape![BK, BM]).with_bounds((k, n));
+        let xp = x.partition(shape![BM, BK]).with_bounds((m, k));
+        let yp = y.partition(shape![BK, BM]).with_bounds((k, n));
         for i in m {
             for j in k {
                 let tx = xp.load(coord((i, j)));
@@ -284,8 +292,8 @@ mod opt_hints_module {
         let m = Dim::new(x.shape()[0] / BM);
         let k = Dim::new(x.shape()[1] / BK);
         let n = Dim::new(y.shape()[1] / BM);
-        let xp = x.partition(const_shape![BM, BK]).with_bounds((m, k));
-        let yp = y.partition(const_shape![BK, BM]).with_bounds((k, n));
+        let xp = x.partition(shape![BM, BK]).with_bounds((m, k));
+        let yp = y.partition(shape![BK, BM]).with_bounds((k, n));
         for i in m {
             for j in k {
                 let tx = xp.load(coord((i, j)));
@@ -317,7 +325,7 @@ mod opt_hints_module {
     ) {
         let m = Dim::new(x.shape()[0] / BM);
         let n = Dim::new(x.shape()[1] / BN);
-        let part = x.partition(const_shape![BM, BN]).with_bounds((m, n));
+        let part = x.partition(shape![BM, BN]).with_bounds((m, n));
         for i in m {
             for j in n {
                 let tile = part.load(coord((i, j)));
@@ -336,9 +344,7 @@ mod opt_hints_module {
     ) {
         let bogus_rows = Dim::new(999);
         let n = Dim::new(x.shape()[1] / BN);
-        let part = x
-            .partition(const_shape![BM, BN])
-            .with_bounds((bogus_rows, n));
+        let part = x.partition(shape![BM, BN]).with_bounds((bogus_rows, n));
         for i in bogus_rows {
             for j in n {
                 let tile = part.load(coord((i, j)));
@@ -358,7 +364,7 @@ mod opt_hints_module {
     ) {
         let cols = Dim::new(N / BLOCK_SIZE);
         let bogus_rows = Dim::new(999);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut out_part = out
             .partition_mut(tile_shape)
             .with_bounds((bogus_rows, cols));
@@ -379,7 +385,7 @@ mod opt_hints_module {
     ) {
         let num_tiles = N / BLOCK_SIZE;
         let cols = Dim::new(num_tiles);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut out_part = out
             .partition_mut(tile_shape)
             .with_bounds((Dim::new(1), cols));
@@ -404,7 +410,7 @@ mod opt_hints_module {
     ) {
         let num_tiles = N / BLOCK_SIZE;
         let cols = Dim::new(num_tiles);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut out_part = out
             .partition_mut(tile_shape)
             .with_bounds((Dim::new(1), cols));
@@ -424,7 +430,7 @@ mod opt_hints_module {
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
         let num_tiles = N / BLOCK_SIZE;
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut out_part = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles {
             let tile: Tile<f32, { [1, BLOCK_SIZE] }> = constant(0.0, tile_shape);
@@ -442,7 +448,7 @@ mod opt_hints_module {
     fn blockid_row_store<const N: i32, const BLOCK_SIZE: i32>(out: &mut Tensor<f32, { [-1, N] }>) {
         let cols = Dim::new(N / BLOCK_SIZE);
         let rows = Dim::new(get_num_tile_blocks().0);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row = pid.0;
         let mut out_part = out.partition_mut(tile_shape).with_bounds((rows, cols));
@@ -462,7 +468,7 @@ mod opt_hints_module {
     ) {
         let cols = Dim::new(N / BLOCK_SIZE);
         let rows = Dim::new(get_num_tile_blocks().0);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let pid: (i32, i32, i32) = get_tile_block_id();
         let wrong = pid.1; // component 1 used as the axis-0 row
         let mut out_part = out.partition_mut(tile_shape).with_bounds((rows, cols));
@@ -478,7 +484,7 @@ mod opt_hints_module {
         out: &mut Tensor<f32, { [-1, N] }>,
     ) {
         let num_tiles = N / BLOCK_SIZE;
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row = pid.0;
         let mut out_part = out.partition_mut(tile_shape);
@@ -497,7 +503,7 @@ mod opt_hints_module {
         z: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let part = x.partition(const_shape![BM, BN]);
+        let part = x.partition(shape![BM, BN]);
         let pid = get_tile_block_id();
         let tile: Tile<f32, { [BM, BN] }> = part.load([pid.0 * 2i32, pid.1]);
         z.store(tile);
@@ -511,7 +517,7 @@ mod opt_hints_module {
         z: &mut Tensor<f32, { [BM, BN] }>,
         x: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let part = x.partition(const_shape![BM, BN]);
+        let part = x.partition(shape![BM, BN]);
         let pid = get_tile_block_id();
         let tile: Tile<f32, { [BM, BN] }> = part.load([pid.0 * 2i32, pid.1]);
         z.store(tile);
@@ -532,7 +538,7 @@ mod opt_hints_module {
         // rejected under the flag.
         let rows = Dim::new(get_num_tile_blocks().0);
         let cols = Dim::new(get_num_tile_blocks().1);
-        let tile_shape = const_shape![BM, BN];
+        let tile_shape = shape![BM, BN];
         let mut out_part = out.partition_mut(tile_shape).with_bounds((rows, cols));
         for i in rows {
             for j in cols {
@@ -553,7 +559,7 @@ mod opt_hints_module {
         n_tiles: i32,
     ) {
         for index in z.iter_indices_within([(start_tile, n_tiles), (0i32, -1i32)]) {
-            let tile: Tile<f32, { [BM, BN] }> = constant(0.0, const_shape![BM, BN]);
+            let tile: Tile<f32, { [BM, BN] }> = constant(0.0, shape![BM, BN]);
             z.store(tile, index);
         }
     }
@@ -565,7 +571,7 @@ mod opt_hints_module {
     fn deny_accepts_fully_discharged<const N: i32, const BLOCK: i32>(
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
-        let tile_shape = const_shape![1, BLOCK];
+        let tile_shape = shape![1, BLOCK];
         let mut p = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles(&p, 1) {
             let tile: Tile<f32, { [1, BLOCK] }> = constant(0.0, tile_shape);
@@ -584,9 +590,9 @@ mod opt_hints_module {
         x: &Tensor<f32, { [-1, -1] }>,
         y: &Tensor<f32, { [-1, -1] }>,
     ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let py = y.partition(const_shape![BK, BN]);
-        let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, const_shape![BM, BN]);
+        let px = x.partition(shape![BM, BK]);
+        let py = y.partition(shape![BK, BN]);
+        let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0, shape![BM, BN]);
         for k in 0i32..num_tiles(&px, 1) {
             let tx = px.load([0i32, k]);
             let ty = py.load([k, 0i32]);
@@ -604,7 +610,7 @@ mod opt_hints_module {
     ) {
         let rows = Dim::new(get_num_tile_blocks().0);
         let cols = Dim::new(get_num_tile_blocks().1);
-        let tile_shape = const_shape![BM, BN];
+        let tile_shape = shape![BM, BN];
         let mut out_part = out.partition_mut(tile_shape).with_bounds((rows, cols));
         for i in rows {
             for j in cols {

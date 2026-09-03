@@ -50,7 +50,7 @@ mod token_ordering_module {
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut v = out
             .partition_mut(tile_shape)
             .with_bounds((Dim::new(1), cols));
@@ -65,7 +65,7 @@ mod token_ordering_module {
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut v = out
             .partition_mut(tile_shape)
             .with_bounds((Dim::new(1), cols));
@@ -79,7 +79,7 @@ mod token_ordering_module {
     #[cutile::entry()]
     fn single_view_loop<const N: i32, const BLOCK_SIZE: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         let mut v = out
             .partition_mut(tile_shape)
             .with_bounds((Dim::new(1), cols));
@@ -95,7 +95,7 @@ mod token_ordering_module {
     #[cutile::entry()]
     fn two_epoch_aliasing<const N: i32, const BLOCK_SIZE: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         {
             let mut a = out
                 .partition_mut(tile_shape)
@@ -120,7 +120,7 @@ mod token_ordering_module {
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let tile_shape = const_shape![1, BLOCK_SIZE];
+        let tile_shape = shape![1, BLOCK_SIZE];
         {
             let mut a = out
                 .partition_mut(tile_shape)
@@ -152,7 +152,7 @@ mod token_ordering_module {
     ) {
         let rows = Dim::new(M / BM);
         let cols = Dim::new(N / BN);
-        let ts = const_shape![BM, BN];
+        let ts = shape![BM, BN];
         let mut v = out.partition_mut(ts).with_bounds((rows, cols));
         for i in rows {
             for j in cols {
@@ -171,7 +171,7 @@ mod token_ordering_module {
     ) {
         let rows = Dim::new(M / BM);
         let cols = Dim::new(N / BN);
-        let ts = const_shape![BM, BN];
+        let ts = shape![BM, BN];
         {
             let mut a = out.partition_mut(ts).with_bounds((rows, cols));
             for i in rows {
@@ -198,7 +198,7 @@ mod token_ordering_module {
     #[cutile::entry()]
     fn store_after_loop<const N: i32, const BLOCK_SIZE: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let ts = const_shape![1, BLOCK_SIZE];
+        let ts = shape![1, BLOCK_SIZE];
         let mut v = out.partition_mut(ts).with_bounds((Dim::new(1), cols));
         for j in cols {
             let tile: Tile<f32, { [1, BLOCK_SIZE] }> = constant(0.0, ts);
@@ -217,7 +217,7 @@ mod token_ordering_module {
         out: &mut Tensor<f32, { [1, N] }>,
     ) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let ts = const_shape![1, BLOCK_SIZE];
+        let ts = shape![1, BLOCK_SIZE];
         let mut v = out.partition_mut(ts).with_bounds((Dim::new(1), cols));
         for j in cols {
             let t0: Tile<f32, { [1, BLOCK_SIZE] }> = constant(0.0, ts);
@@ -233,7 +233,7 @@ mod token_ordering_module {
     #[cutile::entry()]
     fn const_index_loop<const N: i32, const BLOCK_SIZE: i32>(out: &mut Tensor<f32, { [1, N] }>) {
         let cols = Dim::new(N / BLOCK_SIZE);
-        let ts = const_shape![1, BLOCK_SIZE];
+        let ts = shape![1, BLOCK_SIZE];
         let mut v = out.partition_mut(ts).with_bounds((Dim::new(1), cols));
         for _j in cols {
             let tile: Tile<f32, { [1, BLOCK_SIZE] }> = constant(0.0, ts);

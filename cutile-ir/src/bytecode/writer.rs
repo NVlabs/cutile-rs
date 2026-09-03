@@ -859,7 +859,7 @@ pub(super) struct DebugInfoCollector {
 }
 
 impl DebugInfoCollector {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             attrs: super::debug_info::DebugAttrTable::default(),
             per_function: Vec::new(),

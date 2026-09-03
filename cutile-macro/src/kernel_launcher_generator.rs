@@ -11,19 +11,27 @@
 //!
 //! ## Overview
 //!
-//! For each function marked with `#[cutile::entry]`, this module generates:
+//! For each function marked with `#[cutile::entry]`, this module (with
+//! `_module.rs`, which emits the struct and its `TileKernel` / `IntoFuture`
+//! impls) generates:
 //!
-//! - an unsuffixed launcher for materialized arguments
-//! - auto-wraps Tensor→Arc for &Tensor params via IntoDeviceOp
-//! - an internal helper for `DeviceOp` arguments
+//! - a launcher struct `MyKernel<.., DI>` implementing `DeviceOp` (the launch),
+//!   `TileKernel` (`.generics()`, `.grid()`, `.compile_options()`), and
+//!   `GraphNode` when its argument op `DI` is one
+//! - the public launcher fn `my_kernel(..)`, whose every argument is an
+//!   `IntoDeviceOp`: a materialized value (`Tensor`, `Arc<Tensor>`, `&Tensor`,
+//!   `&TensorView`, a `Partition`, a scalar) or a lazy `DeviceOp` producing one
+//! - `my_kernel_apply(..)`, taking the already-materialized argument tuple
+//!   (used by `cutile::api`)
 //!
-//! Together these helpers:
+//! Executing the launcher:
 //!
-//! 1. **Compiles** the kernel (with caching)
-//! 2. **Infers** generic parameters from input types
-//! 3. **Handles** tensor partitioning and grid inference
-//! 4. **Launch** the kernel as a device operation
-//! 5. **Returns** results as device operations
+//! 1. **Executes** the argument op and **infers** generic parameters from the inputs
+//! 2. **Compiles** the specialization (with caching)
+//! 3. **Validates** element types, partition shapes, declared preconditions,
+//!    hoisted launch checks, and the inferred grid against the compiled kernel
+//! 4. **Launches** the kernel as a device operation
+//! 5. **Returns** the arguments, recovered to the types the caller passed
 //!
 //! ## Generated Launcher Structure
 //!
@@ -35,21 +43,28 @@
 //!     input: &Tensor<T, {[-1]}>,
 //! ) { }
 //!
-//! // Generates these launchers:
-//! pub fn my_kernel<T: Send + DType>(
-//!     output: Partition<Tensor<T>>,
-//!     input: Arc<Tensor<T>>,
-//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
-//!     // Wraps materialized values and delegates to my_kernel_op
-//! }
+//! // Generates this launcher (the struct takes the KernelOutput / KernelInput
+//! // intermediates and the argument op as type parameters):
+//! pub fn my_kernel<T: Send + DType, _A0, _Q0, _A1, _S1>(
+//!     output: _A0,
+//!     input: _A1,
+//! ) -> MyKernel<T, _S1, _Q0, KernelArgs<(
+//!         PrepareOutput<<_A0 as IntoDeviceOp<_Q0>>::Op, T>,
+//!         PrepareInput<<_A1 as IntoDeviceOp<_S1>>::Op, T>,
+//!     )>>
+//! where
+//!     _A0: IntoDeviceOp<_Q0>, _Q0: KernelOutput<T>,
+//!     _A1: IntoDeviceOp<_S1>, _S1: KernelInput<T>,
+//! { /* wraps each argument in its op and hands the tuple op to MyKernel::launch */ }
 //!
-//! pub fn my_kernel_op<T: Send + DType>(
-//!     output: impl DeviceOp<Output = Partition<Tensor<T>>>,
-//!     input: impl DeviceOp<Output = Arc<Tensor<T>>>,
-//! ) -> impl DeviceOp<Output=(Partition<Tensor<T>>, Arc<Tensor<T>>)> + TileKernel<...> {
-//!     // Launches from separate lazy arguments
-//! }
+//! // and the materialized-tuple form used internally by cutile::api:
+//! pub fn my_kernel_apply<T: Send + DType>(
+//!     input: (Partition<Tensor<T>>, Arc<Tensor<T>>),
+//! ) -> MyKernel<T, Arc<Tensor<T>>, Partition<Tensor<T>>, Value<(Partition<Tensor<T>>, Arc<Tensor<T>>)>>
 //! ```
+//!
+//! `MyKernel<..>` executes to `(<_Q0 as KernelOutput<T>>::Returned, <_S1 as
+//! KernelInput<T>>::Returned)` — the argument types the caller passed in.
 //!
 //! ## Generic Parameter Inference
 //!
@@ -484,6 +499,7 @@ pub fn generate_kernel_launcher(
     function_entry_name: &str,
     launcher_name: &str,
     _launcher_args_name: &str,
+    tile_rust_crate_root: &syn::Ident,
 ) -> Result<
     (
         RequiredGenerics,
@@ -574,7 +590,7 @@ pub fn generate_kernel_launcher(
                 // For integer scalar params, auto-compute DivHint at launch time.
                 if cutile_compiler::specialization::is_integer_scalar(&type_name) {
                     scalar_hint_exprs.push(format!(
-                        r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
+                        r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
                     ));
                 }
                 param_element_types.push(None);
@@ -587,12 +603,12 @@ pub fn generate_kernel_launcher(
                         .err("Pointers can only be used in unsafe kernel entry points.");
                 }
                 let ptr_str = ptr_type.to_token_stream().to_string();
-                let Some((is_mutable, type_name)) = get_ptr_type(&ptr_str) else {
+                let Some((_is_mutable, type_name)) = get_ptr_type(&ptr_str) else {
                     return ptr_type.err(&format!("Unexpected pointer type: {}", ptr_str));
                 };
-                if !is_mutable {
-                    return ptr_type.err("Pointers must be * mut.");
-                }
+                // `*const` and `*mut` params launch identically: the host
+                // passes a device address either way; constness is a
+                // device-side type discipline, not a launch property.
                 arg_types.push(
                     syn::parse2::<Type>(format!("DevicePointer<{}>", type_name).parse().unwrap())
                         .unwrap(),
@@ -611,8 +627,30 @@ pub fn generate_kernel_launcher(
                     "unsafe {{ kernel_launch.push_device_ptr({var_name}.cu_deviceptr()); }}"
                 )));
                 scalar_hint_exprs.push(format!(
-                    r#"("{var_name}".to_string(), cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
+                    r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
                 ));
+                // The specialization's pointee type must be the `DevicePointer<T>`
+                // element type: a user `.generics(..)` list can widen `T`, and the
+                // kernel would then index the buffer with the wider element size.
+                let pointee_ty = syn::parse_str::<Type>(&type_name).unwrap();
+                validator_statements.extend(
+                    syn::parse2::<ExprBlock>(quote! {{
+                        {
+                            let ValidParamType::Pointer(pointer_validator) = &validator.params[#i] else {
+                                panic!("Unexpected validator type {:#?}", &validator.params[#i]);
+                            };
+                            let given_dtype = <#pointee_ty as DType>::DTYPE.as_str();
+                            let compiled_dtype = #tile_rust_crate_root::cutile_compiler::types::get_ptr_type(&pointer_validator.element_type)
+                                .map(|(_, pointee)| pointee)
+                                .unwrap_or_else(|| pointer_validator.element_type.clone());
+                            kernel_launch_assert(compiled_dtype == given_dtype,
+                                format!("{} element type mismatch: the kernel was specialized for a `*{}` pointer but the launch passes a `DevicePointer<{}>` (check the `.generics(..)` list)", #var_name, compiled_dtype, given_dtype).as_str())?;
+                        }
+                    }})
+                    .unwrap()
+                    .block
+                    .stmts,
+                );
                 param_element_types.push(None);
             }
             _ => {
@@ -778,24 +816,6 @@ pub fn generate_kernel_launcher(
     let device_op_arg: GenericArgument = parse_quote! { DI };
     struct_args.args.push(device_op_arg.clone());
 
-    // Build stored_args_type using _S/_Q names for the unified launcher's context.
-    let launcher_stored_arg_types: Vec<Type> = arg_types
-        .iter()
-        .enumerate()
-        .map(|(i, ty)| {
-            if let Some(ki_idx) = ki_info.param_kernel_input_idx[i] {
-                let elem = &ki_info.element_type_names[ki_idx];
-                syn::parse_str::<Type>(&format!("<_S{i} as KernelInput<{elem}>>::Stored")).unwrap()
-            } else if let Some(ko_idx) = ki_info.param_kernel_output_idx[i] {
-                let elem = &ki_info.ko_element_type_names[ko_idx];
-                syn::parse_str::<Type>(&format!("<_Q{i} as KernelOutput<{elem}>>::Stored")).unwrap()
-            } else {
-                ty.clone()
-            }
-        })
-        .collect();
-    let launcher_stored_args_type: Type = parse_quote! { ( #(#launcher_stored_arg_types,)* ) };
-
     // launch_output_type is used for the unified launcher's return type.
     let mut launch_output_type = generic_args.clone();
     for (i, is_arc) in ki_param_idx.iter().enumerate() {
@@ -812,9 +832,14 @@ pub fn generate_kernel_launcher(
                 .push(syn::parse_str::<GenericArgument>(&format!("_Q{}", i)).unwrap());
         }
     }
-    let impl_device_op: GenericArgument =
-        parse_quote! { impl DeviceOp<Output=#launcher_stored_args_type> };
-    launch_output_type.args.push(impl_device_op);
+    // The argument op is spelled with nameable types (`KernelArgs` of
+    // `PrepareOutput` / `PrepareInput` / bare `IntoDeviceOp::Op`s) rather than
+    // an opaque `impl DeviceOp`, so `impl GraphNode for Launcher<.., DI> where
+    // DI: GraphNode` is visible at the call site: a launcher over
+    // pre-allocated inputs records into a CudaGraph scope, one over an
+    // allocating op such as `api::zeros(..).partition(..)` does not compile
+    // there. Built below alongside the direct launcher's where clauses.
+    let mut launcher_arg_op_types: Vec<String> = vec![];
 
     // ── execute() method body ───────────────────────────────────────────────
 
@@ -877,7 +902,7 @@ pub fn generate_kernel_launcher(
 
     // Emit scalar_hints (populated for integer scalar and raw pointer params).
     let scalar_hints_stmt = parse_stmt(format!(
-        "let scalar_hints: Vec<(String, cutile_compiler::specialization::DivHint)> = vec![{}];",
+        "let scalar_hints: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
     ));
     launcher_method.block.stmts.push(scalar_hints_stmt.clone());
@@ -1029,9 +1054,10 @@ pub fn generate_kernel_launcher(
             syn::parse_str::<GenericArgument>(&part_type.to_token_stream().to_string()).unwrap(),
         );
     }
-    let apply_impl_device_op: GenericArgument =
-        parse_quote! { impl DeviceOp<Output=#concrete_args_type> };
-    apply_launch_output_type.args.push(apply_impl_device_op);
+    // `_apply` wraps an already-materialized tuple, so its argument op is a
+    // plain `Value` — nameable and always graph-recordable.
+    let apply_value_op: GenericArgument = parse_quote! { Value<#concrete_args_type> };
+    apply_launch_output_type.args.push(apply_value_op);
 
     let apply_return_type = quote! { #launcher_ident #apply_launch_output_type };
     let apply_name = kernel_naming.apply_name();
@@ -1045,16 +1071,15 @@ pub fn generate_kernel_launcher(
 
     // ── Unified launcher (the primary public entry point) ───────────────────
 
-    let kernel_return_type = quote! { #launcher_ident #launch_output_type };
-
     let arg_aliases = arg_types
         .iter()
         .map(|i| i.to_token_stream().to_string())
         .collect::<Vec<_>>();
 
     let launcher_direct_ident = Ident::new(kernel_naming.public_name(), Span::call_site());
+    // The return type is filled in once every argument's op type is known.
     let mut launcher_direct = syn::parse2::<ItemFn>(quote! {
-        pub #unsafety fn #launcher_direct_ident #generic_params() -> #kernel_return_type {}
+        pub #unsafety fn #launcher_direct_ident #generic_params() -> () {}
     })
     .unwrap();
     launcher_direct.sig.generics.make_where_clause();
@@ -1086,6 +1111,10 @@ pub fn generate_kernel_launcher(
         if is_arc {
             // KernelInput bound: accepts Tensor<T>, Arc<Tensor<T>>, or &Tensor<T>.
             let intermediate_type = format!("_S{}", i);
+            let elem = &ki_info.element_type_names[ki_param_idx[i].unwrap()];
+            launcher_arg_op_types.push(format!(
+                "PrepareInput<<{type_param_name} as IntoDeviceOp<{intermediate_type}>>::Op, {elem}>"
+            ));
             launcher_direct.sig.generics.params.push(GenericParam::Type(
                 syn::parse2::<TypeParam>(type_param_name.parse().unwrap()).unwrap(),
             ));
@@ -1113,6 +1142,10 @@ pub fn generate_kernel_launcher(
         } else if ko_param_idx[i].is_some() {
             // KernelOutput bound: accepts Partition<Tensor<T>> or Partition<&mut Tensor<T>>.
             let intermediate_type = format!("_Q{}", i);
+            let elem = &ki_info.ko_element_type_names[ko_param_idx[i].unwrap()];
+            launcher_arg_op_types.push(format!(
+                "PrepareOutput<<{type_param_name} as IntoDeviceOp<{intermediate_type}>>::Op, {elem}>"
+            ));
             launcher_direct.sig.generics.params.push(GenericParam::Type(
                 syn::parse2::<TypeParam>(type_param_name.parse().unwrap()).unwrap(),
             ));
@@ -1139,6 +1172,9 @@ pub fn generate_kernel_launcher(
             );
         } else {
             // Scalars: direct IntoDeviceOp bound.
+            launcher_arg_op_types.push(format!(
+                "<{type_param_name} as IntoDeviceOp<{arg_type_str}>>::Op"
+            ));
             launcher_direct.sig.generics.params.push(GenericParam::Type(
                 syn::parse2::<TypeParam>(type_param_name.parse().unwrap()).unwrap(),
             ));
@@ -1153,6 +1189,18 @@ pub fn generate_kernel_launcher(
         }
         function_params.push(function_param);
     }
+    // The argument op: `KernelArgs<(op0, op1, ..)>`, nameable so the launcher
+    // type in the return position carries it (see `launcher_arg_op_types`).
+    let kernel_args_type: GenericArgument = syn::parse_str::<GenericArgument>(&format!(
+        "KernelArgs<{}>",
+        to_tuple_string(&launcher_arg_op_types)
+    ))
+    .unwrap();
+    launch_output_type.args.push(kernel_args_type);
+    launcher_direct.sig.output = syn::parse2::<syn::ReturnType>(quote! {
+        -> #launcher_ident #launch_output_type
+    })
+    .unwrap();
     // Convert each arg into a DeviceOp, applying KernelInput::prepare for
     // &Tensor params and KernelOutput::prepare for &mut Tensor params.
     let mut di_var_names: Vec<String> = vec![];
@@ -1160,11 +1208,11 @@ pub fn generate_kernel_launcher(
         let di_var = format!("_di{}", i);
         if is_arc_param[i] {
             launcher_direct.block.stmts.push(parse_stmt(format!(
-                "let {di_var} = {var}.into_op().map(KernelInput::prepare);"
+                "let {di_var} = PrepareInput::new({var}.into_op());"
             )));
         } else if ko_param_idx[i].is_some() {
             launcher_direct.block.stmts.push(parse_stmt(format!(
-                "let {di_var} = {var}.into_op().map(KernelOutput::prepare);"
+                "let {di_var} = PrepareOutput::new({var}.into_op());"
             )));
         } else {
             launcher_direct
@@ -1174,8 +1222,10 @@ pub fn generate_kernel_launcher(
         }
         di_var_names.push(di_var);
     }
-    let input_zips = zip_and_then_flatten(&di_var_names, "input", false);
-    launcher_direct.block.stmts.extend(input_zips.block.stmts);
+    launcher_direct.block.stmts.push(parse_stmt(format!(
+        "let input = KernelArgs({});",
+        to_tuple_string(&di_var_names)
+    )));
     launcher_direct.block.stmts.push(parse_stmt(format!(
         "return {}::launch(input);",
         launcher_ident
@@ -1193,7 +1243,11 @@ pub fn generate_kernel_launcher(
                 type Output = #returned_args_type_2;
                 #launcher_method
             }
-            impl #struct_generics GraphNode for #launcher_ident #struct_args {}
+            // A launch allocates nothing itself, so it is graph-recordable
+            // exactly when its argument op is: `Value`s over pre-allocated
+            // tensors qualify, an allocating input op does not (its allocation
+            // node would return a different address on replay).
+            impl #struct_generics GraphNode for #launcher_ident #struct_args where DI: GraphNode {}
             #launcher_apply
             #launcher_direct
         },
@@ -1715,6 +1769,12 @@ fn get_tensor_code(
                 let ValidParamType::Tensor(tensor_validator) = &validator.params[#var_idx] else {
                     panic!("Unexpected validator type {:#?}", &validator.params[#var_idx]);
                 };
+                // The compiled specialization's element type must be the tensor's
+                // dtype. A user `.generics(..)` list overrides the inferred type, and
+                // a wider-typed kernel reads and writes past a narrower buffer.
+                let given_dtype = KernelOutputStored::dtype_str(&#var_ident);
+                kernel_launch_assert(tensor_validator.element_type == given_dtype,
+                    format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype).as_str())?;
                 let valid_shape = &tensor_validator.shape;
                 let given_shape: Vec<i32> = KernelOutputStored::partition_shape_as_i32(&#var_ident);
                 kernel_launch_assert(valid_shape.len() == given_shape.len(),
@@ -1740,6 +1800,11 @@ fn get_tensor_code(
                 let ValidParamType::Tensor(tensor_validator) = &validator.params[#var_idx] else {
                     panic!("Unexpected validator type {:#?}", &validator.params[#var_idx]);
                 };
+                // See the output branch: the specialization's element type must be
+                // the tensor's dtype, or a wider-typed kernel reads past the buffer.
+                let given_dtype = KernelInputStored::dtype_str(&#var_ident);
+                kernel_launch_assert(tensor_validator.element_type == given_dtype,
+                    format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype).as_str())?;
                 let valid_shape = &tensor_validator.shape;
                 let given_shape = #var_ident.shape();
                 kernel_launch_assert(valid_shape.len() == given_shape.len(),

@@ -21,7 +21,7 @@ mod zero_kernel_module {
 
     #[cutile::entry()]
     fn zero_fill<T: ElementType, const BM: i32, const BN: i32>(out: &mut Tensor<T, { [BM, BN] }>) {
-        let z: Tile<T, { [BM, BN] }> = constant(T::ZERO, const_shape![BM, BN]);
+        let z: Tile<T, { [BM, BN] }> = constant(T::ZERO, shape![BM, BN]);
         out.store(z);
     }
 }
