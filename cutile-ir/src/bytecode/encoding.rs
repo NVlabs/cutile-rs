@@ -266,25 +266,32 @@ fn convert_to_f8(
 
     let max_exp = (1i32 << exp_bits) - 1;
     let man_mask = (1u8 << man_bits) - 1;
+    let max_finite_exp = if nan_only_all_ones {
+        max_exp
+    } else {
+        max_exp - 1
+    };
+    let max_finite_man = if nan_only_all_ones {
+        man_mask - 1
+    } else {
+        man_mask
+    };
+    let max_finite = (sign << 7) | ((max_finite_exp as u8) << man_bits) | max_finite_man;
 
     // Handle special values.
     if f64_exp == 0x7FF {
-        // Inf or NaN
-        if f64_man != 0 || (nan_only_all_ones && f64_man == 0) {
-            // NaN (or Inf mapped to NaN for formats without infinities)
-            if nan_only_all_ones {
-                return (sign << 7) | ((max_exp as u8) << man_bits) | man_mask;
-            } else {
-                // IEEE NaN: all-ones exponent, non-zero mantissa
-                return (sign << 7) | ((max_exp as u8) << man_bits) | 1;
-            }
+        if f64_man != 0 {
+            // NaN: use a non-zero mantissa (all ones for F8E4M3FN).
+            let nan_man = if nan_only_all_ones { man_mask } else { 1 };
+            return (sign << 7) | ((max_exp as u8) << man_bits) | nan_man;
         }
-        if !nan_only_all_ones {
-            // Inf in IEEE-style format
-            return (sign << 7) | ((max_exp as u8) << man_bits);
-        }
-        // Formats without inf: saturate to max finite
-        return (sign << 7) | ((max_exp as u8) << man_bits) | man_mask;
+        // Infinity saturates for formats without infinity and is preserved for
+        // IEEE-style formats.
+        return if nan_only_all_ones {
+            max_finite
+        } else {
+            (sign << 7) | ((max_exp as u8) << man_bits)
+        };
     }
 
     if value == 0.0 || value == -0.0 {
@@ -295,15 +302,22 @@ fn convert_to_f8(
     let unbiased = f64_exp - 1023;
     let target_exp = unbiased + bias;
 
-    if target_exp >= max_exp {
-        // Overflow: clamp to max finite (or inf for IEEE-style).
-        if nan_only_all_ones {
-            // Max finite: exp = max_exp, man = man_mask - 1 (all-ones is NaN)
-            return (sign << 7) | (((max_exp) as u8) << man_bits) | (man_mask - 1);
+    if target_exp > max_finite_exp {
+        return if nan_only_all_ones {
+            max_finite
         } else {
-            return (sign << 7) | ((max_exp as u8) << man_bits); // Inf
-        }
+            (sign << 7) | ((max_exp as u8) << man_bits)
+        };
     }
+
+    // Shift right and round the discarded bits to nearest, breaking ties by
+    // keeping an even least-significant retained bit.
+    let round_shift = |value: u64, shift: u32| {
+        let retained = value >> shift;
+        let discarded = value & ((1u64 << shift) - 1);
+        let halfway = 1u64 << (shift - 1);
+        retained + u64::from(discarded > halfway || (discarded == halfway && retained & 1 != 0))
+    };
 
     if target_exp <= 0 {
         // Subnormal or underflow to zero.
@@ -311,14 +325,36 @@ fn convert_to_f8(
         if shift > man_bits as i32 + 1 {
             return sign << 7; // Underflow to zero
         }
-        // Subnormal: implicit 1 + fractional bits, shifted right.
-        let subnormal_man = ((1u64 << 52) | f64_man) >> (52 - man_bits as i32 + shift);
+        // Subnormal: implicit 1 + fractional bits, shifted and rounded. A
+        // carry produces the smallest normal value.
+        let subnormal_man = round_shift(
+            (1u64 << 52) | f64_man,
+            (52 - man_bits as i32 + shift) as u32,
+        );
+        if subnormal_man == 1u64 << man_bits {
+            return (sign << 7) | (1u8 << man_bits);
+        }
         return (sign << 7) | (subnormal_man as u8 & man_mask);
     }
 
-    // Normal: truncate mantissa from 52 bits to man_bits.
-    let truncated_man = (f64_man >> (52 - man_bits)) as u8 & man_mask;
-    (sign << 7) | ((target_exp as u8) << man_bits) | truncated_man
+    let mut rounded_man = round_shift(f64_man, 52 - man_bits);
+    let mut rounded_exp = target_exp;
+    if rounded_man == 1u64 << man_bits {
+        rounded_man = 0;
+        rounded_exp += 1;
+    }
+
+    if rounded_exp > max_finite_exp
+        || (rounded_exp == max_finite_exp && rounded_man > max_finite_man as u64)
+    {
+        return if nan_only_all_ones {
+            max_finite
+        } else {
+            (sign << 7) | ((max_exp as u8) << man_bits)
+        };
+    }
+
+    (sign << 7) | ((rounded_exp as u8) << man_bits) | rounded_man as u8
 }
 
 #[cfg(test)]
@@ -373,6 +409,36 @@ mod tests {
             w.as_bytes(),
             &[0x01, ALIGNMENT_BYTE, ALIGNMENT_BYTE, ALIGNMENT_BYTE]
         );
+    }
+
+    #[test]
+    fn f8_conversion_rounds_to_nearest_ties_to_even() {
+        // E4M3FN normal values around 1.0. Ties choose the even mantissa.
+        assert_eq!(f64_to_f8e4m3fn(1.0625), 0x38);
+        assert_eq!(f64_to_f8e4m3fn(1.1875), 0x3A);
+        assert_eq!(
+            f64_to_f8e4m3fn(f64::from_bits(1.0625f64.to_bits() + 1)),
+            0x39
+        );
+
+        // Rounding a mantissa of all ones carries into the exponent.
+        assert_eq!(f64_to_f8e4m3fn(1.9375), 0x40);
+
+        // The midpoint between zero and the smallest subnormal rounds to zero;
+        // the next f64 value rounds up to the smallest subnormal.
+        let smallest_midpoint = 2.0f64.powi(-10);
+        assert_eq!(f64_to_f8e4m3fn(smallest_midpoint), 0x00);
+        assert_eq!(
+            f64_to_f8e4m3fn(f64::from_bits(smallest_midpoint.to_bits() + 1)),
+            0x01
+        );
+
+        // E4M3FN saturates at its largest finite value, while E5M2 carries
+        // into infinity at the upper rounding boundary.
+        assert_eq!(f64_to_f8e4m3fn(448.0), 0x7E);
+        assert_eq!(f64_to_f8e4m3fn(464.0), 0x7E);
+        assert_eq!(f64_to_f8e4m3fn(f64::INFINITY), 0x7E);
+        assert_eq!(f64_to_f8e5m2(61_440.0), 0x7C);
     }
 
     #[test]
