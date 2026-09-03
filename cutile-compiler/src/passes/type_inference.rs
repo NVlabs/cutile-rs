@@ -2483,7 +2483,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             if let Expr::Closure(closure) = arg {
                 if let Some(signature) = signature {
                     if let Some((param_types, return_type)) =
-                        self.instantiate_closure_signature(&signature, &generic_arg_inf)
+                        self.instantiate_closure_signature(signature, &generic_arg_inf)
                     {
                         self.infer_closure(closure, &param_types, return_type)?;
                     } else {
@@ -2830,7 +2830,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             }
         }
 
-        for ((trait_name, self_name), _impls) in self.compiler.modules.trait_impls() {
+        for (trait_name, self_name) in self.compiler.modules.trait_impls().keys() {
             if self_name == &qualifier_name {
                 if let Some(ty) =
                     self.trait_associated_const_syn_type(trait_name, &const_name, &self_ty)
@@ -2839,7 +2839,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 }
             }
         }
-        for ((trait_name, self_name), _impl_item) in self.compiler.modules.primitives() {
+        for (trait_name, self_name) in self.compiler.modules.primitives().keys() {
             if self_name == &qualifier_name {
                 if let Some(ty) =
                     self.trait_associated_const_syn_type(trait_name, &const_name, &self_ty)
@@ -3385,12 +3385,12 @@ fn substitute_self_type(ty: &Type, self_ty: &Type) -> Type {
         }
         Type::Reference(reference) => {
             let mut reference = reference.clone();
-            reference.elem = Box::new(substitute_self_type(&reference.elem, self_ty));
+            *reference.elem = substitute_self_type(&reference.elem, self_ty);
             Type::Reference(reference)
         }
         Type::Ptr(ptr) => {
             let mut ptr = ptr.clone();
-            ptr.elem = Box::new(substitute_self_type(&ptr.elem, self_ty));
+            *ptr.elem = substitute_self_type(&ptr.elem, self_ty);
             Type::Ptr(ptr)
         }
         Type::Tuple(tuple) => {
@@ -3404,22 +3404,22 @@ fn substitute_self_type(ty: &Type, self_ty: &Type) -> Type {
         }
         Type::Array(array) => {
             let mut array = array.clone();
-            array.elem = Box::new(substitute_self_type(&array.elem, self_ty));
+            *array.elem = substitute_self_type(&array.elem, self_ty);
             Type::Array(array)
         }
         Type::Slice(slice) => {
             let mut slice = slice.clone();
-            slice.elem = Box::new(substitute_self_type(&slice.elem, self_ty));
+            *slice.elem = substitute_self_type(&slice.elem, self_ty);
             Type::Slice(slice)
         }
         Type::Paren(paren) => {
             let mut paren = paren.clone();
-            paren.elem = Box::new(substitute_self_type(&paren.elem, self_ty));
+            *paren.elem = substitute_self_type(&paren.elem, self_ty);
             Type::Paren(paren)
         }
         Type::Group(group) => {
             let mut group = group.clone();
-            group.elem = Box::new(substitute_self_type(&group.elem, self_ty));
+            *group.elem = substitute_self_type(&group.elem, self_ty);
             Type::Group(group)
         }
         _ => ty.clone(),
@@ -4002,12 +4002,12 @@ fn substitute_resolved_generics(ty: &Type, inference: &GenericArgInference) -> O
         }
         Type::Reference(reference) => {
             let mut result = reference.clone();
-            result.elem = Box::new(substitute_resolved_generics(&reference.elem, inference)?);
+            *result.elem = substitute_resolved_generics(&reference.elem, inference)?;
             Some(Type::Reference(result))
         }
         Type::Ptr(ptr) => {
             let mut result = ptr.clone();
-            result.elem = Box::new(substitute_resolved_generics(&ptr.elem, inference)?);
+            *result.elem = substitute_resolved_generics(&ptr.elem, inference)?;
             Some(Type::Ptr(result))
         }
         Type::Tuple(tuple) => {
@@ -4019,13 +4019,13 @@ fn substitute_resolved_generics(ty: &Type, inference: &GenericArgInference) -> O
         }
         Type::Array(array) => {
             let mut result = array.clone();
-            result.elem = Box::new(substitute_resolved_generics(&array.elem, inference)?);
+            *result.elem = substitute_resolved_generics(&array.elem, inference)?;
             result.len = substitute_resolved_const_expr(&array.len, inference)?;
             Some(Type::Array(result))
         }
         Type::Slice(slice) => {
             let mut result = slice.clone();
-            result.elem = Box::new(substitute_resolved_generics(&slice.elem, inference)?);
+            *result.elem = substitute_resolved_generics(&slice.elem, inference)?;
             Some(Type::Slice(result))
         }
         Type::ImplTrait(_) => None,
@@ -4084,18 +4084,18 @@ fn substitute_resolved_const_expr(expr: &Expr, inference: &GenericArgInference) 
         }
         Expr::Repeat(repeat) => {
             let mut result = repeat.clone();
-            result.expr = Box::new(substitute_resolved_const_expr(&repeat.expr, inference)?);
-            result.len = Box::new(substitute_resolved_const_expr(&repeat.len, inference)?);
+            *result.expr = substitute_resolved_const_expr(&repeat.expr, inference)?;
+            *result.len = substitute_resolved_const_expr(&repeat.len, inference)?;
             Some(Expr::Repeat(result))
         }
         Expr::Unary(unary) => {
             let mut result = unary.clone();
-            result.expr = Box::new(substitute_resolved_const_expr(&unary.expr, inference)?);
+            *result.expr = substitute_resolved_const_expr(&unary.expr, inference)?;
             Some(Expr::Unary(result))
         }
         Expr::Paren(paren) => {
             let mut result = paren.clone();
-            result.expr = Box::new(substitute_resolved_const_expr(&paren.expr, inference)?);
+            *result.expr = substitute_resolved_const_expr(&paren.expr, inference)?;
             Some(Expr::Paren(result))
         }
         _ => Some(expr.clone()),

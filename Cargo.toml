@@ -99,3 +99,20 @@ cutile-kernels = { path = "cutile-kernels", version = "0.3.1" }
 cutile-examples = { path = "cutile-examples", version = "0.3.1" }
 cutile-ir = { path = "cutile-ir", version = "0.3.1" }
 cutile-benchmarks = { path = "cutile-benchmarks", version = "0.3.1" }
+
+# Lint policy shared by every workspace crate (`[lints] workspace = true`).
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+missing_safety_doc = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+# Rewriting indexed loops over several parallel arrays and boxing large enum variants
+# is invasive in the compiler; both stay allowed for now.
+needless_range_loop = "allow"
+large_enum_variant = "allow"
+# `Tensor::slice` and friends take one `Range` per axis; a single-element range array is the
+# rank-1 case, not a mistaken `vec![0..n]`.
+single_range_in_vec_init = "allow"

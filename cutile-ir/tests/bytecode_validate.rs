@@ -518,75 +518,79 @@ fn load_store_with_tokens() {
         shape: vec![128],
     });
 
-    let module = build_kernel("load_store", &[tile_ptr_f32.clone()], |m, blk, args| {
-        // make_token
-        let (tok_op, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
-            .result(token_ty())
-            .build(m);
-        append_op(m, blk, tok_op);
+    let module = build_kernel(
+        "load_store",
+        std::slice::from_ref(&tile_ptr_f32),
+        |m, blk, args| {
+            // make_token
+            let (tok_op, tok_res) = OpBuilder::new(Opcode::MakeToken, Location::Unknown)
+                .result(token_ty())
+                .build(m);
+            append_op(m, blk, tok_op);
 
-        // make_tensor_view
-        let (mtv, mtv_res) = OpBuilder::new(Opcode::MakeTensorView, Location::Unknown)
-            .operand(args[0])
-            .result(tv_ty.clone())
-            .attr(
-                "operandSegmentSizes",
-                Attribute::Array(vec![
-                    Attribute::Integer(1, i32_ty()),
-                    Attribute::Integer(0, i32_ty()),
-                    Attribute::Integer(0, i32_ty()),
-                ]),
-            )
-            .build(m);
-        append_op(m, blk, mtv);
+            // make_tensor_view
+            let (mtv, mtv_res) = OpBuilder::new(Opcode::MakeTensorView, Location::Unknown)
+                .operand(args[0])
+                .result(tv_ty.clone())
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![
+                        Attribute::Integer(1, i32_ty()),
+                        Attribute::Integer(0, i32_ty()),
+                        Attribute::Integer(0, i32_ty()),
+                    ]),
+                )
+                .build(m);
+            append_op(m, blk, mtv);
 
-        // make_partition_view
-        let (mpv, mpv_res) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
-            .operand(mtv_res[0])
-            .result(pv_ty.clone())
-            .build(m);
-        append_op(m, blk, mpv);
+            // make_partition_view
+            let (mpv, mpv_res) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
+                .operand(mtv_res[0])
+                .result(pv_ty.clone())
+                .build(m);
+            append_op(m, blk, mpv);
 
-        // load_view_tko
-        let idx = const_i32(m, blk, 0);
-        let (load, load_res) = OpBuilder::new(Opcode::LoadViewTko, Location::Unknown)
-            .operand(mpv_res[0]) // view
-            .operand(idx) // index
-            .operand(tok_res[0]) // token
-            .attr("memory_ordering_semantics", Attribute::Integer(0, i32_ty()))
-            .attr(
-                "operandSegmentSizes",
-                Attribute::Array(vec![
-                    Attribute::Integer(1, i32_ty()),
-                    Attribute::Integer(1, i32_ty()),
-                    Attribute::Integer(1, i32_ty()),
-                ]),
-            )
-            .result(tile_128_f32.clone())
-            .result(token_ty())
-            .build(m);
-        append_op(m, blk, load);
+            // load_view_tko
+            let idx = const_i32(m, blk, 0);
+            let (load, load_res) = OpBuilder::new(Opcode::LoadViewTko, Location::Unknown)
+                .operand(mpv_res[0]) // view
+                .operand(idx) // index
+                .operand(tok_res[0]) // token
+                .attr("memory_ordering_semantics", Attribute::Integer(0, i32_ty()))
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![
+                        Attribute::Integer(1, i32_ty()),
+                        Attribute::Integer(1, i32_ty()),
+                        Attribute::Integer(1, i32_ty()),
+                    ]),
+                )
+                .result(tile_128_f32.clone())
+                .result(token_ty())
+                .build(m);
+            append_op(m, blk, load);
 
-        // store_view_tko
-        let (store, _) = OpBuilder::new(Opcode::StoreViewTko, Location::Unknown)
-            .operand(load_res[0]) // tile
-            .operand(mpv_res[0]) // view
-            .operand(idx) // index
-            .operand(load_res[1]) // token
-            .attr("memory_ordering_semantics", Attribute::Integer(0, i32_ty()))
-            .attr(
-                "operandSegmentSizes",
-                Attribute::Array(vec![
-                    Attribute::Integer(1, i32_ty()),
-                    Attribute::Integer(1, i32_ty()),
-                    Attribute::Integer(1, i32_ty()),
-                    Attribute::Integer(1, i32_ty()),
-                ]),
-            )
-            .result(token_ty())
-            .build(m);
-        append_op(m, blk, store);
-    });
+            // store_view_tko
+            let (store, _) = OpBuilder::new(Opcode::StoreViewTko, Location::Unknown)
+                .operand(load_res[0]) // tile
+                .operand(mpv_res[0]) // view
+                .operand(idx) // index
+                .operand(load_res[1]) // token
+                .attr("memory_ordering_semantics", Attribute::Integer(0, i32_ty()))
+                .attr(
+                    "operandSegmentSizes",
+                    Attribute::Array(vec![
+                        Attribute::Integer(1, i32_ty()),
+                        Attribute::Integer(1, i32_ty()),
+                        Attribute::Integer(1, i32_ty()),
+                        Attribute::Integer(1, i32_ty()),
+                    ]),
+                )
+                .result(token_ty())
+                .build(m);
+            append_op(m, blk, store);
+        },
+    );
     validate_module(&module);
 }
 
@@ -702,19 +706,17 @@ fn expect_tileiras_rejects(bc: &[u8], name: &str, needle: &str) {
         .arg(&tmp)
         .output();
     let _ = std::fs::remove_file(&tmp);
-    match out {
-        Ok(out) => {
-            assert!(
-                !out.status.success(),
-                "{name}: tileiras unexpectedly accepted invalid debug info"
-            );
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                stderr.contains(needle),
-                "{name}: rejection reason changed:\n{stderr}"
-            );
-        }
-        Err(_) => {} // tileiras not installed
+    // `Err` means tileiras is not installed; the check is skipped.
+    if let Ok(out) = out {
+        assert!(
+            !out.status.success(),
+            "{name}: tileiras unexpectedly accepted invalid debug info"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(needle),
+            "{name}: rejection reason changed:\n{stderr}"
+        );
     }
 }
 

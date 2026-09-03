@@ -372,6 +372,10 @@ fn module_inner(
                 #![allow(nonstandard_style)]
                 #![allow(dead_code)]
                 #![allow(unused_variables)]
+                // Kernel source is a Rust subset with its own idioms (`a = a + b`,
+                // explicit closures for reduce regions, trailing `return`); clippy's
+                // host-Rust style lints do not apply to it.
+                #![allow(clippy::all)]
                 // Module asts and generated type data.
                 use #ast_path;
                 #ast_module_tokens
@@ -384,6 +388,8 @@ fn module_inner(
         quote! {
             pub mod #name {
                 #![allow(dead_code)]
+                // Kernel source is a Rust subset with its own idioms; see above.
+                #![allow(clippy::all)]
                 // Entry point dependencies.
                 // Use of this macro requires cutile,
                 // so all dependencies should be imported relative to cutile.

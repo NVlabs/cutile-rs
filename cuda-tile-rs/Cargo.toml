@@ -17,3 +17,6 @@ exclude = [
 [build-dependencies]
 cmake = "0.1"
 bindgen = "0.71"
+
+[lints]
+workspace = true

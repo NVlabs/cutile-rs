@@ -131,7 +131,7 @@ fn test_empty_kernel_tileiras() {
     );
 
     // Run through tileiras.
-    let cubin = compile_tile_ir_module(&module, &gpu_name).unwrap();
+    let cubin = compile_tile_ir_module(&module, gpu_name).unwrap();
     println!("cubin: {} bytes", cubin.len());
     assert!(!cubin.is_empty(), "cubin image should be non-empty");
 }
@@ -164,7 +164,7 @@ fn assert_tileiras_accepts(module: &Module) {
         cutile_ir::decode_bytecode(&bytecode).unwrap()
     );
 
-    let cubin = compile_tile_ir_module(module, &gpu_name).unwrap();
+    let cubin = compile_tile_ir_module(module, gpu_name).unwrap();
     assert!(!cubin.is_empty(), "cubin image should be non-empty");
     println!("tileiras accepted ✓");
 }
@@ -535,7 +535,8 @@ fn build_print_kernel(with_token: bool) -> Module {
         shape: vec![],
         element_type: TileElementType::Scalar(ScalarType::F32),
     });
-    let (region_id, block_id, args) = build_single_block_region(&mut module, &[tile_f32.clone()]);
+    let (region_id, block_id, args) =
+        build_single_block_region(&mut module, std::slice::from_ref(&tile_f32));
     let mut operands = vec![args[0]];
     let mut token_count = 0;
     if with_token {

@@ -22,3 +22,6 @@ trybuild = "1"
 [features]
 # Nightly-only: DeviceCopy for the unstable f16 primitive.
 f16 = []
+
+[lints]
+workspace = true
