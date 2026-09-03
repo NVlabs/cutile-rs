@@ -1,0 +1,35 @@
+name: aws-gpu guardrail tests
+
+# Runs the secret-guard.sh test suite on every change to the hook itself,
+# the test harness, or this workflow. Path-filtered to this folder so the
+# rest of the repo's CI is unaffected; conversely, edits elsewhere don't
+# spuriously re-run these tests.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/aws-gpu/.guardrails/secret-guard.sh'
+      - 'infra/aws-gpu/.guardrails/secret-guard.test.sh'
+      - '.github/workflows/aws-gpu-guardrails.yml'
+  pull_request:
+    paths:
+      - 'infra/aws-gpu/.guardrails/secret-guard.sh'
+      - 'infra/aws-gpu/.guardrails/secret-guard.test.sh'
+      - '.github/workflows/aws-gpu-guardrails.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: secret-guard test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify dependencies
+        run: |
+          jq --version
+          bash --version | head -1
+
+      - name: Run secret-guard tests
+        run: bash infra/aws-gpu/.guardrails/secret-guard.test.sh
