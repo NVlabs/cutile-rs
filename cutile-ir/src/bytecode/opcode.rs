@@ -12,7 +12,7 @@
 ///
 /// Public operations occupy the range `0x000 ..= 0xFFF`.
 /// Each variant's discriminant is the on-wire opcode value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, num_derive::FromPrimitive)]
 #[repr(u16)]
 pub enum Opcode {
     AbsF = 0x00,
@@ -135,7 +135,7 @@ impl Opcode {
             // Ops that write varint numResults (from Bytecode.inc audit):
             Break | Continue | Extract | For | GetIndexSpaceShape | GetTensorShape | If
             | JoinTokens | LoadViewTko | Loop | MakeTensorView | Print | Reduce | Return | Scan
-            | StoreViewTko | Yield => None,
+            | StoreViewTko | Yield | AtomicRedViewTko => None,
 
             // Fixed-count ops (from Ops.td):
             // 0 results
@@ -215,12 +215,116 @@ impl Opcode {
             // 2 results
             AtomicCAS | AtomicRMW | LoadPtrTko => Some(2),
             // 1 result (token)
-            AtomicRedViewTko | StorePtrTko => Some(1),
+            StorePtrTko => Some(1),
             // 3 results
             GetTileBlockId | GetNumTileBlocks => Some(3),
             Alloca => Some(1),
             // Entry has 0 results but is function-like (handled in func section, not here)
             Entry => Some(0),
+        }
+    }
+
+    /// Fixed operand count for ops that serialize their operands *without* a
+    /// size prefix (`write_operands(.., false)` in the writer). Returns `None`
+    /// for ops whose operands are variadic or grouped (their counts are read
+    /// from the stream): the terminators, view loads/stores, atomics, the
+    /// region ops, `Extract`, `JoinTokens`, `MakeTensorView`, etc.
+    ///
+    /// Counterpart to [`Opcode::fixed_result_count`]; together they are the
+    /// schema the bytecode *reader* needs (the writer gets arity from the IR).
+    /// Arities are from `Ops.td`.
+    pub fn fixed_operand_count(&self) -> Option<usize> {
+        use Opcode::*;
+        match self {
+            // 0 operands
+            Constant | GetGlobal | GetNumTileBlocks | GetTileBlockId | Iota | MakeToken
+            | Global | Module | Entry | Alloca => Some(0),
+            // 1 operand (unary / single-input)
+            AbsF
+            | AbsI
+            | Assert
+            | Assume
+            | Bitcast
+            | Broadcast
+            | Ceil
+            | Cos
+            | CosH
+            | Exp
+            | Exp2
+            | ExtI
+            | Floor
+            | FToF
+            | FToI
+            | GetIndexSpaceShape
+            | GetTensorShape
+            | IntToPtr
+            | IToF
+            | Log
+            | Log2
+            | MakePartitionView
+            | NegF
+            | NegI
+            | PtrToInt
+            | PtrToPtr
+            | Reshape
+            | Rsqrt
+            | Sin
+            | SinH
+            | Sqrt
+            | Tan
+            | TanH
+            | TruncI
+            | Unpack
+            | Pack
+            | MakeStridedView
+            | MakeGatherScatterView => Some(1),
+            // 2 operands (binary)
+            AddF | AddI | AndI | Atan2 | Cat | CmpF | CmpI | DivF | DivI | MaxF | MaxI | MinF
+            | MinI | MulF | MulhiI | MulI | Offset | OrI | Permute | Pow | RemF | RemI | ShLI
+            | ShRI | SubF | SubI | XOrI => Some(2),
+            // 3 operands (ternary)
+            Fma | MmaF | MmaI | Select => Some(3),
+            // 5 operands (scaled mma: a, b, scale_a, scale_b, acc)
+            MmaFScaled => Some(5),
+            // Variadic / grouped: count(s) read from the stream.
+            AtomicCAS | AtomicRMW | AtomicRedViewTko | Break | Continue | Extract | For | If
+            | JoinTokens | LoadPtrTko | LoadViewTko | Loop | MakeTensorView | Print | Reduce
+            | Return | Scan | StorePtrTko | StoreViewTko | Yield => None,
+        }
+    }
+
+    /// Reverse of [`Opcode::as_u16`]: map an on-wire opcode value to its variant.
+    ///
+    /// Derived from the `#[repr(u16)]` discriminants via
+    /// [`num_derive::FromPrimitive`]; unknown values (including the gaps between
+    /// opcode ranges) return `None`.
+    pub fn from_u16(value: u16) -> Option<Opcode> {
+        <Opcode as num_traits::FromPrimitive>::from_u16(value)
+    }
+}
+
+#[cfg(test)]
+mod opcode_schema_tests {
+    use super::Opcode;
+
+    /// `from_u16` is the exact inverse of `as_u16` for every valid wire value,
+    /// and the discriminant gaps decode to `None`.
+    #[test]
+    fn from_u16_roundtrips_and_rejects_gaps() {
+        let mut decoded = 0;
+        for v in 0u16..=0x80 {
+            if let Some(op) = Opcode::from_u16(v) {
+                assert_eq!(
+                    op.as_u16(),
+                    v,
+                    "from_u16({v:#x}) -> {op:?} but as_u16 != {v:#x}"
+                );
+                decoded += 1;
+            }
+        }
+        assert_eq!(decoded, 100, "expected 100 opcodes to decode");
+        for gap in [0x19u16, 0x24, 0x34, 0x39, 0x76, 0x80] {
+            assert!(Opcode::from_u16(gap).is_none(), "{gap:#x} should be a gap");
         }
     }
 }
