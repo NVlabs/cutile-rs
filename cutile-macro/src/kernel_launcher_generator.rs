@@ -530,7 +530,9 @@ pub fn generate_kernel_launcher(
     let (input_types, _output_type) = get_sig_types(&item.sig, None);
     let mut stride_args = vec![];
     let mut spec_args: Vec<String> = vec![];
+    let mut spec_ref_exprs: Vec<String> = vec![];
     let mut scalar_hint_exprs: Vec<String> = vec![];
+    let mut scalar_hint_value_exprs: Vec<String> = vec![];
     let mut builder_statements = vec![];
     let mut launch_grid_expr_strs = vec![];
     let mut validator_statements = vec![];
@@ -555,6 +557,7 @@ pub fn generate_kernel_launcher(
                 param_element_types.push(res.element_type_name);
                 stride_args.push(res.stride_expr_str);
                 spec_args.push(res.spec_expr_str);
+                spec_ref_exprs.push(res.spec_ref_expr_str);
                 builder_statements.extend(res.builder_statements);
                 launch_grid_expr_strs.extend(res.launch_grid_expr_strs);
                 validator_statements.extend(res.validator_statements.block.stmts);
@@ -570,6 +573,7 @@ pub fn generate_kernel_launcher(
                     param_element_types.push(res.element_type_name);
                     stride_args.push(res.stride_expr_str);
                     spec_args.push(res.spec_expr_str);
+                    spec_ref_exprs.push(res.spec_ref_expr_str);
                     builder_statements.extend(res.builder_statements);
                     launch_grid_expr_strs.extend(res.launch_grid_expr_strs);
                     validator_statements.extend(res.validator_statements.block.stmts);
@@ -591,6 +595,9 @@ pub fn generate_kernel_launcher(
                 if cutile_compiler::specialization::is_integer_scalar(&type_name) {
                     scalar_hint_exprs.push(format!(
                         r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
+                    ));
+                    scalar_hint_value_exprs.push(format!(
+                        "{tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_value({var_name} as i32)"
                     ));
                 }
                 param_element_types.push(None);
@@ -629,6 +636,9 @@ pub fn generate_kernel_launcher(
                 scalar_hint_exprs.push(format!(
                     r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr()))"#
                 ));
+                scalar_hint_value_exprs.push(format!(
+                    "{tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_ptr({var_name}.cu_deviceptr())"
+                ));
                 // The specialization's pointee type must be the `DevicePointer<T>`
                 // element type: a user `.generics(..)` list can widen `T`, and the
                 // kernel would then index the buffer with the wider element size.
@@ -643,8 +653,7 @@ pub fn generate_kernel_launcher(
                             let compiled_dtype = #tile_rust_crate_root::cutile_compiler::types::get_ptr_type(&pointer_validator.element_type)
                                 .map(|(_, pointee)| pointee)
                                 .unwrap_or_else(|| pointer_validator.element_type.clone());
-                            kernel_launch_assert(compiled_dtype == given_dtype,
-                                format!("{} element type mismatch: the kernel was specialized for a `*{}` pointer but the launch passes a `DevicePointer<{}>` (check the `.generics(..)` list)", #var_name, compiled_dtype, given_dtype).as_str())?;
+                            kernel_launch_assert_with(compiled_dtype == given_dtype, || format!("{} element type mismatch: the kernel was specialized for a `*{}` pointer but the launch passes a `DevicePointer<{}>` (check the `.generics(..)` list)", #var_name, compiled_dtype, given_dtype))?;
                         }
                     }})
                     .unwrap()
@@ -894,19 +903,91 @@ pub fn generate_kernel_launcher(
         "let stride_args: Vec<(String, Vec<i32>)> =  vec![{}];",
         stride_args.join(",")
     ));
-    launcher_method.block.stmts.push(stride_args_stmt.clone());
-    specialization_method.block.stmts.push(stride_args_stmt);
-    let spec_args_stmt = parse_stmt(format!("let spec_args = vec![{}];", spec_args.join(",")));
-    launcher_method.block.stmts.push(spec_args_stmt.clone());
-    specialization_method.block.stmts.push(spec_args_stmt);
+    specialization_method
+        .block
+        .stmts
+        .push(stride_args_stmt.clone());
+    let spec_args_stmt = parse_stmt(format!(
+        "let spec_args: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::SpecializationBits)> = vec![{}];",
+        spec_args.join(",")
+    ));
+    specialization_method
+        .block
+        .stmts
+        .push(spec_args_stmt.clone());
 
     // Emit scalar_hints (populated for integer scalar and raw pointer params).
     let scalar_hints_stmt = parse_stmt(format!(
         "let scalar_hints: Vec<(String, {tile_rust_crate_root}::cutile_compiler::specialization::DivHint)> = vec![{}];",
         scalar_hint_exprs.join(",")
     ));
-    launcher_method.block.stmts.push(scalar_hints_stmt.clone());
-    specialization_method.block.stmts.push(scalar_hints_stmt);
+    specialization_method
+        .block
+        .stmts
+        .push(scalar_hints_stmt.clone());
+
+    // Launch-site probe: on the steady state the launcher skips key
+    // construction, toolchain fingerprinting, hashing, and the global cache
+    // entirely — the volatile specialization inputs are compared against the
+    // site's last resolution by value, borrowed from the arguments.
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let __specs: Vec<&{tile_rust_crate_root}::cutile_compiler::specialization::SpecializationBits> = vec![{}];",
+        spec_ref_exprs.join(",")
+    )));
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let __hint_vals: Vec<{tile_rust_crate_root}::cutile_compiler::specialization::DivHint> = vec![{}];",
+        scalar_hint_value_exprs.join(",")
+    )));
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "static __SITE: {tile_rust_crate_root}::tile_kernel::LaunchSite = {tile_rust_crate_root}::tile_kernel::LaunchSite::new();"
+    )));
+    launcher_method.block.stmts.push(parse_stmt(
+        "let __const_grid = if self._const_grid { Some(self._grid) } else { None };".to_string(),
+    ));
+    launcher_method.block.stmts.push(parse_stmt(
+        "let __compile_options = std::mem::take(&mut self._compile_options);".to_string(),
+    ));
+    launcher_method.block.stmts.push(parse_stmt(
+        "let __site_hit = __SITE.get(ctx.get_device_id(), &function_generics, &__specs,          &__hint_vals, __const_grid, &__compile_options);"
+            .to_string(),
+    ));
+    launcher_method.block.stmts.push(parse_stmt(format!(
+        "let (function, validator) = if let Some(__hit) = __site_hit {{
+            __hit
+        }} else {{
+            let stride_args: Vec<(String, Vec<i32>)> = vec![{strides}];
+            let spec_args: Vec<(String, {root}::cutile_compiler::specialization::SpecializationBits)> = vec![{specs}];
+            let scalar_hints: Vec<(String, {root}::cutile_compiler::specialization::DivHint)> = vec![{hints}];
+            let __generics_snapshot = function_generics.clone();
+            let __specs_snapshot: Vec<{root}::cutile_compiler::specialization::SpecializationBits> =
+                spec_args.iter().map(|(_, s)| s.clone()).collect();
+            let __hints_snapshot = __hint_vals.clone();
+            let __options_snapshot = __compile_options.clone();
+            let (function, validator) = self.jit_compile(
+                ctx, __module_ast_self,
+                module_name, function_name, function_entry,
+                function_generics, stride_args, spec_args, scalar_hints,
+                __const_grid,
+                __compile_options,
+                _SOURCE_HASH,
+            )?;
+            __SITE.store({root}::tile_kernel::SiteResolution::new(
+                ctx.get_device_id(),
+                __generics_snapshot,
+                __specs_snapshot,
+                __hints_snapshot,
+                __const_grid,
+                __options_snapshot,
+                function.clone(),
+                validator.clone(),
+            ));
+            (function, validator)
+        }};",
+        strides = stride_args.join(","),
+        specs = spec_args.join(","),
+        hints = scalar_hint_exprs.join(","),
+        root = tile_rust_crate_root,
+    )));
 
     let specialization_stmts = syn::parse2::<ExprBlock>(quote! {{
         let const_grid = if self._const_grid { Some(self._grid) } else { None };
@@ -933,29 +1014,13 @@ pub fn generate_kernel_launcher(
         .stmts
         .extend(specialization_stmts);
 
-    let compile_stmts = syn::parse2::<ExprBlock>(quote! {{
-        let const_grid = if self._const_grid { Some(self._grid) } else { None };
-        let compile_options = std::mem::take(&mut self._compile_options);
-        // LINKING Phase B: pass the kernel's per-module AST builder; the JIT
-        // walks `use` statements against the linker registry for deps.
-        let (function, validator) = self.jit_compile(
-            ctx, __module_ast_self,
-            module_name, function_name, function_entry,
-            function_generics, stride_args, spec_args.clone(), scalar_hints,
-            const_grid,
-            compile_options,
-            _SOURCE_HASH,
-        )?;
-    }})
-    .unwrap()
-    .block
-    .stmts;
-    launcher_method.block.stmts.extend(compile_stmts);
+    // (The jit_compile call lives inside the launch-site miss branch above;
+    // the LINKING Phase B AST-builder note applies there.)
     // Per-parameter runtime extents for launch-time check hoisting; the
     // per-arg validator statements fill in each tensor param's shape by
     // signature index (non-tensor params stay empty).
     launcher_method.block.stmts.push(parse_stmt(
-        "let mut param_shapes: Vec<Vec<i32>> = vec![Vec::new(); validator.params.len()];"
+        "let mut param_shapes: Vec<Vec<i32>> = if validator.launch_checks.is_empty() { Vec::new() } else { vec![Vec::new(); validator.params.len()] };"
             .to_string(),
     ));
     // The kernel-visible view per parameter: the partition slab for a
@@ -963,7 +1028,7 @@ pub fn generate_kernel_launcher(
     // view-frame atoms in hoisted checks, while `param_shapes` (the root
     // frame) resolves `dim(...)` atoms and declared preconditions.
     launcher_method.block.stmts.push(parse_stmt(
-        "let mut view_shapes: Vec<Vec<i32>> = vec![Vec::new(); validator.params.len()];"
+        "let mut view_shapes: Vec<Vec<i32>> = if validator.launch_checks.is_empty() { Vec::new() } else { vec![Vec::new(); validator.params.len()] };"
             .to_string(),
     ));
     launcher_method.block.stmts.extend(validator_statements);
@@ -1326,6 +1391,8 @@ struct TensorLaunchCode {
     fn_arg: PatType, // FnArg::Typed(PatType)
     stride_expr_str: String,
     spec_expr_str: String,
+    /// Borrowed form of the same spec, for the launch-site probe: no clone.
+    spec_ref_expr_str: String,
     builder_statements: Vec<Stmt>,
     launch_grid_expr_strs: Vec<String>,
     validator_statements: ExprBlock,
@@ -1554,20 +1621,16 @@ fn metadata_precondition_validation_stmts(
                 let validation = syn::parse2::<ExprBlock>(quote! {{
                     {
                         let shape: Vec<i32> = #shape_expr;
-                        kernel_launch_assert(
-                            #axis < shape.len(),
-                            format!(
+                        kernel_launch_assert_with(
+                            #axis < shape.len(), || format!(
                                 "dim({}, {}) % {} == 0 failed: axis is out of range for shape {:?}",
                                 #tensor, #axis, #divisor, shape
-                            ).as_str(),
-                        )?;
-                        kernel_launch_assert(
-                            (shape[#axis] as i64).rem_euclid(#divisor) == 0,
-                            format!(
+                            ))?;
+                        kernel_launch_assert_with(
+                            (shape[#axis] as i64).rem_euclid(#divisor) == 0, || format!(
                                 "dim({}, {}) % {} == 0 failed: extent is {}",
                                 #tensor, #axis, #divisor, shape[#axis]
-                            ).as_str(),
-                        )?;
+                            ))?;
                     }
                 }})
                 .unwrap();
@@ -1603,31 +1666,26 @@ fn metadata_precondition_validation_stmts(
             {
                 let lhs_shape: Vec<i32> = #lhs_shape_expr;
                 let rhs_shape: Vec<i32> = #rhs_shape_expr;
-                kernel_launch_assert(
-                    #lhs_axis < lhs_shape.len(),
-                    format!(
+                kernel_launch_assert_with(
+                    #lhs_axis < lhs_shape.len(), || format!(
                         "dim({}, {}) == dim({}, {}) failed: left axis is out of range for shape {:?}",
                         #lhs_name,
                         #lhs_axis,
                         #rhs_name,
                         #rhs_axis,
                         lhs_shape
-                    ).as_str(),
-                )?;
-                kernel_launch_assert(
-                    #rhs_axis < rhs_shape.len(),
-                    format!(
+                    ))?;
+                kernel_launch_assert_with(
+                    #rhs_axis < rhs_shape.len(), || format!(
                         "dim({}, {}) == dim({}, {}) failed: right axis is out of range for shape {:?}",
                         #lhs_name,
                         #lhs_axis,
                         #rhs_name,
                         #rhs_axis,
                         rhs_shape
-                    ).as_str(),
-                )?;
-                kernel_launch_assert(
-                    lhs_shape[#lhs_axis] == rhs_shape[#rhs_axis],
-                    format!(
+                    ))?;
+                kernel_launch_assert_with(
+                    lhs_shape[#lhs_axis] == rhs_shape[#rhs_axis], || format!(
                         "dim({}, {}) == dim({}, {}) failed: axis extents differ ({} vs {})",
                         #lhs_name,
                         #lhs_axis,
@@ -1635,8 +1693,7 @@ fn metadata_precondition_validation_stmts(
                         #rhs_axis,
                         lhs_shape[#lhs_axis],
                         rhs_shape[#rhs_axis],
-                    ).as_str(),
-                )?;
+                    ))?;
             }
         }})
         .unwrap();
@@ -1755,6 +1812,11 @@ fn get_tensor_code(
         )"#
         )
     };
+    let spec_ref_expr_str = if ty.mutability.is_some() {
+        format!("KernelOutputStored::spec(&{var_name})")
+    } else {
+        format!("{var_name}.spec()")
+    };
     // Builder and validator statements.
     let var_ident = Ident::new(var_name, Span::call_site());
     let mut builder_statements = vec![];
@@ -1773,20 +1835,19 @@ fn get_tensor_code(
                 // dtype. A user `.generics(..)` list overrides the inferred type, and
                 // a wider-typed kernel reads and writes past a narrower buffer.
                 let given_dtype = KernelOutputStored::dtype_str(&#var_ident);
-                kernel_launch_assert(tensor_validator.element_type == given_dtype,
-                    format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype).as_str())?;
+                kernel_launch_assert_with(tensor_validator.element_type == given_dtype, || format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype))?;
                 let valid_shape = &tensor_validator.shape;
                 let given_shape: Vec<i32> = KernelOutputStored::partition_shape_as_i32(&#var_ident);
-                kernel_launch_assert(valid_shape.len() == given_shape.len(),
-                    format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()).as_str())?;
-                kernel_launch_assert(valid_shape == &given_shape,
-                    format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape, given_shape).as_str())?;
+                kernel_launch_assert_with(valid_shape.len() == given_shape.len(), || format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()))?;
+                kernel_launch_assert_with(valid_shape == &given_shape, || format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape, given_shape))?;
                 // Runtime extents for launch-time check hoisting (indexed by
                 // signature position): root shape resolves `Dim` atoms, and the
                 // partition slab -- this param's kernel-visible view -- resolves
                 // `ViewExtent` atoms.
-                param_shapes[#var_idx] = KernelOutputStored::shape_as_i32(&#var_ident);
-                view_shapes[#var_idx] = given_shape;
+                if !validator.launch_checks.is_empty() {
+                    param_shapes[#var_idx] = KernelOutputStored::shape_as_i32(&#var_ident);
+                    view_shapes[#var_idx] = given_shape;
+                }
             }
         }})
         .unwrap()
@@ -1803,26 +1864,25 @@ fn get_tensor_code(
                 // See the output branch: the specialization's element type must be
                 // the tensor's dtype, or a wider-typed kernel reads past the buffer.
                 let given_dtype = KernelInputStored::dtype_str(&#var_ident);
-                kernel_launch_assert(tensor_validator.element_type == given_dtype,
-                    format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype).as_str())?;
+                kernel_launch_assert_with(tensor_validator.element_type == given_dtype, || format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype))?;
                 let valid_shape = &tensor_validator.shape;
                 let given_shape = #var_ident.shape();
-                kernel_launch_assert(valid_shape.len() == given_shape.len(),
-                    format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()).as_str())?;
+                kernel_launch_assert_with(valid_shape.len() == given_shape.len(), || format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()))?;
                 let valid_shape_mixed = zip(valid_shape, given_shape).map(|(&expected, &given)|{
                     if expected == -1 { given } else { expected }
                 }).collect::<Vec<_>>();
                 let pred = zip(&valid_shape_mixed, given_shape).all(|(&expected, &given)|{
                     expected == given
                 });
-                kernel_launch_assert(pred,
-                    format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape_mixed, given_shape).as_str())?;
+                kernel_launch_assert_with(pred, || format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape_mixed, given_shape))?;
                 // TODO (hme): add validation for strides here too.
                 // Runtime extents for launch-time check hoisting (indexed by
                 // signature position). An immutable tensor is passed whole, so
                 // its view is its root shape.
-                param_shapes[#var_idx] = #var_ident.shape().to_vec();
-                view_shapes[#var_idx] = param_shapes[#var_idx].clone();
+                if !validator.launch_checks.is_empty() {
+                    param_shapes[#var_idx] = #var_ident.shape().to_vec();
+                    view_shapes[#var_idx] = param_shapes[#var_idx].clone();
+                }
             }
         }})
         .unwrap()
@@ -1837,6 +1897,7 @@ fn get_tensor_code(
         fn_arg,
         stride_expr_str,
         spec_expr_str,
+        spec_ref_expr_str,
         builder_statements,
         launch_grid_expr_strs,
         validator_statements,

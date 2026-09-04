@@ -291,6 +291,19 @@ fn stat_fingerprint(tileiras: &Path) -> String {
 
 /// The first set, non-empty toolkit variable (`CUDA_TOOLKIT_PATH`, then
 /// `CUDA_HOME`) with its value.
+/// The environment values that drive toolchain resolution, as one comparable
+/// snapshot. Launch-site caches compare this per launch instead of re-running
+/// the full [`tileiras_fingerprint`] chain, preserving the documented
+/// mid-process `CUTILE_TILEIRAS_PATH` / toolkit switch semantics at the cost
+/// of the env reads alone.
+pub type ToolchainEnvSnapshot = (Option<OsString>, Option<(&'static str, OsString)>);
+
+/// See [`ToolchainEnvSnapshot`].
+pub fn toolchain_env_snapshot() -> ToolchainEnvSnapshot {
+    let tileiras_env = env::var_os(TILEIRAS_PATH_ENV).filter(|v| !v.as_os_str().is_empty());
+    (tileiras_env, toolkit_env())
+}
+
 fn toolkit_env() -> Option<ToolkitEnv> {
     TOOLKIT_ENV_VARS.iter().find_map(|&var| {
         env::var_os(var)
