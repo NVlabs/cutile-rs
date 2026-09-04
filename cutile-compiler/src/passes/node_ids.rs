@@ -36,9 +36,7 @@ pub fn assign_block_expr_ids(block: &mut syn::Block) {
 }
 
 pub fn expr_id(expr: &Expr) -> Option<NodeId> {
-    expr_attrs(expr)?
-        .iter()
-        .find_map(|attr| node_id_from_attr(attr))
+    expr_attrs(expr)?.iter().find_map(node_id_from_attr)
 }
 
 pub fn set_expr_id(expr: &mut Expr, id: NodeId) {
@@ -83,7 +81,7 @@ impl VisitMut for NodeIdAssigner {
         match expr {
             Expr::Assign(assign) => {
                 // The destination is binding syntax, not a value expression.
-                self.visit_expr_mut(&mut *assign.right);
+                self.visit_expr_mut(&mut assign.right);
             }
             Expr::Call(call) => {
                 // The callee is name-resolution syntax in this DSL.

@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile::{api::*, tensor::*, tile_kernel::*};
 use cutile_compiler::compiler::utils::CompileOptions;
 use half::bf16;
@@ -120,7 +119,7 @@ use type_conversion_ops_module::bf16_to_f32_conversion_kernel;
 use type_conversion_ops_module::f32_to_bf16_conversion_kernel;
 
 #[test]
-fn compile_conversion_ops() -> () {
+fn compile_conversion_ops() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "conversion_ops_kernel",
@@ -147,7 +146,7 @@ fn compile_conversion_ops() -> () {
 }
 
 #[test]
-fn compile_ptr_conversion() -> () {
+fn compile_ptr_conversion() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "ptr_conversion_kernel",
@@ -174,7 +173,7 @@ fn compile_ptr_conversion() -> () {
 }
 
 #[test]
-fn compile_exti_unsigned() -> () {
+fn compile_exti_unsigned() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "exti_unsigned_kernel",
@@ -197,7 +196,7 @@ fn compile_exti_unsigned() -> () {
 }
 
 #[test]
-fn compile_bf16_conversion() -> () {
+fn compile_bf16_conversion() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "bf16_conversion_kernel",
@@ -218,7 +217,7 @@ fn compile_bf16_conversion() -> () {
 }
 
 #[test]
-fn compile_bf16_to_f32_load_tile_like() -> () {
+fn compile_bf16_to_f32_load_tile_like() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "bf16_to_f32_conversion_kernel",
@@ -246,7 +245,7 @@ fn compile_bf16_to_f32_load_tile_like() -> () {
 }
 
 #[test]
-fn compile_unannotated_load_tile_like() -> () {
+fn compile_unannotated_load_tile_like() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "unannotated_load_tile_like_kernel",
@@ -274,7 +273,7 @@ fn compile_unannotated_load_tile_like() -> () {
 }
 
 #[test]
-fn compile_explicit_conversion_ops() -> () {
+fn compile_explicit_conversion_ops() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "explicit_conversion_ops_kernel",
@@ -299,7 +298,7 @@ fn compile_explicit_conversion_ops() -> () {
 }
 
 #[test]
-fn execute_bf16_f32_roundtrip() -> () {
+fn execute_bf16_f32_roundtrip() {
     common::with_test_stack(|| {
         let input_host = Arc::new(vec![
             bf16::from_f32(-3.5),
@@ -330,7 +329,7 @@ fn execute_bf16_f32_roundtrip() -> () {
 }
 
 #[test]
-fn execute_bf16_to_f32_conversion() -> () {
+fn execute_bf16_to_f32_conversion() {
     common::with_test_stack(|| {
         let input_host = Arc::new(vec![
             bf16::from_f32(-3.5),
@@ -364,7 +363,7 @@ fn execute_bf16_to_f32_conversion() -> () {
 }
 
 #[test]
-fn execute_f32_to_bf16_conversion() -> () {
+fn execute_f32_to_bf16_conversion() {
     common::with_test_stack(|| {
         let input_host = Arc::new(vec![-3.5f32, -1.0, -0.0, 0.0, 0.125, 0.1, 1.1, 42.0]);
 

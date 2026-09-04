@@ -324,7 +324,7 @@ fn capacity_holds_across_short_lived_processes() {
             .capacity_bytes(CAPACITY)
             .open()
             .unwrap();
-        store.put(&key(tag), &vec![tag; ENTRY_BYTES]).unwrap();
+        store.put(&key(tag), &[tag; ENTRY_BYTES]).unwrap();
     }
 
     // Collection lands the store on the low watermark (6553 B ≈ 32 entries) and

@@ -4,7 +4,6 @@
  */
 use std::sync::Arc;
 
-use cutile;
 use cutile::api;
 use cutile::tensor::{IntoPartition, ToHostVec};
 use cutile::tile_kernel::DeviceOp;
@@ -87,7 +86,7 @@ fn reinterpret_u8_to_i16_succeeds() {
 #[test]
 fn reinterpret_u8_boundaries_are_enforced() {
     common::with_test_stack(|| {
-        let valid_bits = vec![0x3f800000u32, 0x40000000u32];
+        let valid_bits = [0x3f800000u32, 0x40000000u32];
         let valid_bytes: Arc<Vec<u8>> = Arc::new(
             valid_bits
                 .iter()

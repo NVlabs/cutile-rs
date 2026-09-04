@@ -421,7 +421,7 @@ fn partition_load_bounds_check_static() {
     common::with_test_stack(|| {
         let n: usize = 1000;
         let b: usize = 128;
-        let nblocks = (n + b - 1) / b; // = 8
+        let nblocks = n.div_ceil(b); // = 8
         let generics = vec![b.to_string(), n.to_string(), nblocks.to_string()];
 
         let a: Arc<Tensor<f32>> = api::ones::<f32>(&[n]).sync().expect("alloc a").into();

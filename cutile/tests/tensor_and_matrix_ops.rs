@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile::cuda_core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::prelude::{
     api, Arc, Device, DeviceOp, DeviceOpReshape, IntoPartition, Tensor, ToHostVec,
@@ -319,7 +318,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_cat() -> () {
+fn compile_cat() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("cat_kernel", &[], &[("output", &[8])]);
         println!("\n=== CAT MLIR ===\n{}", module_op_str);
@@ -338,7 +337,7 @@ fn compile_cat() -> () {
 }
 
 #[test]
-fn compile_extract() -> () {
+fn compile_extract() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("extract_kernel", &[], &[("output", &[1])]);
         println!("\n=== EXTRACT MLIR ===\n{}", module_op_str);
@@ -353,7 +352,7 @@ fn compile_extract() -> () {
 }
 
 #[test]
-fn compile_mmai() -> () {
+fn compile_mmai() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("mmai_kernel", &[], &[("output", &[16, 16])]);
         println!("\n=== MMAI MLIR ===\n{}", module_op_str);
@@ -376,7 +375,7 @@ fn compile_mmai() -> () {
 }
 
 #[test]
-fn compile_raw_mmai() -> () {
+fn compile_raw_mmai() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("raw_mmai_kernel", &[], &[("output", &[16, 16])]);
         println!("\n=== RAW MMAI MLIR ===\n{}", module_op_str);
@@ -393,7 +392,7 @@ fn compile_raw_mmai() -> () {
 }
 
 #[test]
-fn compile_raw_mmaf() -> () {
+fn compile_raw_mmaf() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("raw_mmaf_kernel", &[], &[("output", &[16, 16])]);
         println!("\n=== RAW MMAF MLIR ===\n{}", module_op_str);
@@ -406,7 +405,7 @@ fn compile_raw_mmaf() -> () {
 }
 
 #[test]
-fn compile_transpose_tile() -> () {
+fn compile_transpose_tile() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "transpose_tile_kernel",
@@ -421,7 +420,7 @@ fn compile_transpose_tile() -> () {
 }
 
 #[test]
-fn compile_nvfp4_pack_unpack() -> () {
+fn compile_nvfp4_pack_unpack() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "nvfp4_pack_unpack_kernel",
@@ -446,7 +445,7 @@ fn compile_nvfp4_pack_unpack() -> () {
 }
 
 #[test]
-fn compile_nvfp4_pack_unpack_2d() -> () {
+fn compile_nvfp4_pack_unpack_2d() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "nvfp4_pack_unpack_2d_kernel",
@@ -463,7 +462,7 @@ fn compile_nvfp4_pack_unpack_2d() -> () {
 }
 
 #[test]
-fn compile_nvfp4_u8_escape_unpack() -> () {
+fn compile_nvfp4_u8_escape_unpack() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "nvfp4_u8_escape_unpack_kernel",
@@ -488,7 +487,7 @@ fn compile_nvfp4_u8_escape_unpack() -> () {
 }
 
 #[test]
-fn compile_pack_unpack_2d_f16() -> () {
+fn compile_pack_unpack_2d_f16() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "pack_unpack_2d_f16_kernel",
@@ -504,7 +503,7 @@ fn compile_pack_unpack_2d_f16() -> () {
 }
 
 #[test]
-fn compile_cross_type_pack_unpack() -> () {
+fn compile_cross_type_pack_unpack() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "cross_type_pack_unpack_kernel",
@@ -520,7 +519,7 @@ fn compile_cross_type_pack_unpack() -> () {
 }
 
 #[test]
-fn compile_i32_packed_nibbles_to_i4_roundtrip() -> () {
+fn compile_i32_packed_nibbles_to_i4_roundtrip() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "i32_packed_nibbles_to_i4_roundtrip_kernel",
@@ -537,7 +536,7 @@ fn compile_i32_packed_nibbles_to_i4_roundtrip() -> () {
 }
 
 #[test]
-fn compile_raw_mmaf_scaled_nvfp4_from_i32_words() -> () {
+fn compile_raw_mmaf_scaled_nvfp4_from_i32_words() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "raw_mmaf_scaled_nvfp4_from_i32_words_kernel",
@@ -563,7 +562,7 @@ fn compile_raw_mmaf_scaled_nvfp4_from_i32_words() -> () {
 }
 
 #[test]
-fn compile_raw_mmaf_scaled_nvfp4() -> () {
+fn compile_raw_mmaf_scaled_nvfp4() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "raw_mmaf_scaled_nvfp4_kernel",
@@ -594,7 +593,7 @@ fn compile_raw_mmaf_scaled_nvfp4() -> () {
 }
 
 #[test]
-fn compile_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
+fn compile_raw_mmaf_scaled_nvfp4_e4_scale() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "raw_mmaf_scaled_nvfp4_e4_scale_kernel",
@@ -615,7 +614,7 @@ fn compile_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
 }
 
 #[test]
-fn execute_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
+fn execute_raw_mmaf_scaled_nvfp4_e4_scale() {
     common::with_test_stack(|| {
         let gpu_name = get_gpu_name(0);
         if !supports_native_nvfp4(&gpu_name) {
@@ -677,7 +676,7 @@ fn execute_raw_mmaf_scaled_nvfp4_e4_scale() -> () {
 }
 
 #[test]
-fn compile_raw_mmaf_scaled_fp8() -> () {
+fn compile_raw_mmaf_scaled_fp8() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "raw_mmaf_scaled_fp8_kernel",
@@ -698,7 +697,7 @@ fn compile_raw_mmaf_scaled_fp8() -> () {
 }
 
 #[test]
-fn compile_batch_mmaf_scaled_fp8() -> () {
+fn compile_batch_mmaf_scaled_fp8() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "batch_mmaf_scaled_fp8_kernel",
