@@ -7,6 +7,7 @@
 //! Provides GPU detection and bytecode compilation helpers.
 
 use crate::error::JITError;
+use crate::hints::Optimization;
 use cuda_core::{get_device_sm_name, Device};
 use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion};
 use std::collections::HashMap;
@@ -28,6 +29,9 @@ const MIN_TILE_CUDA_VERSION: u32 = 13020;
 /// that binary instead of the `tileiras` found on `PATH`.
 pub const TILEIRAS_PATH_ENV: &str = "CUTILE_TILEIRAS_PATH";
 pub const SETUP_DIAGNOSTICS_ENV: &str = "CUTILE_SETUP_DIAGNOSTICS";
+pub const JIT_OPTIMIZATION_ENV: &str = "CUTILE_JIT_OPTIMIZATION";
+pub const JIT_SANITIZE_ENV: &str = "CUTILE_JIT_SANITIZE";
+pub const JIT_LINEINFO_ENV: &str = "CUTILE_JIT_LINEINFO";
 
 const CUDA_TOOLKIT_PATH_ENV: &str = "CUDA_TOOLKIT_PATH";
 /// Honored after `CUDA_TOOLKIT_PATH`, like the build scripts do: the
@@ -42,6 +46,91 @@ const MIN_CUDA_VERSION: u32 = 13020;
 /// Environment variable to force the emitted Tile IR bytecode version
 /// (e.g. `13.2`). Overrides toolkit detection and probing.
 pub const BYTECODE_VERSION_ENV: &str = "CUTILE_BYTECODE_VERSION";
+
+fn parse_jit_env_overrides(
+    optimization: Result<String, env::VarError>,
+    sanitize: Result<String, env::VarError>,
+    lineinfo: Result<String, env::VarError>,
+) -> Result<(Option<Optimization>, Option<bool>, Option<bool>), String> {
+    let invalid = |name: &str, value: Result<String, env::VarError>, expected: &str| match value {
+        Ok(value) => format!("invalid {name} value {value:?}; expected {expected}"),
+        Err(env::VarError::NotUnicode(_)) => {
+            format!("{name} contains a non-Unicode value; expected {expected}")
+        }
+        Err(env::VarError::NotPresent) => unreachable!(),
+    };
+    let optimization = match optimization {
+        Err(env::VarError::NotPresent) => None,
+        Ok(value) => Some(match value.as_str() {
+            "0" => Optimization::Level(0),
+            "1" => Optimization::Level(1),
+            "2" => Optimization::Level(2),
+            "3" => Optimization::Level(3),
+            "debug" => Optimization::FullDebug,
+            _ => {
+                return Err(invalid(
+                    JIT_OPTIMIZATION_ENV,
+                    Ok(value),
+                    "0, 1, 2, 3, or debug",
+                ))
+            }
+        }),
+        error => return Err(invalid(JIT_OPTIMIZATION_ENV, error, "0, 1, 2, 3, or debug")),
+    };
+    let sanitize = match sanitize {
+        Err(env::VarError::NotPresent) => None,
+        Ok(value) if value == "memcheck" => Some(true),
+        Ok(value) if value == "none" => Some(false),
+        value => return Err(invalid(JIT_SANITIZE_ENV, value, "memcheck or none")),
+    };
+    let lineinfo = match lineinfo {
+        Err(env::VarError::NotPresent) => None,
+        Ok(value)
+            if ["1", "true", "yes", "on"]
+                .iter()
+                .any(|candidate| value.eq_ignore_ascii_case(candidate)) =>
+        {
+            Some(true)
+        }
+        Ok(value)
+            if ["0", "false", "no", "off"]
+                .iter()
+                .any(|candidate| value.eq_ignore_ascii_case(candidate)) =>
+        {
+            Some(false)
+        }
+        value => {
+            return Err(invalid(
+                JIT_LINEINFO_ENV,
+                value,
+                "1/0, true/false, yes/no, or on/off",
+            ));
+        }
+    };
+    Ok((optimization, sanitize, lineinfo))
+}
+
+fn resolve_tileiras_options(
+    options: &crate::hints::CompileOptions,
+    overrides: (Option<Optimization>, Option<bool>, Option<bool>),
+) -> Result<TileirasOptions, JITError> {
+    let (optimization_override, sanitize_override, lineinfo_override) = overrides;
+    let optimization = optimization_override
+        .or(options.optimization)
+        .unwrap_or(Optimization::Level(DEFAULT_OPT_LEVEL));
+    if let Optimization::Level(level) = optimization {
+        if level > 3 {
+            return Err(JITError::Generic(format!(
+                "invalid tileiras optimization level {level}; expected 0 through 3"
+            )));
+        }
+    }
+    Ok(TileirasOptions {
+        optimization,
+        lineinfo: lineinfo_override.unwrap_or(options.lineinfo),
+        sanitize_memcheck: sanitize_override.unwrap_or(options.sanitize_memcheck),
+    })
+}
 
 /// Returns the cutile compiler version (from the workspace Cargo.toml).
 pub fn get_compiler_version() -> String {
@@ -808,10 +897,8 @@ pub(crate) fn current_l2_key_for_module(
 /// field can never share a cubin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileirasOptions {
-    /// `--opt-level <N>`.
-    pub opt_level: u8,
-    /// `--device-debug`: generate debug information.
-    pub device_debug: bool,
+    /// Optimization level or full device-debug mode.
+    pub optimization: Optimization,
     /// `--lineinfo`: generate line-number information only.
     pub lineinfo: bool,
     /// `--sanitize=memcheck`: instrument memory accesses for the sanitizer.
@@ -821,8 +908,7 @@ pub struct TileirasOptions {
 impl Default for TileirasOptions {
     fn default() -> Self {
         Self {
-            opt_level: DEFAULT_OPT_LEVEL,
-            device_debug: false,
+            optimization: Optimization::Level(DEFAULT_OPT_LEVEL),
             lineinfo: false,
             sanitize_memcheck: false,
         }
@@ -831,26 +917,35 @@ impl Default for TileirasOptions {
 
 impl TileirasOptions {
     /// Resolves the launch-facing [`crate::hints::CompileOptions`] into the
-    /// stage-2 flags. `device_debug` implies `--opt-level 0` unless an
-    /// explicit level was requested.
-    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Self {
-        let opt_level = options.opt_level.unwrap_or(if options.device_debug {
-            0
-        } else {
-            DEFAULT_OPT_LEVEL
-        });
-        Self {
-            opt_level,
-            device_debug: options.device_debug,
-            lineinfo: options.lineinfo,
-            sanitize_memcheck: options.sanitize_memcheck,
+    /// stage-2 flags. Full debug always uses the backend-required level 0.
+    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Result<Self, JITError> {
+        static OVERRIDES: OnceLock<
+            Result<(Option<Optimization>, Option<bool>, Option<bool>), String>,
+        > = OnceLock::new();
+        let &overrides = OVERRIDES
+            .get_or_init(|| {
+                parse_jit_env_overrides(
+                    env::var(JIT_OPTIMIZATION_ENV),
+                    env::var(JIT_SANITIZE_ENV),
+                    env::var(JIT_LINEINFO_ENV),
+                )
+            })
+            .as_ref()
+            .map_err(|message| JITError::Generic(message.clone()))?;
+        resolve_tileiras_options(options, overrides)
+    }
+
+    pub fn opt_level(&self) -> u8 {
+        match self.optimization {
+            Optimization::Level(level) => level,
+            Optimization::FullDebug => 0,
         }
     }
 
     /// The boolean flags packed into one byte, for the cache-entry header
     /// and the L2 key material.
     pub fn flags_byte(&self) -> u8 {
-        (self.device_debug as u8)
+        (matches!(self.optimization, Optimization::FullDebug) as u8)
             | ((self.lineinfo as u8) << 1)
             | ((self.sanitize_memcheck as u8) << 2)
     }
@@ -880,9 +975,9 @@ pub fn run_tileiras(
     })?;
 
     let tileiras = tileiras_binary();
-    let opt_level_arg = opts.opt_level.to_string();
+    let opt_level_arg = opts.opt_level().to_string();
     let mut args = vec!["--gpu-name", gpu_name, "--opt-level", &opt_level_arg];
-    if opts.device_debug {
+    if matches!(opts.optimization, Optimization::FullDebug) {
         args.push("--device-debug");
     }
     if opts.lineinfo {
@@ -985,7 +1080,7 @@ pub fn compile_bytecode_cached(
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,
-        opt_level: opts.opt_level,
+        opt_level: opts.opt_level(),
         flags: opts.flags_byte(),
         tileiras_fp,
     };
@@ -1294,6 +1389,86 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn jit_env_parser_distinguishes_unset_off_and_invalid() {
+        let unset = Err(env::VarError::NotPresent);
+        assert_eq!(
+            parse_jit_env_overrides(unset.clone(), unset.clone(), unset.clone()).unwrap(),
+            (None, None, None)
+        );
+        assert_eq!(
+            parse_jit_env_overrides(
+                Ok("debug".to_string()),
+                Ok("none".to_string()),
+                Ok("FALSE".to_string()),
+            )
+            .unwrap(),
+            (Some(Optimization::FullDebug), Some(false), Some(false))
+        );
+        let err = parse_jit_env_overrides(unset.clone(), unset, Ok("tru".to_string())).unwrap_err();
+        assert!(err.contains(JIT_LINEINFO_ENV));
+        assert!(err.contains("tru"));
+    }
+
+    #[test]
+    fn debug_override_replaces_explicit_optimized_level() {
+        let resolved = resolve_tileiras_options(
+            &crate::hints::CompileOptions::new().opt_level(3),
+            (Some(Optimization::FullDebug), None, None),
+        )
+        .unwrap();
+        assert_eq!(resolved.optimization, Optimization::FullDebug);
+        assert_eq!(resolved.opt_level(), 0);
+    }
+
+    #[test]
+    fn absent_optimization_override_preserves_code_setting() {
+        let resolved = resolve_tileiras_options(
+            &crate::hints::CompileOptions::new().opt_level(3),
+            (None, None, None),
+        )
+        .unwrap();
+        assert_eq!(resolved.optimization, Optimization::Level(3));
+        assert_eq!(resolved.opt_level(), 3);
+    }
+
+    #[test]
+    fn boolean_overrides_distinguish_unset_on_and_off() {
+        let code = crate::hints::CompileOptions::new()
+            .sanitize_memcheck(true)
+            .lineinfo(false);
+        let unchanged = resolve_tileiras_options(&code, (None, None, None)).unwrap();
+        assert!(unchanged.sanitize_memcheck);
+        assert!(!unchanged.lineinfo);
+
+        let forced = resolve_tileiras_options(&code, (None, Some(false), Some(true))).unwrap();
+        assert!(!forced.sanitize_memcheck);
+        assert!(forced.lineinfo);
+
+        let reversed_code = crate::hints::CompileOptions::new()
+            .sanitize_memcheck(false)
+            .lineinfo(true);
+        let forced =
+            resolve_tileiras_options(&reversed_code, (None, Some(true), Some(false))).unwrap();
+        assert!(forced.sanitize_memcheck);
+        assert!(!forced.lineinfo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jit_env_parser_rejects_non_unicode() {
+        use std::os::unix::ffi::OsStringExt;
+        let non_unicode = env::VarError::NotUnicode(OsString::from_vec(vec![0xff]));
+        let err = parse_jit_env_overrides(
+            Err(non_unicode),
+            Err(env::VarError::NotPresent),
+            Err(env::VarError::NotPresent),
+        )
+        .unwrap_err();
+        assert!(err.contains(JIT_OPTIMIZATION_ENV));
+        assert!(err.contains("non-Unicode"));
+    }
 
     /// The probe module must be a valid, encodable kernel at every supported
     /// version, and it must contain a `for` region — an EMPTY probe passed a

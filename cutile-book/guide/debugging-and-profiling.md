@@ -149,10 +149,23 @@ my_kernel(args).compile_options(CompileOptions::new().sanitize_memcheck(true)).s
 
 What each option does:
 
-- `device_debug(true)` passes `--device-debug` to the device compiler and implies optimization level 0 (set `opt_level` explicitly to override). The frontend also stops hoisting bounds checks out of loops, so every check that runs on the device sits at the source line that wrote it. Checks the compiler proved impossible, and checks it moved to launch time on the host, are unaffected — they never reach device code in any mode.
+- `device_debug(true)` selects full device debugging, passing `--device-debug` at its required optimization level 0. `opt_level(n)` selects an optimization level instead, so the backend-invalid combination of full debugging with an optimized level cannot be represented. The frontend also stops hoisting bounds checks out of loops, so every check that runs on the device sits at the source line that wrote it. Checks the compiler proved impossible, and checks it moved to launch time on the host, are unaffected — they never reach device code in any mode.
 - `lineinfo(true)` passes `--lineinfo`: source-line correlation for Nsight Compute and Nsight Systems without changing code generation. This is the option for profiling optimized kernels.
 - `sanitize_memcheck(true)` passes `--sanitize=memcheck` for `compute-sanitizer --tool memcheck`.
 - `opt_level(n)` selects `--opt-level` directly; the default is 3.
+
+For wrappers and debugging sessions that cannot change application code, the
+same settings can be overridden for the process:
+
+- `CUTILE_JIT_OPTIMIZATION=0|1|2|3|debug`
+- `CUTILE_JIT_SANITIZE=memcheck|none`
+- `CUTILE_JIT_LINEINFO=1|0` (also `true`/`false`, `yes`/`no`, or `on`/`off`)
+
+An unset variable preserves the code setting, including its default. An
+explicit value replaces it, so `none` and false values turn a code-enabled
+option off. Invalid and non-Unicode values are errors rather than being
+silently ignored. These variables are read once when the process first
+resolves JIT options, before cache keys are constructed.
 
 ## Profiling
 
