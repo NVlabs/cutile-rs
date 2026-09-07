@@ -156,7 +156,9 @@ impl LayerBuffers {
 /// replays the graph. The output is read directly from the last layer's
 /// residual buffer.
 struct GraphModel {
-    graph: CudaGraph<()>,
+    // The captured op owns `Arc` clones of every buffer it touches, so the
+    // graph borrows nothing: `'static`.
+    graph: CudaGraph<'static, ()>,
     input: Tensor<f32>,
     output: Arc<Tensor<f32>>,
 }
@@ -206,7 +208,7 @@ impl GraphModel {
     /// Copy a new embedding into the input buffer and replay the graph.
     fn forward(&mut self, embedding: &Tensor<f32>) -> Result<(), DeviceError> {
         self.graph.update(api::memcpy(&mut self.input, embedding))?;
-        self.graph.launch().sync_on(self.graph.stream())?;
+        self.graph.replay()?;
         Ok(())
     }
 

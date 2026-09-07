@@ -16,13 +16,24 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 
 /// A captured and instantiated CUDA graph, ready for replay.
 ///
-/// Created via [`CudaGraph::capture`], which runs a [`DeviceOp`] once on a
-/// capture stream, recording all GPU work into a graph. The graph can then
+/// Created via [`CudaGraph::capture`] or [`CudaGraph::scope`]. The graph can
 /// be replayed any number of times via [`launch`](CudaGraph::launch).
 ///
-/// All device pointers used by the operation are baked into the graph at capture
-/// time. To vary inputs between replays, pre-allocate an input buffer, pass it
-/// into the operation, and memcpy new data into that buffer before each launch.
+/// # Lifetime `'a`: captured buffers stay borrowed
+///
+/// The instantiated graph bakes in the **device pointers** of every buffer
+/// the captured work touches; a replay reads and writes those exact
+/// addresses. `'a` ties the graph to those buffers: everything the capture
+/// closure (or op) borrowed stays borrowed for as long as the graph value is
+/// used, so safe code cannot drop, move, or mutably alias a captured buffer
+/// while a replay could still happen, and cannot touch any of them while a
+/// [`GraphLaunch`] (which borrows the graph mutably) is in flight.
+///
+/// Outputs are only reachable after a completed replay: through the
+/// reference [`GraphLaunch::sync`]/[`sync_on`](GraphLaunch::sync_on) return,
+/// through [`outputs`](CudaGraph::outputs), or by consuming the graph with
+/// [`into_inner`](CudaGraph::into_inner) — each synchronizes before handing
+/// anything back.
 ///
 /// # Examples
 ///
@@ -34,18 +45,20 @@ const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 ///
 /// // Capture: records the op's GPU work into a graph. Nothing has run yet.
 /// let mut graph = CudaGraph::capture(stream.clone(), forward_op)?;
-/// let bufs = graph.take_output().unwrap();
 ///
-/// // Replay loop.
+/// // Replay loop; the completed replay hands back the outputs.
 /// for _ in 0..n_tokens {
-///     // Optionally: copy new input into a pre-allocated buffer here.
-///     graph.launch().sync_on(&stream)?;
+///     // Optionally: graph.update(memcpy into a pre-allocated input) here.
+///     let bufs = graph.launch().sync_on(&stream)?;
 /// }
 /// ```
-pub struct CudaGraph<T> {
+pub struct CudaGraph<'a, T> {
     stream: Arc<Stream>,
     exec: Arc<GraphExecHandle>,
-    output: Option<T>,
+    output: T,
+    /// Keeps every capture-time borrow alive while the graph is in use; see
+    /// the type docs.
+    _captured: std::marker::PhantomData<&'a mut ()>,
 }
 
 /// Owns an instantiated CUDA graph: the `CUgraph` it was instantiated from
@@ -178,18 +191,19 @@ fn destroy_graph(cu_graph: sys::CUgraph) {
     }
 }
 
-impl<T: Send> CudaGraph<T> {
+impl<'a, T: Send> CudaGraph<'a, T> {
     /// Capture a [`DeviceOp`] into a replayable CUDA graph.
     ///
     /// Runs `op` once on `stream` in capture mode. All GPU work (kernel
     /// launches, memcpys, etc.) issued by the operation is *recorded* into a
     /// graph, not executed. The graph is then instantiated and uploaded.
     ///
-    /// The output `T` is available immediately via
-    /// [`take_output`](CudaGraph::take_output), but only its host-side
-    /// metadata (shapes, device pointers, handles) is meaningful: the GPU
-    /// data behind it is first computed when the graph is launched. Read it
-    /// after `graph.launch().sync_on(graph.stream())`.
+    /// The `op: 'a` bound keeps every buffer the op borrows alive and
+    /// exclusively held for as long as the graph is used (see the type
+    /// docs). The output `T` — typically the op's recovered buffers — is
+    /// held by the graph and only handed out after a completed replay
+    /// ([`GraphLaunch::sync`], [`outputs`](CudaGraph::outputs)) or when the
+    /// graph is consumed ([`into_inner`](CudaGraph::into_inner)).
     ///
     /// Capture holds the thread-local execution lock for the duration of
     /// `op`, so nested `.sync()` / `.sync_on()` / `.await` inside it return
@@ -198,7 +212,7 @@ impl<T: Send> CudaGraph<T> {
     /// propagates.
     pub fn capture(
         stream: Arc<Stream>,
-        op: impl DeviceOp<Output = T>,
+        op: impl DeviceOp<Output = T> + 'a,
     ) -> Result<Self, DeviceError> {
         let _execution_lock = crate::device_operation::acquire_execution_lock()?;
         let exec_ctx = ExecutionContext::new(stream.clone());
@@ -206,16 +220,9 @@ impl<T: Send> CudaGraph<T> {
         Ok(Self {
             stream,
             exec,
-            output: Some(output),
+            output,
+            _captured: std::marker::PhantomData,
         })
-    }
-
-    /// Take the output produced during the capture execution.
-    ///
-    /// Returns `Some(T)` on the first call, `None` thereafter. Use this to
-    /// recover intermediate buffers or inspect the initial result.
-    pub fn take_output(&mut self) -> Option<T> {
-        self.output.take()
     }
 
     /// Enqueue a [`GraphNode`] on the graph's stream without synchronizing.
@@ -296,10 +303,60 @@ impl<T: Send> CudaGraph<T> {
     /// complete before the graph runs **only when the launch is executed on
     /// [`stream`](CudaGraph::stream)** (same-stream ordering); on any other
     /// stream there is no ordering between them.
-    pub fn launch(&self) -> GraphLaunch {
-        GraphLaunch {
-            exec: Arc::clone(&self.exec),
-        }
+    pub fn launch(&mut self) -> GraphLaunch<'_, 'a, T> {
+        GraphLaunch { graph: self }
+    }
+
+    /// Like [`update`](CudaGraph::update), for an input buffer the graph
+    /// *owns* (part of its output handle `T`): `build` receives `&mut T`
+    /// and returns the refresh op — typically a memcpy into a pre-allocated
+    /// input — which is enqueued on the graph's stream without
+    /// synchronizing. Taking `&mut self` guarantees no replay is in flight
+    /// while the host-side handle is being used to build the op; the
+    /// enqueued work itself is ordered before any later replay on
+    /// [`stream`](CudaGraph::stream), exactly like `update`.
+    pub fn update_with<'s, N, F>(&'s mut self, build: F) -> Result<(), DeviceError>
+    where
+        F: FnOnce(&'s mut T) -> N,
+        N: GraphNode + DeviceOp<Output = ()> + 's,
+    {
+        let _execution_lock = crate::device_operation::acquire_execution_lock()?;
+        let ctx = ExecutionContext::new(self.stream.clone());
+        let op = build(&mut self.output);
+        // SAFETY: as in `update` — a `GraphNode` with no output, enqueued on
+        // the graph's stream; nothing observes it before stream order does.
+        unsafe { op.execute(&ctx) }
+    }
+
+    /// Replay once on the graph's own stream, block until complete, and
+    /// return the outputs. Shorthand for
+    /// `graph.launch().sync_on(graph.stream())`, which the borrow checker
+    /// cannot express directly (the launch borrows the graph mutably).
+    pub fn replay(&mut self) -> Result<&mut T, DeviceError> {
+        let stream = self.stream.clone();
+        self.launch().sync_on(&stream)
+    }
+
+    /// The captured outputs, after synchronizing the graph's stream.
+    ///
+    /// The synchronize guarantees no replay (or [`update`](CudaGraph::update))
+    /// issued on [`stream`](CudaGraph::stream) is still writing the buffers
+    /// behind `T` when the reference is handed out. A replay executed on a
+    /// *different* stream is not ordered by this call — complete it through
+    /// its own [`GraphLaunch::sync`]/[`sync_on`](GraphLaunch::sync_on)
+    /// instead (the launch's `&mut` borrow of the graph already prevents
+    /// calling this while one is pending).
+    pub fn outputs(&mut self) -> Result<&mut T, DeviceError> {
+        unsafe { self.stream.synchronize()? };
+        Ok(&mut self.output)
+    }
+
+    /// Consume the graph: synchronize its stream, destroy nothing that a
+    /// pending launch still shares, and return the captured outputs. This
+    /// ends the graph's borrow of every captured buffer.
+    pub fn into_inner(self) -> Result<T, DeviceError> {
+        unsafe { self.stream.synchronize()? };
+        Ok(self.output)
     }
 
     /// Returns a reference to the stream this graph was captured on.
@@ -308,22 +365,52 @@ impl<T: Send> CudaGraph<T> {
     }
 }
 
-/// A [`DeviceOp`] that replays a captured CUDA graph.
+/// One replay of a captured CUDA graph.
 ///
-/// Created by [`CudaGraph::launch`]. The graph executes on whichever stream
-/// the op is scheduled on (via `.sync_on(&stream)`, `.sync()`, or `.await`).
-/// Holds a shared reference to the instantiated graph, so it may outlive the
-/// [`CudaGraph`] that created it.
-pub struct GraphLaunch {
-    exec: Arc<GraphExecHandle>,
+/// Created by [`CudaGraph::launch`]. Borrows the graph **mutably** for the
+/// replay's duration, so while a replay is pending nothing else can touch
+/// the graph, its outputs, or (through the graph's `'a`) any captured
+/// buffer.
+///
+/// Completing the replay hands the outputs back:
+/// [`sync`](GraphLaunch::sync) / [`sync_on`](GraphLaunch::sync_on) return
+/// `&mut T` tied to the graph borrow, valid only after the synchronize.
+/// The launch also composes as a [`DeviceOp`] with `Output = ()` —
+/// `graph.launch().then(op)`, `.await` — which never exposes `T`; read the
+/// outputs afterwards via [`CudaGraph::outputs`], which synchronizes first.
+pub struct GraphLaunch<'g, 'a, T> {
+    graph: &'g mut CudaGraph<'a, T>,
 }
 
-impl DeviceOp for GraphLaunch {
+impl<'g, 'a, T: Send> GraphLaunch<'g, 'a, T> {
+    /// Replay on `stream`, block until complete, and return the outputs.
+    ///
+    /// Mirrors [`DeviceOp::sync_on`], with one addition: the completed
+    /// replay yields `&mut T`, the graph's captured outputs, which cannot be
+    /// reached before this synchronize returns.
+    pub fn sync_on(self, stream: &Arc<Stream>) -> Result<&'g mut T, DeviceError> {
+        let _execution_lock = crate::device_operation::acquire_execution_lock()?;
+        unsafe {
+            sys::cuGraphLaunch(self.graph.exec.cu_graph_exec, stream.cu_stream()).result()?;
+            stream.synchronize()?;
+        }
+        Ok(&mut self.graph.output)
+    }
+
+    /// Replay on a policy-chosen stream, block until complete, and return
+    /// the outputs. See [`sync_on`](GraphLaunch::sync_on).
+    pub fn sync(self) -> Result<&'g mut T, DeviceError> {
+        let stream = with_default_device_policy(|policy| policy.next_stream())??;
+        self.sync_on(&stream)
+    }
+}
+
+impl<'g, 'a, T: Send> DeviceOp for GraphLaunch<'g, 'a, T> {
     type Output = ();
 
     unsafe fn execute(self, context: &ExecutionContext) -> Result<(), DeviceError> {
         sys::cuGraphLaunch(
-            self.exec.cu_graph_exec,
+            self.graph.exec.cu_graph_exec,
             context.get_cuda_stream().cu_stream(),
         )
         .result()?;
@@ -331,9 +418,9 @@ impl DeviceOp for GraphLaunch {
     }
 }
 
-impl IntoFuture for GraphLaunch {
+impl<'g, 'a, T: Send> IntoFuture for GraphLaunch<'g, 'a, T> {
     type Output = Result<(), DeviceError>;
-    type IntoFuture = DeviceFuture<(), GraphLaunch>;
+    type IntoFuture = DeviceFuture<(), GraphLaunch<'g, 'a, T>>;
     fn into_future(self) -> Self::IntoFuture {
         match with_default_device_policy(|policy| {
             let stream = policy.next_stream()?;
@@ -430,6 +517,44 @@ impl IntoFuture for GraphLaunch {
 /// pre-allocated and passed in via borrows. No tensor created inside
 /// the scope means no tensor dropped inside the scope.
 ///
+/// ## Lifetimes make replay safe, not just capture
+///
+/// Capture-time ordering alone is not enough: the instantiated graph bakes
+/// in the *device pointers* of every recorded buffer, and a replay
+/// dereferences them long after `record`'s borrows have ended. The
+/// remaining obligations are carried by [`CudaGraph<'a, T>`]'s lifetime:
+///
+/// 1. **No use-after-free.** `scope`'s closure is bound `F: 'a`, so every
+///    buffer it captures outlives `'a`; the returned graph keeps `'a` alive
+///    at each of its uses. Dropping or moving a captured buffer while the
+///    graph can still replay is a borrow-check error.
+/// 2. **No aliased writes between replays.** The same borrow covers host or
+///    other-stream writes: taking `&mut` to a captured buffer while the
+///    graph lives is rejected.
+/// 3. **Nothing touches the buffers during a replay.** A replay borrows the
+///    graph mutably ([`CudaGraph::launch`] takes `&mut self`), so no other
+///    graph operation — including output reads — can overlap it.
+/// 4. **Outputs only after completion.** The closure's return value is held
+///    by the graph and handed out only through paths that synchronize
+///    first: [`GraphLaunch::sync`]/[`sync_on`](GraphLaunch::sync_on),
+///    [`CudaGraph::outputs`], [`CudaGraph::into_inner`].
+///
+/// Point 1 covers buffers the closure captures by reference. A buffer the
+/// closure *owns* (a pre-allocated tensor moved into a `move` closure) must
+/// be returned as part of `T`: the graph then owns it and the same
+/// guarantees apply. An owned buffer that is recorded against and then
+/// dropped when the closure returns is freed while the graph still holds
+/// its device address — the borrow checker cannot see that relationship,
+/// and a later replay is a use-after-free.
+///
+/// One boundary remains the caller's: a replay awaited through the
+/// `DeviceOp` composition path and *abandoned before completion* (the
+/// future dropped mid-flight) leaves GPU work running that the borrow
+/// system can no longer see once the graph itself is dropped. The shared
+/// exec handle keeps the graph objects alive for a pending launch, but the
+/// captured buffers' liveness then rests on the general stream-ordering
+/// contract of [`DeviceOp`], as with every other operation in this crate.
+///
 /// # What happens if you call other operations inside the closure
 ///
 /// While `s.record(op)` is the intended API, other operations inside
@@ -478,16 +603,25 @@ impl Scope {
     }
 }
 
-impl CudaGraph<()> {
+impl<'a, T: Send> CudaGraph<'a, T> {
     /// Capture a CUDA graph using a scoped closure.
     ///
     /// The closure receives a [`Scope`] for recording operations. Each
     /// `s.record(op)` records a graph node and consumes the op, releasing
-    /// borrows. A buffer written by one `record` call can be read by the
-    /// next.
+    /// borrows *within the scope*. A buffer written by one `record` call can
+    /// be read by the next.
     ///
-    /// Pre-allocate all buffers before calling this method — the graph
-    /// replays into the same device pointers.
+    /// The closure's return value `T` becomes the graph's output handle —
+    /// typically the recovered output buffers of the last `record` (or `()`
+    /// when the caller keeps its own handles). It is only reachable after a
+    /// completed replay; see [`CudaGraph`].
+    ///
+    /// The `F: 'a` bound is the lifetime half of the safety argument: every
+    /// reference the closure captures must outlive `'a`, and the returned
+    /// `CudaGraph<'a, T>` keeps `'a` alive for as long as the graph is used
+    /// — so the buffers whose device pointers the graph baked in can be
+    /// neither dropped, moved, nor mutably reborrowed while a replay can
+    /// still happen. Pre-allocate all buffers before calling this method.
     ///
     /// # Example
     ///
@@ -495,19 +629,21 @@ impl CudaGraph<()> {
     /// let mut output = api::zeros::<f32>(&[d]).sync_on(&stream)?;
     /// let weights = api::ones::<f32>(&[d]).sync_on(&stream)?;
     ///
-    /// let graph = CudaGraph::scope(&stream, |s| {
+    /// let mut graph = CudaGraph::scope(&stream, |s| {
     ///     s.record(kernel1((&mut output).partition([128]), &weights))?;
     ///     s.record(kernel2((&mut output).partition([64]), &weights))?;
     ///     Ok(())
     /// })?;
     ///
     /// graph.launch().sync_on(&stream)?;
+    /// // `output` is borrowed until `graph`'s last use.
     /// ```
     ///
-    /// See [`Scope`] for the safety proof and edge-case behavior.
+    /// See [`Scope`] for the capture-time safety proof and edge-case
+    /// behavior.
     pub fn scope<F>(stream: &Arc<Stream>, f: F) -> Result<Self, DeviceError>
     where
-        F: FnOnce(&Scope) -> Result<(), DeviceError>,
+        F: FnOnce(&Scope) -> Result<T, DeviceError> + 'a,
     {
         // The guard releases the lock on return and on unwind; `capture_on`
         // ends the capture itself before a panic propagates.
@@ -516,11 +652,12 @@ impl CudaGraph<()> {
             ctx: ExecutionContext::new(stream.clone()),
             _not_send: std::marker::PhantomData,
         };
-        let ((), exec) = capture_on(stream, || f(&scope))?;
+        let (output, exec) = capture_on(stream, || f(&scope))?;
         Ok(CudaGraph {
             stream: stream.clone(),
             exec,
-            output: Some(()),
+            output,
+            _captured: std::marker::PhantomData,
         })
     }
 }
@@ -540,18 +677,17 @@ impl CudaGraph<()> {
 /// use cuda_async::prelude::*;
 ///
 /// struct MyModel {
-///     graph: CudaGraph<Arc<Tensor<f32>>>,
+///     // The captured op owns `Arc` clones of its buffers: `'static`.
+///     graph: CudaGraph<'static, Arc<Tensor<f32>>>,
 ///     h_input: Tensor<f32>,
-///     output: Arc<Tensor<f32>>,
 /// }
 ///
 /// impl MyModel {
 ///     fn new(stream: Arc<Stream>) -> Result<Self, DeviceError> {
 ///         let h_input = api::zeros(&[d]).sync_on(&stream)?;
 ///         let forward_op = build_forward(h_input.clone().into());
-///         let mut graph = forward_op.graph_on(stream)?;
-///         let output = graph.take_output().unwrap();
-///         Ok(Self { graph, h_input, output })
+///         let graph = forward_op.graph_on(stream)?;
+///         Ok(Self { graph, h_input })
 ///     }
 /// }
 ///
@@ -565,8 +701,8 @@ impl CudaGraph<()> {
 ///         self.graph.update(
 ///             api::memcpy(&mut self.h_input, &input)
 ///         )?;
-///         self.graph.launch().sync_on(self.graph.stream())?;
-///         Ok(self.output.clone())
+///         let output = self.graph.replay()?;
+///         Ok(output.clone())
 ///     }
 /// }
 /// ```
