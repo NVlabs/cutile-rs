@@ -1,0 +1,12 @@
+error[E0499]: cannot borrow `out` as mutable more than once at a time
+  --> tests/ui/graph_captured_buffer_no_mut_alias.rs:17:17
+   |
+13 |     let mut graph = CudaGraph::scope(&stream, |s| {
+   |                                               --- first mutable borrow occurs here
+14 |         s.record(api::memcpy(&mut out, &a))?;
+   |                                   --- first borrow occurs due to use of `out` in closure
+...
+17 |     api::memcpy(&mut out, &a).sync_on(&stream)?;
+   |                 ^^^^^^^^ second mutable borrow occurs here
+18 |     graph.launch().sync()?;
+   |     ----- first borrow later used here
