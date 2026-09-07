@@ -50,8 +50,7 @@ mod my_module {
         let w_part: Partition<f32, { [BLOCK_SIZE] }> = w.partition(shape![BLOCK_SIZE]);
         // TODO (hme): This is a safety leak. If this partition goes out of scope, we can partition out again,
         //  and any memory ops will not succeed tokens corresponding to write operations (since those will also be dropped).
-        let mut out_part: PartitionMut<f32, { [1, BLOCK_SIZE] }> =
-            unsafe { out.partition_mut(tile_shape) };
+        let mut out_part: PartitionMut<f32, { [1, BLOCK_SIZE] }> = out.partition_mut(tile_shape);
         for j in 0i32..num_tiles {
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
             let tw: Tile<f32, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
