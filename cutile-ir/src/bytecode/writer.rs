@@ -185,6 +185,12 @@ impl StringManager {
         }
     }
 
+    /// Strings in index order (`get_or_insert` assigns sequential indices).
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> Vec<String> {
+        self.map.keys().cloned().collect()
+    }
+
     pub(super) fn get_or_insert(&mut self, s: &str) -> u64 {
         if let Some(&idx) = self.map.get(s) {
             return idx;
@@ -247,6 +253,12 @@ impl TypeManager {
         }
     }
 
+    /// The ordered type list (dependency-first), i.e. the on-wire order.
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> &[Type] {
+        &self.list
+    }
+
     pub(super) fn get_or_insert(&mut self, ty: &Type) -> u64 {
         if let Some(&idx) = self.map.get(ty) {
             return idx;
@@ -297,7 +309,7 @@ impl TypeManager {
     }
 }
 
-fn serialize_type(
+pub(super) fn serialize_type(
     ty: &Type,
     types: &mut TypeManager,
     w: &mut EncodingWriter,
@@ -464,6 +476,12 @@ impl ConstantManager {
         let idx = self.entries.len() as u64;
         self.entries.push(data);
         idx
+    }
+
+    /// Constant-pool entries in index order.
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> &[Vec<u8>] {
+        &self.entries
     }
 }
 
