@@ -88,8 +88,8 @@ https://developer.nvidia.com/cuda-downloads
 Set `CUDA_TOOLKIT_PATH` (or `CUDA_HOME`, consulted second) to your CUDA 13.3
 install directory for a reproducible setup. If neither is set, cuTile
 searches standard CUDA 13.3/13.2 install locations such as
-`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`, and
-`/usr/local/cuda`.
+`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`,
+`/usr/local/cuda`, and `/opt/cuda`.
 
 Example `.cargo/config.toml`:
 ```toml
