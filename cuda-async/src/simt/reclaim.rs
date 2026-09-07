@@ -36,7 +36,6 @@
 //! [`DeviceFuture`]: crate::simt::device_future::DeviceFuture
 
 use cuda_core::{CudaEvent, DriverError};
-use std::io::{self, Write};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -169,12 +168,10 @@ pub fn drain() -> usize {
                 reclaimed += 1;
             }
             Err(error) => {
-                let mut stderr = io::stderr().lock();
-                let _ = writeln!(
-                    stderr,
+                crate::leak::report_leak(format_args!(
                     "cuda-async: leaking a cancelled in-flight result; the driver \
                      could not prove the GPU work finished: {error}"
-                );
+                ));
                 mem::forget(entry.payload);
             }
         }
@@ -297,12 +294,15 @@ mod tests {
             Box::new(CountDrop(Arc::clone(&drops))),
         );
 
+        let mut capture = crate::leak::capture::start();
         let reclaimed = drain();
+        let reports = capture.take();
         assert_eq!(reclaimed, 0);
         assert_eq!(
             drops.load(Ordering::Relaxed),
             0,
             "an unprovable gate must leak the payload, never drop it early"
         );
+        assert_eq!(reports.len(), 1, "the leak must be reported: {reports:?}");
     }
 }
