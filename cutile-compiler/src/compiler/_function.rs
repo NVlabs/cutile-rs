@@ -631,7 +631,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // in-kernel code motion (see CheckOptimizations::device_debug for
         // why discharge and launch relocation are untouched).
         let mut check_opts = crate::check_optimizations::CheckOptimizations::from_env();
-        if compile_options.device_debug {
+        if compile_options.full_device_debug() {
             check_opts.hoist_to_preheaders = false;
         }
         Ok(CUDATileFunctionCompiler {

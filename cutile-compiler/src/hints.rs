@@ -87,6 +87,15 @@ fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
         .map_err(|e| JITError::Generic(format!("Failed to parse int hint: {e}")))
 }
 
+/// Optimization mode requested from the Tile IR backend.
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+pub enum Optimization {
+    /// Compile at the specified optimization level.
+    Level(u8),
+    /// Emit full device debug information at the backend-required level 0.
+    FullDebug,
+}
+
 /// Runtime compile options for kernel JIT compilation.
 ///
 /// These options control kernel-level compilation hints that can vary between
@@ -98,16 +107,11 @@ pub struct CompileOptions {
     pub num_cta_in_cga: Option<i32>,
     pub max_divisibility: Option<i32>,
     pub num_worker_warps_per_cta: Option<i32>,
-    /// `tileiras` optimization level (`--opt-level`). `None` means the
-    /// default: 3, or 0 when `device_debug` is set.
-    pub opt_level: Option<u8>,
-    /// Compile for debugging (`tileiras --device-debug`): the frontend stops
-    /// hoisting bounds checks out of loops, so every check that runs on the
-    /// device sits at the source line that wrote it, and the backend
-    /// generates debug information. Checks the compiler discharged by proof
-    /// or moved to launch time never reach device code in any mode. Implies
-    /// `--opt-level 0` unless `opt_level` is set explicitly.
-    pub device_debug: bool,
+    /// Tile IR optimization mode. `None` means [`Optimization::Level`] 3.
+    /// Full debug passes `--device-debug`, owns its required level 0, and
+    /// prevents the frontend from hoisting device checks away from their
+    /// source lines.
+    pub optimization: Option<Optimization>,
     /// Emit line-number information (`tileiras --lineinfo`) for profiler
     /// correlation, without the rest of the debug contract.
     pub lineinfo: bool,
@@ -142,13 +146,26 @@ impl CompileOptions {
     }
 
     pub fn opt_level(mut self, opt_level: u8) -> Self {
-        self.opt_level = Some(opt_level);
+        self.optimization = Some(Optimization::Level(opt_level));
+        self
+    }
+
+    pub fn optimization(mut self, optimization: Optimization) -> Self {
+        self.optimization = Some(optimization);
         self
     }
 
     pub fn device_debug(mut self, device_debug: bool) -> Self {
-        self.device_debug = device_debug;
+        if device_debug {
+            self.optimization = Some(Optimization::FullDebug);
+        } else if matches!(self.optimization, Some(Optimization::FullDebug)) {
+            self.optimization = None;
+        }
         self
+    }
+
+    pub(crate) fn full_device_debug(&self) -> bool {
+        matches!(self.optimization, Some(Optimization::FullDebug))
     }
 
     pub fn lineinfo(mut self, lineinfo: bool) -> Self {

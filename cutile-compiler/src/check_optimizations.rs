@@ -103,34 +103,42 @@ impl CheckOptimizations {
 mod tests {
     use super::*;
     use crate::cuda_tile_runtime_utils::{TileirasOptions, DEFAULT_OPT_LEVEL};
-    use crate::hints::CompileOptions;
+    use crate::hints::{CompileOptions, Optimization};
 
     #[test]
-    fn device_debug_implies_opt_zero_unless_explicit() {
+    fn optimization_mode_owns_opt_level_and_device_debug() {
         let debug =
-            TileirasOptions::from_compile_options(&CompileOptions::new().device_debug(true));
-        assert_eq!(debug.opt_level, 0);
-        assert!(debug.device_debug);
+            TileirasOptions::from_compile_options(&CompileOptions::new().device_debug(true))
+                .unwrap();
+        assert_eq!(debug.opt_level(), 0);
+        assert_eq!(debug.optimization, Optimization::FullDebug);
 
         let explicit = TileirasOptions::from_compile_options(
             &CompileOptions::new().device_debug(true).opt_level(2),
-        );
-        assert_eq!(explicit.opt_level, 2, "an explicit level wins");
+        )
+        .unwrap();
+        assert_eq!(explicit.optimization, Optimization::Level(2));
 
-        let release = TileirasOptions::from_compile_options(&CompileOptions::new());
-        assert_eq!(release.opt_level, DEFAULT_OPT_LEVEL);
+        let release = TileirasOptions::from_compile_options(&CompileOptions::new()).unwrap();
+        assert_eq!(release.opt_level(), DEFAULT_OPT_LEVEL);
         assert_eq!(release, TileirasOptions::default());
+    }
+
+    #[test]
+    fn invalid_optimization_level_is_an_error() {
+        let err =
+            TileirasOptions::from_compile_options(&CompileOptions::new().opt_level(4)).unwrap_err();
+        assert!(err.to_string().contains("expected 0 through 3"));
     }
 
     #[test]
     fn flags_byte_is_injective_over_the_flag_combinations() {
         let mut seen = std::collections::BTreeSet::new();
-        for dd in [false, true] {
+        for optimization in [Optimization::Level(3), Optimization::FullDebug] {
             for li in [false, true] {
                 for sm in [false, true] {
                     let o = TileirasOptions {
-                        opt_level: 3,
-                        device_debug: dd,
+                        optimization,
                         lineinfo: li,
                         sanitize_memcheck: sm,
                     };
