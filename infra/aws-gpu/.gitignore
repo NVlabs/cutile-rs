@@ -1,0 +1,19 @@
+# NEVER commit anything in this folder that contains secret material.
+
+# Real tfvars (the .example is fine).
+terraform.tfvars
+terraform.tfvars.json
+
+# Terraform state — may contain sensitive output values.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Generated SSH private keys.
+.ssh/
+*.pem
+
+# Saved plans.
+tfplan
+*.tfplan
