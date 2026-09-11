@@ -1742,13 +1742,75 @@ pub trait KernelOutputStored<T: DType>: Send {
 /// | Input | Stored | Returned |
 /// |---|---|---|
 /// | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` | `Partition<Tensor<T>>` |
-/// | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` | `Partition<&'a mut Tensor<T>>` |
-/// | `MappedLaunchPartition<Partition<..>>` | `MappedLaunchPartition<Partition<..>>` | `Partition<..>` |
+/// | `Partition<&'a mut Tensor<T>>` | partition + storage keepalive | `Partition<&'a mut Tensor<T>>` |
+/// | `MappedLaunchPartition<Partition<Tensor<T>>>` | `MappedLaunchPartition<Partition<Tensor<T>>>` | `Partition<Tensor<T>>` |
+/// | `MappedLaunchPartition<Partition<&'a mut Tensor<T>>>` | mapped partition + storage keepalive | `Partition<&'a mut Tensor<T>>` |
 pub trait KernelOutput<T: DType>: Send + Sized {
     type Stored: KernelOutputStored<T>;
     type Returned: Send;
     fn prepare(self) -> Self::Stored;
     fn recover(stored: Self::Stored) -> Self::Returned;
+}
+
+/// Stored wrapper that keeps a borrowed tensor's backing allocation alive.
+///
+/// Borrowed kernel inputs and outputs are safe to pass through
+/// `DeviceFuture::Drop`, which waits for in-flight work before releasing them.
+/// Safe Rust can still bypass destructors with `mem::forget`, so borrowed
+/// stored values also carry a cloned storage handle. Forgetting the future then
+/// leaks the storage instead of freeing memory that submitted GPU work may still
+/// read or write.
+#[doc(hidden)]
+pub struct StorageKeepalive<T> {
+    value: T,
+    _storage_keepalive: Arc<Storage>,
+}
+
+impl<T> StorageKeepalive<T> {
+    fn new(value: T, storage: Arc<Storage>) -> Self {
+        Self {
+            value,
+            _storage_keepalive: storage,
+        }
+    }
+}
+
+impl<T: DType, K: KernelOutputStored<T>> KernelOutputStored<T> for StorageKeepalive<K> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        self.value.push_kernel_args(launcher);
+    }
+
+    fn grid(&self) -> Result<(u32, u32, u32), Error> {
+        self.value.grid()
+    }
+
+    fn grid_bound(&self) -> Result<GridBound, Error> {
+        self.value.grid_bound()
+    }
+
+    fn map_shape_as_i32(&self) -> Option<Vec<i32>> {
+        self.value.map_shape_as_i32()
+    }
+
+    fn dtype_str(&self) -> &'static str {
+        self.value.dtype_str()
+    }
+
+    fn partition_shape_as_i32(&self) -> Vec<i32> {
+        self.value.partition_shape_as_i32()
+    }
+
+    fn strides_hint(&self) -> Vec<i32> {
+        self.value.strides_hint()
+    }
+
+    fn spec(&self) -> &SpecializationBits {
+        self.value.spec()
+    }
+
+    fn shape_as_i32(&self) -> Vec<i32> {
+        self.value.shape_as_i32()
+    }
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
@@ -1935,13 +1997,14 @@ impl<T: DType> KernelOutput<T> for Partition<Tensor<T>> {
 }
 
 impl<'a, T: DType> KernelOutput<T> for Partition<&'a mut Tensor<T>> {
-    type Stored = Partition<&'a mut Tensor<T>>;
+    type Stored = StorageKeepalive<Partition<&'a mut Tensor<T>>>;
     type Returned = Partition<&'a mut Tensor<T>>;
     fn prepare(self) -> Self::Stored {
-        self
+        let storage = self.object.storage.clone();
+        StorageKeepalive::new(self, storage)
     }
     fn recover(stored: Self::Stored) -> Self::Returned {
-        stored
+        stored.value
     }
 }
 
@@ -1959,15 +2022,16 @@ impl<T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<Tensor<T>>> {
 }
 
 impl<'a, T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<&'a mut Tensor<T>>> {
-    type Stored = MappedLaunchPartition<Partition<&'a mut Tensor<T>>>;
+    type Stored = StorageKeepalive<MappedLaunchPartition<Partition<&'a mut Tensor<T>>>>;
     type Returned = Partition<&'a mut Tensor<T>>;
 
     fn prepare(self) -> Self::Stored {
-        self
+        let storage = self.partition.object.storage.clone();
+        StorageKeepalive::new(self, storage)
     }
 
     fn recover(stored: Self::Stored) -> Self::Returned {
-        stored.partition
+        stored.value.partition
     }
 }
 
@@ -1978,8 +2042,8 @@ impl<'a, T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<&'a mut T
 
 /// How a stored kernel input pushes its arguments to the launcher.
 ///
-/// Implemented for `Arc<Tensor<T>>` and `&Tensor<T>`. Both push the same
-/// data: device pointer, shape, and strides.
+/// Implemented for owned and borrowed tensor inputs. Borrowed stored forms
+/// keep the backing storage alive while submitted GPU work may still use it.
 pub trait KernelInputStored: Send {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn shape(&self) -> &[i32];
@@ -1995,7 +2059,7 @@ pub trait KernelInputStored: Send {
 /// |---|---|---|---|
 /// | `Tensor<T>` | `Arc<Tensor<T>>` | `Tensor<T>` | Yes |
 /// | `Arc<Tensor<T>>` | `Arc<Tensor<T>>` | `Arc<Tensor<T>>` | Yes |
-/// | `&'a Tensor<T>` | `&'a Tensor<T>` | `&'a Tensor<T>` | No |
+/// | `&'a Tensor<T>` | borrow + storage keepalive | `&'a Tensor<T>` | No |
 pub trait KernelInput<T: DType>: Send + Sized {
     type Stored: KernelInputStored;
     type Returned: Send;
@@ -2028,6 +2092,28 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
     }
     fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
+    }
+}
+
+impl<I: KernelInputStored> KernelInputStored for StorageKeepalive<I> {
+    fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
+        self.value.push_kernel_args(launcher);
+    }
+
+    fn shape(&self) -> &[i32] {
+        self.value.shape()
+    }
+
+    fn strides(&self) -> &[i32] {
+        self.value.strides()
+    }
+
+    fn spec(&self) -> &SpecializationBits {
+        self.value.spec()
+    }
+
+    fn dtype_str(&self) -> &'static str {
+        self.value.dtype_str()
     }
 }
 
@@ -2082,13 +2168,13 @@ impl<T: DType> KernelInput<T> for Arc<Tensor<T>> {
 }
 
 impl<'a, T: DType + Sync> KernelInput<T> for &'a Tensor<T> {
-    type Stored = &'a Tensor<T>;
+    type Stored = StorageKeepalive<&'a Tensor<T>>;
     type Returned = &'a Tensor<T>;
-    fn prepare(self) -> &'a Tensor<T> {
-        self
+    fn prepare(self) -> Self::Stored {
+        StorageKeepalive::new(self, self.storage.clone())
     }
-    fn recover(stored: &'a Tensor<T>) -> &'a Tensor<T> {
-        stored
+    fn recover(stored: Self::Stored) -> &'a Tensor<T> {
+        stored.value
     }
 }
 
@@ -2123,13 +2209,13 @@ impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
 }
 
 impl<'a, T: DType + Sync> KernelInput<T> for &'a TensorView<'a, T> {
-    type Stored = &'a TensorView<'a, T>;
+    type Stored = StorageKeepalive<&'a TensorView<'a, T>>;
     type Returned = &'a TensorView<'a, T>;
     fn prepare(self) -> Self::Stored {
-        self
+        StorageKeepalive::new(self, self.base.storage.clone())
     }
     fn recover(stored: Self::Stored) -> Self::Returned {
-        stored
+        stored.value
     }
 }
 
@@ -2208,6 +2294,70 @@ mod tests {
     // allocates nothing and its device pointer is never read on these paths.
     fn meta_f32(shape: &[i32]) -> Tensor<f32> {
         Tensor::<f32>::from_meta(shape.to_vec(), 0)
+    }
+
+    #[test]
+    fn borrowed_kernel_input_keeps_storage_alive() {
+        let t = meta_f32(&[8]);
+        assert_eq!(Arc::strong_count(&t.storage), 1);
+
+        let stored = <&Tensor<f32> as KernelInput<f32>>::prepare(&t);
+        assert_eq!(Arc::strong_count(&t.storage), 2);
+
+        let recovered = <&Tensor<f32> as KernelInput<f32>>::recover(stored);
+        assert!(std::ptr::eq(recovered, &t));
+        assert_eq!(Arc::strong_count(&t.storage), 1);
+    }
+
+    #[test]
+    fn borrowed_tensor_view_input_keeps_base_storage_alive() {
+        let t = meta_f32(&[8]);
+        let view = t.view(&[2, 4]).unwrap();
+        assert_eq!(Arc::strong_count(&t.storage), 1);
+
+        let stored = <&TensorView<'_, f32> as KernelInput<f32>>::prepare(&view);
+        assert_eq!(Arc::strong_count(&t.storage), 2);
+
+        let recovered = <&TensorView<'_, f32> as KernelInput<f32>>::recover(stored);
+        assert!(std::ptr::eq(recovered, &view));
+        assert_eq!(Arc::strong_count(&t.storage), 1);
+    }
+
+    #[test]
+    fn borrowed_kernel_output_keeps_storage_alive() {
+        let mut t = meta_f32(&[8]);
+        let partition = (&mut t).partition([4]);
+        let storage = partition.object.storage.clone();
+        assert_eq!(Arc::strong_count(&storage), 2);
+
+        let stored = <Partition<&mut Tensor<f32>> as KernelOutput<f32>>::prepare(partition);
+        assert_eq!(Arc::strong_count(&storage), 3);
+
+        let recovered = <Partition<&mut Tensor<f32>> as KernelOutput<f32>>::recover(stored);
+        assert_eq!(Arc::strong_count(&storage), 2);
+        drop(recovered);
+        assert_eq!(Arc::strong_count(&storage), 2);
+    }
+
+    #[test]
+    fn borrowed_mapped_kernel_output_keeps_storage_alive() {
+        let mut t = meta_f32(&[8]);
+        let mapped = (&mut t).partition([4]).map([1], 2);
+        let storage = mapped.partition.object.storage.clone();
+        assert_eq!(Arc::strong_count(&storage), 2);
+
+        let stored =
+            <MappedLaunchPartition<Partition<&mut Tensor<f32>>> as KernelOutput<f32>>::prepare(
+                mapped,
+            );
+        assert_eq!(Arc::strong_count(&storage), 3);
+
+        let recovered =
+            <MappedLaunchPartition<Partition<&mut Tensor<f32>>> as KernelOutput<f32>>::recover(
+                stored,
+            );
+        assert_eq!(recovered.grid().unwrap(), (2, 1, 1));
+        assert_eq!(Arc::strong_count(&storage), 2);
     }
 
     #[test]
