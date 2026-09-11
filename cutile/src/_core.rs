@@ -152,7 +152,7 @@ pub mod tma {
 
 /// Latency hint (Tile IR `optimization_hints.latency`). Single value applied
 /// across SM archs; per-arch dictionary form is deferred.
-pub struct Latency<const CYCLES: u32>;
+pub struct Latency<const CYCLES: i32>;
 
 /// Integer-overflow behavior. Mirrors Tile IR `IntegerOverflow`.
 pub mod overflow {
@@ -2873,7 +2873,7 @@ pub mod core {
         const S: [i32; N],
         O: ordering::LoadMode,
         Sc: scope::Mode,
-        const CYCLES: u32,
+        const CYCLES: i32,
     >(
         source: PointerTile<P, S>,
         memory_ordering: O,
@@ -2903,7 +2903,7 @@ pub mod core {
         const S: [i32; N],
         O: ordering::StoreMode,
         Sc: scope::Mode,
-        const CYCLES: u32,
+        const CYCLES: i32,
     >(
         destination: PointerTile<P, S>,
         value: Tile<E, S>,
