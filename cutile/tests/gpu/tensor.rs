@@ -48,3 +48,14 @@ fn from_raw_parts_rejects_shape_storage_mismatch() {
         )
     };
 }
+
+/// Regression test for #252: owned tensor `to_host_vec().sync_on(&stream)` must not race
+/// with asynchronous deallocation on the deallocator stream.
+#[test]
+fn to_host_vec_owned_sync_on_stream_order() {
+    let device = cuda_core::Device::new(0).expect("Failed to create device");
+    let stream = device.new_stream().expect("Failed to create stream");
+    let tensor = api::zeros::<u8>(&[1]).sync_on(&stream).expect("zeros failed");
+    let host = tensor.to_host_vec().sync_on(&stream).expect("to_host_vec failed");
+    assert_eq!(host, vec![0]);
+}

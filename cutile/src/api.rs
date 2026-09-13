@@ -342,11 +342,14 @@ impl<T: DType> DeviceOp for CopyDeviceToHostVec<T> {
             unsafe {
                 memcpy_dtoh_async(host.as_mut_ptr(), cu_deviceptr, size, ctx.get_cuda_stream())
             }?;
+            // Synchronize the execution stream before dropping `self.tensor` (owned by `self`),
+            // ensuring the device read finishes before any asynchronous deallocation is
+            // enqueued on the deallocator stream (#252).
+            unsafe { ctx.get_cuda_stream().synchronize() }?;
         }
-        // SAFETY: `cuMemcpyDtoHAsync` into pageable host memory (a `Vec`'s
-        // heap buffer is pageable) returns only once the copy has completed,
-        // so all `size` elements are initialized here, and `size` is exactly
-        // the capacity reserved above.
+        // SAFETY: `cuMemcpyDtoHAsync` into pageable host memory followed by stream
+        // synchronization ensures the copy has completed, so all `size` elements
+        // are initialized here, and `size` is exactly the capacity reserved above.
         unsafe { host.set_len(size) };
         Ok(host)
     }
