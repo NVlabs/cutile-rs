@@ -6,7 +6,6 @@
 //! CPU integration tests for error message quality, formatting consistency,
 //! and source-location utilities that do not need CUDA runtime access.
 
-use cutile;
 use cutile_compiler::error::JITError;
 
 mod common;

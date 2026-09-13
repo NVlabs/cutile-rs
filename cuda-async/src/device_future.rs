@@ -22,17 +22,18 @@
 //! in flight therefore waits for the stream to drain before dropping its
 //! undelivered result (the owned output — buffers, DMA targets — plus the
 //! execution context's stream and pool handles). If the wait cannot be
-//! performed (a faulted context, a stream mid-capture) the result is leaked
-//! with a message on stderr: releasing memory the device may still write to
-//! is the worse failure. See [`DeviceFuture`]'s type docs for why the wait
-//! is synchronous.
+//! performed (a faulted context, a stream mid-capture) the result is leaked:
+//! releasing memory the device may still write to is the worse failure. The
+//! leak is reported on stderr unless the future already resolved with the
+//! stream's fault — then the caller has the error and the leak is its
+//! documented consequence. See [`DeviceFuture`]'s type docs for why the
+//! wait is synchronous.
 
 use crate::device_operation::{DeviceOp, ExecutionContext};
 use crate::error::DeviceError;
 use cuda_core::{DriverError, Stream};
 use futures::task::AtomicWaker;
 use std::future::Future;
-use std::io::{self, Write};
 use std::mem::{self, MaybeUninit};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,7 +59,7 @@ pub enum DeviceFutureState {
 }
 
 /// Shared state between a CUDA stream callback and the async waker.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StreamCallbackState {
     pub(crate) waker: AtomicWaker,
     pub(crate) complete: AtomicBool,
@@ -67,10 +68,7 @@ pub struct StreamCallbackState {
 impl StreamCallbackState {
     /// Creates a new callback state with the completion flag unset.
     pub fn new() -> Self {
-        Self {
-            waker: AtomicWaker::new(),
-            complete: AtomicBool::new(false),
-        }
+        Self::default()
     }
     /// Marks the operation as complete and wakes the associated task.
     ///
@@ -143,7 +141,8 @@ pub(crate) fn probe_stream(stream: &Stream) -> StreamHealth {
 /// result*: the operation's output, which owns the buffers the GPU is still
 /// writing (a tensor, a `Vec<T>` DMA target), or borrows the caller's. The
 /// drop waits for the stream to drain and only then drops that result. On a
-/// wait failure the result is leaked, loudly.
+/// wait failure the result is leaked — loudly, unless the future already
+/// delivered the stream's fault to its caller.
 ///
 /// The wait is synchronous by necessity, not preference. The alternative —
 /// parking the result behind a CUDA event and dropping it later, once
@@ -165,6 +164,10 @@ pub struct DeviceFuture<T: Send, DO: DeviceOp<Output = T>> {
     pub(crate) error: Option<DeviceError>,
     pub(crate) state: DeviceFutureState,
     pub(crate) callback_state: Option<Arc<StreamCallbackState>>,
+    /// Set when `poll` resolved with the stream's fault: the caller has the
+    /// error, so the drop-time leak of the stored result is the documented
+    /// consequence of that fault, not news worth reporting again.
+    pub(crate) fault_delivered: bool,
 }
 
 impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
@@ -184,6 +187,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
             error: None,
             state: DeviceFutureState::Idle,
             callback_state: None,
+            fault_delivered: false,
         }
     }
 
@@ -200,6 +204,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
             callback_state: None,
             result: None,
             error: Some(error),
+            fault_delivered: false,
         }
     }
 
@@ -340,12 +345,18 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
             return;
         };
         if let Err(error) = wait() {
-            let mut stderr = io::stderr().lock();
-            let _ = writeln!(
-                stderr,
+            if self.fault_delivered {
+                // The caller already received this stream's fault from
+                // `poll`; the leak is its documented consequence. A test
+                // (or program) that handled the error correctly should not
+                // see an error report for it.
+                mem::forget(result);
+                return;
+            }
+            crate::leak::report_leak(format_args!(
                 "cuda-async: leaking the result of a dropped in-flight future; the driver \
                  could not prove its GPU work finished: {error}"
-            );
+            ));
             mem::forget(result);
             return;
         }
@@ -368,6 +379,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> Default for DeviceFuture<T, DO> {
             error: None,
             state: DeviceFutureState::Idle,
             callback_state: None,
+            fault_delivered: false,
         }
     }
 }
@@ -464,8 +476,10 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                     Ok(false) => {}
                     Err(e) => {
                         // The result stays stored; `Drop` decides how to
-                        // release it (it will leak loudly on a dead context).
+                        // release it (it will leak, quietly, on a dead
+                        // context — the caller receives the fault here).
                         self.state = DeviceFutureState::Complete;
+                        self.fault_delivered = true;
                         return Poll::Ready(Err(DeviceError::Driver(e)));
                     }
                 }
@@ -509,9 +523,10 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                 };
                 match health {
                     StreamHealth::Faulted(e) => {
-                        // The result stays stored for `Drop` (which leaks it
-                        // loudly on a dead context).
+                        // The result stays stored for `Drop` (which leaks it,
+                        // quietly — the caller receives the fault here).
                         self.state = DeviceFutureState::Complete;
+                        self.fault_delivered = true;
                         return Poll::Ready(Err(DeviceError::Driver(e)));
                     }
                     StreamHealth::Idle => {
@@ -592,6 +607,7 @@ mod release_tests {
             error: None,
             state,
             callback_state: None,
+            fault_delivered: false,
         }
     }
 
@@ -623,10 +639,42 @@ mod release_tests {
             Some(CountDrop(Arc::clone(&drops))),
         );
 
+        let mut capture = crate::leak::capture::start();
         future.release_in_flight_result_with(|| Err(DeviceError::Internal("boom".to_string())));
+        let reports = capture.take();
 
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(future.result.is_none());
+        assert_eq!(reports.len(), 1, "the leak must be reported: {reports:?}");
+        assert!(reports[0].contains("dropped in-flight future"));
+    }
+
+    /// A future that already delivered the stream's fault to its caller
+    /// leaks its stored result *quietly*: the caller has the error, the
+    /// leak is its documented consequence.
+    #[test]
+    fn release_leaks_quietly_after_the_fault_was_delivered() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut future = future_in_state(
+            DeviceFutureState::Complete,
+            Some(CountDrop(Arc::clone(&drops))),
+        );
+        future.fault_delivered = true;
+
+        let mut capture = crate::leak::capture::start();
+        future.release_in_flight_result_with(|| Err(DeviceError::Internal("boom".to_string())));
+        let reports = capture.take();
+
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            0,
+            "must still leak, not drop"
+        );
+        assert!(future.result.is_none());
+        assert!(
+            reports.is_empty(),
+            "a delivered fault must not be re-reported: {reports:?}"
+        );
     }
 
     /// The registration-failure shape: `execute` succeeded (work submitted,

@@ -67,9 +67,7 @@ fn reshape_op_rejects_shape_that_exceeds_storage() {
     // this returned a [32] tensor whose every later launch read 64 bytes past
     // the allocation (reproduced under compute-sanitizer).
     let result = api::ones::<f32>(&[16]).reshape(&[32]).sync();
-    let err = result
-        .err()
-        .expect("reshape to a larger element count must fail");
+    let err = result.expect_err("reshape to a larger element count must fail");
     let msg = format!("{err}");
     assert!(
         msg.contains("preserve tensor size"),
@@ -93,8 +91,7 @@ fn oversized_allocation_is_an_error_not_a_panic() {
     // 2^44 f32 elements = 64 TiB, beyond any device.
     let err = Tensor::<f32>::uninitialized(1usize << 44)
         .sync()
-        .err()
-        .expect("oversized allocation must fail");
+        .expect_err("oversized allocation must fail");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("Driver"),

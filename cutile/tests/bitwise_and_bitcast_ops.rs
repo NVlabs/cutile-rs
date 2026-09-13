@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -65,7 +64,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_bitwise_ops() -> () {
+fn compile_bitwise_ops() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "bitwise_ops_kernel",
@@ -91,7 +90,7 @@ fn compile_bitwise_ops() -> () {
 }
 
 #[test]
-fn compile_bitcast() -> () {
+fn compile_bitcast() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("bitcast_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== BITCAST MLIR ===\n{}", module_op_str);
@@ -106,7 +105,7 @@ fn compile_bitcast() -> () {
 }
 
 #[test]
-fn compile_shri_unsigned() -> () {
+fn compile_shri_unsigned() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "shri_unsigned_kernel",

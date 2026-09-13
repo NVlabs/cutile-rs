@@ -316,7 +316,7 @@ fn sequential_pingpong_park_unpark() {
             }
         }
         let host = read_device(dptr, 4096);
-        assert!(host.iter().all(|&b| b == (199 % 251) as u8));
+        assert!(host.iter().all(|&b| b == 199_u8));
     });
 }
 

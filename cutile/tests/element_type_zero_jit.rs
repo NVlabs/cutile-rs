@@ -10,7 +10,6 @@
 //! `generic_args.inst_types` lookup was added to the Expr::Path branch in
 //! `compile_cuda_tile_op.rs`.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

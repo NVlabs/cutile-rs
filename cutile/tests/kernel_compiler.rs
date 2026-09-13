@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use cutile;
 use cutile::compile_api::KernelCompiler;
 use cutile::cutile_compiler::cuda_tile_runtime_utils::{
     serialize_tile_ir_bytecode, tileiras_fingerprint, TileirasOptions,

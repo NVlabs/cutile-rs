@@ -7,7 +7,6 @@
 // annotation path deliberately.
 #![allow(deprecated)]
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

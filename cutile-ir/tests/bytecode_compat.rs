@@ -9,6 +9,9 @@
 //! `cuda-tile/test/Bytecode/`) into Rust, exercising the same IR patterns
 //! through the `OpBuilder` API and verifying bytecode roundtrip.
 
+// Float literals such as 3.14159 are arbitrary test payloads, not approximations of pi.
+#![allow(clippy::approx_constant)]
+
 use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
 use cutile_ir::bytecode::{Opcode, MAGIC};
 use cutile_ir::ir::*;
@@ -34,9 +37,10 @@ fn build_kernel(
     // Append return if not already present.
     let needs_return = {
         let block = module.block(block_id);
-        block.ops.last().map_or(true, |&last| {
-            !matches!(module.op(last).opcode, Opcode::Return)
-        })
+        block
+            .ops
+            .last()
+            .is_none_or(|&last| !matches!(module.op(last).opcode, Opcode::Return))
     };
     if needs_return {
         let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
@@ -66,9 +70,10 @@ fn add_entry(
     build_body(module, block_id, &args);
     let needs_return = {
         let block = module.block(block_id);
-        block.ops.last().map_or(true, |&last| {
-            !matches!(module.op(last).opcode, Opcode::Return)
-        })
+        block
+            .ops
+            .last()
+            .is_none_or(|&last| !matches!(module.op(last).opcode, Opcode::Return))
     };
     if needs_return {
         let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(module);
@@ -658,7 +663,7 @@ fn build_padding_test(padding: Option<PaddingValue>) -> Module {
         dim_map: vec![0],
         padding_value: padding,
     });
-    build_kernel(&name, &[ptr_ty.clone()], move |m, b, args| {
+    build_kernel(&name, std::slice::from_ref(&ptr_ty), move |m, b, args| {
         // make_tensor_view
         let (mtv, mtv_res) = OpBuilder::new(Opcode::MakeTensorView, Location::Unknown)
             .operand(args[0])
@@ -1011,10 +1016,10 @@ fn test_edge_case_many_parameters() {
             append_op(m, b, op);
             res[0]
         };
-        for i in 2..10 {
+        for &arg in args.iter().take(10).skip(2) {
             let (op, res) = OpBuilder::new(Opcode::AddI, Location::Unknown)
                 .operand(acc)
-                .operand(args[i])
+                .operand(arg)
                 .result(tile_i32())
                 .attr("overflow", Attribute::i32(0))
                 .build(m);
@@ -1510,7 +1515,7 @@ fn test_attrs_all_padding_values_combined() {
     add_entry(
         &mut module,
         "make_partition_view_op",
-        &[ptr_ty.clone()],
+        std::slice::from_ref(&ptr_ty),
         |m, b, args| {
             // make_tensor_view from pointer
             let (mtv, mtv_res) = OpBuilder::new(Opcode::MakeTensorView, Location::Unknown)

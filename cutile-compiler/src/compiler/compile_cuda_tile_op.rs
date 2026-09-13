@@ -395,16 +395,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let cuda_tile_op_params = op_attrs
             .parse_string_arr("params")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_else(std::vec::Vec::new);
         let cuda_tile_op_attribute_params = op_attrs
             .parse_string_arr("attribute_params")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_else(std::vec::Vec::new);
         let cuda_tile_op_hint_params = op_attrs
             .parse_string_arr("hint_params")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_else(std::vec::Vec::new);
         let cuda_tile_op_named_attributes = op_attrs
             .parse_string_arr("named_attributes")
-            .unwrap_or_else(|| vec![]);
+            .unwrap_or_else(std::vec::Vec::new);
         let cuda_tile_op_static_params = op_attrs
             .parse_string_arr("static_params")
             .unwrap_or_default();
@@ -694,7 +694,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         let element_type = tensor_value
             .ty
-            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .get_instantiated_rust_element_type(self.modules.primitives())
             .ok_or_else(|| {
                 self.jit_error(
                     &call_expr.args[0].span(),
@@ -948,17 +948,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let (op_id, results) = op_builder.build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -1188,7 +1181,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let elem_ty_prefix = ptr_value
             .ty
-            .get_cuda_tile_element_type_prefix(&self.modules.primitives())?;
+            .get_cuda_tile_element_type_prefix(self.modules.primitives())?;
         let atomic_mode = AtomicMode::new(mode.as_str(), elem_ty_prefix)? as i64;
 
         let mut operands = vec![ptrs, arg];
@@ -1238,17 +1231,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 )
                 .build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -1406,17 +1392,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 )
                 .build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -1539,7 +1518,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         let elem_ty_prefix = view_value
             .ty
-            .get_cuda_tile_element_type_prefix(&self.modules.primitives())?;
+            .get_cuda_tile_element_type_prefix(self.modules.primitives())?;
         let atomic_mode = AtomicMode::new(mode.as_str(), elem_ty_prefix)? as i64;
 
         let mut all_operands = vec![cuda_tile_view_value];
@@ -1838,7 +1817,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .result(tile_result_ir_ty)
                 .result(token_result_ir_ty)
                 .operands(all_operands.iter().copied())
-                .attrs(opt_hint_attrs.into_iter())
+                .attrs(opt_hint_attrs)
                 .attr(
                     "memory_ordering_semantics",
                     Attribute::i32(memory_ordering_value),
@@ -1978,7 +1957,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             OpBuilder::new(Opcode::StoreViewTko, self.ir_location(&call_expr.span()))
                 .result(token_result_ir_ty)
                 .operands(all_operands.iter().copied())
-                .attrs(opt_hint_attrs.into_iter())
+                .attrs(opt_hint_attrs)
                 .attr(
                     "memory_ordering_semantics",
                     Attribute::i32(memory_ordering_value),
@@ -2183,7 +2162,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .unwrap();
         let elem_ty_str = operand_value
             .ty
-            .get_cuda_tile_element_type(&self.modules.primitives())?
+            .get_cuda_tile_element_type(self.modules.primitives())?
             .unwrap();
         let elem_ir_ty = super::_type::make_scalar_tile_type(&elem_ty_str)
             .expect("failed to build scalar tile type for reduce element");
@@ -2265,7 +2244,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             result_value.value.unwrap()
         } else {
             let is_float =
-                super::_type::scalar_from_name(&elem_ty_str).map_or(false, |s| s.is_float());
+                super::_type::scalar_from_name(&elem_ty_str).is_some_and(|s| s.is_float());
             let add_opcode = if is_float { Opcode::AddF } else { Opcode::AddI };
             let mut add_op_builder =
                 OpBuilder::new(add_opcode, self.ir_location(&call_expr.span()))
@@ -2343,7 +2322,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             .expect("failed to convert scan result type");
         let elem_ty_str = operand_value
             .ty
-            .get_cuda_tile_element_type(&self.modules.primitives())?
+            .get_cuda_tile_element_type(self.modules.primitives())?
             .unwrap();
         let elem_ir_ty = super::_type::make_scalar_tile_type(&elem_ty_str)
             .expect("failed to build scalar tile type for scan element");
@@ -2412,7 +2391,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             result_value.value.unwrap()
         } else {
             let is_float =
-                super::_type::scalar_from_name(&elem_ty_str).map_or(false, |s| s.is_float());
+                super::_type::scalar_from_name(&elem_ty_str).is_some_and(|s| s.is_float());
             let add_opcode = if is_float { Opcode::AddF } else { Opcode::AddI };
             let mut add_op_builder =
                 OpBuilder::new(add_opcode, self.ir_location(&call_expr.span()))
@@ -2507,17 +2486,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
 
         let return_type = if return_type.is_none() {
-            match rust_function_name.as_str() {
-                "constant" => {
-                    return self.jit_error_result(
-                        &call_expr.span(),
-                        &format!(
-                            "Return type required for {}",
-                            call_expr.to_token_stream().to_string()
-                        ),
-                    )
-                }
-                _ => {}
+            if rust_function_name.as_str() == "constant" {
+                return self.jit_error_result(
+                    &call_expr.span(),
+                    &format!("Return type required for {}", call_expr.to_token_stream()),
+                );
             }
             self.derive_type(
                 module,
@@ -2601,22 +2574,21 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             compiled_args.push(op_arg.clone());
             let op_param = &cuda_tile_op_params[i];
             let mut arg_values: Vec<Value> = vec![];
-            if op_arg.value.is_some() {
-                arg_values.push(op_arg.value.clone().unwrap());
-            } else if op_arg.fields.is_some() {
-                let fields = op_arg.fields.as_ref().unwrap();
+            if let Some(value) = op_arg.value {
+                arg_values.push(value);
+            } else if let Some(fields) = &op_arg.fields {
                 let op_path = op_param.split(".").collect::<Vec<&str>>();
                 if op_path.len() <= 1 {
                     return self.jit_error_result(&call_expr.args[i].span(), &format!("Field expression required for struct param {call_expr_arg_str}, got {op_param}"));
                 }
-                let field = *op_path.last().clone().unwrap();
+                let field = *op_path.last().unwrap();
                 match fields.get(field) {
                     Some(field_value) => {
-                        if field_value.value.is_some() {
-                            arg_values.push(field_value.value.clone().unwrap());
-                        } else if field_value.values.is_some() {
-                            for value in field_value.values.as_ref().unwrap().iter() {
-                                let Some(v) = value.value.clone() else {
+                        if let Some(value) = field_value.value {
+                            arg_values.push(value);
+                        } else if let Some(values) = &field_value.values {
+                            for value in values.iter() {
+                                let Some(v) = value.value else {
                                     return self.jit_error_result(&call_expr.args[i].span(), &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"));
                                 };
                                 arg_values.push(v);
@@ -2642,9 +2614,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         )
                     }
                 }
-            } else if op_arg.values.is_some() {
-                for value in op_arg.values.as_ref().unwrap().iter() {
-                    let Some(v) = value.value.clone() else {
+            } else if let Some(values) = &op_arg.values {
+                for value in values.iter() {
+                    let Some(v) = value.value else {
                         return self.jit_error_result(
                             &call_expr.args[i].span(),
                             &format!("Unexpected nested array {op_param} for {call_expr_arg_str}"),
@@ -2668,16 +2640,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let (attr_name, attr_value) = (name_attr_split[0], name_attr_split[1]);
             if attr_name.starts_with("signedness") && attr_value == "inferred_signedness" {
                 let elem_ty = compiled_args
-                    .get(0)
+                    .first()
                     .and_then(|arg| {
                         arg.ty
-                            .get_instantiated_rust_element_type(&self.modules.primitives())
+                            .get_instantiated_rust_element_type(self.modules.primitives())
                     })
                     .expect("Failed to get element type for signedness inference.");
                 for arg in &compiled_args {
                     let arg_elem_ty = arg
                         .ty
-                        .get_instantiated_rust_element_type(&self.modules.primitives())
+                        .get_instantiated_rust_element_type(self.modules.primitives())
                         .expect("Operand types are not all equivalent.");
                     if arg_elem_ty != elem_ty {
                         return self.jit_error_result(&call_expr.span(), &format!("Element type mismatch for signedness inference: expected {elem_ty}, got {arg_elem_ty}"));
@@ -2692,7 +2664,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // Resolve static_params: ZST marker types -> tile-ir attributes.
         let resolved_static_attrs =
             resolve_static_params(cuda_tile_op_static_params, call_expr, fn_item)
-                .map_err(|e| JITError::Generic(e))?;
+                .map_err(JITError::Generic)?;
         for attr_str in &resolved_static_attrs {
             if let Some((name, val_str)) = attr_str.split_once('=') {
                 let name = name.trim();
@@ -2792,9 +2764,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 };
                                 attrs.push((
                                     attr_id.to_string(),
-                                    Attribute::DenseI32Array(
-                                        cga.iter().map(|&x| x as i32).collect(),
-                                    ),
+                                    Attribute::DenseI32Array(cga.to_vec()),
                                 ));
                             }
                             _ => {
@@ -2904,7 +2874,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     };
                     // Build a DenseElements attribute from the literal value.
                     let elem_ty_str = return_type
-                        .get_cuda_tile_element_type(&self.modules.primitives())?
+                        .get_cuda_tile_element_type(self.modules.primitives())?
                         .unwrap_or("i32".to_string());
                     let result_ir_ty = super::_type::scalar_from_name(&elem_ty_str)
                         .map(|sc| {
@@ -3006,7 +2976,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                     if let Some(bounds) = op_arg.bounds {
                         if bounds.is_exact() {
-                            attrs.push(int_attr(attr_id, bounds.start as i64));
+                            attrs.push(int_attr(attr_id, bounds.start));
                         } else {
                             return self.jit_error_result(&call_expr.args[i].span(), &format!("Integer attribute {attr_id} must be a constant value, got bounds: {bounds:?}"));
                         }
@@ -3040,7 +3010,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let mut op_builder = OpBuilder::new(opcode, self.ir_location(&call_expr.span()))
             .operands(op_operands.iter().copied())
-            .attrs(attrs.into_iter());
+            .attrs(attrs);
 
         if function_returns(fn_item) {
             match return_type.kind {
@@ -3070,7 +3040,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     if let Type::Tuple(tuple_type) = &return_type.rust_ty {
                         let mut elem_types = vec![];
                         for elem in &tuple_type.elems {
-                            let elem_ty = self.compile_type(&elem, generic_args, &HashMap::new())?;
+                            let elem_ty = self.compile_type(elem, generic_args, &HashMap::new())?;
                             if elem_ty.is_none() { return self.jit_error_result(&call_expr.span(), "failed to compile type"); }
                             let elem_ty = elem_ty.unwrap();
                             if elem_ty.tile_ir_ty.is_none() { return self.jit_error_result(&call_expr.span(), "failed to compile tile type"); }
@@ -3121,7 +3091,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             }
                         }
                         Ok(Some(TileRustValue::new_compound(values, return_type)))
-                    } else { self.jit_error_result(&call_expr.span(), &format!("operations that return multiple values must use a tuple return type, got `{}`", return_type.rust_ty.to_token_stream().to_string())) }
+                    } else { self.jit_error_result(&call_expr.span(), &format!("operations that return multiple values must use a tuple return type, got `{}`", return_type.rust_ty.to_token_stream())) }
                 }
                 Kind::Struct => self.jit_error_result(&call_expr.span(), "this operation cannot return a struct; only scalar and structured (tile) types are supported as return types"),
                 Kind::String => self.jit_error_result(&call_expr.span(), "this operation cannot return a string; only scalar and structured (tile) types are supported as return types"),
@@ -3163,7 +3133,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let Some(val) = self.compile_expression(
                                 module,
                                 block_id,
-                                &expr,
+                                expr,
                                 generic_vars,
                                 ctx,
                                 None,
@@ -3188,10 +3158,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 let re_repl = Regex::new(r"\{\}").unwrap();
                 for (i, element_ty) in element_type_instance.into_iter().enumerate() {
-                    let rust_element_type_instance = element_ty.expect(
-                        format!("failed to determine element type for print argument {}", i)
-                            .as_str(),
-                    );
+                    let rust_element_type_instance = element_ty.unwrap_or_else(|| {
+                        panic!("failed to determine element type for print argument {}", i)
+                    });
                     if !re_repl.is_match(&str_literal) {
                         return self.jit_error_result(
                             &mac.span(),
@@ -3201,7 +3170,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let Some(tile_element_type_instance) =
                         get_cuda_tile_element_type_from_rust_primitive_str(
                             &rust_element_type_instance,
-                            &self.modules.primitives(),
+                            self.modules.primitives(),
                         )
                     else {
                         return self.jit_error_result(&mac.span(), &format!("unable to determine tile element type for `{rust_element_type_instance}`"));
@@ -3486,7 +3455,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let element_type = tensor_value
             .ty
-            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .get_instantiated_rust_element_type(self.modules.primitives())
             .ok_or_else(|| {
                 self.jit_error(
                     &call_expr.args[0].span(),
@@ -3639,7 +3608,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         let element_type = tensor_value
             .ty
-            .get_instantiated_rust_element_type(&self.modules.primitives())
+            .get_instantiated_rust_element_type(self.modules.primitives())
             .ok_or_else(|| {
                 self.jit_error(
                     &call_expr.args[0].span(),
@@ -3821,7 +3790,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 true,
             )?;
 
-        let all_operands = vec![
+        let all_operands = [
             cuda_tile_view_value,
             cuda_tile_sparse_index,
             cuda_tile_dense_index,
@@ -3852,17 +3821,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         let (op_id, results) = op_builder.build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 
@@ -3985,17 +3947,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
         let (op_id, results) = op_builder.build(module);
         append_op(module, block_id, op_id);
-        let mut values = vec![];
-        values.push(TileRustValue::new_structured_type(
-            results[0],
-            tile_elem_ty,
-            None,
-        ));
-        values.push(TileRustValue::new_primitive(
-            results[1],
-            token_elem_ty,
-            None,
-        ));
+        let values = vec![
+            TileRustValue::new_structured_type(results[0], tile_elem_ty, None),
+            TileRustValue::new_primitive(results[1], token_elem_ty, None),
+        ];
         Ok(Some(TileRustValue::new_compound(values, return_type_outer)))
     }
 }

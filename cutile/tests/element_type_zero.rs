@@ -11,6 +11,7 @@
 use cutile::core::{bf16, f16, f8e4m3fn, f8e5m2, tf32, ElementType};
 
 #[test]
+#[allow(clippy::assertions_on_constants)] // the constants are what is under test
 fn zero_values_match_expected() {
     assert_eq!(<f16 as ElementType>::ZERO, f16::ZERO);
     assert_eq!(<bf16 as ElementType>::ZERO, bf16::ZERO);
@@ -24,13 +25,14 @@ fn zero_values_match_expected() {
     assert_eq!(<u32 as ElementType>::ZERO, 0u32);
     assert_eq!(<i64 as ElementType>::ZERO, 0i64);
     assert_eq!(<u64 as ElementType>::ZERO, 0u64);
-    assert_eq!(<bool as ElementType>::ZERO, false);
+    assert!(!<bool as ElementType>::ZERO);
     assert_eq!(<tf32 as ElementType>::ZERO, tf32(0));
     assert_eq!(<f8e4m3fn as ElementType>::ZERO, f8e4m3fn(0));
     assert_eq!(<f8e5m2 as ElementType>::ZERO, f8e5m2(0));
 }
 
 #[test]
+#[allow(clippy::assertions_on_constants)] // the constants are what is under test
 fn zero_usable_in_const_context() {
     const F32_ZERO: f32 = <f32 as ElementType>::ZERO;
     const I32_ZERO: i32 = <i32 as ElementType>::ZERO;

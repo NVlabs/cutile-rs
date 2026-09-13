@@ -309,7 +309,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_control_flow_test() -> () {
+fn compile_control_flow_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "control_flow_test_kernel",
@@ -339,7 +339,7 @@ fn compile_control_flow_test() -> () {
 }
 
 #[test]
-fn execute_if_result_test() -> () {
+fn execute_if_result_test() {
     common::with_test_stack(|| {
         let arg: Tensor<i64> = ones(&[16]).sync().expect("Failed.");
         // If true, double and add 2.
@@ -360,7 +360,7 @@ fn execute_if_result_test() -> () {
 }
 
 #[test]
-fn execute_break_test() -> () {
+fn execute_break_test() {
     common::with_test_stack(|| {
         // break_test_kernel loads output, doubles it twice (loop runs 2 iterations then breaks),
         // and stores the result. Starting from 1.0, we expect 1.0 * 2 * 2 = 4.0.
@@ -378,7 +378,7 @@ fn execute_break_test() -> () {
 }
 
 #[test]
-fn compile_break_test() -> () {
+fn compile_break_test() {
     common::with_test_stack(|| {
         let module_op_str =
             compile_ir("break_test_kernel", &[128.to_string()], &[("output", &[1])]);
@@ -395,7 +395,7 @@ fn compile_break_test() -> () {
 }
 
 #[test]
-fn compile_while_loop_test() -> () {
+fn compile_while_loop_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "while_loop_test_kernel",
@@ -415,7 +415,7 @@ fn compile_while_loop_test() -> () {
 }
 
 #[test]
-fn compile_loop_test() -> () {
+fn compile_loop_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "infinite_loop_test_kernel",
@@ -435,7 +435,7 @@ fn compile_loop_test() -> () {
 }
 
 #[test]
-fn compile_step_by_test() -> () {
+fn compile_step_by_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "step_by_test_kernel",
@@ -456,7 +456,7 @@ fn compile_step_by_test() -> () {
 }
 
 #[test]
-fn compile_assume_test() -> () {
+fn compile_assume_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "assume_test_kernel",
@@ -484,7 +484,7 @@ fn compile_assume_test() -> () {
 }
 
 #[test]
-fn compile_assume_non_negative_test() -> () {
+fn compile_assume_non_negative_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "assume_non_negative_test_kernel",
@@ -507,7 +507,7 @@ fn compile_assume_non_negative_test() -> () {
 }
 
 #[test]
-fn compile_assume_div_by_test() -> () {
+fn compile_assume_div_by_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "assume_div_by_test_kernel",
@@ -530,7 +530,7 @@ fn compile_assume_div_by_test() -> () {
 }
 
 #[test]
-fn compile_assume_same_elements_test() -> () {
+fn compile_assume_same_elements_test() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "assume_same_elements_test_kernel",

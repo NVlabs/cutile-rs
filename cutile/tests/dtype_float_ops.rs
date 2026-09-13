@@ -10,7 +10,6 @@
 //! 4. Verify correctness on the host
 
 use cuda_core::{f8e4m3fn, f8e5m2};
-use cutile;
 use cutile::tensor::PartitionMut;
 use cutile::tile_kernel::{DeviceOp, ToHostVecOp};
 use half::{bf16, f16};

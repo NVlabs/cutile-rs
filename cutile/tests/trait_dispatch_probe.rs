@@ -48,31 +48,67 @@ pub struct Tensor_2<E, const D0: i32, const D1: i32>(PhantomData<E>);
 pub struct Tensor_3<E, const D0: i32, const D1: i32, const D2: i32>(PhantomData<E>);
 
 // Constructors so tests can build values without needing real DSL machinery.
+impl<E, const D0: i32> Default for Tile_1<E, D0> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E, const D0: i32> Tile_1<E, D0> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
+impl<E, const D0: i32, const D1: i32> Default for Tile_2<E, D0, D1> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E, const D0: i32, const D1: i32> Tile_2<E, D0, D1> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
+impl<E, const D0: i32, const D1: i32, const D2: i32> Default for Tile_3<E, D0, D1, D2> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E, const D0: i32, const D1: i32, const D2: i32> Tile_3<E, D0, D1, D2> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
+impl<E, const D0: i32> Default for Tensor_1<E, D0> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E, const D0: i32> Tensor_1<E, D0> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
+impl<E, const D0: i32, const D1: i32> Default for Tensor_2<E, D0, D1> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E, const D0: i32, const D1: i32> Tensor_2<E, D0, D1> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
+impl<E, const D0: i32, const D1: i32, const D2: i32> Default for Tensor_3<E, D0, D1, D2> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<E, const D0: i32, const D1: i32, const D2: i32> Tensor_3<E, D0, D1, D2> {
     pub fn new() -> Self {
         Self(PhantomData)

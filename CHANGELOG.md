@@ -11,6 +11,18 @@ A single `cargo add cutile` now suffices, kernels gain Triton-parity
 program indexing and Rust-model raw pointers, and the experimental
 autotuner grows the pieces its first engine-scale consumer asked for.
 
+### Performance
+
+- Cache-hit kernel launches are ~2.4x faster on the host (3.9 us -> 1.6 us
+  per launch on a Ryzen 9 9950X, RTX 5090): generated launchers keep a
+  per-site cache of the last resolved specialization, launch validation
+  builds its messages only on failure, hoisting shape vectors are built
+  only when a kernel has hoisted checks, and kernel arguments marshal
+  through an inline slot arena instead of one heap allocation each
+  (~108 -> single-digit allocations per launch). Evicting from the kernel
+  cache invalidates every launch site, preserving the quiesce-then-clear
+  contract.
+
 ### Breaking changes
 
 0.3.1 ships the incompatible changes below. Each one closes a soundness or

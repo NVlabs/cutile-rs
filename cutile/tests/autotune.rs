@@ -160,7 +160,7 @@ fn record_end_to_end_with_real_l2_verification() {
                     "gate: wrong scale result".into(),
                 )));
             }
-            Ok(move |s: &std::sync::Arc<cuda_core::Stream>| launch(s).map_err(Into::into))
+            Ok(move |s: &std::sync::Arc<cuda_core::Stream>| launch(s))
         })
         .expect("tuning run");
 

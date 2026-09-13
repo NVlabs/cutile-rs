@@ -8,7 +8,6 @@
 use cuda_core::Device;
 use cutile::bench::{do_bench, do_bench_paired, BenchOptions};
 use cutile::prelude::*;
-use std::sync::Arc;
 use std::time::Duration;
 
 fn quick_opts() -> BenchOptions {

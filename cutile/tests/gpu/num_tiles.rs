@@ -44,7 +44,7 @@ mod kernels {
 }
 
 fn cdiv(n: usize, d: usize) -> usize {
-    (n + d - 1) / d
+    n.div_ceil(d)
 }
 
 /// Launches the axis-0 kernel on an input of shape `[m, n]` with tile `[bm, bn]`,
