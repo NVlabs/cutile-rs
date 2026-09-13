@@ -89,6 +89,36 @@ mod reduce_scan_ops_module {
         // Store the result
         output.store(prefix_products);
     }
+
+    #[cutile::entry()]
+    fn reduce_xor_test_kernel<const S: [i32; 2]>(
+        input: &mut Tensor<u32, S>,
+        output: &mut Tensor<u32, { [1, 1] }>,
+    ) {
+        let tile: Tile<u32, S> = load_tile_mut(input);
+        let reduced: Tile<u32, { [1, 1] }> = reduce_xor(tile, 1i32);
+        output.store(reduced);
+    }
+
+    #[cutile::entry()]
+    fn reduce_and_test_kernel<const S: [i32; 2]>(
+        input: &mut Tensor<u32, S>,
+        output: &mut Tensor<u32, { [1, 1] }>,
+    ) {
+        let tile: Tile<u32, S> = load_tile_mut(input);
+        let reduced: Tile<u32, { [1, 1] }> = reduce_and(tile, 1i32);
+        output.store(reduced);
+    }
+
+    #[cutile::entry()]
+    fn reduce_or_test_kernel<const S: [i32; 2]>(
+        input: &mut Tensor<u32, S>,
+        output: &mut Tensor<u32, { [1, 1] }>,
+    ) {
+        let tile: Tile<u32, S> = load_tile_mut(input);
+        let reduced: Tile<u32, { [1, 1] }> = reduce_or(tile, 1i32);
+        output.store(reduced);
+    }
 }
 
 use reduce_scan_ops_module::__module_ast_self;
@@ -283,5 +313,53 @@ fn compile_scan_closure_test() {
         );
 
         println!("\n✓ scan with closure (prefix product) operation verified");
+    });
+}
+
+#[test]
+fn compile_reduce_xor_test() {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir(
+            "reduce_xor_test_kernel",
+            &[8.to_string(), 16.to_string()],
+            &[("input", &[8, 16]), ("output", &[1, 1])],
+        );
+        assert!(
+            module_op_str.contains("reduce"),
+            "Expected reduce operation in MLIR output"
+        );
+        println!("\n✓ reduce_xor operation verified");
+    });
+}
+
+#[test]
+fn compile_reduce_and_test() {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir(
+            "reduce_and_test_kernel",
+            &[8.to_string(), 16.to_string()],
+            &[("input", &[8, 16]), ("output", &[1, 1])],
+        );
+        assert!(
+            module_op_str.contains("reduce"),
+            "Expected reduce operation in MLIR output"
+        );
+        println!("\n✓ reduce_and operation verified");
+    });
+}
+
+#[test]
+fn compile_reduce_or_test() {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir(
+            "reduce_or_test_kernel",
+            &[8.to_string(), 16.to_string()],
+            &[("input", &[8, 16]), ("output", &[1, 1])],
+        );
+        assert!(
+            module_op_str.contains("reduce"),
+            "Expected reduce operation in MLIR output"
+        );
+        println!("\n✓ reduce_or operation verified");
     });
 }

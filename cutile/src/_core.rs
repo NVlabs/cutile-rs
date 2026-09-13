@@ -1924,6 +1924,36 @@ pub mod core {
         unreachable!()
     }
 
+    /// Bitwise XOR reduction along `dim`. Useful for parity checks, page hashing, and CRC calculations.
+    #[cuda_tile::compiler_op(name = "reduce")]
+    #[cuda_tile::variadic_op(N = 6, M = 6)]
+    pub fn reduce_xor<E: ElementType, const S: [i32; N], const R: [i32; M]>(
+        x: Tile<E, S>,
+        dim: i32,
+    ) -> Tile<E, R> {
+        unreachable!()
+    }
+
+    /// Bitwise AND reduction along `dim`.
+    #[cuda_tile::compiler_op(name = "reduce")]
+    #[cuda_tile::variadic_op(N = 6, M = 6)]
+    pub fn reduce_and<E: ElementType, const S: [i32; N], const R: [i32; M]>(
+        x: Tile<E, S>,
+        dim: i32,
+    ) -> Tile<E, R> {
+        unreachable!()
+    }
+
+    /// Bitwise OR reduction along `dim`. Useful for zero-page detection and flag aggregation.
+    #[cuda_tile::compiler_op(name = "reduce")]
+    #[cuda_tile::variadic_op(N = 6, M = 6)]
+    pub fn reduce_or<E: ElementType, const S: [i32; N], const R: [i32; M]>(
+        x: Tile<E, S>,
+        dim: i32,
+    ) -> Tile<E, R> {
+        unreachable!()
+    }
+
     /// Prefix sum along `dim`. The compiler emits the addf/addi region.
     #[cuda_tile::op(name="cuda_tile.scan", params=["operand"])]
     #[cuda_tile::variadic_op(N = 6)]
