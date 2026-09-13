@@ -60,7 +60,13 @@ impl std::error::Error for DynLoadError {
 }
 
 #[cfg(target_os = "linux")]
-const CUDA_LIB_NAMES: &[&str] = &["libcuda.so.1", "libcuda.so"];
+const CUDA_LIB_NAMES: &[&str] = &[
+    "libcuda.so.1",
+    "/usr/lib/wsl/lib/libcuda.so.1",
+    "libcuda.so",
+    "/usr/lib/wsl/lib/libcuda.so",
+    "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+];
 #[cfg(target_os = "macos")]
 const CUDA_LIB_NAMES: &[&str] = &["libcuda.dylib"];
 #[cfg(target_os = "windows")]
