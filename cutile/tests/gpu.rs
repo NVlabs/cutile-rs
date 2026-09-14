@@ -93,6 +93,9 @@ mod launcher_guards;
 
 #[path = "gpu/graph_scope_inputs.rs"]
 mod graph_scope_inputs;
+
+#[path = "gpu/submission_lifetimes.rs"]
+mod submission_lifetimes;
 // 2026-08 codegen audit regressions, one module per fix; `audit_common`
 // holds the shared compile/transfer/subprocess helpers.
 // ---------------------------------------------------------------------------

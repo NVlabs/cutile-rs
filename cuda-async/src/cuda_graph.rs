@@ -57,6 +57,7 @@ pub struct CudaGraph<T> {
 /// launch — is dropped. `GraphLaunch` used to copy the raw `CUgraphExec`, so
 /// `let l = graph.launch(); drop(graph); l.sync()` launched a destroyed exec.
 struct GraphExecHandle {
+    resources: std::sync::Mutex<Vec<ExecutionContext>>,
     /// Bound before destruction: the driver needs the owning context current.
     device: Arc<Device>,
     cu_graph: sys::CUgraph,
@@ -92,6 +93,7 @@ impl GraphExecHandle {
             }
         };
         let handle = Self {
+            resources: std::sync::Mutex::new(Vec::new()),
             device,
             cu_graph,
             cu_graph_exec,
@@ -201,8 +203,12 @@ impl<T: Send> CudaGraph<T> {
         op: impl DeviceOp<Output = T>,
     ) -> Result<Self, DeviceError> {
         let _execution_lock = crate::device_operation::acquire_execution_lock()?;
-        let exec_ctx = ExecutionContext::new(stream.clone());
+        let exec_ctx = ExecutionContext::for_capture(stream.clone());
         let (output, exec) = capture_on(&stream, || unsafe { op.execute(&exec_ctx) })?;
+        exec.resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(exec_ctx);
         Ok(Self {
             stream,
             exec,
@@ -273,9 +279,16 @@ impl<T: Send> CudaGraph<T> {
     {
         let _execution_lock = crate::device_operation::acquire_execution_lock()?;
         let ctx = ExecutionContext::new(self.stream.clone());
-        // SAFETY: the op is a `GraphNode` (no alloc/free) with no output, so
-        // nothing it produces can be read before the stream is synchronized.
-        unsafe { op.execute(&ctx) }
+        // The context retains submitted resources and access leases even
+        // after the op's Rust borrows end. A replay takes ownership of pending
+        // update contexts; otherwise the graph keeps them until destruction.
+        let result = unsafe { op.execute(&ctx) };
+        self.exec
+            .resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ctx);
+        result
     }
 
     /// Return a [`DeviceOp`] that replays the captured graph.
@@ -322,6 +335,28 @@ impl DeviceOp for GraphLaunch {
     type Output = ();
 
     unsafe fn execute(self, context: &ExecutionContext) -> Result<(), DeviceError> {
+        context.retain(self.exec.clone())?;
+        {
+            let mut resources = self
+                .exec
+                .resources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for recorded in resources.iter() {
+                recorded.replay_resources(context)?;
+            }
+            // Pending updates need not accumulate over the graph's lifetime.
+            // The launch submission now owns them; their contexts wait on the
+            // update stream if it differs from the launch stream.
+            let mut i = 0;
+            while i < resources.len() {
+                if resources[i].is_recording() {
+                    i += 1;
+                } else {
+                    context.retain(resources.remove(i))?;
+                }
+            }
+        }
         sys::cuGraphLaunch(
             self.exec.cu_graph_exec,
             context.get_cuda_stream().cu_stream(),
@@ -513,10 +548,14 @@ impl CudaGraph<()> {
         // ends the capture itself before a panic propagates.
         let _execution_lock = crate::device_operation::acquire_execution_lock()?;
         let scope = Scope {
-            ctx: ExecutionContext::new(stream.clone()),
+            ctx: ExecutionContext::for_capture(stream.clone()),
             _not_send: std::marker::PhantomData,
         };
         let ((), exec) = capture_on(stream, || f(&scope))?;
+        exec.resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(scope.ctx);
         Ok(CudaGraph {
             stream: stream.clone(),
             exec,

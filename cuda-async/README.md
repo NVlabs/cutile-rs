@@ -141,7 +141,7 @@ error on re-poll. The explicit `CUDA_ASYNC_HOST_SYNC` modes rely on the
 driver running the host function, which it does not do for a faulted
 context; a future awaiting through them may not resolve after a fault.
 
-### Cancellation (dropping a future)
+### Cancellation and Forgotten Futures
 
 Dropping a `DeviceFuture` never cancels GPU work that was already
 submitted; kernels run to completion. What the drop decides is when the
@@ -152,13 +152,36 @@ targets, borrowed inputs). If the wait cannot be performed — the context
 has faulted, or the stream is recording a graph — the output is leaked
 with a message on stderr rather than freed under a running kernel. A
 future dropped before its first poll submitted nothing and waits for
-nothing. See the `DeviceFuture` type docs for why the wait is synchronous
-(outputs may borrow the caller's buffers, so they are not `'static`).
+nothing.
+
+cuTile submissions retain storage independently of their outputs. Borrowed
+kernel arguments, tensor views, copies, and values discarded by `.then()`
+or tuple projection remain alive until completion, including when submission
+fails or panics after enqueueing some work. On success these owners are
+released before the future returns its result.
+
+`mem::forget(future)` deliberately leaks those owners and their device access
+leases. It does not cancel work or release the leases when the GPU finishes.
+Same-stream use remains ordered, and concurrent reads are allowed; conflicting
+access on another stream returns an error. Await or drop a future normally to
+release its leases. Mutable partitions and `memcpy` destinations must also have
+unique user-visible storage; internal submission owners do not count as aliases.
+
+For 0.4.0, custom `KernelInputStored` and `KernelOutputStored` implementations
+must implement `retain`. Custom `DeviceOp`s must register owned resources with
+`ExecutionContext::retain` before enqueueing work. The unsafe `async_on` escape
+hatch leaves resource lifetime and access ordering to its caller. Device-to-host
+`Vec` copies synchronize before exposing initialized elements to host combinators.
 
 ## CUDA Graphs
 
 `CudaGraph<T>` captures a `DeviceOp` into a replayable CUDA graph using
 [stream capture](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html#creating-a-graph-using-stream-capture):
+
+Recorded tensor storage is owned by the graph, independently of `take_output`.
+Each replay acquires its tensor access leases on the actual launch stream and
+retains the graph through completion. Recording alone does not claim that its
+device accesses have executed.
 
 ```rust
 // Capture: records all GPU work into a graph. Nothing runs yet; the

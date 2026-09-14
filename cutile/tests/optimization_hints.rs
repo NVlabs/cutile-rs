@@ -35,6 +35,25 @@ mod opt_hints_module {
     }
 
     #[cutile::entry]
+    fn load_ptr_const_latency_kernel<const S: [i32; 1], const L: i32>(output: &mut Tensor<f32, S>) {
+        let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
+        let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
+        let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
+        let (loaded, _tok): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                None,
+                Latency::<L>,
+            )
+        };
+        output.store(loaded);
+    }
+
+    #[cutile::entry]
     fn store_ptr_latency_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
         let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
@@ -1098,6 +1117,28 @@ fn load_ptr_latency_hint_in_mlir() {
         assert!(
             mlir.contains("latency = 4"),
             "Expected latency=4 in load_ptr_tko optimization_hints.\nMLIR:\n{mlir}"
+        );
+    });
+}
+
+#[test]
+fn load_ptr_const_latency_hint_in_mlir() {
+    common::with_test_stack(|| {
+        let mlir = common::compile_to_ir(
+            __module_ast_self,
+            "opt_hints_module",
+            "load_ptr_const_latency_kernel",
+            &["128".to_string(), "5".to_string()],
+            &[("output", &[1])],
+            &[],
+            &[],
+            None,
+            &CompileOptions::default(),
+        )
+        .expect("Failed to compile");
+        assert!(
+            mlir.contains("latency = 5"),
+            "Expected latency=5 from Latency::<L> with L=5.\nMLIR:\n{mlir}"
         );
     });
 }

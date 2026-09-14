@@ -91,12 +91,21 @@ impl Drop for ExecutionLockRelease {
 
 pub type DeviceOrdinal = usize;
 
+/// A graph-owned resource whose device accesses must be acquired on each replay.
+/// Implementations must register the access with the supplied execution context.
+#[doc(hidden)]
+pub trait ReplayResource: Send + Sync {
+    fn retain_for_launch(&self, ctx: &ExecutionContext) -> Result<(), DeviceError>;
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     ordinal: DeviceOrdinal,
     cuda_stream: Arc<Stream>,
     device: Arc<Device>,
     pool: Option<Arc<MemPool>>,
+    submission: Arc<crate::submission::Submission>,
+    recording: bool,
 }
 
 impl ExecutionContext {
@@ -105,6 +114,8 @@ impl ExecutionContext {
         let ordinal = device.ordinal();
         let pool = pool_for_stream(&cuda_stream);
         Self {
+            recording: false,
+            submission: Arc::new(crate::submission::Submission::new(cuda_stream.clone())),
             cuda_stream,
             device,
             ordinal,
@@ -113,6 +124,52 @@ impl ExecutionContext {
     }
     pub fn get_cuda_stream(&self) -> &Arc<Stream> {
         &self.cuda_stream
+    }
+    /// Retain an owned resource until this submission completes. Register
+    /// resources before enqueueing work, including resources absent from the
+    /// operation's output. A forgotten future deliberately leaks these owners.
+    ///
+    /// Clones share the submission; a completed context cannot be reused.
+    pub fn retain(&self, owner: impl Send + 'static) -> Result<(), DeviceError> {
+        self.submission.retain(owner)
+    }
+
+    #[doc(hidden)]
+    pub fn is_recording(&self) -> bool {
+        self.recording
+    }
+
+    /// Keep graph storage alive without claiming that its recorded accesses
+    /// have executed. The graph reacquires those accesses on each launch.
+    #[doc(hidden)]
+    pub fn record_resource(&self, resource: Arc<dyn ReplayResource>) {
+        assert!(self.recording);
+        self.submission.record(resource);
+    }
+
+    pub(crate) fn for_capture(stream: Arc<Stream>) -> Self {
+        Self {
+            recording: true,
+            ..Self::new(stream)
+        }
+    }
+
+    pub(crate) fn fresh_submission(&self) -> Self {
+        Self {
+            submission: Arc::new(crate::submission::Submission::new(self.cuda_stream.clone())),
+            recording: false,
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn replay_resources(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.submission.replay(ctx)
+    }
+
+    /// The caller has proved completion, or explicitly assumes responsibility
+    /// for all submitted resources (the unsafe `async_on` escape hatch).
+    pub(crate) unsafe fn complete(&self) {
+        self.submission.complete();
     }
     pub fn device(&self) -> &Arc<Device> {
         &self.device
@@ -236,6 +293,15 @@ pub trait DeviceOp:
     // by the output.
     // Converting DeviceOp into a DeviceFuture ensures any memory operations are complete
     // before the output can be accessed by the async runtime.
+    /// Enqueue this operation on `context`.
+    ///
+    /// Implementations must register owned resources with [`ExecutionContext::retain`]
+    /// before submitting work. Returning them or borrowing them in the output
+    /// is insufficient: safe callers may discard outputs or forget futures.
+    ///
+    /// # Safety
+    /// The caller must establish completion before host access to the output,
+    /// and must retain the context until completion or deliberately leak it.
     unsafe fn execute(
         self,
         context: &ExecutionContext,
@@ -412,13 +478,18 @@ pub trait DeviceOp:
     /// # Safety
     ///
     /// The caller must ensure the stream is synchronized before accessing
-    /// GPU data from the output.
+    /// GPU data from the output, and must keep every submitted resource alive
+    /// and prevent conflicting accesses until completion, including resources
+    /// discarded by combinators. Unlike safe execution, this method does not
+    /// retain resources after it returns.
     unsafe fn async_on(
         self,
         stream: &Arc<Stream>,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let ctx = ExecutionContext::new(stream.clone());
-        unsafe { self.execute(&ctx) }
+        let result = unsafe { self.execute(&ctx) };
+        unsafe { ctx.complete() };
+        result
     }
     /// Execute on an **explicit stream** and block until the GPU finishes.
     ///
@@ -432,6 +503,7 @@ pub trait DeviceOp:
         let res = unsafe { self.execute(&ctx) };
         let sync_res = unsafe { stream.synchronize() };
         sync_res?;
+        unsafe { ctx.complete() };
         res
     }
 }
