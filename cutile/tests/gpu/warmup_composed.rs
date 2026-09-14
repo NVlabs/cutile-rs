@@ -100,7 +100,6 @@ fn composed_builder_compile_terminal_warms_the_dispatched_specialization() {
     });
 }
 
-#[cfg(feature = "experimental-tune")]
 #[test]
 fn cache_management_evicts_and_recompiles() {
     common::with_test_stack(|| {
@@ -173,7 +172,6 @@ fn cache_management_evicts_and_recompiles() {
 /// (which would wedge every JIT lookup in the process). If this regressed —
 /// e.g. back to `cache.retain(|k, _| pred(k))` with the predicate under the
 /// shard lock — this test would hang forever rather than fail.
-#[cfg(feature = "experimental-tune")]
 #[test]
 fn retain_predicate_may_reenter_the_cache_without_deadlock() {
     common::with_test_stack(|| {
