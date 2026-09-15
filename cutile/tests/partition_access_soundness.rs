@@ -10,7 +10,6 @@
 //! foreign mapped index against a permuted target must discharge against the
 //! REMAPPED root axis, not the logical coordinate.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

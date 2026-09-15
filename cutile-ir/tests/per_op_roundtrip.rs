@@ -9,6 +9,9 @@
 //! bytecode, and decodes to verify no errors. These are cheap (no GPU)
 //! and run with every `cargo test`.
 
+// Float literals such as 3.14159 are arbitrary test payloads, not approximations of pi.
+#![allow(clippy::approx_constant)]
+
 use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
 use cutile_ir::bytecode::Opcode;
 use cutile_ir::ir::*;
@@ -29,9 +32,10 @@ fn build_kernel(
     // Append return if not already present.
     let needs_return = {
         let block = module.block(block_id);
-        block.ops.last().map_or(true, |&last| {
-            !matches!(module.op(last).opcode, Opcode::Return)
-        })
+        block
+            .ops
+            .last()
+            .is_none_or(|&last| !matches!(module.op(last).opcode, Opcode::Return))
     };
     if needs_return {
         let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
@@ -489,13 +493,17 @@ fn roundtrip_make_partition_view() {
         dim_map: vec![0],
         padding_value: None,
     });
-    let module = build_kernel("make_partition_view", &[tv_ty.clone()], |m, b, args| {
-        let (op, _) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
-            .operand(args[0])
-            .result(pv_ty.clone())
-            .build(m);
-        append_op(m, b, op);
-    });
+    let module = build_kernel(
+        "make_partition_view",
+        std::slice::from_ref(&tv_ty),
+        |m, b, args| {
+            let (op, _) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
+                .operand(args[0])
+                .result(pv_ty.clone())
+                .build(m);
+            append_op(m, b, op);
+        },
+    );
     assert_roundtrip(&module);
 }
 
@@ -509,7 +517,7 @@ fn roundtrip_if_op() {
         shape: vec![],
         element_type: TileElementType::Scalar(ScalarType::I1),
     });
-    let module = build_kernel("if_op", &[cond_ty.clone()], |m, b, args| {
+    let module = build_kernel("if_op", std::slice::from_ref(&cond_ty), |m, b, args| {
         // Build then region.
         let (then_region, then_block, _) = build_single_block_region(m, &[]);
         let (ret, _) = OpBuilder::new(Opcode::Yield, Location::Unknown).build(m);
@@ -669,7 +677,7 @@ fn roundtrip_permute() {
         shape: vec![128, 64],
         element_type: TileElementType::Scalar(ScalarType::F32),
     });
-    let module = build_kernel("permute", &[ty.clone()], |m, b, args| {
+    let module = build_kernel("permute", std::slice::from_ref(&ty), |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::Permute, Location::Unknown)
             .operand(args[0])
             .result(ty_t.clone())
@@ -984,7 +992,7 @@ fn roundtrip_get_tensor_shape() {
         shape: vec![DYNAMIC, DYNAMIC],
         strides: vec![DYNAMIC, 1],
     });
-    let module = build_kernel("gts", &[tv.clone()], |m, b, args| {
+    let module = build_kernel("gts", std::slice::from_ref(&tv), |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::GetTensorShape, Location::Unknown)
             .operand(args[0])
             .result(scalar_i32())
@@ -1007,7 +1015,7 @@ fn roundtrip_get_index_space_shape() {
         dim_map: vec![0],
         padding_value: None,
     });
-    let module = build_kernel("giss", &[pv.clone()], |m, b, args| {
+    let module = build_kernel("giss", std::slice::from_ref(&pv), |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::GetIndexSpaceShape, Location::Unknown)
             .operand(args[0])
             .result(scalar_i32())
@@ -2278,7 +2286,7 @@ fn roundtrip_make_partition_view_with_padding() {
         dim_map: vec![0],
         padding_value: Some(PaddingValue::Zero),
     });
-    let module = build_kernel("pv_pad", &[tv.clone()], |m, b, args| {
+    let module = build_kernel("pv_pad", std::slice::from_ref(&tv), |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::MakePartitionView, Location::Unknown)
             .operand(args[0])
             .result(pv.clone())

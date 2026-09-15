@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -485,7 +484,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_inline_tensor_from_ptr_helper() -> () {
+fn compile_inline_tensor_from_ptr_helper() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("inline_tensor_from_ptr_kernel", &["f32".to_string()], &[]);
         assert!(
@@ -497,7 +496,7 @@ fn compile_inline_tensor_from_ptr_helper() -> () {
 }
 
 #[test]
-fn compile_ptr_partition_load_helper() -> () {
+fn compile_ptr_partition_load_helper() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("ptr_partition_load_kernel", &["f32".to_string()], &[]);
         assert!(
@@ -512,7 +511,7 @@ fn compile_ptr_partition_load_helper() -> () {
 }
 
 #[test]
-fn compile_shift_ops_kernel() -> () {
+fn compile_shift_ops_kernel() {
     common::with_test_stack(|| {
         let module_op_str =
             compile_ir("shift_ops_kernel", &[], &[("x", &[1][..]), ("z", &[1][..])]);
@@ -528,7 +527,7 @@ fn compile_shift_ops_kernel() -> () {
 }
 
 #[test]
-fn compile_ptr_partition_mut_store_helper() -> () {
+fn compile_ptr_partition_mut_store_helper() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("ptr_partition_mut_store_kernel", &[], &[]);
         assert!(
@@ -543,7 +542,7 @@ fn compile_ptr_partition_mut_store_helper() -> () {
 }
 
 #[test]
-fn compile_partition_mut_store_rank3_loop() -> () {
+fn compile_partition_mut_store_rank3_loop() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "partition_mut_store_rank3_loop_kernel",
@@ -558,7 +557,7 @@ fn compile_partition_mut_store_rank3_loop() -> () {
 }
 
 #[test]
-fn compile_partition_mut_store_loaded_rank3_loop() -> () {
+fn compile_partition_mut_store_loaded_rank3_loop() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "partition_mut_store_loaded_rank3_loop_kernel",
@@ -573,7 +572,7 @@ fn compile_partition_mut_store_loaded_rank3_loop() -> () {
 }
 
 #[test]
-fn compile_inlining() -> () {
+fn compile_inlining() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "inlining_kernel",
@@ -592,7 +591,7 @@ fn compile_inlining() -> () {
 }
 
 #[test]
-fn compile_scalar_bool_condition() -> () {
+fn compile_scalar_bool_condition() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "scalar_bool_condition_kernel",
@@ -604,7 +603,7 @@ fn compile_scalar_bool_condition() -> () {
 }
 
 #[test]
-fn compile_basics() -> () {
+fn compile_basics() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "basics_kernel",
@@ -616,7 +615,7 @@ fn compile_basics() -> () {
 }
 
 #[test]
-fn compile_negative_constant() -> () {
+fn compile_negative_constant() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "negative_constant_kernel",
@@ -629,7 +628,7 @@ fn compile_negative_constant() -> () {
 }
 
 #[test]
-fn compile_ptr_tile_reshape() -> () {
+fn compile_ptr_tile_reshape() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("ptr_tile_reshape_kernel", &[], &[]);
         println!("{module_op_str}");

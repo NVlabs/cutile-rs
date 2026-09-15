@@ -1043,7 +1043,7 @@ impl<T: DType> Tensor<T> {
         // spec_ptr, not cu_deviceptr: the sentinel satisfies every DType's
         // alignment (like a real >=256-aligned allocation) without panicking on meta.
         let alignment = align_of::<U>() as u64;
-        if alignment > 1 && self.storage.spec_ptr() % alignment != 0 {
+        if alignment > 1 && !self.storage.spec_ptr().is_multiple_of(alignment) {
             return tensor_error_result(
                 "Tensor storage alignment is incompatible with reinterpret target type.",
             );
@@ -1284,7 +1284,7 @@ impl<T: DType> Reshape for Tensor<T> {
     }
 }
 
-impl<'a, T: DType> Reshape for &'a Arc<Tensor<T>> {
+impl<T: DType> Reshape for &Arc<Tensor<T>> {
     type Output = Arc<Tensor<T>>;
     fn reshape(self, shape: &[usize]) -> Result<Arc<Tensor<T>>, Error> {
         self.reshape_shared(shape)
@@ -1519,7 +1519,7 @@ impl<'a, T: DType> PartitionMut<'a, T> for &'a mut Tensor<T> {
     }
 }
 
-impl<'a, T: DType> Partition<&'a mut Tensor<T>> {
+impl<T: DType> Partition<&mut Tensor<T>> {
     pub fn dtype_str(&self) -> &'static str {
         T::DTYPE.as_str()
     }
@@ -1803,7 +1803,7 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
     }
 }
 
-impl<'a, T: DType> KernelOutputStored<T> for Partition<&'a mut Tensor<T>> {
+impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
     fn grid_bound(&self) -> Result<GridBound, Error> {
         let grid = KernelOutputStored::grid(self)?;
         Ok(if self.prefix_coverage {
@@ -1889,7 +1889,7 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<
     }
 }
 
-impl<'a, T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&'a mut Tensor<T>>> {
+impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&mut Tensor<T>>> {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         self.partition.push_kernel_args(launcher);
     }
@@ -2031,7 +2031,7 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
     }
 }
 
-impl<'a, T: DType + Sync> KernelInputStored for &'a Tensor<T> {
+impl<T: DType + Sync> KernelInputStored for &Tensor<T> {
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());

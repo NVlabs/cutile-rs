@@ -38,6 +38,9 @@ mod const_pointers;
 #[path = "gpu/program_id.rs"]
 mod program_id;
 
+#[path = "gpu/launch_site.rs"]
+mod launch_site;
+
 #[path = "gpu/add_refs.rs"]
 mod add_refs;
 

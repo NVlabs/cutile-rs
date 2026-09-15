@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile::compile_api::KernelCompiler;
 use cutile_compiler::compiler::utils::CompileOptions;
 
@@ -90,7 +89,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_maxi() -> () {
+fn compile_maxi() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("maxi_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MAXI MLIR ===\n{}", module_op_str);
@@ -109,7 +108,7 @@ fn compile_maxi() -> () {
 }
 
 #[test]
-fn compile_mini() -> () {
+fn compile_mini() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("mini_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MINI MLIR ===\n{}", module_op_str);
@@ -126,7 +125,7 @@ fn compile_mini() -> () {
 }
 
 #[test]
-fn compile_mulhii() -> () {
+fn compile_mulhii() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("mulhii_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MULHII MLIR ===\n{}", module_op_str);
@@ -141,7 +140,7 @@ fn compile_mulhii() -> () {
 }
 
 #[test]
-fn compile_maxi_unsigned() -> () {
+fn compile_maxi_unsigned() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "maxi_unsigned_kernel",
@@ -164,7 +163,7 @@ fn compile_maxi_unsigned() -> () {
 }
 
 #[test]
-fn compile_named_integer_arithmetic() -> () {
+fn compile_named_integer_arithmetic() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "named_integer_arithmetic_kernel",
@@ -205,7 +204,7 @@ fn named_integer_arithmetic_serializes_bytecode() {
 }
 
 #[test]
-fn compile_cmpi() -> () {
+fn compile_cmpi() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("cmpi_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== CMPI MLIR ===\n{}", module_op_str);

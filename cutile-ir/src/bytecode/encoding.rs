@@ -18,6 +18,12 @@ pub struct EncodingWriter {
     required_alignment: u64,
 }
 
+impl Default for EncodingWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EncodingWriter {
     pub fn new() -> Self {
         Self {
@@ -270,7 +276,7 @@ fn convert_to_f8(
     // Handle special values.
     if f64_exp == 0x7FF {
         // Inf or NaN
-        if f64_man != 0 || (nan_only_all_ones && f64_man == 0) {
+        if f64_man != 0 || nan_only_all_ones {
             // NaN (or Inf mapped to NaN for formats without infinities)
             if nan_only_all_ones {
                 return (sign << 7) | ((max_exp as u8) << man_bits) | man_mask;

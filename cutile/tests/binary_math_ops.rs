@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -118,7 +117,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_minmax() -> () {
+fn compile_minmax() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("minmax_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MIN/MAX MLIR ===\n{}", module_op_str);
@@ -140,7 +139,7 @@ fn compile_minmax() -> () {
 }
 
 #[test]
-fn compile_select() -> () {
+fn compile_select() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("select_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== SELECT MLIR ===\n{}", module_op_str);
@@ -159,7 +158,7 @@ fn compile_select() -> () {
 }
 
 #[test]
-fn compile_bf16_binary_arith() -> () {
+fn compile_bf16_binary_arith() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "bf16_binary_arith_kernel",
@@ -183,7 +182,7 @@ fn compile_bf16_binary_arith() -> () {
 }
 
 #[test]
-fn compile_addf_shadow_dispatch() -> () {
+fn compile_addf_shadow_dispatch() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "addf_shadow_dispatch_kernel",
@@ -199,7 +198,7 @@ fn compile_addf_shadow_dispatch() -> () {
 }
 
 #[test]
-fn compile_reshape_shadow_dispatch() -> () {
+fn compile_reshape_shadow_dispatch() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "reshape_shadow_dispatch_kernel",
@@ -215,7 +214,7 @@ fn compile_reshape_shadow_dispatch() -> () {
 }
 
 #[test]
-fn compile_reduce_sum_shadow_dispatch() -> () {
+fn compile_reduce_sum_shadow_dispatch() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "reduce_sum_shadow_dispatch_kernel",
@@ -234,7 +233,7 @@ fn compile_reduce_sum_shadow_dispatch() -> () {
 }
 
 #[test]
-fn compile_addf_shadow_dispatch_nested() -> () {
+fn compile_addf_shadow_dispatch_nested() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "addf_shadow_dispatch_nested_kernel",

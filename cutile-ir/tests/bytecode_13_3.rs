@@ -23,9 +23,10 @@ fn build_kernel(
     build_body(&mut module, block_id, &args);
     let needs_return = {
         let block = module.block(block_id);
-        block.ops.last().map_or(true, |&last| {
-            !matches!(module.op(last).opcode, Opcode::Return)
-        })
+        block
+            .ops
+            .last()
+            .is_none_or(|&last| !matches!(module.op(last).opcode, Opcode::Return))
     };
     if needs_return {
         let (ret, _) = OpBuilder::new(Opcode::Return, Location::Unknown).build(&mut module);
@@ -115,7 +116,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn section_payload<'a>(bytecode: &'a [u8], wanted: Section) -> &'a [u8] {
+fn section_payload(bytecode: &[u8], wanted: Section) -> &[u8] {
     let mut r = Reader::new(bytecode);
     assert_eq!(r.bytes(MAGIC.len()), MAGIC);
     let _major = r.byte();
@@ -272,10 +273,10 @@ fn mmaf_fast_acc_flag_tracks_boolean_value() {
 #[test]
 fn exp_encodes_13_3_default_rounding_mode() {
     let f32_tile = tile(&[4], ScalarType::F32);
-    let module = build_kernel("exp", &[f32_tile.clone()], |m, b, args| {
+    let module = build_kernel("exp", std::slice::from_ref(&f32_tile), |m, b, args| {
         let (op, _) = OpBuilder::new(Opcode::Exp, Location::Unknown)
             .operand(args[0])
-            .result(f32_tile)
+            .result(f32_tile.clone())
             .build(m);
         append_op(m, b, op);
     });

@@ -5,7 +5,6 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
-use cutile;
 use cutile::api;
 use cutile::tensor::{IntoPartition, Reshape, ToHostVec};
 use cutile::tile_kernel::DeviceOp;
@@ -269,6 +268,7 @@ fn slice_chained() {
 }
 
 #[test]
+#[allow(clippy::reversed_empty_ranges)] // `5..3` is the rejected input under test
 fn slice_out_of_bounds_rejected() {
     common::with_test_stack(|| {
         let tensor = api::arange::<f32>(8).sync().expect("Failed.");

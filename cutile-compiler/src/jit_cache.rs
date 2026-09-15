@@ -349,13 +349,10 @@ impl FileSystemJitStore {
             if total as f64 <= target {
                 break;
             }
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    total -= len;
-                    deleted += 1;
-                }
-                // In use (Windows) or already gone: skip, keep going.
-                Err(_) => {}
+            // A failed removal (in use on Windows, or already gone) is skipped.
+            if std::fs::remove_file(&path).is_ok() {
+                total -= len;
+                deleted += 1;
             }
         }
         cache_log(format_args!(

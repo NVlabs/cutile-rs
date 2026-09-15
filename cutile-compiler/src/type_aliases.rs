@@ -142,7 +142,7 @@ pub fn normalize_item_fn_param_type_aliases(
         let FnArg::Typed(PatType { ty, .. }) = arg else {
             continue;
         };
-        *ty = Box::new(normalize_type_aliases(ty, aliases)?);
+        **ty = normalize_type_aliases(ty, aliases)?;
     }
     Ok(item)
 }
@@ -186,12 +186,12 @@ fn normalize_type_aliases_inner(
         Type::Path(type_path) => normalize_path_type(type_path, aliases, stack),
         Type::Reference(type_ref) => {
             let mut out = type_ref.clone();
-            out.elem = Box::new(normalize_type_aliases_inner(&out.elem, aliases, stack)?);
+            *out.elem = normalize_type_aliases_inner(&out.elem, aliases, stack)?;
             Ok(Type::Reference(out))
         }
         Type::Ptr(type_ptr) => {
             let mut out = type_ptr.clone();
-            out.elem = Box::new(normalize_type_aliases_inner(&out.elem, aliases, stack)?);
+            *out.elem = normalize_type_aliases_inner(&out.elem, aliases, stack)?;
             Ok(Type::Ptr(out))
         }
         Type::Tuple(tuple) => {
@@ -203,22 +203,22 @@ fn normalize_type_aliases_inner(
         }
         Type::Array(array) => {
             let mut out = array.clone();
-            out.elem = Box::new(normalize_type_aliases_inner(&out.elem, aliases, stack)?);
+            *out.elem = normalize_type_aliases_inner(&out.elem, aliases, stack)?;
             Ok(Type::Array(out))
         }
         Type::Slice(slice) => {
             let mut out = slice.clone();
-            out.elem = Box::new(normalize_type_aliases_inner(&out.elem, aliases, stack)?);
+            *out.elem = normalize_type_aliases_inner(&out.elem, aliases, stack)?;
             Ok(Type::Slice(out))
         }
         Type::Paren(paren) => {
             let mut out = paren.clone();
-            out.elem = Box::new(normalize_type_aliases_inner(&out.elem, aliases, stack)?);
+            *out.elem = normalize_type_aliases_inner(&out.elem, aliases, stack)?;
             Ok(Type::Paren(out))
         }
         Type::Group(group) => {
             let mut out = group.clone();
-            out.elem = Box::new(normalize_type_aliases_inner(&out.elem, aliases, stack)?);
+            *out.elem = normalize_type_aliases_inner(&out.elem, aliases, stack)?;
             Ok(Type::Group(out))
         }
         _ => Ok(ty.clone()),
@@ -292,7 +292,7 @@ fn build_alias_substitution(
     }
 
     let mut subst = AliasSubstitution::default();
-    for (formal, actual) in formals.into_iter().zip(actual_args.into_iter()) {
+    for (formal, actual) in formals.into_iter().zip(actual_args) {
         match (formal, actual) {
             (GenericParam::Type(param), GenericArgument::Type(ty)) => {
                 subst.types.insert(param.ident.to_string(), ty);
@@ -352,12 +352,12 @@ fn substitute_type(
         }
         Type::Reference(type_ref) => {
             let mut out = type_ref.clone();
-            out.elem = Box::new(substitute_type(&out.elem, subst, aliases, stack)?);
+            *out.elem = substitute_type(&out.elem, subst, aliases, stack)?;
             Ok(Type::Reference(out))
         }
         Type::Ptr(type_ptr) => {
             let mut out = type_ptr.clone();
-            out.elem = Box::new(substitute_type(&out.elem, subst, aliases, stack)?);
+            *out.elem = substitute_type(&out.elem, subst, aliases, stack)?;
             Ok(Type::Ptr(out))
         }
         Type::Tuple(tuple) => {
@@ -369,23 +369,23 @@ fn substitute_type(
         }
         Type::Array(array) => {
             let mut out = array.clone();
-            out.elem = Box::new(substitute_type(&out.elem, subst, aliases, stack)?);
+            *out.elem = substitute_type(&out.elem, subst, aliases, stack)?;
             substitute_expr_in_place(&mut out.len, subst);
             Ok(Type::Array(out))
         }
         Type::Slice(slice) => {
             let mut out = slice.clone();
-            out.elem = Box::new(substitute_type(&out.elem, subst, aliases, stack)?);
+            *out.elem = substitute_type(&out.elem, subst, aliases, stack)?;
             Ok(Type::Slice(out))
         }
         Type::Paren(paren) => {
             let mut out = paren.clone();
-            out.elem = Box::new(substitute_type(&out.elem, subst, aliases, stack)?);
+            *out.elem = substitute_type(&out.elem, subst, aliases, stack)?;
             Ok(Type::Paren(out))
         }
         Type::Group(group) => {
             let mut out = group.clone();
-            out.elem = Box::new(substitute_type(&out.elem, subst, aliases, stack)?);
+            *out.elem = substitute_type(&out.elem, subst, aliases, stack)?;
             Ok(Type::Group(out))
         }
         _ => Ok(ty.clone()),

@@ -14,8 +14,8 @@ use cutile_compiler::compile_api::KernelCompiler;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
     compile_bytecode_cached, env_flag_enabled, get_compiler_version, get_gpu_name,
-    recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint, Stage2Source,
-    TileirasOptions,
+    recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint,
+    toolchain_env_snapshot, Stage2Source, TileirasOptions, ToolchainEnvSnapshot,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;
@@ -363,6 +363,121 @@ pub fn _specialization_from_context<F: Fn() -> Module>(
     }
 }
 
+/// One macro-generated launch site's most recent resolution: the volatile
+/// parts of the specialization it was resolved for, plus the resolved
+/// function and validator.
+///
+/// The generated launcher probes this before constructing a
+/// [`TileFunctionKey`]: on the steady state the probe is a handful of
+/// integer/`String` comparisons and two `Arc` clones, with no allocation and
+/// no toolchain-fingerprint work. Probe equality implies key equality: the
+/// process-constant key fields (names, source hash, compiler version) cannot
+/// differ at one site, `gpu_name` is a function of `device_id`, and stride
+/// hints are derived from the compared [`SpecializationBits`].
+///
+/// Toolchain env semantics: the `CUTILE_TILEIRAS_PATH` / toolkit env values
+/// are snapshotted when the site fills, not re-read per launch — a
+/// mid-process env switch takes effect for cache misses and new sites (the
+/// global cache still keys by fingerprint) but does not invalidate an
+/// already-hot launch site. Reading the env on every launch costs
+/// allocations on the very path this cache exists to strip.
+pub struct LaunchSite {
+    inner: std::sync::RwLock<Option<std::sync::Arc<SiteResolution>>>,
+}
+
+/// The snapshot a [`LaunchSite`] holds. Constructed by the generated
+/// launcher on a probe miss, after the normal cache path resolved.
+pub struct SiteResolution {
+    /// Cache generation at fill time: any eviction from the global cache
+    /// invalidates every launch site, so no site outlives a quiesced clear.
+    epoch: u64,
+    device_id: usize,
+    #[allow(dead_code)]
+    toolchain: ToolchainEnvSnapshot,
+    generics: Vec<String>,
+    specs: Vec<SpecializationBits>,
+    scalar_hints: Vec<DivHint>,
+    const_grid: Option<(u32, u32, u32)>,
+    compile_options: CompileOptions,
+    function: Arc<Function>,
+    validator: Arc<Validator>,
+}
+
+impl SiteResolution {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        device_id: usize,
+        generics: Vec<String>,
+        specs: Vec<SpecializationBits>,
+        scalar_hints: Vec<DivHint>,
+        const_grid: Option<(u32, u32, u32)>,
+        compile_options: CompileOptions,
+        function: Arc<Function>,
+        validator: Arc<Validator>,
+    ) -> Self {
+        Self {
+            epoch: kernel_cache_epoch(),
+            device_id,
+            toolchain: toolchain_env_snapshot(),
+            generics,
+            specs,
+            scalar_hints,
+            const_grid,
+            compile_options,
+            function,
+            validator,
+        }
+    }
+}
+
+impl LaunchSite {
+    pub const fn new() -> Self {
+        Self {
+            inner: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// The cached resolution, if the probe matches it exactly.
+    pub fn get(
+        &self,
+        device_id: usize,
+        generics: &[String],
+        specs: &[&SpecializationBits],
+        scalar_hints: &[DivHint],
+        const_grid: Option<(u32, u32, u32)>,
+        compile_options: &CompileOptions,
+    ) -> Option<(Arc<Function>, Arc<Validator>)> {
+        let guard = self.inner.read().ok()?;
+        let r = guard.as_ref()?;
+        if r.epoch == kernel_cache_epoch()
+            && r.device_id == device_id
+            && r.const_grid == const_grid
+            && &r.compile_options == compile_options
+            && r.generics.as_slice() == generics
+            && r.specs.len() == specs.len()
+            && r.specs.iter().zip(specs).all(|(a, b)| a == *b)
+            && r.scalar_hints.as_slice() == scalar_hints
+        {
+            Some((Arc::clone(&r.function), Arc::clone(&r.validator)))
+        } else {
+            None
+        }
+    }
+
+    /// Replaces the cached resolution (single entry: last one wins).
+    pub fn store(&self, resolution: SiteResolution) {
+        if let Ok(mut guard) = self.inner.write() {
+            *guard = Some(std::sync::Arc::new(resolution));
+        }
+    }
+}
+
+impl Default for LaunchSite {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Global kernel cache (process-wide, cross-thread) ────────────────────────
 
 /// Global kernel cache. `DashMap` for cross-thread sharing; inner `OnceCell` for
@@ -404,6 +519,20 @@ pub(crate) fn get_kernel_cache() -> &'static DashMap<TileFunctionKey, Arc<OnceCe
 #[doc(hidden)]
 pub unsafe fn clear_kernel_cache_for_tests() {
     get_kernel_cache().clear();
+    bump_kernel_cache_epoch();
+}
+
+/// Generation counter for the in-memory cache: bumped by every removal so
+/// launch-site caches (which hold their own `Arc<Function>`) re-resolve
+/// instead of keeping evicted modules alive past a quiesced clear.
+static KERNEL_CACHE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn kernel_cache_epoch() -> u64 {
+    KERNEL_CACHE_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn bump_kernel_cache_epoch() {
+    KERNEL_CACHE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// Removes every kernel from the process-global in-memory cache.
@@ -444,7 +573,11 @@ pub unsafe fn clear_kernel_cache() -> usize {
 /// ensure no stream is still running this kernel before evicting it.
 #[cfg(feature = "experimental-tune")]
 pub unsafe fn evict_kernel(key: &TileFunctionKey) -> bool {
-    get_kernel_cache().remove(key).is_some()
+    let removed = get_kernel_cache().remove(key).is_some();
+    if removed {
+        bump_kernel_cache_epoch();
+    }
+    removed
 }
 
 /// Keeps only specializations whose key satisfies `pred`; returns the
@@ -474,6 +607,9 @@ pub unsafe fn retain_kernels(mut pred: impl FnMut(&TileFunctionKey) -> bool) -> 
         if !pred(&key) && cache.remove(&key).is_some() {
             removed += 1;
         }
+    }
+    if removed > 0 {
+        bump_kernel_cache_epoch();
     }
     removed
 }
@@ -1323,7 +1459,7 @@ impl<T: DType> KernelArgument for &Partition<Tensor<T>> {
 }
 
 /// Same as above but for borrowed mutable tensor partitions.
-impl<'a, T: DType> KernelArgument for &Partition<&'a mut Tensor<T>> {
+impl<T: DType> KernelArgument for &Partition<&mut Tensor<T>> {
     fn push_arg(self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.object.cu_deviceptr());

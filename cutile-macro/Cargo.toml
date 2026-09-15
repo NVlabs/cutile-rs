@@ -25,3 +25,6 @@ phf = { workspace = true }
 convert_case = { workspace = true }
 cutile-compiler = { workspace = true }
 sha2 = { workspace = true }
+
+[lints]
+workspace = true

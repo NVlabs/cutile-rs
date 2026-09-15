@@ -28,3 +28,6 @@ cuda-async = { workspace = true }
 tokio = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
+
+[lints]
+workspace = true

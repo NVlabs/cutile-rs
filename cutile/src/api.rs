@@ -833,7 +833,7 @@ pub fn randn_f16<const RANK: usize>(
             let res = value((Arc::new(src_tensor), dst))
                 .then(convert_apply)
                 .unzip();
-            res.1.unpartition().reshape(&shape.to_vec())
+            res.1.unpartition().reshape(shape.as_ref())
         })
     })
 }

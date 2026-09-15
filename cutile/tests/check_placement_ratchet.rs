@@ -22,7 +22,6 @@
 //! Keep this corpus FROZEN: it is a measurement instrument, not a feature
 //! test. New behavior gets new tests elsewhere.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

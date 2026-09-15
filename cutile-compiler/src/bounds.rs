@@ -144,7 +144,7 @@ impl Add for Bounds<i64> {
         // Saturating so overflow widens to the i64 range (a sound over-
         // approximation) rather than panicking (debug) or wrapping (release,
         // which would be an unsound bound).
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start.saturating_add(b.start),
             a.start.saturating_add(b.end),
             a.end.saturating_add(b.start),
@@ -168,7 +168,7 @@ impl Sub for Bounds<i64> {
         let a = self;
         let b = rhs;
         // Saturating: see `Add` — overflow widens to the i64 range soundly.
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start.saturating_sub(b.start),
             a.start.saturating_sub(b.end),
             a.end.saturating_sub(b.start),
@@ -193,7 +193,7 @@ impl Mul for Bounds<i64> {
         let b = rhs;
         // Saturating: see `Add` — products can overflow i64 for wide inputs;
         // widening to the i64 range keeps the bound sound.
-        let possible_bounds = vec![
+        let possible_bounds = [
             a.start.saturating_mul(b.start),
             a.start.saturating_mul(b.end),
             a.end.saturating_mul(b.start),
@@ -232,7 +232,7 @@ impl Div for Bounds<i64> {
                 // `i64::MIN / -1`; saturating it to `i64::MAX` keeps the bound
                 // sound instead of panicking. Divisors are non-zero here (the
                 // caller of `bounds_from_bop` rejects zero divisors).
-                let possible_bounds = vec![
+                let possible_bounds = [
                     a.start.saturating_div(b.start),
                     a.start.saturating_div(b.end),
                     a.end.saturating_div(b.start),
@@ -293,7 +293,7 @@ pub fn bop_bounds<F: Fn(i64, i64) -> i64>(a: &Bounds<i64>, b: &Bounds<i64>, f: F
     if a.is_exact() && b.is_exact() {
         return Bounds::exact(f(a.start, b.start));
     }
-    let possible_bounds = vec![
+    let possible_bounds = [
         f(a.start, b.start),
         f(a.start, b.end),
         f(a.end, b.start),

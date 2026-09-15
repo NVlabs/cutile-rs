@@ -4,7 +4,7 @@
  */
 
 //! Smoke test: raw async compile-and-launch path via `compile_from_context`
-//! + `AsyncKernelLaunch`. Exercises the low-level async API that higher-
+//! and `AsyncKernelLaunch`. Exercises the low-level async API that higher-
 //! level kernel launchers wrap.
 
 use cuda_async::device_operation::{value, with_context, DeviceOp};
