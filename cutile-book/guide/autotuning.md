@@ -157,14 +157,15 @@ my_module::my_kernel(api::meta::<f32>(&[64, 64]).sync()?.partition([16, 16]), ..
     .compile()?;
 ```
 
-Tuning sweeps churn specializations by design, and each cached kernel holds
-device memory, so the in-memory kernel cache — intentionally unbounded for
-steady-state engines — needs managing during a sweep. The `unsafe`
-functions `clear_kernel_cache()`, `evict_kernel(&key)`, and
-`retain_kernels(pred)` in `cutile::tile_kernel` (gated behind
-`experimental-tune`) remove entries, releasing each module's device memory
-when its last holder drops. They are `unsafe` because of the one obligation
-they cannot check: quiesce first. A launched kernel executes after the launch
-call returns, so synchronize any stream that may still be running cached
-kernels — between tuning trials, exactly where an objective already
-synchronizes.
+Tuning sweeps and long-running serving engines can accumulate many
+specializations, and each cached kernel holds device memory. The in-memory
+kernel cache is intentionally unbounded. The `unsafe` functions
+`clear_kernel_cache()`, `evict_kernel(&key)`, and `retain_kernels(pred)` in
+`cutile::tile_kernel` are available without any Cargo feature. They remove
+entries, releasing each module's device memory when its last holder drops.
+They are `unsafe` because of the one obligation they cannot check: quiesce
+first. A launched kernel executes after the launch call returns, so
+synchronize every stream that may still be running cached kernels before
+evicting. Between tuning trials or at a serving engine's quiescent point,
+callers can evict and then reload the needed specializations. The autotuning
+API in `cutile::tune` still requires `experimental-tune`.

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Kernel-cache eviction APIs `clear_kernel_cache`, `evict_kernel`, and
+  `retain_kernels` are available without `experimental-tune`, allowing
+  serving engines to manage cached specializations independently of
+  autotuning. Their unsafe quiesce-before-eviction contracts and return
+  values are unchanged (#268).
+
 ## [0.3.1] - 2026-09-02
 
 A single `cargo add cutile` now suffices, kernels gain Triton-parity
