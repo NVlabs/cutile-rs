@@ -13,6 +13,7 @@
 //! environment reads.
 
 use std::env;
+use std::sync::OnceLock;
 
 /// Which bounds-check optimizations a compile may apply.
 ///
@@ -99,51 +100,31 @@ impl CheckOptimizations {
     }
 }
 
+/// Reads an on/off environment switch.
+///
+/// `1`/`true`/`yes`/`on` (case- and whitespace-insensitive) enable; anything
+/// else, including an unset variable, disables. The single spelling every
+/// switch in `cutile-frontend`, `cutile-compiler` and `cutile` shares.
+pub fn env_flag_enabled(var: &str) -> bool {
+    env::var(var).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// `CUTILE_JIT_LOG` (`1`/`true`/`yes`/`on`, like every other on/off switch
+/// of the crate and of `cutile`) also reports every bounds check that stays
+/// inside a loop body with the reason it could not hoist.
+pub fn jit_hoist_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("CUTILE_JIT_LOG"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cuda_tile_runtime_utils::{TileirasOptions, DEFAULT_OPT_LEVEL};
-    use crate::hints::CompileOptions;
-
-    #[test]
-    fn device_debug_implies_opt_zero_unless_explicit() {
-        let debug =
-            TileirasOptions::from_compile_options(&CompileOptions::new().device_debug(true));
-        assert_eq!(debug.opt_level, 0);
-        assert!(debug.device_debug);
-
-        let explicit = TileirasOptions::from_compile_options(
-            &CompileOptions::new().device_debug(true).opt_level(2),
-        );
-        assert_eq!(explicit.opt_level, 2, "an explicit level wins");
-
-        let release = TileirasOptions::from_compile_options(&CompileOptions::new());
-        assert_eq!(release.opt_level, DEFAULT_OPT_LEVEL);
-        assert_eq!(release, TileirasOptions::default());
-    }
-
-    #[test]
-    fn flags_byte_is_injective_over_the_flag_combinations() {
-        let mut seen = std::collections::BTreeSet::new();
-        for dd in [false, true] {
-            for li in [false, true] {
-                for sm in [false, true] {
-                    let o = TileirasOptions {
-                        opt_level: 3,
-                        device_debug: dd,
-                        lineinfo: li,
-                        sanitize_memcheck: sm,
-                    };
-                    assert!(seen.insert(o.flags_byte()), "flags_byte collision");
-                }
-            }
-        }
-        assert_eq!(
-            TileirasOptions::default().flags_byte(),
-            0,
-            "release flags must encode as 0, matching the byte old cache entries carry"
-        );
-    }
 
     #[test]
     fn named_policies_differ_only_where_documented() {

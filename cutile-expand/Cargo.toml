@@ -1,0 +1,19 @@
+[package]
+name = "cutile-expand"
+description = "Macro expansion for cuTile Rust: rank instantiation, shadow dispatch and module walking."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["cutile", "syn", "macros"]
+
+[dependencies]
+syn = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+cutile-syn-utils = { workspace = true }
+
+[lints]
+workspace = true

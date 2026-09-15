@@ -74,8 +74,8 @@ use crate::shadow_dispatch::{
     desugar_variadic_trait_decl, desugar_variadic_trait_impl, emit_shadow_dispatch,
 };
 use crate::validate_dsl_syntax::validate_entry_point_parameters;
-use cutile_compiler::kernel_naming::KernelNaming;
-use cutile_compiler::syn_utils::*;
+use cutile_frontend::kernel_naming::KernelNaming;
+use cutile_frontend::syn_utils::*;
 
 fn line_column_to_offset(source: &str, loc: LineColumn) -> Option<usize> {
     let mut line_start = 0usize;
@@ -122,7 +122,7 @@ fn source_slice_from_file(path: &str, start: LineColumn, end: LineColumn) -> Opt
 ///
 /// This is used throughout the code generation to reference AST types.
 pub fn get_ast_path(tile_rust_crate_root: &Ident) -> Path {
-    let s = format!("{tile_rust_crate_root}::cutile_compiler::ast");
+    let s = format!("{tile_rust_crate_root}::cutile_frontend::ast");
     syn::parse::<Path>(s.parse().unwrap()).unwrap()
 }
 
@@ -133,7 +133,7 @@ pub fn get_ast_path(tile_rust_crate_root: &Ident) -> Path {
 /// name the registry without each downstream crate depending on `linkme`
 /// directly.
 pub fn get_registry_path(tile_rust_crate_root: &Ident) -> Path {
-    let s = format!("{tile_rust_crate_root}::cutile_compiler::registry");
+    let s = format!("{tile_rust_crate_root}::cutile_frontend::registry");
     syn::parse::<Path>(s.parse().unwrap()).unwrap()
 }
 
@@ -245,7 +245,7 @@ fn process_items(
 ) -> Result<(Vec<TokenStream2>, Vec<TokenStream2>), Error> {
     let mut concrete_items: Vec<TokenStream2> = vec![];
     let mut entry_functions: Vec<TokenStream2> = vec![];
-    let type_aliases = cutile_compiler::type_aliases::collect_type_aliases(items);
+    let type_aliases = cutile_frontend::type_aliases::collect_type_aliases(items);
 
     for item in items {
         match item {
@@ -640,7 +640,7 @@ pub fn function(
 ) -> Result<TokenStream2, Error> {
     let is_entry = get_meta_list_by_last_segment("entry", &item.attrs).is_some();
     if is_entry {
-        let validation_item = cutile_compiler::type_aliases::normalize_item_fn_param_type_aliases(
+        let validation_item = cutile_frontend::type_aliases::normalize_item_fn_param_type_aliases(
             &item,
             type_aliases,
         )
@@ -850,7 +850,7 @@ pub fn kernel_launcher(
     let launcher_args_name = format!("{}Args", launcher_name);
     let unsafety = item.sig.unsafety;
     let launcher_item =
-        cutile_compiler::type_aliases::normalize_item_fn_param_type_aliases(item, type_aliases)
+        cutile_frontend::type_aliases::normalize_item_fn_param_type_aliases(item, type_aliases)
             .map_err(|msg| crate::error::syn_err(item.sig.ident.span(), &msg))?;
 
     let (

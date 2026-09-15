@@ -239,7 +239,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         goals: &AxisGoals<'_>,
         partition: &TileRustValue,
     ) -> bool {
-        use cuda_async::predicate::{Atom, Predicate, Term};
+        use cutile_obligation::predicate::{Atom, Predicate, Term};
         let Some(term) = goals.index.term.as_ref() else {
             return false;
         };
@@ -301,7 +301,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         goals: &AxisGoals<'_>,
         partition: &TileRustValue,
     ) -> bool {
-        use cuda_async::predicate::{Predicate, Term};
+        use cutile_obligation::predicate::{Predicate, Term};
         if goals.static_extent.is_some() {
             return false;
         }

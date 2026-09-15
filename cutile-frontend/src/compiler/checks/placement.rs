@@ -155,7 +155,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         .as_ref()
                         .and_then(|term| term.as_single_affine())
                         .and_then(|(atom, scale, offset)| match atom {
-                            cuda_async::predicate::Atom::Iv(id)
+                            cutile_obligation::predicate::Atom::Iv(id)
                                 if innermost.induction_values.iter().any(|v| v.index() == id) =>
                             {
                                 Some((id, scale, offset))
@@ -179,13 +179,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // instead of a runtime strongest-instance substitution.
                     let static_max = innermost.induction_range.and_then(|iv_range| {
                         crate::value_facts::term_range(
-                            &cuda_async::predicate::Term::affine(
-                                cuda_async::predicate::Atom::Iv(iv_id),
+                            &cutile_obligation::predicate::Term::affine(
+                                cutile_obligation::predicate::Atom::Iv(iv_id),
                                 scale,
                                 offset,
                             ),
                             &|atom| match atom {
-                                cuda_async::predicate::Atom::Iv(id) if *id == iv_id => {
+                                cutile_obligation::predicate::Atom::Iv(id) if *id == iv_id => {
                                     Some(iv_range)
                                 }
                                 _ => None,
@@ -422,7 +422,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .in_place
                 .set(self.check_stats.in_place.get() + 1);
             if let Some(why) = no_hoist_why {
-                if crate::cuda_tile_runtime_utils::jit_hoist_log_enabled() {
+                if crate::check_optimizations::jit_hoist_log_enabled() {
                     eprintln!(
                         "[cutile::jit] bounds check for dim {axis} stays in the loop body: {why}"
                     );

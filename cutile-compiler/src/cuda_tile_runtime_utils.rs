@@ -6,8 +6,11 @@
 //! Runtime utilities for compiling Tile IR modules to GPU cubins.
 //! Provides GPU detection and bytecode compilation helpers.
 
-use crate::error::JITError;
+use cutile_frontend::error::JITError;
+
 use cuda_core::{get_device_sm_name, Device};
+/// Environment-switch helpers. Re-exported here for backwards compatibility.
+pub use cutile_frontend::check_optimizations::{env_flag_enabled, jit_hoist_log_enabled};
 use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion};
 use std::collections::HashMap;
 use std::env;
@@ -50,16 +53,8 @@ pub fn get_compiler_version() -> String {
 
 // The `CUTILE_DISABLE_CHECK_HOISTING` / `CUTILE_FORCE_DEVICE_CHECKS`
 // ablation switches are resolved once per compile into a
-// [`crate::check_optimizations::CheckOptimizations`] (see `from_env` there);
+// [`cutile_frontend::check_optimizations::CheckOptimizations`] (see `from_env` there);
 // the compiler consults that policy, never the environment.
-
-/// `CUTILE_JIT_LOG` (`1`/`true`/`yes`/`on`, like every other on/off switch
-/// of the crate and of `cutile`) also reports every bounds check that stays
-/// inside a loop body with the reason it could not hoist.
-pub fn jit_hoist_log_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("CUTILE_JIT_LOG"))
-}
 
 /// Queries the CUDA driver to determine the SM architecture name (e.g. `"sm_90"`) for a device.
 ///
@@ -744,9 +739,9 @@ pub fn serialize_tile_ir_bytecode(
 
     // Dump IR via unified CUTILE_DUMP mechanism (also honors legacy TILE_IR_DUMP).
     // `to_mlir_text` renders the whole module, so it stays behind `should_dump`.
-    if crate::dump::should_dump(crate::dump::DumpStage::Ir) {
-        crate::dump::dump_module(
-            crate::dump::DumpStage::Ir,
+    if cutile_frontend::dump::should_dump(cutile_frontend::dump::DumpStage::Ir) {
+        cutile_frontend::dump::dump_module(
+            cutile_frontend::dump::DumpStage::Ir,
             &module.name,
             &module.to_mlir_text(),
         );
@@ -760,10 +755,14 @@ pub fn serialize_tile_ir_bytecode(
         ))
     })?;
 
-    if crate::dump::should_dump(crate::dump::DumpStage::Bytecode) {
+    if cutile_frontend::dump::should_dump(cutile_frontend::dump::DumpStage::Bytecode) {
         let decoded = cutile_ir::decode_bytecode(&bytes)
             .unwrap_or_else(|e| format!("<bytecode decode failed: {e}>"));
-        crate::dump::dump_module(crate::dump::DumpStage::Bytecode, &module.name, &decoded);
+        cutile_frontend::dump::dump_module(
+            cutile_frontend::dump::DumpStage::Bytecode,
+            &module.name,
+            &decoded,
+        );
     }
 
     Ok((bytes, bytecode_version))
@@ -830,10 +829,10 @@ impl Default for TileirasOptions {
 }
 
 impl TileirasOptions {
-    /// Resolves the launch-facing [`crate::hints::CompileOptions`] into the
+    /// Resolves the launch-facing [`cutile_frontend::hints::CompileOptions`] into the
     /// stage-2 flags. `device_debug` implies `--opt-level 0` unless an
     /// explicit level was requested.
-    pub fn from_compile_options(options: &crate::hints::CompileOptions) -> Self {
+    pub fn from_compile_options(options: &cutile_frontend::hints::CompileOptions) -> Self {
         let opt_level = options.opt_level.unwrap_or(if options.device_debug {
             0
         } else {
@@ -1245,14 +1244,6 @@ fn format_cuda_version(version: u32) -> String {
 /// (`1` / `true` / `yes` / `on`, case-insensitive, surrounding whitespace ignored).
 ///
 /// Shared by the crate's on/off diagnostic env vars so they all parse the same way.
-pub fn env_flag_enabled(var: &str) -> bool {
-    env::var(var).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
 
 fn setup_diagnostics_enabled() -> bool {
     env_flag_enabled(SETUP_DIAGNOSTICS_ENV)
@@ -1984,5 +1975,51 @@ printf 'fake cubin\n' > "$out"
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tileiras_options_tests {
+    use super::{TileirasOptions, DEFAULT_OPT_LEVEL};
+    use cutile_frontend::hints::CompileOptions;
+
+    #[test]
+    fn device_debug_implies_opt_zero_unless_explicit() {
+        let debug =
+            TileirasOptions::from_compile_options(&CompileOptions::new().device_debug(true));
+        assert_eq!(debug.opt_level, 0);
+        assert!(debug.device_debug);
+
+        let explicit = TileirasOptions::from_compile_options(
+            &CompileOptions::new().device_debug(true).opt_level(2),
+        );
+        assert_eq!(explicit.opt_level, 2, "an explicit level wins");
+
+        let release = TileirasOptions::from_compile_options(&CompileOptions::new());
+        assert_eq!(release.opt_level, DEFAULT_OPT_LEVEL);
+        assert_eq!(release, TileirasOptions::default());
+    }
+
+    #[test]
+    fn flags_byte_is_injective_over_the_flag_combinations() {
+        let mut seen = std::collections::BTreeSet::new();
+        for dd in [false, true] {
+            for li in [false, true] {
+                for sm in [false, true] {
+                    let o = TileirasOptions {
+                        opt_level: 3,
+                        device_debug: dd,
+                        lineinfo: li,
+                        sanitize_memcheck: sm,
+                    };
+                    assert!(seen.insert(o.flags_byte()), "flags_byte collision");
+                }
+            }
+        }
+        assert_eq!(
+            TileirasOptions::default().flags_byte(),
+            0,
+            "release flags must encode as 0, matching the byte old cache entries carry"
+        );
     }
 }

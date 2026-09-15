@@ -157,7 +157,7 @@ pub struct TileRustValue {
     /// affine fragment used by loop check-hoisting is [`Term::as_single_affine`].
     /// Consolidates the former `AffineForm { scale, var, offset }` (its single-
     /// `Iv`-atom special case).
-    pub(crate) term: Option<cuda_async::predicate::Term>,
+    pub(crate) term: Option<cutile_obligation::predicate::Term>,
 }
 
 impl TileRustValue {

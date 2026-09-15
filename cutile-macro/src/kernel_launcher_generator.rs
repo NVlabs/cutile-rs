@@ -91,9 +91,9 @@
 //! Launch grid dimensions are automatically inferred from partitioned tensors.
 //! If multiple partitions exist, their grids must match.
 
-use cutile_compiler::kernel_naming::KernelNaming;
-use cutile_compiler::syn_utils::*;
-use cutile_compiler::types::get_ptr_type;
+use cutile_frontend::kernel_naming::KernelNaming;
+use cutile_frontend::ptr_and_literals::get_ptr_type;
+use cutile_frontend::syn_utils::*;
 use proc_macro2::Ident;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
@@ -592,7 +592,7 @@ pub fn generate_kernel_launcher(
                 }
                 builder_statements.push(parse_stmt(format!("kernel_launch.push_arg({var_name});")));
                 // For integer scalar params, auto-compute DivHint at launch time.
-                if cutile_compiler::specialization::is_integer_scalar(&type_name) {
+                if cutile_frontend::specialization::is_integer_scalar(&type_name) {
                     scalar_hint_exprs.push(format!(
                         r#"("{var_name}".to_string(), {tile_rust_crate_root}::cutile_compiler::specialization::DivHint::from_value({var_name} as i32))"#
                     ));
@@ -650,7 +650,7 @@ pub fn generate_kernel_launcher(
                                 panic!("Unexpected validator type {:#?}", &validator.params[#i]);
                             };
                             let given_dtype = <#pointee_ty as DType>::DTYPE.as_str();
-                            let compiled_dtype = #tile_rust_crate_root::cutile_compiler::types::get_ptr_type(&pointer_validator.element_type)
+                            let compiled_dtype = #tile_rust_crate_root::cutile_frontend::types::get_ptr_type(&pointer_validator.element_type)
                                 .map(|(_, pointee)| pointee)
                                 .unwrap_or_else(|| pointer_validator.element_type.clone());
                             kernel_launch_assert_with(compiled_dtype == given_dtype, || format!("{} element type mismatch: the kernel was specialized for a `*{}` pointer but the launch passes a `DevicePointer<{}>` (check the `.generics(..)` list)", #var_name, compiled_dtype, given_dtype))?;

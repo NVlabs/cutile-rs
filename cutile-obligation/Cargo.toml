@@ -1,0 +1,15 @@
+[package]
+name = "cutile-obligation"
+description = "Staged obligation vocabulary shared by the cuTile compiler and the host launcher."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["cutile", "obligation", "predicate"]
+
+[dependencies]
+
+[lints]
+workspace = true

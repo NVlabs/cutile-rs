@@ -63,8 +63,8 @@
 //! because it has CGA args, full stop.
 
 use crate::error::{syn_err, Error};
-use cutile_compiler::syn_utils::*;
-use cutile_compiler::types::parse_signed_literal_as_i32;
+use cutile_syn_utils::ptr_and_literals::parse_signed_literal_as_i32;
+use cutile_syn_utils::syn_utils::*;
 use proc_macro2::{Ident, Span};
 use quote::{format_ident, ToTokens};
 use std::collections::BTreeMap;

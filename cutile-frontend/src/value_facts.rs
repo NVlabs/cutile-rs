@@ -10,7 +10,7 @@
 //! - **interval** — [`Bounds`] (`crate::bounds`), a concrete inclusive
 //!   `[start, end]` range. The constant / static rung of bounds checks consumes
 //!   it, and an *exact* range folds to a compile-time constant.
-//! - **symbolic** — [`Term`] (`cuda_async::predicate`), a canonical linear form
+//! - **symbolic** — [`Term`] (`cutile_obligation::predicate`), a canonical linear form
 //!   `sum(coeff·atom) + constant`. Loop check-hoisting consumes it via
 //!   `Term::as_single_affine`; launch-time check hoisting consumes it via the
 //!   obligation solver (`passes::obligation::resolve`).
@@ -29,7 +29,7 @@
 
 use crate::bounds::{bounds_from_bop, Bounds, TileBinaryOp};
 use crate::compiler::_value::TileRustValue;
-use cuda_async::predicate::{Atom, Term};
+use cutile_obligation::predicate::{Atom, Term};
 
 /// The arithmetic facts produced for a binary op's result value.
 pub(crate) struct ScalarFacts {
@@ -57,7 +57,7 @@ pub(crate) struct ScalarFacts {
 /// Keeping the residue here lets an obligation site reduce it to a predicate
 /// over the *existing* vocabulary. The reduction that matters:
 /// `floor(e/d) == ceil(e/d)` iff `d` divides `e`, so an equality against a tile
-/// count becomes [`cuda_async::predicate::Predicate::divisible_by`] over `e` —
+/// count becomes [`cutile_obligation::predicate::Predicate::divisible_by`] over `e` —
 /// which a precondition can entail, and the host can decide. This mirrors MLIR,
 /// where `floordiv`/`ceildiv` simplification is driven by known divisibility
 /// rather than by treating the division as an opaque leaf.

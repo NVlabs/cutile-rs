@@ -56,9 +56,9 @@ fn kernel_compiler_emits_ir_and_bytecode() {
     });
 }
 
-fn tile_math_compiler() -> KernelCompiler<fn() -> cutile::cutile_compiler::ast::Module> {
+fn tile_math_compiler() -> KernelCompiler<fn() -> cutile::cutile_frontend::ast::Module> {
     KernelCompiler::new(
-        compile_only_module::__module_ast_self as fn() -> cutile::cutile_compiler::ast::Module,
+        compile_only_module::__module_ast_self as fn() -> cutile::cutile_frontend::ast::Module,
         "compile_only_module",
         "tile_math",
     )

@@ -419,6 +419,7 @@ dependencies = [
  "anyhow",
  "cuda-bindings",
  "cuda-core",
+ "cutile-obligation",
  "dashmap",
  "futures",
  "half",
@@ -510,19 +511,11 @@ dependencies = [
 name = "cutile-compiler"
 version = "0.3.1"
 dependencies = [
- "anyhow",
  "cuda-async",
  "cuda-core",
+ "cutile-frontend",
  "cutile-ir",
- "half",
- "linkme",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
  "sha2",
- "stacker",
- "syn",
  "uuid",
 ]
 
@@ -539,6 +532,34 @@ dependencies = [
  "cutile-compiler",
  "cutile-ir",
  "tokio",
+]
+
+[[package]]
+name = "cutile-expand"
+version = "0.3.1"
+dependencies = [
+ "cutile-syn-utils",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "cutile-frontend"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "cutile-ir",
+ "cutile-obligation",
+ "cutile-syn-utils",
+ "half",
+ "linkme",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "stacker",
+ "syn",
 ]
 
 [[package]]
@@ -563,7 +584,8 @@ name = "cutile-macro"
 version = "0.3.1"
 dependencies = [
  "convert_case",
- "cutile-compiler",
+ "cutile-expand",
+ "cutile-frontend",
  "itertools 0.14.0",
  "phf",
  "proc-macro2",
@@ -571,6 +593,20 @@ dependencies = [
  "sha2",
  "syn",
  "trybuild",
+]
+
+[[package]]
+name = "cutile-obligation"
+version = "0.3.1"
+
+[[package]]
+name = "cutile-syn-utils"
+version = "0.3.1"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

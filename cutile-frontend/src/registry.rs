@@ -25,7 +25,7 @@ use crate::ast::Module;
 use linkme::distributed_slice;
 
 /// Re-export so macro-emitted code at user crates can name `linkme`
-/// through `cutile::cutile_compiler::registry::linkme` without requiring
+/// through `cutile::cutile_frontend::registry::linkme` without requiring
 /// `linkme` to be a direct dependency of every crate that uses
 /// `#[cutile::module]`.
 pub use linkme;

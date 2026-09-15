@@ -14,20 +14,12 @@ keywords = ["cutile", "compiler", "gpu"]
 default = []
 
 [dependencies]
-syn = { workspace = true }
-proc-macro2 = { workspace = true }
-quote = { workspace = true }
-regex = { workspace = true }
 uuid = { workspace = true }
-prettyplease = { workspace = true }
-half = { workspace = true }
-anyhow = { workspace = true }
-stacker = { workspace = true }
+sha2 = { workspace = true }
 cuda-core = { workspace = true }
 cuda-async = { workspace = true }
 cutile-ir = { workspace = true }
-linkme = { workspace = true }
-sha2 = { workspace = true }
+cutile-frontend = { workspace = true }
 
 [lints]
 workspace = true
