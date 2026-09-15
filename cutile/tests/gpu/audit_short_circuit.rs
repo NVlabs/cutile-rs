@@ -17,7 +17,7 @@ use crate::common;
 mod short_circuit_module {
     use cutile::core::*;
 
-    static HITS: Global<i32, { [] }> = Global::new(0i32);
+    static HITS: Global<AtomicI32, { [] }> = Global::new(0i32);
 
     /// Bumps the counter and returns `true`: a right operand with a side
     /// effect, so evaluation is observable.

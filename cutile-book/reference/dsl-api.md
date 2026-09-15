@@ -704,6 +704,36 @@ let (values, token): (Tile<f32, { [128] }>, Token) =
 
 #### Atomics
 
+Module-scope atomic storage uses `Global<A, { [] }>`, where `A` implements
+the sealed `Atomic` trait:
+
+```rust
+static COUNTER: Global<AtomicI32, { [] }> = Global::new(0i32);
+// Inside a kernel:
+let one: Tile<i32, { [] }> = constant(1i32, shape![]);
+let (previous, token) = COUNTER.atomic_add(one, ordering::Relaxed, scope::Device);
+```
+
+Supported markers are `AtomicI32`, `AtomicU32`, `AtomicI64`, `AtomicU64`,
+`AtomicF32`, and `AtomicF64`. Their `Atomic::Value` types are the corresponding
+scalars; these are device-DSL markers, not host atomic objects. Only scalar
+globals are currently supported.
+
+Global `load` accepts `Relaxed`/`Acquire`; `store` accepts
+`Relaxed`/`Release`; `atomic_add` accepts
+`Relaxed`/`Acquire`/`Release`/`AcqRel`. All require `Device` or `System`
+scope. Rust and the JIT reject weak or tile-block-scoped global accesses.
+A load followed by a store is not an atomic increment: use `atomic_add`.
+
+The ordering contract remains Tile IR's explicit token model, not
+`std::sync::atomic` semantics for surrounding memory. Global operations
+return completion tokens but accept no input token. They do not automatically
+order other tensor or raw-pointer accesses: do not use them alone for
+publication protocols, which also require explicit token dependencies.
+
+The raw intrinsics below remain unsafe and retain Tile IR's broader
+ordering/scope choices.
+
 | Function | Signature | Description |
 |---|---|---|
 | `unsafe atomic_rmw_tko(ptrs, arg, mode, ordering, scope, mask, token)` | `(PointerTile<*mut E, S>, Tile<E, S>, atomic::Mode, ordering::AtomicMode, scope::Mode, Option<Tile<bool, S>>, Option<Token>) -> (Tile<E, S>, Token)` | Atomic read-modify-write |

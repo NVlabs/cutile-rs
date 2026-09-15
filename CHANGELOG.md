@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `Global` now requires a sealed device atomic type, such as
+  `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`.
+  Global accesses reject `Weak` ordering and `TileBlock` scope in both
+  Rust and the JIT; unsafe raw intrinsics are unchanged. This is a breaking
+  API change intended for 0.4.0.
+
 - Kernel-cache eviction APIs `clear_kernel_cache`, `evict_kernel`, and
   `retain_kernels` are available without `experimental-tune`, allowing
   serving engines to manage cached specializations independently of

@@ -2648,6 +2648,9 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         let Some(element_ty) = global_element_type(&ty) else {
             return Ok(None);
         };
+        let element_ty = self
+            .compiler
+            .global_atomic_value_type(&element_ty, &def_id.module)?;
         let Some(shape) = global_shape(&ty) else {
             return Ok(None);
         };

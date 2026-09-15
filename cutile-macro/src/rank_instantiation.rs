@@ -1438,7 +1438,7 @@ pub fn instantiate_type_alias_for_rank(item: &ItemType) -> Result<ItemType, Erro
 
 /// Desugars const generic array syntax in a static item.
 ///
-/// This keeps `static COUNTER: Global<i32, { [] }> = Global::new(0i32);`
+/// This keeps `static COUNTER: Global<AtomicI32, { [] }> = Global::new(0i32);`
 /// valid in rustc-visible expanded code while preserving the original source
 /// text for the JIT.
 pub fn instantiate_static_for_rank(item: &ItemStatic) -> Result<ItemStatic, Error> {

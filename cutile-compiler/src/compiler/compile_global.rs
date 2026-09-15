@@ -5,7 +5,7 @@
 
 //! Module-level `Global` lowering.
 //!
-//! Rust `static NAME: Global<E, { [] }>` items are ordinary Rust statics in the
+//! Rust `static NAME: Global<A, { [] }>` items are ordinary Rust statics in the
 //! expanded module, but the JIT treats them as Tile IR globals. The Rust value is
 //! just an immutable descriptor; device-side mutability is expressed by the
 //! load/store/atomic methods lowered here.
@@ -47,7 +47,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for (module_name, item) in self.modules.name_resolver.all_statics() {
             let Some(info) = self.global_info(module_name, item, &self.generic_vars)? else {
                 return self.modules.resolve_span(module_name, &item.span()).jit_error_result(
-                    "only `static NAME: Global<E, { [] }>` items are supported inside `#[cutile::module]`; use `const` for compile-time constants",
+                    "only `static NAME: Global<A, { [] }>` items are supported inside `#[cutile::module]`; use `const` for compile-time constants",
                 );
             };
             if !info.shape.is_empty() {
@@ -55,7 +55,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     .modules
                     .resolve_span(module_name, &item.span())
                     .jit_error_result(
-                        "shaped `Global` statics are not supported yet; use `Global<E, { [] }>`",
+                        "shaped `Global` statics are not supported yet; use `Global<A, { [] }>`",
                     );
             }
 
@@ -105,7 +105,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         if !info.shape.is_empty() {
             return self.jit_error_result(
                 &method_call.receiver.span(),
-                "shaped `Global` method calls are not supported yet; use `Global<E, { [] }>`",
+                "shaped `Global` method calls are not supported yet; use `Global<A, { [] }>`",
             );
         }
 
@@ -147,7 +147,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let memory_ordering_value = load_ordering_value(&memory_ordering).ok_or_else(|| {
             self.jit_error(
                 &method_call.args[0].span(),
-                "invalid Global load ordering; valid: Weak, Relaxed, Acquire",
+                "invalid Global load ordering; valid: Relaxed, Acquire",
             )
         })?;
         let memory_scope =
@@ -155,11 +155,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let memory_scope_value = memory_scope_value(&memory_scope).ok_or_else(|| {
             self.jit_error(
                 &method_call.args[1].span(),
-                "invalid memory scope; valid: TileBlock, Device, System",
+                "invalid Global memory scope; valid: Device, System",
             )
         })?;
 
-        let mut builder = OpBuilder::new(Opcode::LoadPtrTko, self.ir_location(&method_call.span()))
+        let builder = OpBuilder::new(Opcode::LoadPtrTko, self.ir_location(&method_call.span()))
             .result(tile_ir_ty)
             .result(TileIrType::Token)
             .operand(ptr)
@@ -167,6 +167,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "memory_ordering_semantics",
                 Attribute::i32(memory_ordering_value),
             )
+            .attr("memory_scope", Attribute::i32(memory_scope_value))
             .attr(
                 "operandSegmentSizes",
                 Attribute::Array(vec![
@@ -176,9 +177,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     Attribute::i32(0),
                 ]),
             );
-        if memory_ordering != "Weak" {
-            builder = builder.attr("memory_scope", Attribute::i32(memory_scope_value));
-        }
         let (op_id, results) = builder.build(module);
         append_op(module, block_id, op_id);
 
@@ -250,7 +248,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let memory_ordering_value = store_ordering_value(&memory_ordering).ok_or_else(|| {
             self.jit_error(
                 &method_call.args[1].span(),
-                "invalid Global store ordering; valid: Weak, Relaxed, Release",
+                "invalid Global store ordering; valid: Relaxed, Release",
             )
         })?;
         let memory_scope =
@@ -258,31 +256,28 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let memory_scope_value = memory_scope_value(&memory_scope).ok_or_else(|| {
             self.jit_error(
                 &method_call.args[2].span(),
-                "invalid memory scope; valid: TileBlock, Device, System",
+                "invalid Global memory scope; valid: Device, System",
             )
         })?;
 
-        let mut builder =
-            OpBuilder::new(Opcode::StorePtrTko, self.ir_location(&method_call.span()))
-                .result(TileIrType::Token)
-                .operand(ptr)
-                .operand(value_ir)
-                .attr(
-                    "memory_ordering_semantics",
-                    Attribute::i32(memory_ordering_value),
-                )
-                .attr(
-                    "operandSegmentSizes",
-                    Attribute::Array(vec![
-                        Attribute::i32(1),
-                        Attribute::i32(1),
-                        Attribute::i32(0),
-                        Attribute::i32(0),
-                    ]),
-                );
-        if memory_ordering != "Weak" {
-            builder = builder.attr("memory_scope", Attribute::i32(memory_scope_value));
-        }
+        let builder = OpBuilder::new(Opcode::StorePtrTko, self.ir_location(&method_call.span()))
+            .result(TileIrType::Token)
+            .operand(ptr)
+            .operand(value_ir)
+            .attr(
+                "memory_ordering_semantics",
+                Attribute::i32(memory_ordering_value),
+            )
+            .attr("memory_scope", Attribute::i32(memory_scope_value))
+            .attr(
+                "operandSegmentSizes",
+                Attribute::Array(vec![
+                    Attribute::i32(1),
+                    Attribute::i32(1),
+                    Attribute::i32(0),
+                    Attribute::i32(0),
+                ]),
+            );
         let (op_id, results) = builder.build(module);
         append_op(module, block_id, op_id);
         Ok(Some(TileRustValue::new_primitive(
@@ -349,7 +344,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let memory_scope_value = memory_scope_value(&memory_scope).ok_or_else(|| {
             self.jit_error(
                 &method_call.args[2].span(),
-                "invalid memory scope; valid: TileBlock, Device, System",
+                "invalid Global memory scope; valid: Device, System",
             )
         })?;
 
@@ -489,11 +484,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         if type_name != "Global" {
             return Ok(None);
         }
-        let element_ty = global_element_type(&normalized_ty).ok_or_else(|| {
+        let atomic_ty = global_element_type(&normalized_ty).ok_or_else(|| {
             self.modules
                 .resolve_span(module_name, &item.ty.span())
-                .jit_error("`Global` requires an element type: `Global<E, { [] }>`")
+                .jit_error("`Global` requires an atomic type: `Global<AtomicI32, { [] }>`")
         })?;
+        let element_ty = self.global_atomic_value_type(&atomic_ty, module_name)?;
         let element_compiled = self
             .compile_type(
                 &element_ty,
@@ -515,7 +511,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let shape = global_shape(&normalized_ty).ok_or_else(|| {
             self.modules
                 .resolve_span(module_name, &item.ty.span())
-                .jit_error("`Global` requires a static shape: `Global<E, { [] }>`")
+                .jit_error("`Global` requires a static shape: `Global<A, { [] }>`")
         })?;
         Ok(Some(GlobalInfo {
             symbol: global_symbol_name(module_name, &item.ident.to_string()),
@@ -523,6 +519,31 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             element_name,
             shape,
         }))
+    }
+
+    /// Resolve the sealed marker once, shared by inference and IR emission.
+    pub(crate) fn global_atomic_value_type(
+        &self,
+        ty: &Type,
+        module_name: &str,
+    ) -> Result<Type, JITError> {
+        let ty = self
+            .modules
+            .normalize_type_aliases_in(ty, Some(module_name))?;
+        let payload = match &ty {
+            Type::Path(path) => match self.modules.name_resolver.resolve_path(&path.path, module_name) {
+                Res::Def(DefKind::Struct, id)
+                    if Some(id.module.as_str()) == self.modules.name_resolver.core_module() =>
+                {
+                    atomic_payload_type(&id.name)
+                }
+                _ => None,
+            },
+            _ => None,
+        }.ok_or_else(|| self.modules.resolve_span(module_name, &ty.span()).jit_error(
+            "`Global` requires a supported sealed Atomic type (AtomicI32, AtomicU32, AtomicI64, AtomicU64, AtomicF32, or AtomicF64)",
+        ))?;
+        Ok(syn::parse_str(payload).expect("atomic payload is a scalar type"))
     }
 
     fn global_static_initializer(&self, item: &ItemStatic) -> Result<Expr, JITError> {
@@ -700,7 +721,6 @@ fn scalar_alignment(scalar: ScalarType) -> u64 {
 
 fn memory_scope_value(scope: &str) -> Option<i64> {
     match scope {
-        "TileBlock" => Some(0),
         "Device" => Some(1),
         "System" => Some(2),
         _ => None,
@@ -709,7 +729,6 @@ fn memory_scope_value(scope: &str) -> Option<i64> {
 
 fn load_ordering_value(ordering: &str) -> Option<i64> {
     match ordering {
-        "Weak" => Some(0),
         "Relaxed" => Some(1),
         "Acquire" => Some(2),
         _ => None,
@@ -718,7 +737,6 @@ fn load_ordering_value(ordering: &str) -> Option<i64> {
 
 fn store_ordering_value(ordering: &str) -> Option<i64> {
     match ordering {
-        "Weak" => Some(0),
         "Relaxed" => Some(1),
         "Release" => Some(3),
         _ => None,
@@ -731,6 +749,19 @@ fn atomic_ordering_value(ordering: &str) -> Option<i64> {
         "Acquire" => Some(2),
         "Release" => Some(3),
         "AcqRel" => Some(4),
+        _ => None,
+    }
+}
+
+// Must agree with the sealed Atomic implementations in cutile::core.
+fn atomic_payload_type(name: &str) -> Option<&'static str> {
+    match name {
+        "AtomicI32" => Some("i32"),
+        "AtomicU32" => Some("u32"),
+        "AtomicI64" => Some("i64"),
+        "AtomicU64" => Some("u64"),
+        "AtomicF32" => Some("f32"),
+        "AtomicF64" => Some("f64"),
         _ => None,
     }
 }
