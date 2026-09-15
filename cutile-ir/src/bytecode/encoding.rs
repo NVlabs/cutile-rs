@@ -255,6 +255,14 @@ fn f64_to_f8e5m2(value: f64) -> u8 {
     convert_to_f8(value, 5, 2, 15, false)
 }
 
+fn round_shift_right(value: u64, shift: u32) -> u64 {
+    debug_assert!((1..64).contains(&shift));
+    let retained = value >> shift;
+    let remainder = value & ((1u64 << shift) - 1);
+    let halfway = 1u64 << (shift - 1);
+    retained + u64::from(remainder > halfway || (remainder == halfway && retained & 1 != 0))
+}
+
 /// Generic f64 → 8-bit float conversion.
 /// `nan_only_all_ones`: if true, NaN is encoded as all-ones mantissa
 /// (F8E4M3FN style — no infinities). If false, IEEE-style (F8E5M2).
@@ -276,8 +284,8 @@ fn convert_to_f8(
     // Handle special values.
     if f64_exp == 0x7FF {
         // Inf or NaN
-        if f64_man != 0 || nan_only_all_ones {
-            // NaN (or Inf mapped to NaN for formats without infinities)
+        if f64_man != 0 {
+            // NaN
             if nan_only_all_ones {
                 return (sign << 7) | ((max_exp as u8) << man_bits) | man_mask;
             } else {
@@ -290,7 +298,7 @@ fn convert_to_f8(
             return (sign << 7) | ((max_exp as u8) << man_bits);
         }
         // Formats without inf: saturate to max finite
-        return (sign << 7) | ((max_exp as u8) << man_bits) | man_mask;
+        return (sign << 7) | ((max_exp as u8) << man_bits) | (man_mask - 1);
     }
 
     if value == 0.0 || value == -0.0 {
@@ -299,17 +307,8 @@ fn convert_to_f8(
 
     // Unbias f64 exponent (bias=1023), rebias for target.
     let unbiased = f64_exp - 1023;
-    let target_exp = unbiased + bias;
-
-    if target_exp >= max_exp {
-        // Overflow: clamp to max finite (or inf for IEEE-style).
-        if nan_only_all_ones {
-            // Max finite: exp = max_exp, man = man_mask - 1 (all-ones is NaN)
-            return (sign << 7) | (((max_exp) as u8) << man_bits) | (man_mask - 1);
-        } else {
-            return (sign << 7) | ((max_exp as u8) << man_bits); // Inf
-        }
-    }
+    let mut target_exp = unbiased + bias;
+    let significand = (1u64 << 52) | f64_man;
 
     if target_exp <= 0 {
         // Subnormal or underflow to zero.
@@ -318,13 +317,26 @@ fn convert_to_f8(
             return sign << 7; // Underflow to zero
         }
         // Subnormal: implicit 1 + fractional bits, shifted right.
-        let subnormal_man = ((1u64 << 52) | f64_man) >> (52 - man_bits as i32 + shift);
-        return (sign << 7) | (subnormal_man as u8 & man_mask);
+        let subnormal_man = round_shift_right(significand, (52 - man_bits as i32 + shift) as u32);
+        return (sign << 7) | subnormal_man as u8;
     }
 
-    // Normal: truncate mantissa from 52 bits to man_bits.
-    let truncated_man = (f64_man >> (52 - man_bits)) as u8 & man_mask;
-    (sign << 7) | ((target_exp as u8) << man_bits) | truncated_man
+    let mut rounded_significand = round_shift_right(significand, 52 - man_bits);
+    if rounded_significand == 1u64 << (man_bits + 1) {
+        rounded_significand >>= 1;
+        target_exp += 1;
+    }
+    let rounded_man = rounded_significand as u8 & man_mask;
+
+    if nan_only_all_ones {
+        if target_exp > max_exp || (target_exp == max_exp && rounded_man == man_mask) {
+            return (sign << 7) | ((max_exp as u8) << man_bits) | (man_mask - 1);
+        }
+    } else if target_exp >= max_exp {
+        return (sign << 7) | ((max_exp as u8) << man_bits);
+    }
+
+    (sign << 7) | ((target_exp as u8) << man_bits) | rounded_man
 }
 
 #[cfg(test)]
@@ -386,5 +398,54 @@ mod tests {
         let mut w = EncodingWriter::new();
         w.write_le_u32(0xDEADBEEF);
         assert_eq!(w.as_bytes(), &[0xEF, 0xBE, 0xAD, 0xDE]);
+    }
+
+    #[test]
+    fn f8_normal_values_round_to_nearest_even() {
+        let above_e4_midpoint = f64::from_bits(1.0625f64.to_bits() + 1);
+        let above_e5_midpoint = f64::from_bits(1.125f64.to_bits() + 1);
+
+        assert_eq!(f64_to_f8e4m3fn(above_e4_midpoint), 0x39);
+        assert_eq!(f64_to_f8e5m2(above_e5_midpoint), 0x3D);
+        assert_eq!(f64_to_f8e4m3fn(1.0625), 0x38);
+        assert_eq!(f64_to_f8e4m3fn(1.1875), 0x3A);
+        assert_eq!(f64_to_f8e4m3fn(1.9375), 0x40);
+    }
+
+    #[test]
+    fn f8_boundaries_round_and_preserve_format_policy() {
+        let above_e4_zero_midpoint = f64::from_bits((2.0f64.powi(-10)).to_bits() + 1);
+        let above_e5_zero_midpoint = f64::from_bits((2.0f64.powi(-17)).to_bits() + 1);
+        let negative_nan = f64::from_bits(f64::NAN.to_bits() | (1u64 << 63));
+
+        assert_eq!(f64_to_f8e4m3fn(0.0), 0x00);
+        assert_eq!(f64_to_f8e4m3fn(-0.0), 0x80);
+        assert_eq!(f64_to_f8e4m3fn(f64::from_bits(1)), 0x00);
+        assert_eq!(f64_to_f8e4m3fn(-f64::from_bits(1)), 0x80);
+        assert_eq!(f64_to_f8e4m3fn(2.0f64.powi(-10)), 0x00);
+        assert_eq!(f64_to_f8e4m3fn(above_e4_zero_midpoint), 0x01);
+        assert_eq!(f64_to_f8e5m2(2.0f64.powi(-17)), 0x00);
+        assert_eq!(f64_to_f8e5m2(above_e5_zero_midpoint), 0x01);
+        assert_eq!(f64_to_f8e5m2(3.5 * 2.0f64.powi(-16)), 0x04);
+        assert_eq!(f64_to_f8e4m3fn(0.0146484375), 0x08);
+        assert_eq!(f64_to_f8e4m3fn(-1.1875), 0xBA);
+        assert_eq!(f64_to_f8e5m2(-1.375), 0xBE);
+        assert_eq!(f64_to_f8e4m3fn(248.0), 0x78);
+        assert_eq!(f64_to_f8e4m3fn(256.0), 0x78);
+        assert_eq!(f64_to_f8e4m3fn(464.0), 0x7E);
+        assert_eq!(f64_to_f8e5m2(57_344.0), 0x7B);
+        assert_eq!(f64_to_f8e5m2(61_440.0), 0x7C);
+        assert_eq!(f64_to_f8e4m3fn(f64::MAX), 0x7E);
+        assert_eq!(f64_to_f8e4m3fn(-f64::MAX), 0xFE);
+        assert_eq!(f64_to_f8e5m2(f64::MAX), 0x7C);
+        assert_eq!(f64_to_f8e5m2(-f64::MAX), 0xFC);
+        assert_eq!(f64_to_f8e4m3fn(f64::INFINITY), 0x7E);
+        assert_eq!(f64_to_f8e4m3fn(f64::NEG_INFINITY), 0xFE);
+        assert_eq!(f64_to_f8e4m3fn(f64::NAN), 0x7F);
+        assert_eq!(f64_to_f8e4m3fn(negative_nan), 0xFF);
+        assert_eq!(f64_to_f8e5m2(f64::INFINITY), 0x7C);
+        assert_eq!(f64_to_f8e5m2(f64::NEG_INFINITY), 0xFC);
+        assert_eq!(f64_to_f8e5m2(f64::NAN), 0x7D);
+        assert_eq!(f64_to_f8e5m2(negative_nan), 0xFD);
     }
 }
