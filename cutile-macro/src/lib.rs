@@ -79,11 +79,8 @@ use proc_macro::TokenStream;
 // Note: These modules are private because proc-macro crates can only export proc-macro functions.
 // Use `cargo doc --document-private-items` to generate documentation for these modules.
 mod _module;
-mod error;
 mod kernel_launcher_generator;
-mod rank_instantiation;
-mod shadow_dispatch;
-mod validate_dsl_syntax;
+use cutile_expand::{error, rank_instantiation, shadow_dispatch, validate_dsl_syntax};
 
 /// Transforms a Rust module into GPU kernel code with kernel launchers.
 ///
@@ -101,7 +98,7 @@ mod validate_dsl_syntax;
 /// #[cutile::module]
 /// mod kernels {
 ///     use cutile::core::*;
-///     
+///
 ///     #[cutile::entry]
 ///     fn my_kernel<const N: i32>(data: &mut Tensor<f32, {[N]}>) {
 ///         let tile = data.load();
