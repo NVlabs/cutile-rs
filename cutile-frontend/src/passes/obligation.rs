@@ -5,7 +5,7 @@
 
 //! Staged obligation resolution: the solver seam for launch-time check hoisting.
 //!
-//! The predicate vocabulary itself lives in [`cuda_async::predicate`] (a
+//! The predicate vocabulary itself lives in [`cutile_obligation::predicate`] (a
 //! canonical [`Term`]/[`Predicate`] shared with the host launcher). This module
 //! adds the *solver* around it:
 //! - [`Obligation`] — a predicate to prove, with a diagnostic `cause` (rustc
@@ -17,13 +17,13 @@
 //!   [`Resolution::Launch`] if the predicate ranges only over launch-known
 //!   operands (`predicate.stage() <= Launch`), else [`Resolution::Device`].
 //!
-//! Because [`Predicate`] is canonical (see `cuda_async::predicate`), assumption
+//! Because [`Predicate`] is canonical (see `cutile_obligation::predicate`), assumption
 //! entailment is set membership and the launch-known test is `stage()` over the
 //! predicate's atoms — no per-variant special-casing.
 
 use std::collections::HashSet;
 
-use cuda_async::predicate::{LaunchCheck, Predicate, Stage};
+use cutile_obligation::predicate::{LaunchCheck, Predicate, Stage};
 
 use crate::passes::proof_analysis::ProofResults;
 
@@ -77,7 +77,7 @@ impl Assumptions {
     ) -> Self {
         use crate::passes::proof_analysis::MetadataExpr;
         use crate::passes::proof_analysis::MetadataFact;
-        use cuda_async::predicate::{Atom, Term};
+        use cutile_obligation::predicate::{Atom, Term};
         let mut believed = HashSet::new();
         for fact in &proof.metadata_facts {
             match fact {
@@ -194,7 +194,7 @@ pub(crate) fn resolve(obligation: &Obligation, assumptions: &Assumptions) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cuda_async::predicate::{Atom, Term};
+    use cutile_obligation::predicate::{Atom, Term};
 
     fn dim_term(param: usize, axis: usize) -> Term {
         Term::atom(Atom::Dim { param, axis })

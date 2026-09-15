@@ -3076,12 +3076,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                     // obligation can discharge against the
                                     // `TileBlockId(k) < NumTileBlocks(k)` axiom.
                                     if op_name == "cuda_tile.get_tile_block_id" {
-                                        prim.term = Some(cuda_async::predicate::Term::atom(
-                                            cuda_async::predicate::Atom::TileBlockId(i),
+                                        prim.term = Some(cutile_obligation::predicate::Term::atom(
+                                            cutile_obligation::predicate::Atom::TileBlockId(i),
                                         ));
                                     } else if op_name == "cuda_tile.get_num_tile_blocks" {
-                                        prim.term = Some(cuda_async::predicate::Term::atom(
-                                            cuda_async::predicate::Atom::NumTileBlocks(i),
+                                        prim.term = Some(cutile_obligation::predicate::Term::atom(
+                                            cutile_obligation::predicate::Atom::NumTileBlocks(i),
                                         ));
                                     }
                                     values.push(prim);

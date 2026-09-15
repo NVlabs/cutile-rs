@@ -14,7 +14,7 @@ use super::_function::CUDATileFunctionCompiler;
 use super::_value::{CompilerContext, TileRustValue};
 use super::tile_rust_type::TileRustType;
 use crate::error::JITError;
-use crate::generics::GenericVars;
+use crate::generics::{get_generic_arg_ints, GenericVars};
 use crate::syn_utils::*;
 
 use cutile_ir::builder::{append_op, OpBuilder};

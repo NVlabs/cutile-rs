@@ -2630,6 +2630,47 @@ pub fn parse_expr_as_i32(expr: &Expr, generic_args: &GenericVars) -> i32 {
     }
 }
 
+/// Collects integer const generic arguments from angle brackets, resolving generic vars.
+pub fn get_generic_arg_ints<T>(
+    generic_args: &AngleBracketedGenericArguments,
+    generic_vars: Option<&GenericVars>,
+) -> Vec<T>
+where
+    T: FromStr + From<i32>,
+    T::Err: Display,
+{
+    let mut result = vec![];
+    for arg in &generic_args.args {
+        match arg {
+            GenericArgument::Const(expr) => {
+                let Expr::Lit(lit) = expr else {
+                    panic!("Unexpected expression.")
+                };
+                let Lit::Int(int_expr) = &lit.lit else {
+                    panic!("Unexpected expression.")
+                };
+                let x = int_expr.base10_parse::<T>().expect("Failed to parse int.");
+                result.push(x);
+            }
+            GenericArgument::Type(ty) => {
+                if let Type::Path(path_ty) = ty {
+                    if let Some(const_var) = path_ty.path.get_ident() {
+                        if let Some(generic_vars) = generic_vars {
+                            if let Some(const_val) =
+                                generic_vars.inst_i32.get(&const_var.to_string())
+                            {
+                                result.push(T::from(*const_val));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => continue,
+        };
+    }
+    result
+}
+
 #[cfg(test)]
 mod inference_tests {
     use super::*;
@@ -2763,44 +2804,4 @@ mod inference_tests {
             "unexpected error: {err}"
         );
     }
-}
-/// Collects integer const generic arguments from angle brackets, resolving generic vars.
-pub fn get_generic_arg_ints<T>(
-    generic_args: &AngleBracketedGenericArguments,
-    generic_vars: Option<&GenericVars>,
-) -> Vec<T>
-where
-    T: FromStr + From<i32>,
-    T::Err: Display,
-{
-    let mut result = vec![];
-    for arg in &generic_args.args {
-        match arg {
-            GenericArgument::Const(expr) => {
-                let Expr::Lit(lit) = expr else {
-                    panic!("Unexpected expression.")
-                };
-                let Lit::Int(int_expr) = &lit.lit else {
-                    panic!("Unexpected expression.")
-                };
-                let x = int_expr.base10_parse::<T>().expect("Failed to parse int.");
-                result.push(x);
-            }
-            GenericArgument::Type(ty) => {
-                if let Type::Path(path_ty) = ty {
-                    if let Some(const_var) = path_ty.path.get_ident() {
-                        if let Some(generic_vars) = generic_vars {
-                            if let Some(const_val) =
-                                generic_vars.inst_i32.get(&const_var.to_string())
-                            {
-                                result.push(T::from(*const_val));
-                            }
-                        }
-                    }
-                }
-            }
-            _ => continue,
-        };
-    }
-    result
 }

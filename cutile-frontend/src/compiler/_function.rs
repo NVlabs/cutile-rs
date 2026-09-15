@@ -18,7 +18,7 @@ use crate::kernel_naming::KernelNaming;
 use crate::syn_utils::*;
 use crate::types::get_cuda_tile_element_type_from_rust_primitive_str;
 use crate::types::get_sig_param_mutability;
-use cuda_async::device_context::Validator;
+use cutile_obligation::launch_validation::Validator;
 
 use super::_value::{BlockTerminator, CompilerContext, Mutability, TileRustValue};
 use super::optimization_hints::{build_entry_optimization_hints, OptimizationHints};
@@ -72,7 +72,7 @@ pub struct CUDATileFunctionCompiler<'m> {
     /// (`Resolution::Launch`). Interior-mutable because compile passes take
     /// `&self`; merged into the `Validator` in [`Self::get_validator`] and run
     /// once per launch by the host `validate_launch`.
-    pub(crate) launch_checks: RefCell<Vec<cuda_async::predicate::LaunchCheck>>,
+    pub(crate) launch_checks: RefCell<Vec<cutile_obligation::predicate::LaunchCheck>>,
     pub(crate) gpu_name: String,
     pub(crate) optimization_hints: OptimizationHints,
     pub(crate) stride_args: HashMap<String, Vec<i32>>,
@@ -172,7 +172,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         b_tensor: &str,
         b_axis: usize,
     ) -> bool {
-        use cuda_async::predicate::{Atom, Predicate, Term};
+        use cutile_obligation::predicate::{Atom, Predicate, Term};
         // Resolve both tensor names to param indices; if either is not a
         // parameter, the equality can't be canonicalized — conservatively not
         // discharged (falls to the existing in-kernel path).
@@ -224,7 +224,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         tile: i32,
     ) -> bool {
         use crate::passes::obligation::{resolve, Obligation, Resolution};
-        use cuda_async::predicate::{Atom, Predicate, Term};
+        use cutile_obligation::predicate::{Atom, Predicate, Term};
         let (Some(&a_param), Some(&b_param)) = (
             self.param_index.get(a_tensor),
             self.param_index.get(b_tensor),
@@ -297,7 +297,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// assert be hoisted out of the kernel when its operands are launch-known.
     pub(crate) fn lower_obligation(
         &self,
-        predicate: cuda_async::predicate::Predicate,
+        predicate: cutile_obligation::predicate::Predicate,
         cause: impl Into<String>,
     ) -> bool {
         use crate::passes::obligation::{resolve, Obligation, Resolution};
@@ -352,7 +352,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let tensor_axis = *dim_map.get(axis).filter(|&&d| d >= 0)? as usize;
         let idx = *self.param_index.get(partition.tensor_origin.as_ref()?)?;
         let shape = match self.validator.params.get(idx)? {
-            cuda_async::device_context::ValidParamType::Tensor(t) => &t.shape,
+            cutile_obligation::launch_validation::ValidParamType::Tensor(t) => &t.shape,
             _ => return None,
         };
         shape.get(tensor_axis).copied().filter(|&e| e >= 0)
@@ -363,7 +363,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// with that atom.
     ///
     /// This is the bridge between the two fact systems. Facts carried on values
-    /// (bounds, provenance) and predicates over [`cuda_async::predicate::Atom`]s
+    /// (bounds, provenance) and predicates over [`cutile_obligation::predicate::Atom`]s
     /// have no shared vocabulary, so an extent read out of the signature was an
     /// opaque scalar: an obligation mentioning it could not be seen as
     /// launch-known and fell straight to a device check. One label makes every
@@ -393,7 +393,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         };
         for (axis, dim) in dims.iter_mut().enumerate() {
             if dim.term.is_none() {
-                dim.term = Some(cuda_async::predicate::Term::atom(
+                dim.term = Some(cutile_obligation::predicate::Term::atom(
                     self.extent_atom(param, axis),
                 ));
             }
@@ -404,19 +404,23 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// actually sees — the single place the SC1 frame decision is encoded.
     ///
     /// An immutable `&Tensor` is passed whole, so its kernel-visible extent is
-    /// the *root* extent: [`cuda_async::predicate::Atom::Dim`], the frame
+    /// the *root* extent: [`cutile_obligation::predicate::Atom::Dim`], the frame
     /// declared `preconditions` are stated in (so declared facts can entail
     /// obligations over it). A `&mut Tensor` is slabbed — each work item sees
     /// one piece — so its extent is
-    /// [`cuda_async::predicate::Atom::ViewExtent`], resolved on the host
+    /// [`cutile_obligation::predicate::Atom::ViewExtent`], resolved on the host
     /// against the partition shape. The two are distinct atom variants
     /// precisely so a root-frame fact can never entail a view-frame obligation
     /// by structural equality: the frame confusion is unrepresentable.
-    pub(crate) fn extent_atom(&self, param: usize, axis: usize) -> cuda_async::predicate::Atom {
+    pub(crate) fn extent_atom(
+        &self,
+        param: usize,
+        axis: usize,
+    ) -> cutile_obligation::predicate::Atom {
         if self.param_is_mutable.get(param).copied().unwrap_or(true) {
-            cuda_async::predicate::Atom::ViewExtent { param, axis }
+            cutile_obligation::predicate::Atom::ViewExtent { param, axis }
         } else {
-            cuda_async::predicate::Atom::Dim { param, axis }
+            cutile_obligation::predicate::Atom::Dim { param, axis }
         }
     }
 
@@ -433,7 +437,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let param = *self.param_index.get(tensor)?;
         matches!(
             self.extent_atom(param, 0),
-            cuda_async::predicate::Atom::Dim { .. }
+            cutile_obligation::predicate::Atom::Dim { .. }
         )
         .then_some(param)
     }

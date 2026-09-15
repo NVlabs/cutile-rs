@@ -12,11 +12,17 @@ members = [
     # Async CUDA API. Uses cuda-core.
     "cuda-async",
 
-    # cuTile Rust compiler. Requires cutile-ir + cuda-async.
+    # cuTile Rust compiler frontend. DSL to IR. Requires cutile-ir.
+    "cutile-frontend",
+
+    # cuTile Rust compiler backend. Requires cutile-frontend + cutile-ir + cuda-async.
     "cutile-compiler",
 
     # Macro syn helpers. Shared by the compiler and macro expansion.
     "cutile-syn-utils",
+
+    # Staged obligation vocabulary. Shared by the compiler and the host launcher.
+    "cutile-obligation",
 
     # Macro expansion. Rank instantiation and shadow dispatch.
     "cutile-expand",
@@ -43,6 +49,8 @@ members = [
 ]
 
 default-members = [
+    "cutile-obligation",
+    "cutile-frontend",
     "cuda-bindings",
     "cuda-core",
     "cuda-async",
@@ -104,8 +112,10 @@ cuda-async = { path = "cuda-async", version = "=0.3.1" }
 # crate for downstreams (candle CI, 2026-09-04: cutile 0.3.0 resolved
 # cutile-macro 0.3.1 and failed on 0.3.1-only symbols). Exact-pin, like
 # serde pins serde_derive.
+cutile-obligation = { path = "cutile-obligation", version = "=0.3.1" }
 cutile-syn-utils = { path = "cutile-syn-utils", version = "=0.3.1" }
 cutile-expand = { path = "cutile-expand", version = "=0.3.1" }
+cutile-frontend = { path = "cutile-frontend", version = "=0.3.1" }
 cutile-compiler = { path = "cutile-compiler", version = "=0.3.1" }
 cutile-macro = { path = "cutile-macro", version = "=0.3.1" }
 cutile = { path = "cutile", version = "=0.3.1" }

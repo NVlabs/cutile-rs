@@ -15,7 +15,8 @@ pub mod error;
 pub mod launch;
 mod leak;
 mod loom_compat;
-pub mod predicate;
+/// Staged obligation resolution types. Re-exported here for backwards compatibility.
+pub use cutile_obligation::predicate;
 pub mod prelude;
 // The real CUDA backend wraps pinned memory via `AtomicU32::from_ptr`, which is
 // incompatible with loom's swapped atomics; under `--cfg loom` the protocol is

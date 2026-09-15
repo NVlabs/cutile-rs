@@ -68,7 +68,7 @@
 //! ## See also
 //!
 //! - `cutile` — runtime library and core types.
-//! - `cutile_compiler` — MLIR/PTX backend that consumes `_module_asts()`.
+//! - `cutile_compiler` — MLIR/PTX compiler that consumes `_module_asts()` (via `cutile_frontend`).
 
 #![allow(dead_code)]
 #![allow(unused_assignments)]

@@ -21,7 +21,6 @@ use quote::ToTokens;
 use std::collections::HashMap;
 use syn::{
     Expr, ExprLit, FnArg, GenericArgument, ItemImpl, Lit, Signature, Stmt, Type, TypeReference,
-    UnOp,
 };
 
 /// A type parameter slot in a CUDA Tile type definition (e.g. element type, shape, strides).

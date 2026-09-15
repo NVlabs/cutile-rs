@@ -413,12 +413,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // partition-access obligation can discharge against the universal
                 // `TileBlockId(k) < NumTileBlocks(k)` hardware axiom.
                 if is_tile_block_id {
-                    result.term = Some(cuda_async::predicate::Term::atom(
-                        cuda_async::predicate::Atom::TileBlockId(axis),
+                    result.term = Some(cutile_obligation::predicate::Term::atom(
+                        cutile_obligation::predicate::Atom::TileBlockId(axis),
                     ));
                 } else if is_num_tile_blocks {
-                    result.term = Some(cuda_async::predicate::Term::atom(
-                        cuda_async::predicate::Atom::NumTileBlocks(axis),
+                    result.term = Some(cutile_obligation::predicate::Term::atom(
+                        cutile_obligation::predicate::Atom::NumTileBlocks(axis),
                     ));
                 }
                 result
@@ -845,9 +845,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         dim_map: &[i32],
         axis: usize,
         tile_dim: i64,
-    ) -> Option<cuda_async::predicate::Predicate> {
+    ) -> Option<cutile_obligation::predicate::Predicate> {
         use crate::passes::obligation::{resolve, Obligation, Resolution};
-        use cuda_async::predicate::{Predicate, Term};
+        use cutile_obligation::predicate::{Predicate, Term};
         // The `Dim`'s scalar lives in a `size` field; look there too.
         let floor_div = bound.floor_div.as_ref().or_else(|| {
             bound
@@ -1036,7 +1036,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         ) {
             let tensor_axis = pv.dim_map.get(axis).copied().filter(|&d| d >= 0);
             if let (Some(tensor_axis), true, true) = (tensor_axis, c >= 1, tile_dim >= 1) {
-                use cuda_async::predicate::{Predicate, Term};
+                use cutile_obligation::predicate::{Predicate, Term};
                 let e = Term::atom(self.extent_atom(param, tensor_axis as usize));
                 // `(c-1)·t < e` and `e < c·t + 1`; bail to the device assert on
                 // arithmetic overflow rather than weaken either side (the upper
@@ -2559,8 +2559,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             // Seed the induction variable's symbolic form: `1 *
                             // iv + 0`. Term arithmetic propagates it through the
                             // loop body (replaces the former AffineForm seed).
-                            iterand_val.term = Some(cuda_async::predicate::Term::atom(
-                                cuda_async::predicate::Atom::Iv(alias.index()),
+                            iterand_val.term = Some(cutile_obligation::predicate::Term::atom(
+                                cutile_obligation::predicate::Atom::Iv(alias.index()),
                             ));
                         }
                         let unit_step = maybe_step_expr.is_none();
