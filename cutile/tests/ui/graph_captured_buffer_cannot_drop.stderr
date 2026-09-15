@@ -1,0 +1,12 @@
+error[E0505]: cannot move out of `out` because it is borrowed
+  --> tests/ui/graph_captured_buffer_cannot_drop.rs:17:10
+   |
+13 |     let mut graph = CudaGraph::scope(&stream, |s| {
+   |                                               --- borrow of `out` occurs here
+14 |         s.record(api::memcpy(&mut out, &a))?;
+   |                                   --- borrow occurs due to use in closure
+...
+17 |     drop(out);
+   |          ^^^ move out of `out` occurs here
+18 |     graph.launch().sync()?;
+   |     ----- borrow later used here

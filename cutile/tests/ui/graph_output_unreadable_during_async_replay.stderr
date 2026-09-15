@@ -1,0 +1,9 @@
+error[E0499]: cannot borrow `graph` as mutable more than once at a time
+  --> tests/ui/graph_output_unreadable_during_async_replay.rs:20:17
+   |
+19 |     let replay = graph.launch().into_future();
+   |                  ----- first mutable borrow occurs here
+20 |     let _peek = graph.outputs();
+   |                 ^^^^^ second mutable borrow occurs here
+21 |     drop(replay);
+   |          ------ first borrow later used here

@@ -143,7 +143,7 @@ fn panic_inside_scope_releases_lock() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            CudaGraph::scope(&stream, |_s| panic!("intentional panic in scope"))
+            CudaGraph::<()>::scope(&stream, |_s| panic!("intentional panic in scope"))
         }));
         assert!(panicked.is_err(), "the panic must propagate");
         assert_eq!(

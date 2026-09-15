@@ -380,9 +380,12 @@ pub trait DeviceOp:
     }
     /// Capture this operation into a replayable [`CudaGraph`](crate::cuda_graph::CudaGraph)
     /// using the default device's scheduling policy to pick a stream.
-    fn graph(
+    fn graph<'a>(
         self,
-    ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
+    ) -> Result<crate::cuda_graph::CudaGraph<'a, <Self as DeviceOp>::Output>, DeviceError>
+    where
+        Self: 'a,
+    {
         let stream = with_default_device_policy(|policy| policy.next_stream())??;
         self.graph_on(stream)
     }
@@ -392,10 +395,13 @@ pub trait DeviceOp:
     /// Executes the operation once on `stream` in capture mode, recording
     /// all GPU work. Returns a `CudaGraph<Self::Output>` containing the
     /// replayable graph and the initial output.
-    fn graph_on(
+    fn graph_on<'a>(
         self,
         stream: Arc<Stream>,
-    ) -> Result<crate::cuda_graph::CudaGraph<<Self as DeviceOp>::Output>, DeviceError> {
+    ) -> Result<crate::cuda_graph::CudaGraph<'a, <Self as DeviceOp>::Output>, DeviceError>
+    where
+        Self: 'a,
+    {
         crate::cuda_graph::CudaGraph::capture(stream, self)
     }
     /// Execute synchronously using the default device's scheduling policy.

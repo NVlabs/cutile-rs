@@ -31,7 +31,7 @@ fn scope_empty_closure() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
+        let mut graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
         graph.launch().sync_on(&stream).unwrap();
     });
 }
@@ -45,17 +45,17 @@ fn scope_records_value_ops() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let mut recorded = Vec::new();
-        let graph = CudaGraph::scope(&stream, |s| {
+        // Capture-time results come back as the graph's output handle: a
+        // closure-captured local would stay borrowed for the graph's whole
+        // life (by design), so return the data instead.
+        let mut graph = CudaGraph::scope(&stream, |s| {
             let a = s.record(value(42))?;
             let b = s.record(value("hello"))?;
-            recorded.push(a);
-            recorded.push(b.len() as i32);
-            Ok(())
+            Ok(vec![a, b.len() as i32])
         })
         .unwrap();
 
-        assert_eq!(recorded, vec![42, 5]);
+        assert_eq!(*graph.outputs().unwrap(), vec![42, 5]);
         graph.launch().sync_on(&stream).unwrap();
     });
 }
@@ -69,7 +69,7 @@ fn scope_error_propagation() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let result = CudaGraph::scope(&stream, |_s| {
+        let result = CudaGraph::<()>::scope(&stream, |_s| {
             Err(DeviceError::Internal("test error".into()))
         });
 
@@ -97,7 +97,7 @@ fn scope_panic_safety() {
         let stream = device.new_stream().unwrap();
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            CudaGraph::scope(&stream, |_s| {
+            CudaGraph::<()>::scope(&stream, |_s| {
                 panic!("intentional panic in scope");
             })
         }));
@@ -122,7 +122,7 @@ fn scope_multiple_launches() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
+        let mut graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
 
         for _ in 0..10 {
             graph.launch().sync_on(&stream).unwrap();
@@ -168,13 +168,18 @@ fn scope_nested_execution_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Launch lifetime: a GraphLaunch shares ownership of the instantiated graph
+// Launch lifetime: a GraphLaunch mutably borrows its graph, and the exec
+// handle is Arc-shared so a pending future can never dangle
 // ---------------------------------------------------------------------------
 
-/// `GraphLaunch` used to copy the raw `CUgraphExec`, so dropping the graph
-/// before replaying the launch ran a destroyed exec.
+/// A launch borrows the graph for the replay's duration; completing it hands
+/// back the captured outputs, and sequential replays each take a fresh
+/// borrow. (`GraphLaunch` once copied the raw `CUgraphExec` and could replay
+/// a destroyed exec; the borrow now makes graph-outlives-launch a
+/// compile-time fact, with the `Arc` exec handle as defense in depth for
+/// pending `DeviceOp` futures.)
 #[test]
-fn launch_outlives_its_graph() {
+fn launch_borrows_its_graph_and_returns_outputs() {
     if !has_gpu() {
         return;
     }
@@ -182,25 +187,18 @@ fn launch_outlives_its_graph() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let graph = CudaGraph::scope(&stream, |s| {
-            s.record(value(1))?;
-            Ok(())
-        })
-        .unwrap();
-        let launch = graph.launch();
-        drop(graph);
-        launch
+        let mut graph = CudaGraph::scope(&stream, |s| s.record(value(1))).unwrap();
+        let out = graph
+            .launch()
             .sync_on(&stream)
-            .expect("launch must keep the instantiated graph alive");
+            .expect("replay must complete");
+        assert_eq!(*out, 1);
 
-        // Several pending launches, replayed on different streams, after
-        // the graph is gone.
-        let graph = CudaGraph::capture(stream.clone(), value(3)).unwrap();
-        let a = graph.launch();
-        let b = graph.launch();
-        drop(graph);
-        a.sync_on(&stream).unwrap();
-        b.sync().unwrap();
+        // Sequential replays on different completion paths, then consume.
+        let mut graph = CudaGraph::capture(stream.clone(), value(3)).unwrap();
+        assert_eq!(*graph.launch().sync_on(&stream).unwrap(), 3);
+        assert_eq!(*graph.launch().sync().unwrap(), 3);
+        assert_eq!(graph.into_inner().unwrap(), 3);
     });
 }
 
@@ -217,7 +215,7 @@ fn capture_rejects_nested_execution() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let mut graph = CudaGraph::capture(
+        let graph = CudaGraph::capture(
             stream.clone(),
             value(1).then(|x| {
                 let nested = value(0).sync();
@@ -229,7 +227,7 @@ fn capture_rejects_nested_execution() {
             }),
         )
         .expect("capture failed");
-        assert_eq!(graph.take_output(), Some(1));
+        assert_eq!(graph.into_inner().unwrap(), 1);
     });
 }
 
@@ -256,7 +254,7 @@ fn capture_panic_ends_capture_and_releases_lock() {
         unsafe { stream.synchronize() }.expect("stream must not be left in capture mode");
         assert_eq!(value(2).sync_on(&stream).expect("lock must be free"), 2);
         let mut graph = CudaGraph::capture(stream.clone(), value(4)).expect("recapture");
-        assert_eq!(graph.take_output(), Some(4));
+        assert_eq!(*graph.outputs().unwrap(), 4);
     });
 }
 
@@ -314,12 +312,10 @@ fn graph_combinators_capture_and_replay() {
         let stream = device.new_stream().unwrap();
 
         let mut graph = value(5).graph_on(stream.clone()).expect("graph_on");
-        assert_eq!(graph.take_output(), Some(5));
-        graph.launch().sync_on(&stream).unwrap();
+        assert_eq!(*graph.launch().sync_on(&stream).unwrap(), 5);
 
         let mut graph = value(6).graph().expect("graph");
-        assert_eq!(graph.take_output(), Some(6));
-        graph.launch().sync().unwrap();
+        assert_eq!(*graph.launch().sync().unwrap(), 6);
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             value(())
@@ -348,9 +344,9 @@ fn update_runs_unit_graph_nodes() {
         let device = cuda_core::Device::new(0).unwrap();
         let stream = device.new_stream().unwrap();
 
-        let graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
+        let mut graph = CudaGraph::scope(&stream, |_s| Ok(())).unwrap();
         graph.update(value(())).expect("unit GraphNode");
-        graph.launch().sync_on(graph.stream()).unwrap();
+        graph.replay().unwrap();
 
         // `update` executes under the lock: from inside an executing region
         // it is rejected like any other nested execution.

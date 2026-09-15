@@ -11,7 +11,9 @@
  * releasing borrows — so the same buffer can be written by one kernel
  * and read by the next.
  *
- * No Arc, no try_partition, no take_output, no SharedDeviceOp.
+ * No Arc, no try_partition, no SharedDeviceOp: the closure moves the
+ * pre-allocated buffers in and returns them as the graph's output, so the
+ * graph owns them for as long as it can replay.
  *
  * Usage:
  *   cargo run -p cutile-examples --example cuda_graphs
@@ -148,14 +150,23 @@ impl LayerBuffers {
 // Graph model — scoped capture
 // ═══════════════════════════════════════════════════════════════════════════════
 
-struct GraphModel {
-    graph: CudaGraph<()>,
+/// The buffers the captured graph reads and writes. The scope closure takes
+/// ownership of them and returns them as the graph's output, so the graph —
+/// not the model — owns them: they cannot be dropped, moved, or mutated
+/// while the graph can still replay.
+struct GraphBuffers {
     input: Tensor<f32>, // (d,) — copy new embedding here before launch
     buffers: Vec<LayerBuffers>,
 }
 
-impl GraphModel {
-    fn new(cfg: &Config, weights: &[LayerWeights], stream: &Arc<Stream>) -> Result<Self, Error> {
+/// `'w` is the borrow of the layer weights, which the graph captures by
+/// reference; the graph cannot outlive them.
+struct GraphModel<'w> {
+    graph: CudaGraph<'w, GraphBuffers>,
+}
+
+impl<'w> GraphModel<'w> {
+    fn new(cfg: &Config, weights: &'w [LayerWeights], stream: &Arc<Stream>) -> Result<Self, Error> {
         let mut input: Tensor<f32> = api::ones::<f32>(&[cfg.d]).sync_on(stream)?;
         let mut buffers: Vec<_> = (0..cfg.n_layers)
             .map(|_| LayerBuffers::allocate(cfg.d, stream))
@@ -163,41 +174,49 @@ impl GraphModel {
         unsafe { stream.synchronize() }?;
 
         // Capture the forward pass as a CUDA graph. Each s.record()
-        // records a graph node, releasing borrows between kernels.
-        let graph = CudaGraph::scope(stream, |s| {
+        // records a graph node, releasing borrows between kernels. The
+        // closure owns `input` and `buffers` (move) and returns them as
+        // the graph's output.
+        let d = cfg.d;
+        let block = cfg.block;
+        let bn = cfg.bn;
+        let eps = cfg.eps;
+        let rms_generics = cfg.rms_generics();
+        let mv_generics = cfg.mv_generics();
+        let graph = CudaGraph::scope(stream, move |s| {
             for (w, bufs) in weights.iter().zip(buffers.iter_mut()) {
                 // Create a (1,d) view of input for rms_norm. The view borrows
                 // input — after record consumes the op, the borrow is released.
-                let hidden_2d = input.view(&[1, cfg.d])?;
+                let hidden_2d = input.view(&[1, d])?;
 
                 // RMSNorm: hidden(1,d) → norm(1,d)
                 s.record(
                     rms_norm(
-                        (&mut bufs.norm).partition([1, cfg.d]),
+                        (&mut bufs.norm).partition([1, d]),
                         &hidden_2d,
                         &w.norm_w,
-                        cfg.eps,
+                        eps,
                     )
-                    .generics(cfg.rms_generics()),
+                    .generics(rms_generics.clone()),
                 )?;
                 // hidden_2d dropped — input no longer borrowed.
 
                 // Q projection: norm(1,d) @ wq^T → q(d,)
                 s.record(
-                    matvec((&mut bufs.q).partition([cfg.bn]), &bufs.norm, &w.wq)
-                        .generics(cfg.mv_generics()),
+                    matvec((&mut bufs.q).partition([bn]), &bufs.norm, &w.wq)
+                        .generics(mv_generics.clone()),
                 )?;
 
                 // O projection: q(1,d) @ wo^T → o(d,)
-                let q_2d = bufs.q.view(&[1, cfg.d])?;
+                let q_2d = bufs.q.view(&[1, d])?;
                 s.record(
-                    matvec((&mut bufs.o).partition([cfg.bn]), &q_2d, &w.wo)
-                        .generics(cfg.mv_generics()),
+                    matvec((&mut bufs.o).partition([bn]), &q_2d, &w.wo)
+                        .generics(mv_generics.clone()),
                 )?;
 
                 // Residual: hidden(d,) + o(d,) → residual(d,)
                 s.record(add(
-                    (&mut bufs.residual).partition([cfg.block]),
+                    (&mut bufs.residual).partition([block]),
                     &input,
                     &bufs.o,
                 ))?;
@@ -205,23 +224,23 @@ impl GraphModel {
                 // Copy residual into input for the next layer.
                 s.record(api::memcpy(&mut input, &bufs.residual))?;
             }
-            Ok(())
+            Ok(GraphBuffers { input, buffers })
         })?;
 
-        Ok(Self {
-            graph,
-            input,
-            buffers,
-        })
+        Ok(Self { graph })
     }
 
-    fn output(&self) -> &Tensor<f32> {
-        &self.buffers.last().unwrap().residual
+    /// Synchronizes the graph's stream, then hands out the output buffer.
+    fn output(&mut self) -> Result<&Tensor<f32>, DeviceError> {
+        Ok(&self.graph.outputs()?.buffers.last().unwrap().residual)
     }
 
     fn forward(&mut self, embedding: &Tensor<f32>) -> Result<(), DeviceError> {
-        self.graph.update(api::memcpy(&mut self.input, embedding))?;
-        self.graph.launch().sync_on(self.graph.stream())?;
+        // The graph owns `input`; `update_with` hands it back (no replay can
+        // be in flight) so the refresh memcpy can be built against it.
+        self.graph
+            .update_with(|b| api::memcpy(&mut b.input, embedding))?;
+        self.graph.replay()?;
         Ok(())
     }
 }
@@ -321,11 +340,7 @@ fn main() -> Result<(), Error> {
 
     // Graph path.
     model.forward(&test_input)?;
-    let graph_output: Vec<f32> = model
-        .output()
-        .dup()
-        .to_host_vec()
-        .sync_on(model.graph.stream())?;
+    let graph_output: Vec<f32> = model.output()?.dup().to_host_vec().sync_on(&stream)?;
 
     // Eager path.
     let eager_output = eager_forward(&cfg, &weights, &test_input, &stream)?;

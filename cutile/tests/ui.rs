@@ -20,6 +20,13 @@ fn ui() {
     // A launcher is only a `GraphNode` when its argument op is; an allocating
     // input (`api::zeros(..).partition(..)`) cannot be recorded into a scope.
     t.compile_fail("tests/ui/graph_scope_rejects_allocating_input.rs");
+    // Replay-time lifetime safety: a `CudaGraph<'a, T>` mutably borrows every
+    // captured buffer for `'a`, and a launch borrows the graph. Each case is
+    // one way safe code could otherwise reach a baked-in device address.
+    t.compile_fail("tests/ui/graph_captured_buffer_cannot_drop.rs");
+    t.compile_fail("tests/ui/graph_captured_buffer_cannot_move.rs");
+    t.compile_fail("tests/ui/graph_captured_buffer_no_mut_alias.rs");
+    t.compile_fail("tests/ui/graph_output_unreadable_during_async_replay.rs");
     // `#[cutile::entry(..)]` keys and literal kinds are checked at expansion:
     // a typo is no longer silently ignored, a non-literal no longer panics
     // inside the JIT at first launch.
