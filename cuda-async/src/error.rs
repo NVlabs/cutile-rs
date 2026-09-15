@@ -38,6 +38,20 @@ impl From<anyhow::Error> for DeviceError {
     }
 }
 
+/// Returns `Err(DeviceError::Launch)` if `pred` is false; the message is
+/// built only on failure, so passing checks cost no allocation.
+#[inline]
+pub fn kernel_launch_assert_with(
+    pred: bool,
+    message: impl FnOnce() -> String,
+) -> Result<(), DeviceError> {
+    if !pred {
+        Err(DeviceError::Launch(message()))
+    } else {
+        Ok(())
+    }
+}
+
 /// Returns `Err(DeviceError::Launch)` if `pred` is false.
 pub fn kernel_launch_assert(pred: bool, message: &str) -> Result<(), DeviceError> {
     if !pred {

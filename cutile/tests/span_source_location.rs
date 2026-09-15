@@ -32,7 +32,6 @@
 //!    number, and column number — proving that `source_text()` correctly
 //!    preserves comments in the captured text.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::error::JITError;
 

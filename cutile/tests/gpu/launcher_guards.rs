@@ -164,8 +164,7 @@ fn generics_must_match_pointer_element_types() {
             .generics(vec!["f16".to_string()])
             .grid((1, 1, 1))
             .sync()
-            .err()
-            .expect("f16 specialization over a DevicePointer<f32> must be rejected");
+            .expect_err("f16 specialization over a DevicePointer<f32> must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("element type mismatch"), "{msg}");
         assert!(msg.contains("DevicePointer<f32>"), "{msg}");

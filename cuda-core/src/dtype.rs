@@ -398,8 +398,8 @@ mod tests {
 
     #[test]
     fn dtype_zero_one() {
-        assert_eq!(bool::zero(), false);
-        assert_eq!(bool::one(), true);
+        assert!(!bool::zero());
+        assert!(bool::one());
         assert_eq!(u8::zero(), 0u8);
         assert_eq!(u8::one(), 1u8);
         assert_eq!(i32::zero(), 0i32);

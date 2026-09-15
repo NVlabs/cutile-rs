@@ -121,7 +121,7 @@ impl SingleMetaList {
     pub fn from_attribute(attr: Attribute) -> Self {
         match attr.meta {
             Meta::List(meta_list) => {
-                let tokens = proc_macro2::TokenStream::from(meta_list.tokens.clone());
+                let tokens = meta_list.tokens.clone();
                 let mut result = syn::parse2::<SingleMetaList>(tokens).unwrap();
                 result.name = Some(meta_list.path.to_token_stream().to_string());
                 result.meta_list = Some(meta_list);
@@ -139,24 +139,20 @@ impl SingleMetaList {
     }
     /// Returns the attribute path as a single string.
     pub fn name_as_str(&self) -> Option<String> {
-        match &self.name {
-            Some(s) => Some(s.clone()),
-            None => None,
-        }
+        self.name.clone()
     }
     /// Returns the attribute path split by `::` separators.
     pub fn name_as_vec(&self) -> Option<Vec<&str>> {
-        match &self.name {
-            Some(s) => Some(s.as_str().split(" :: ").collect()),
-            None => None,
-        }
+        self.name
+            .as_ref()
+            .map(|s| s.as_str().split(" :: ").collect())
     }
     fn get_value(&self, name: &str) -> Option<&Expr> {
         for item in &self.variables {
             match item {
                 Meta::NameValue(name_value) => {
                     let meta_ident = name_value.path.get_ident();
-                    let meta_name = meta_ident.clone().unwrap().to_string();
+                    let meta_name = meta_ident.unwrap().to_string();
                     if name == meta_name {
                         return Some(&name_value.value);
                     }
@@ -266,10 +262,10 @@ impl Parse for SingleMetaList {
     }
 }
 
-impl Into<Vec<Attribute>> for SingleMetaList {
-    fn into(self) -> Vec<Attribute> {
+impl From<SingleMetaList> for Vec<Attribute> {
+    fn from(val: SingleMetaList) -> Self {
         let mut res = vec![];
-        for meta in self.variables {
+        for meta in val.variables {
             let attr: Attribute = parse_quote! {
                 #[noname(#meta)]
             };
@@ -280,7 +276,7 @@ impl Into<Vec<Attribute>> for SingleMetaList {
 }
 
 /// Removes all attributes whose path matches one of the given names.
-pub fn clear_attributes(attr_names: HashSet<&str>, attrs: &mut Vec<Attribute>) -> () {
+pub fn clear_attributes(attr_names: HashSet<&str>, attrs: &mut Vec<Attribute>) {
     // filter == keep
     *attrs = attrs
         .clone()
@@ -329,10 +325,7 @@ pub fn get_attribute(
 
 /// Looks up an attribute by full path and parses it as a [`SingleMetaList`].
 pub fn get_meta_list(attr_name: &str, outer_attrs: &Vec<Attribute>) -> Option<SingleMetaList> {
-    match get_attribute(attr_name, outer_attrs, false) {
-        Some(attr) => Some(SingleMetaList::from_attribute(attr)),
-        None => None,
-    }
+    get_attribute(attr_name, outer_attrs, false).map(SingleMetaList::from_attribute)
 }
 
 /// Like [`get_meta_list`] but matches only the last path segment.
@@ -340,10 +333,7 @@ pub fn get_meta_list_by_last_segment(
     last_seg: &str,
     outer_attrs: &Vec<Attribute>,
 ) -> Option<SingleMetaList> {
-    match get_attribute(last_seg, outer_attrs, true) {
-        Some(attr) => Some(SingleMetaList::from_attribute(attr)),
-        None => None,
-    }
+    get_attribute(last_seg, outer_attrs, true).map(SingleMetaList::from_attribute)
 }
 
 /// Finds the first `cuda_tile::*` attribute and parses it as a [`SingleMetaList`].
@@ -414,7 +404,7 @@ impl VarCGAParameter {
                 }
             }
             _ => {
-                panic!("Unexpected path expression {:#?}.", &ty_arr.len)
+                panic!("Unexpected path expression {:#?}.", ty_arr.len)
             }
         }
     }
@@ -483,7 +473,7 @@ impl CGAParameter {
                 }
             }
             _ => {
-                panic!("Unexpected path expression {:#?}.", &ty_arr.len)
+                panic!("Unexpected path expression {:#?}.", ty_arr.len)
             }
         }
     }
@@ -640,7 +630,7 @@ pub fn get_sig_output_type(sig: &Signature) -> Type {
 pub fn function_returns(fn_item: &ItemFn) -> bool {
     match &fn_item.sig.output {
         ReturnType::Type(_, return_type) => match &**return_type {
-            Type::Tuple(type_tuple) => type_tuple.elems.len() > 0,
+            Type::Tuple(type_tuple) => !type_tuple.elems.is_empty(),
             _ => true,
         },
         ReturnType::Default => false,
@@ -661,7 +651,7 @@ pub fn get_ident_from_path_expr(path_expr: &ExprPath) -> Ident {
 pub fn get_ident_from_expr(expr: &Expr) -> Option<Ident> {
     match expr {
         Expr::Path(path_expr) => Some(get_ident_from_path(&path_expr.path)),
-        Expr::Reference(ref_expr) => get_ident_from_expr(&*ref_expr.expr),
+        Expr::Reference(ref_expr) => get_ident_from_expr(&ref_expr.expr),
         _ => None,
     }
 }
@@ -771,7 +761,7 @@ pub fn get_supported_generic_params(generics: &Generics) -> Vec<(String, Option<
 }
 
 /// Removes lifetime arguments from angle-bracketed generic arguments in place.
-pub fn strip_generic_args_lifetimes(gen_args: &mut AngleBracketedGenericArguments) -> () {
+pub fn strip_generic_args_lifetimes(gen_args: &mut AngleBracketedGenericArguments) {
     let mut res = gen_args.args.clone();
     res.clear();
     for gen_arg in gen_args.args.iter() {
@@ -784,7 +774,7 @@ pub fn strip_generic_args_lifetimes(gen_args: &mut AngleBracketedGenericArgument
 }
 
 /// Removes lifetime parameters from generics in place.
-pub fn strip_generics_lifetimes(generics: &mut Generics) -> () {
+pub fn strip_generics_lifetimes(generics: &mut Generics) {
     let mut res = generics.params.clone();
     res.clear();
     for gen_param in generics.params.iter() {

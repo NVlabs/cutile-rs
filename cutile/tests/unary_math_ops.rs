@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -200,7 +199,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_unary_math_ops() -> () {
+fn compile_unary_math_ops() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "unary_math_ops_kernel",
@@ -229,7 +228,7 @@ fn compile_unary_math_ops() -> () {
 }
 
 #[test]
-fn compile_integer_unary_ops() -> () {
+fn compile_integer_unary_ops() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "integer_unary_ops_kernel",
@@ -255,7 +254,7 @@ fn compile_integer_unary_ops() -> () {
 }
 
 #[test]
-fn compile_sqrt() -> () {
+fn compile_sqrt() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("sqrt_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== SQRT MLIR ===\n{}", module_op_str);
@@ -270,7 +269,7 @@ fn compile_sqrt() -> () {
 }
 
 #[test]
-fn compile_fma() -> () {
+fn compile_fma() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("fma_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== FMA MLIR ===\n{}", module_op_str);
@@ -285,7 +284,7 @@ fn compile_fma() -> () {
 }
 
 #[test]
-fn compile_pow() -> () {
+fn compile_pow() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("pow_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== POW MLIR ===\n{}", module_op_str);
@@ -300,7 +299,7 @@ fn compile_pow() -> () {
 }
 
 #[test]
-fn compile_atan2() -> () {
+fn compile_atan2() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("atan2_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== ATAN2 MLIR ===\n{}", module_op_str);
@@ -313,7 +312,7 @@ fn compile_atan2() -> () {
 }
 
 #[test]
-fn compile_exp2_ftz() -> () {
+fn compile_exp2_ftz() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("exp2_ftz_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== EXP2 FTZ MLIR ===\n{}", module_op_str);
@@ -330,7 +329,7 @@ fn compile_exp2_ftz() -> () {
 }
 
 #[test]
-fn compile_maxf_ftz() -> () {
+fn compile_maxf_ftz() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("maxf_ftz_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MAXF FTZ MLIR ===\n{}", module_op_str);
@@ -347,7 +346,7 @@ fn compile_maxf_ftz() -> () {
 }
 
 #[test]
-fn compile_minf_ftz() -> () {
+fn compile_minf_ftz() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("minf_ftz_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== MINF FTZ MLIR ===\n{}", module_op_str);
@@ -416,7 +415,7 @@ fn compile_sqrt_ftz() {
 }
 
 #[test]
-fn compile_unary_math_ops_bf16() -> () {
+fn compile_unary_math_ops_bf16() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "unary_math_ops_bf16_kernel",

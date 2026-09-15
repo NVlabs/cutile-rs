@@ -7,7 +7,6 @@
 // must keep working unchanged until it is removed.
 #![allow(deprecated)]
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

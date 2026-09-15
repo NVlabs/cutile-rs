@@ -41,6 +41,7 @@ pub fn cache_test_lock() -> MutexGuard<'static, ()> {
 /// - With reduce/scan operations: ~2.7 MB
 /// - With all unary math operations: ~5 MB (after adding absf, negf, negi, floor)
 /// - tensor_views module tests require a bit more headroom.
+///
 /// Using 8 MB provides an adequate safety margin for all tests.
 pub const TEST_STACK_SIZE: usize = 8_000_000; // 8 MB
 

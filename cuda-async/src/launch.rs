@@ -40,57 +40,63 @@ pub struct AsyncKernelLaunch {
 // enter the storage, so moving the launch to another thread is sound.
 unsafe impl Send for AsyncKernelLaunch {}
 
-/// Heap-allocated, type-erased kernel arguments, each paired with the
-/// destructor for its concrete type.
+/// Type-erased kernel argument values, stored inline in 16-byte slots.
 ///
 /// `cuLaunchKernel` takes an array of `*mut c_void` pointing at the parameter
-/// values, so the boxes must be erased for the driver. They must *not* be
-/// erased for deallocation: the allocator contract requires freeing with the
-/// `Layout` the value was allocated with, and `Box::<c_void>::from_raw` on a
-/// pointer that came from `Box::<T>::into_raw` deallocates with `c_void`'s
-/// layout (size 1, align 1) instead of `T`'s — undefined behavior for every
-/// real argument type. Each entry therefore records `drop_box::<T>` for the
-/// `T` it was pushed as.
+/// VALUES. Every value pushed here is a plain `Copy` scalar or device pointer
+/// (the only two `push` callers), so the storage is a bump arena with no
+/// per-argument heap allocation and no destructor bookkeeping. The pointer
+/// array is materialized only at launch, after every push, so arena growth
+/// can never invalidate a recorded pointer.
 #[derive(Default)]
 struct KernelArgStorage {
+    /// 16-byte-aligned value slots.
+    values: Vec<u128>,
+    /// Slot index of each argument, in push order.
+    offsets: Vec<usize>,
+    /// Parameter pointers in push order; rebuilt from `offsets` at launch.
     ptrs: Vec<*mut c_void>,
-    drops: Vec<unsafe fn(*mut c_void)>,
 }
 
 impl Debug for KernelArgStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelArgStorage")
-            .field("len", &self.ptrs.len())
-            .field("ptrs", &self.ptrs)
+            .field("len", &self.offsets.len())
+            .field("offsets", &self.offsets)
             .finish()
     }
 }
 
-impl Drop for KernelArgStorage {
-    fn drop(&mut self) {
-        for (arg, drop_arg) in self.ptrs.drain(..).zip(self.drops.drain(..)) {
-            // SAFETY: `arg` came from `Box::<T>::into_raw` in `push`, and
-            // `drop_arg` is `drop_box::<T>` for that same `T`, so the box is
-            // reconstituted and freed with the layout it was allocated with.
-            unsafe { drop_arg(arg) };
-        }
-    }
-}
-
 impl KernelArgStorage {
-    /// Erases `arg` for the driver and records its typed destructor.
-    fn push<T: Send>(&mut self, arg: Box<T>) {
-        unsafe fn drop_box<T>(arg: *mut c_void) {
-            // SAFETY: the caller (`Drop for KernelArgStorage`) passes the
-            // pointer this entry was created from, typed as `T`.
-            drop(unsafe { Box::from_raw(arg as *mut T) });
+    /// Copies `arg` into the arena. `Copy` makes the missing destructor
+    /// bookkeeping sound: dropping the arena drops nothing.
+    fn push<T: Copy + Send>(&mut self, arg: T) {
+        const SLOT: usize = std::mem::size_of::<u128>();
+        const {
+            assert!(std::mem::align_of::<T>() <= SLOT);
         }
-        self.ptrs.push(Box::into_raw(arg) as *mut c_void);
-        self.drops.push(drop_box::<T>);
+        let slots = std::mem::size_of::<T>().div_ceil(SLOT).max(1);
+        let offset = self.values.len();
+        self.values.resize(offset + slots, 0);
+        // SAFETY: the reserved span is at least `size_of::<T>()` bytes and
+        // 16-byte aligned, which the const assertion above bounds `T`'s
+        // alignment by; `T: Copy` so overwriting the zeroed slots drops
+        // nothing.
+        unsafe { std::ptr::write(self.values.as_mut_ptr().add(offset) as *mut T, arg) };
+        self.offsets.push(offset);
     }
 
     /// The parameter pointer array in push order, as `cuLaunchKernel` wants it.
     fn as_mut_slice(&mut self) -> &mut [*mut c_void] {
+        let base = self.values.as_mut_ptr();
+        self.ptrs.clear();
+        self.ptrs.extend(
+            self.offsets
+                .iter()
+                // SAFETY: every offset was a valid slot index at push time and
+                // the arena only grows.
+                .map(|&offset| unsafe { base.add(offset) } as *mut c_void),
+        );
         &mut self.ptrs
     }
 }
@@ -127,15 +133,16 @@ impl AsyncKernelLaunch {
     /// merely until the launch is submitted. The kernel signature must expect a
     /// pointer at this position.
     pub unsafe fn push_device_ptr(&mut self, ptr: CUdeviceptr) -> &mut Self {
-        self.push_arg_raw(Box::new(ptr))
+        self.push_arg_raw(ptr)
     }
 
     /// Pushes a raw argument to the kernel parameter list.
     ///
     /// # Safety
     /// `T` must match the size and alignment of the kernel's formal parameter
-    /// at this position; the driver copies `size_of::<T>()` bytes from the box.
-    unsafe fn push_arg_raw<T: Send>(&mut self, arg: Box<T>) -> &mut Self {
+    /// at this position; the driver copies `size_of::<T>()` bytes from the
+    /// stored value.
+    unsafe fn push_arg_raw<T: Copy + Send>(&mut self, arg: T) -> &mut Self {
         self.args.push(arg);
         self
     }
@@ -151,9 +158,9 @@ impl AsyncKernelLaunch {
     /// # Safety
     /// The caller must ensure the kernel arguments and launch config are valid.
     unsafe fn launch(mut self, stream: &Arc<Stream>) -> Result<(), DeviceError> {
-        let cfg = self.cfg.ok_or(DeviceError::Launch(
-            "Await called before launching the kernel.".to_string(),
-        ))?;
+        let cfg = self.cfg.ok_or_else(|| {
+            DeviceError::Launch("Await called before launching the kernel.".to_string())
+        })?;
         launch_kernel(
             self.func.cu_function(),
             cfg.grid_dim,
@@ -197,7 +204,7 @@ impl<T: DType> KernelArgument for T {
         // signature validation (in cutile) checks the position, and the value
         // is copied out by the driver at launch, so nothing outlives the box.
         unsafe {
-            launcher.push_arg_raw(Box::new(self));
+            launcher.push_arg_raw(self);
         }
     }
 }
@@ -236,47 +243,39 @@ mod arg_storage_tests {
     //! Host-only: the storage never touches the driver.
 
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Each argument's destructor runs exactly once, when the storage drops,
-    /// through the `drop_box::<T>` recorded for its own `T`.
+    /// Values of every accepted width roundtrip through the arena, and the
+    /// pointer array — materialized after all pushes — points at the values
+    /// even when the arena reallocated while growing.
     #[test]
-    fn arguments_drop_once_with_their_original_type() {
-        struct DropCounter(Arc<AtomicUsize>);
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let drops = Arc::new(AtomicUsize::new(0));
+    fn values_roundtrip_and_survive_arena_growth() {
         let mut storage = KernelArgStorage::default();
-        storage.push(Box::new(DropCounter(Arc::clone(&drops))));
-        storage.push(Box::new(DropCounter(Arc::clone(&drops))));
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        drop(storage);
-        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        storage.push(7u8);
+        storage.push(0x1122_3344_5566_7788u64);
+        storage.push(-5i32);
+        for i in 0..64u64 {
+            storage.push(i);
+        }
+        let ptrs = storage.as_mut_slice();
+        assert_eq!(ptrs.len(), 3 + 64);
+        assert_eq!(unsafe { *(ptrs[0] as *const u8) }, 7);
+        assert_eq!(unsafe { *(ptrs[1] as *const u64) }, 0x1122_3344_5566_7788);
+        assert_eq!(unsafe { *(ptrs[2] as *const i32) }, -5);
+        for i in 0..64usize {
+            assert_eq!(unsafe { *(ptrs[3 + i] as *const u64) }, i as u64);
+        }
     }
 
-    /// Wide and over-aligned arguments are allocated and freed with their own
-    /// layout, and the parameter array points at the values themselves. The
-    /// previous `Box::<c_void>::from_raw` teardown deallocated these with a
-    /// 1-byte/1-align layout, which Miri and ASan report as a layout mismatch.
+    /// Every parameter pointer is aligned for its slot (16 bytes), which
+    /// bounds all accepted argument types; the `const` assertion in `push`
+    /// rejects wider alignments at compile time.
     #[test]
-    fn over_aligned_argument_roundtrips() {
-        #[repr(C, align(64))]
-        #[derive(Clone, Copy, PartialEq, Debug)]
-        struct Wide([u64; 8]);
-
-        let value = Wide([1, 2, 3, 4, 5, 6, 7, 8]);
+    fn slots_are_sixteen_byte_aligned() {
         let mut storage = KernelArgStorage::default();
-        storage.push(Box::new(value));
-        storage.push(Box::new(7u8));
-
+        storage.push(1u8);
+        storage.push(2u128);
         let ptrs = storage.as_mut_slice();
-        assert_eq!(ptrs.len(), 2);
-        assert_eq!(ptrs[0] as usize % 64, 0, "box honours the type's alignment");
-        assert_eq!(unsafe { *(ptrs[0] as *const Wide) }, value);
-        assert_eq!(unsafe { *(ptrs[1] as *const u8) }, 7);
+        assert!(ptrs.iter().all(|&p| (p as usize).is_multiple_of(16)));
+        assert_eq!(unsafe { *(ptrs[1] as *const u128) }, 2);
     }
 }

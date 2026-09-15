@@ -51,11 +51,7 @@ fn gemm<T: DType + std::fmt::Display>() -> Result<(), Error> {
     let stream = device.new_stream()?;
     let scale = 2usize.pow(10); // On the order of megabytes.
     let (bm, bn, bk) = (16, 16, 8);
-    let (m, n, k) = (
-        scale * bm as usize,
-        scale * bn as usize,
-        scale * bk as usize,
-    );
+    let (m, n, k) = (scale * bm, scale * bn, scale * bk as usize);
     let generics = vec![
         T::DTYPE.as_str().to_string(),
         bm.to_string(),

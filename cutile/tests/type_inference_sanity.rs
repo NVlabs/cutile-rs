@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 

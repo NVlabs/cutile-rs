@@ -17,7 +17,6 @@ use crate::common;
 /// uses it in a value position.
 #[cutile::module]
 mod const_helper_module {
-    use cutile::core::*;
 
     const N: i32 = 64;
 

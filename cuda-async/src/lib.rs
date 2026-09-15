@@ -13,6 +13,7 @@ pub mod device_future;
 pub mod device_operation;
 pub mod error;
 pub mod launch;
+mod leak;
 mod loom_compat;
 pub mod predicate;
 pub mod prelude;

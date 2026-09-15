@@ -9,7 +9,6 @@
 //! instead of ascribing the returned tile type. These tests exercise the same
 //! JIT path without requiring a CUDA device.
 
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;

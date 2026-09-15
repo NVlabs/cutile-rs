@@ -6,7 +6,6 @@ extern crate core;
 
 use cuda_async::device_operation::{DeviceOp, Unzippable6};
 use cuda_core::Device;
-use cutile;
 use cutile::api::{randn, zeros};
 use cutile::error::Error;
 use cutile::tensor::{IntoPartition, Partition, Tensor, ToHostVec, Unpartition};
@@ -169,7 +168,7 @@ fn fmha(
     let out: Partition<Tensor<f32>> = zeros(&[b * h, m, d])
         .sync_on(&stream)?
         .partition([bbh, bm, d]);
-    assert_eq!(out.grid()?, ((b * h) as u32, (m / bm as usize) as u32, 1));
+    assert_eq!(out.grid()?, ((b * h) as u32, (m / bm) as u32, 1));
 
     let qk_scale = 1.0 / f32::sqrt(q.shape()[3] as f32);
 

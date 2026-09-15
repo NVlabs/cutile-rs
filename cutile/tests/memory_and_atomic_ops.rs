@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-use cutile;
 use cutile_compiler::compiler::utils::CompileOptions;
 
 mod common;
@@ -568,7 +567,7 @@ fn compile_ir(function_name: &str, generics: &[String], strides: &[(&str, &[i32]
 }
 
 #[test]
-fn compile_join_tokens() -> () {
+fn compile_join_tokens() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "join_tokens_kernel",
@@ -602,7 +601,7 @@ fn compile_join_tokens() -> () {
 }
 
 #[test]
-fn compile_print_tko() -> () {
+fn compile_print_tko() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir("print_tko_kernel", &[128.to_string()], &[("output", &[1])]);
         println!("\n=== PRINT_TKO MLIR ===\n{}", module_op_str);
@@ -619,7 +618,7 @@ fn compile_print_tko() -> () {
 }
 
 #[test]
-fn compile_ptr_load_store() -> () {
+fn compile_ptr_load_store() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "ptr_load_store_kernel",
@@ -676,7 +675,7 @@ fn compile_ptr_load_store() -> () {
 }
 
 #[test]
-fn compile_load_ptr_weak() -> () {
+fn compile_load_ptr_weak() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "load_ptr_weak_kernel",
@@ -699,7 +698,7 @@ fn compile_load_ptr_weak() -> () {
 }
 
 #[test]
-fn compile_load_ptr_acquire() -> () {
+fn compile_load_ptr_acquire() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "load_ptr_acquire_kernel",
@@ -722,7 +721,7 @@ fn compile_load_ptr_acquire() -> () {
 }
 
 #[test]
-fn compile_load_ptr_with_token() -> () {
+fn compile_load_ptr_with_token() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "load_ptr_with_token_kernel",
@@ -750,7 +749,7 @@ fn compile_load_ptr_with_token() -> () {
 }
 
 #[test]
-fn compile_load_ptr_with_mask() -> () {
+fn compile_load_ptr_with_mask() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "load_ptr_with_mask_kernel",
@@ -778,7 +777,7 @@ fn compile_load_ptr_with_mask() -> () {
 }
 
 #[test]
-fn compile_store_ptr_release() -> () {
+fn compile_store_ptr_release() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "store_ptr_release_kernel",
@@ -801,7 +800,7 @@ fn compile_store_ptr_release() -> () {
 }
 
 #[test]
-fn compile_store_ptr_with_mask() -> () {
+fn compile_store_ptr_with_mask() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "store_ptr_with_mask_kernel",
@@ -828,7 +827,7 @@ fn compile_store_ptr_with_mask() -> () {
 }
 
 #[test]
-fn compile_atomic_rmw() -> () {
+fn compile_atomic_rmw() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_rmw_kernel",
@@ -863,7 +862,7 @@ fn compile_atomic_rmw() -> () {
 }
 
 #[test]
-fn compile_atomic_cas() -> () {
+fn compile_atomic_cas() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_cas_kernel",
@@ -899,7 +898,7 @@ fn compile_atomic_cas() -> () {
 }
 
 #[test]
-fn compile_atomic_cas_with_mask() -> () {
+fn compile_atomic_cas_with_mask() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_cas_with_mask_kernel",
@@ -927,7 +926,7 @@ fn compile_atomic_cas_with_mask() -> () {
 }
 
 #[test]
-fn compile_atomic_cas_acq_rel_sys() -> () {
+fn compile_atomic_cas_acq_rel_sys() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_cas_acq_rel_sys_kernel",
@@ -955,7 +954,7 @@ fn compile_atomic_cas_acq_rel_sys() -> () {
 }
 
 #[test]
-fn compile_atomic_and() -> () {
+fn compile_atomic_and() {
     common::with_test_stack(|| {
         let module_op_str =
             compile_ir("atomic_and_kernel", &[128.to_string()], &[("output", &[1])]);
@@ -979,7 +978,7 @@ fn compile_atomic_and() -> () {
 }
 
 #[test]
-fn compile_atomic_add() -> () {
+fn compile_atomic_add() {
     common::with_test_stack(|| {
         let module_op_str =
             compile_ir("atomic_add_kernel", &[128.to_string()], &[("output", &[1])]);
@@ -1003,7 +1002,7 @@ fn compile_atomic_add() -> () {
 }
 
 #[test]
-fn compile_atomic_max() -> () {
+fn compile_atomic_max() {
     common::with_test_stack(|| {
         let module_op_str =
             compile_ir("atomic_max_kernel", &[128.to_string()], &[("output", &[1])]);
@@ -1027,7 +1026,7 @@ fn compile_atomic_max() -> () {
 }
 
 #[test]
-fn compile_atomic_rmw_with_mask() -> () {
+fn compile_atomic_rmw_with_mask() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_rmw_with_mask_kernel",
@@ -1054,7 +1053,7 @@ fn compile_atomic_rmw_with_mask() -> () {
 }
 
 #[test]
-fn compile_atomic_rmw_with_token() -> () {
+fn compile_atomic_rmw_with_token() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_rmw_with_token_kernel",
@@ -1081,7 +1080,7 @@ fn compile_atomic_rmw_with_token() -> () {
 }
 
 #[test]
-fn compile_atomic_xchg() -> () {
+fn compile_atomic_xchg() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "atomic_xchg_kernel",
@@ -1108,7 +1107,7 @@ fn compile_atomic_xchg() -> () {
 }
 
 #[test]
-fn compile_padded_partition_view() -> () {
+fn compile_padded_partition_view() {
     common::with_test_stack(|| {
         let module_op_str = compile_ir(
             "padded_partition_view_kernel",
@@ -1131,7 +1130,7 @@ fn compile_padded_partition_view() -> () {
 }
 
 #[test]
-fn compile_atomic_red_view_tko() -> () {
+fn compile_atomic_red_view_tko() {
     common::with_test_stack(|| {
         let module_op_str = common::compile_to_ir(
             atomic_red_view_module::__module_ast_self,
@@ -1180,7 +1179,7 @@ mod gather_scatter_view_module {
 }
 
 #[test]
-fn compile_make_gather_scatter_view() -> () {
+fn compile_make_gather_scatter_view() {
     common::with_test_stack(|| {
         let module_op_str = common::compile_to_ir(
             gather_scatter_view_module::__module_ast_self,
@@ -1229,7 +1228,7 @@ mod strided_view_module {
 }
 
 #[test]
-fn compile_make_strided_view() -> () {
+fn compile_make_strided_view() {
     common::with_test_stack(|| {
         let module_op_str = common::compile_to_ir(
             strided_view_module::__module_ast_self,
@@ -1281,7 +1280,7 @@ mod strided_view_permuted_module {
 }
 
 #[test]
-fn compile_strided_view_threads_dim_map() -> () {
+fn compile_strided_view_threads_dim_map() {
     common::with_test_stack(|| {
         let module_op_str = common::compile_to_ir(
             strided_view_permuted_module::__module_ast_self,

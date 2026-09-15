@@ -28,7 +28,6 @@ use crate::simt::error::DeviceError;
 use crate::simt::reclaim;
 use futures::task::AtomicWaker;
 use std::future::Future;
-use std::io::{self, Write};
 use std::mem;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -239,12 +238,9 @@ impl<T: Send + 'static, DO: DeviceOperation<Output = T>> DeviceFuture<T, DO> {
         };
 
         if let Err(error) = synchronize() {
-            let mut stderr = io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "cuda-async: leaking in-flight future result after cleanup failure: {}",
-                error
-            );
+            crate::leak::report_leak(format_args!(
+                "cuda-async: leaking in-flight future result after cleanup failure: {error}"
+            ));
             // If cleanup cannot prove the stream is idle, leaking the owned
             // result is safer than dropping buffers that device work may still
             // be using.
@@ -418,10 +414,13 @@ mod tests {
             callback_state: None,
         };
 
+        let mut capture = crate::leak::capture::start();
         future.cleanup_executing_result_with(|| Err(DeviceError::Internal("boom".to_string())));
+        let reports = capture.take();
 
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(future.result.is_none());
+        assert_eq!(reports.len(), 1, "the leak must be reported: {reports:?}");
     }
 
     /// The shape left behind by issue #99's second path: `execute()`

@@ -56,7 +56,7 @@ mod kernels {
         let inv: f32 = tile_to_scalar(inv_tile);
         let scale: Tile<f32, { [1, BS] }> = inv.broadcast(shape);
         let w_part: Partition<f32, { [BS] }> = w.partition(shape![BS]);
-        let mut out_part: PartitionMut<f32, { [1, BS] }> = unsafe { out.partition_mut(shape) };
+        let mut out_part: PartitionMut<f32, { [1, BS] }> = out.partition_mut(shape);
         for j in 0i32..tiles {
             let t: Tile<f32, { [1, BS] }> = x_part.load([row, j]);
             let tw: Tile<f32, { [1, BS] }> = w_part.load([j]).reshape(shape);
