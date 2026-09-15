@@ -600,10 +600,10 @@ impl<Op, Out> ExecuteOnce<Op, Out> {
                 // ordered after the producing work. The value may own memory
                 // that work still writes; releasing it now would be the
                 // in-flight-free hazard, so leak it loudly instead.
-                eprintln!(
+                crate::leak::report_leak(format_args!(
                     "cuda-async: leaking a memoized result after its completion \
                      event could not be recorded: {error}"
-                );
+                ));
                 std::mem::forget(value);
                 OnceState::Failed(error)
             }

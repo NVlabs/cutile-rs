@@ -11,7 +11,7 @@ readme = "README.md"
 
 [dependencies]
 cuda-bindings = { workspace = true }
-cuda-core-derive = { version = "0.3", path = "../cuda-core-derive" }
+cuda-core-derive = { version = "=0.3.1", path = "../cuda-core-derive" }
 anyhow = { workspace = true }
 half = { workspace = true }
 oxide-artifacts = { version = "0.2.1", features = ["object-read"] }
