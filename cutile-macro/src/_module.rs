@@ -122,7 +122,7 @@ fn source_slice_from_file(path: &str, start: LineColumn, end: LineColumn) -> Opt
 ///
 /// This is used throughout the code generation to reference AST types.
 pub fn get_ast_path(tile_rust_crate_root: &Ident) -> Path {
-    let s = format!("{tile_rust_crate_root}::cutile_compiler::ast");
+    let s = format!("{tile_rust_crate_root}::cutile_frontend::ast");
     syn::parse::<Path>(s.parse().unwrap()).unwrap()
 }
 
@@ -133,7 +133,7 @@ pub fn get_ast_path(tile_rust_crate_root: &Ident) -> Path {
 /// name the registry without each downstream crate depending on `linkme`
 /// directly.
 pub fn get_registry_path(tile_rust_crate_root: &Ident) -> Path {
-    let s = format!("{tile_rust_crate_root}::cutile_compiler::registry");
+    let s = format!("{tile_rust_crate_root}::cutile_frontend::registry");
     syn::parse::<Path>(s.parse().unwrap()).unwrap()
 }
 

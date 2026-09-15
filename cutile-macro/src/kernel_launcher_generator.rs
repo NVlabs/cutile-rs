@@ -650,7 +650,7 @@ pub fn generate_kernel_launcher(
                                 panic!("Unexpected validator type {:#?}", &validator.params[#i]);
                             };
                             let given_dtype = <#pointee_ty as DType>::DTYPE.as_str();
-                            let compiled_dtype = #tile_rust_crate_root::cutile_compiler::types::get_ptr_type(&pointer_validator.element_type)
+                            let compiled_dtype = #tile_rust_crate_root::cutile_frontend::types::get_ptr_type(&pointer_validator.element_type)
                                 .map(|(_, pointee)| pointee)
                                 .unwrap_or_else(|| pointer_validator.element_type.clone());
                             kernel_launch_assert_with(compiled_dtype == given_dtype, || format!("{} element type mismatch: the kernel was specialized for a `*{}` pointer but the launch passes a `DevicePointer<{}>` (check the `.generics(..)` list)", #var_name, compiled_dtype, given_dtype))?;
