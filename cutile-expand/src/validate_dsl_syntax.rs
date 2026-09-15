@@ -57,8 +57,8 @@
 //! - Suggests correct usage (e.g., using `&mut Tensor` for partitioned tensors)
 //! - Points to the specific parameter that caused the error
 
-use cutile_compiler::syn_utils::{get_ident_from_path, get_sig_types, get_type_ident};
-use cutile_compiler::types::get_ptr_type;
+use cutile_syn_utils::ptr_and_literals::get_ptr_type;
+use cutile_syn_utils::syn_utils::{get_ident_from_path, get_sig_types, get_type_ident};
 use quote::ToTokens;
 use syn::{ItemFn, Type};
 

@@ -15,6 +15,12 @@ members = [
     # cuTile Rust compiler. Requires cutile-ir + cuda-async.
     "cutile-compiler",
 
+    # Macro syn helpers. Shared by the compiler and macro expansion.
+    "cutile-syn-utils",
+
+    # Macro expansion. Rank instantiation and shadow dispatch.
+    "cutile-expand",
+
     # cuTile Rust macros. Requires cutile-compiler.
     "cutile-macro",
 
@@ -98,6 +104,8 @@ cuda-async = { path = "cuda-async", version = "=0.3.1" }
 # crate for downstreams (candle CI, 2026-09-04: cutile 0.3.0 resolved
 # cutile-macro 0.3.1 and failed on 0.3.1-only symbols). Exact-pin, like
 # serde pins serde_derive.
+cutile-syn-utils = { path = "cutile-syn-utils", version = "=0.3.1" }
+cutile-expand = { path = "cutile-expand", version = "=0.3.1" }
 cutile-compiler = { path = "cutile-compiler", version = "=0.3.1" }
 cutile-macro = { path = "cutile-macro", version = "=0.3.1" }
 cutile = { path = "cutile", version = "=0.3.1" }

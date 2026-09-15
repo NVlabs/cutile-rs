@@ -514,6 +514,7 @@ dependencies = [
  "cuda-async",
  "cuda-core",
  "cutile-ir",
+ "cutile-syn-utils",
  "half",
  "linkme",
  "prettyplease",
@@ -542,6 +543,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutile-expand"
+version = "0.3.1"
+dependencies = [
+ "cutile-syn-utils",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "cutile-ir"
 version = "0.3.1"
 dependencies = [
@@ -564,6 +575,7 @@ version = "0.3.1"
 dependencies = [
  "convert_case",
  "cutile-compiler",
+ "cutile-expand",
  "itertools 0.14.0",
  "phf",
  "proc-macro2",
@@ -571,6 +583,16 @@ dependencies = [
  "sha2",
  "syn",
  "trybuild",
+]
+
+[[package]]
+name = "cutile-syn-utils"
+version = "0.3.1"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ use crate::error::{JITError, SpannedJITError};
 use crate::generics::{
     GenericVars, TypInstancePrimitiveType, TypeInstance, TypeInstanceStructuredType,
 };
+pub use crate::ptr_and_literals::{get_ptr_type, parse_signed_literal_as_i32};
 use crate::syn_utils::{
     get_ident_from_path_expr, get_ident_generic_args, get_meta_list, get_type_ident,
     maybe_generic_args, strip_generic_args_lifetimes, SingleMetaList,
@@ -538,29 +539,6 @@ pub fn is_element_type_ptr(
     get_primitives_attrs("ElementType", rust_primitive, primitives).is_some()
 }
 
-/// Parses a pointer type string, returning `(is_mutable, pointee_type)`.
-pub fn get_ptr_type(rust_ptr: &str) -> Option<(bool, String)> {
-    // This also serves to check whether this is actually a pointer.
-    let res = if rust_ptr.starts_with("* mut ") {
-        (
-            true,
-            rust_ptr.split("* mut ").collect::<Vec<_>>()[1]
-                .trim()
-                .to_string(),
-        )
-    } else if rust_ptr.starts_with("* const ") {
-        (
-            false,
-            rust_ptr.split("* const ").collect::<Vec<_>>()[1]
-                .trim()
-                .to_string(),
-        )
-    } else {
-        return None;
-    };
-    Some(res)
-}
-
 /// Like [`get_ptr_type`] but also resolves generic type variables.
 pub fn get_ptr_type_instance(
     rust_ptr: &str,
@@ -703,33 +681,6 @@ pub fn get_lit_type(lit_expr: &ExprLit) -> Option<syn::Type> {
         Lit::Bool(_bool_lit) => Some(syn::parse2("bool".parse().unwrap()).unwrap()),
         Lit::Str(_str_lit) => Some(syn::parse2("str".parse().unwrap()).unwrap()),
         _ => None,
-    }
-}
-
-/// Parses a possibly-negated integer literal expression as an `i32`.
-pub fn parse_signed_literal_as_i32(expr: &Expr) -> i32 {
-    match expr {
-        Expr::Lit(lit) => {
-            let val = match &lit.lit {
-                Lit::Int(int_lit) => int_lit.base10_parse().unwrap(),
-                _ => unimplemented!("Unexpected array element {expr:#?}"),
-            };
-            val
-        }
-        Expr::Unary(unary_expr) => match unary_expr.op {
-            UnOp::Neg(_) => match &*unary_expr.expr {
-                Expr::Lit(lit_expr) => {
-                    let val: i32 = match &lit_expr.lit {
-                        Lit::Int(int_lit) => int_lit.base10_parse().unwrap(),
-                        _ => unimplemented!("Unexpected array element {expr:#?}"),
-                    };
-                    -val
-                }
-                _ => panic!("Unexpected unary expr {unary_expr:#?}"),
-            },
-            _ => panic!("Unexpected unary expr {unary_expr:#?}"),
-        },
-        _ => unimplemented!("Unexpected literal expression {expr:#?}"),
     }
 }
 
