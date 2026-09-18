@@ -36,6 +36,7 @@
 use crate::device_future::{probe_stream, StreamCallbackState, StreamHealth};
 use crate::error::DeviceError;
 use crate::slot_table::{FlagArray, SlotTable};
+use crate::spin_budget::{SpinBudget, DEFAULT_FIXED_PASSES};
 use cuda_core::Stream;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU32;
@@ -44,8 +45,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const NUM_SLOTS: usize = 1024;
-/// Spin passes over the active set before yielding between scans.
-const SPIN_PASSES: u32 = 10_000;
 /// While armed slots make no progress, how often their streams are probed
 /// for a fault. Long-running kernels pay one `cuStreamQuery` per distinct
 /// stream per interval; a faulted stream resolves within about an interval.
@@ -136,6 +135,14 @@ fn scan_loop() {
         }
         thread::yield_now();
     };
+    // `CUDA_ASYNC_SPIN=adaptive` selects the adaptive budget; the default keeps
+    // the historical fixed pass count so the two can be A/B'd on one binary.
+    let mut budget = match std::env::var("CUDA_ASYNC_SPIN").as_deref() {
+        Ok("adaptive") => SpinBudget::adaptive(),
+        _ => SpinBudget::Fixed {
+            passes: DEFAULT_FIXED_PASSES,
+        },
+    };
     let mut idle_passes: u32 = 0;
     let mut woken: Vec<Registration> = Vec::new();
     let mut faulted: Vec<Registration> = Vec::new();
@@ -148,6 +155,8 @@ fn scan_loop() {
             for reg in woken.drain(..) {
                 reg.waker_state.signal();
             }
+            // Completions are flowing: stay responsive.
+            budget.on_progress();
             idle_passes = 0;
             continue;
         }
@@ -167,10 +176,13 @@ fn scan_loop() {
             continue;
         }
         idle_passes += 1;
-        if idle_passes < SPIN_PASSES {
+        if idle_passes < budget.limit() {
             std::hint::spin_loop();
             continue;
         }
+        // A whole budget expired with nothing landed: assume a slow wait and
+        // back off so the scanner stops competing with the submitting threads.
+        budget.on_stall();
         // Slow phase: something has been armed for a while without landing.
         // Either a long kernel, or a stream whose flag write will never
         // execute because the context faulted. Probe periodically so the
