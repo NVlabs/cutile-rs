@@ -124,6 +124,7 @@ fn explicit_debug_modes_override_build_default_and_change_cache_keys() {
             .debug_info(DebugInfoLevel::Full)
             .debug_info(level)
             .occupancy(2)
+            .expect("2 is a valid occupancy")
             .sanitize_memcheck(true);
         assert_eq!(options.occupancy, Some(2));
         let flags = TileirasOptions::from_compile_options(&options);

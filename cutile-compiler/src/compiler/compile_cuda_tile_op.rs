@@ -255,6 +255,25 @@ fn extract_latency_cycles(expr: &Expr, generic_args: &GenericVars) -> Result<i32
     }
 }
 
+/// Applies the Tile IR value domain of the per-op `latency` hint.
+///
+/// `Latency::<0>` is the established "no hint" spelling at load/store call
+/// sites and keeps working: the hint map simply omits the key, exactly as
+/// before. Any other value outside `[1, 10]` is rejected at the call site —
+/// where the expression and its real source location are still available —
+/// instead of being forwarded to `tileiras` as an out-of-range attribute.
+fn check_latency_cycles(
+    cycles: i32,
+    latency_expr: &Expr,
+    resolve: impl FnOnce(&proc_macro2::Span) -> crate::ast::SourceLocation,
+) -> Result<i32, JITError> {
+    if cycles == 0 {
+        return Ok(cycles);
+    }
+    crate::hints::check_hint_value("latency", cycles, crate::hints::LATENCY_DOMAIN)
+        .map_err(|err| err.into_jit_error(resolve(&latency_expr.span())))
+}
+
 impl<'m> CUDATileFunctionCompiler<'m> {
     fn dense_module_const_path_value(
         &self,
@@ -919,7 +938,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        let latency = extract_latency_cycles(&call_expr.args[6], generic_args)?;
+        let latency = check_latency_cycles(
+            extract_latency_cycles(&call_expr.args[6], generic_args)?,
+            &call_expr.args[6],
+            |span| self.resolve_span(span),
+        )?;
         if latency > 0 {
             hint_params.insert("latency".to_string(), latency);
         }
@@ -1050,7 +1073,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
         let mut hint_params: HashMap<String, i32> = HashMap::new();
-        let latency = extract_latency_cycles(&call_expr.args[6], generic_args)?;
+        let latency = check_latency_cycles(
+            extract_latency_cycles(&call_expr.args[6], generic_args)?,
+            &call_expr.args[6],
+            |span| self.resolve_span(span),
+        )?;
         if latency > 0 {
             hint_params.insert("latency".to_string(), latency);
         }

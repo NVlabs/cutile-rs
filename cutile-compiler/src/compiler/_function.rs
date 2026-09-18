@@ -39,6 +39,23 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
+/// Resolves spans from one module's AST to absolute source locations for the
+/// optimization-hint parser.
+///
+/// `crate::hints` is pure Rust and cannot reach `SpanBase`, so the compiler
+/// hands it this adapter instead. Every span the parser reports therefore
+/// belongs to the module that actually wrote the hint.
+struct ModuleSpanResolver<'m> {
+    modules: &'m CUDATileModules,
+    module_name: &'m str,
+}
+
+impl crate::hints::HintLocationResolver for ModuleSpanResolver<'_> {
+    fn resolve(&self, span: proc_macro2::Span) -> SourceLocation {
+        self.modules.resolve_span(self.module_name, &span)
+    }
+}
+
 /// Compiles a single Rust function into Tile IR bytecode.
 pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) modules: &'m CUDATileModules,
@@ -538,8 +555,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         // 6. Parse optimization_hints.
+        // Hint diagnostics carry real positions: the resolver maps a span in
+        // this kernel's AST through the owning module's `SpanBase`, so an
+        // out-of-range value points at the expression that wrote it.
+        let hint_resolver = ModuleSpanResolver {
+            modules,
+            module_name,
+        };
         let mut optimization_hints = match entry_attrs.get_entry_arg_expr("optimization_hints") {
-            Some(hints_expr) => OptimizationHints::parse(hints_expr, gpu_name.clone())?,
+            Some(hints_expr) => {
+                OptimizationHints::parse(hints_expr, gpu_name.clone(), &hint_resolver)?
+            }
             None => {
                 let mut hints = OptimizationHints::empty();
                 hints.target_gpu_name = Some(gpu_name.clone());
@@ -547,7 +573,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         };
         // Runtime compile options override entry-level hints.
-        optimization_hints.apply_compile_options(compile_options);
+        optimization_hints.apply_compile_options(compile_options)?;
 
         // 7. Build stride_args HashMap.
         let stride_args: HashMap<String, Vec<i32>> = stride_args

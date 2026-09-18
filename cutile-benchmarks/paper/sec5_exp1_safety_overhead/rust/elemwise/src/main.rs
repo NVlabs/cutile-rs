@@ -197,18 +197,18 @@ impl HintConfig {
         })
     }
 
-    fn compile_options(self) -> CompileOptions {
+    fn compile_options(self) -> Result<CompileOptions, Box<dyn std::error::Error>> {
         let mut options = CompileOptions::default();
         if let Some(v) = self.num_cta_in_cga {
-            options = options.num_cta_in_cga(v);
+            options = options.num_cta_in_cga(v)?;
         }
         if let Some(v) = self.occupancy {
-            options = options.occupancy(v);
+            options = options.occupancy(v)?;
         }
         if let Some(v) = self.max_divisibility {
-            options = options.max_divisibility(v);
+            options = options.max_divisibility(v)?;
         }
-        options
+        Ok(options)
     }
 
     fn num_cta_label(self) -> String {
@@ -809,7 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let hints = HintConfig::from_args(&args)?;
-    let compile_options = hints.compile_options();
+    let compile_options = hints.compile_options()?;
 
     if tune_one {
         let n = parse_arg(&args, "--n", *ns.last().expect("non-empty"))?;

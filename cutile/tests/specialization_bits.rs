@@ -265,7 +265,9 @@ fn runtime_max_divisibility_overrides_entry_hint() {
             base_ptr_div: dh(16),
             elements_disjoint: true,
         };
-        let options = CompileOptions::default().max_divisibility(4);
+        let options = CompileOptions::default()
+            .max_divisibility(4)
+            .expect("any integer is a valid max_divisibility");
         let mlir = compile_with_spec_and_options(
             "simple_kernel",
             &[("output", &[1])],
@@ -310,7 +312,9 @@ fn scalar_int_hint_emits_assume_div_by_in_entry_wrapper() {
 fn scalar_int_hint_respects_runtime_max_divisibility() {
     common::with_test_stack(|| {
         let hint = DivHint::from_value(1024);
-        let options = CompileOptions::default().max_divisibility(4);
+        let options = CompileOptions::default()
+            .max_divisibility(4)
+            .expect("any integer is a valid max_divisibility");
         let mlir = compile_kernel(
             "scalar_kernel",
             &[128.to_string()],
@@ -356,8 +360,12 @@ fn raw_pointer_integer_scalar_hint_emits_assume_div_by() {
 #[test]
 fn raw_pointer_launch_computes_scalar_div_hint() {
     common::with_test_stack(|| {
-        let mlir =
-            launch_raw_ptr_scalar_kernel_and_read_mlir(12, CompileOptions::default().occupancy(3));
+        let mlir = launch_raw_ptr_scalar_kernel_and_read_mlir(
+            12,
+            CompileOptions::default()
+                .occupancy(3)
+                .expect("3 is a valid occupancy"),
+        );
 
         assert!(
             mlir.contains("entry @raw_ptr_scalar_kernel_entry"),
@@ -394,7 +402,9 @@ fn raw_pointer_launch_scalar_div_hint_covers_powers_of_two_through_16() {
         for (n, expected_divisor, occupancy) in cases {
             let mlir = launch_raw_ptr_scalar_kernel_and_read_mlir(
                 n,
-                CompileOptions::default().occupancy(occupancy),
+                CompileOptions::default()
+                    .occupancy(occupancy)
+                    .expect("test cases use valid occupancies"),
             );
             assert!(
                 mlir.contains("assume div_by<16>"),
