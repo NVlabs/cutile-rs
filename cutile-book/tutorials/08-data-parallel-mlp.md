@@ -77,6 +77,7 @@ use data_parallel_module::{gemm, relu, matvec};
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
 
+    use std::sync::Arc;
     use cuda_async::device_operation::*;
     use data_parallel_module::{gemm, relu, matvec};
     use cutile::api;
@@ -113,7 +114,8 @@ async fn main() -> Result<(), DeviceError> {
     ];
     let w0 = api::randn(0.0f32, 1.0, [dim, dim], None); // impl DeviceOp
     let w1 = api::randn(0.0f32, 1.0, [dim], None); // impl DeviceOp
-    let w = zip!(w0.map(Into::into), w1.map(Into::into)).schedule(&devices[0])?.await?;
+    let w: (Arc<Tensor<f32>>, Arc<Tensor<f32>>) = zip!(w0.map(Into::into), w1.map(Into::into))
+        .schedule(&devices[0])?.await?;
     let mut joins = vec![];
     for i in 1..num_devices {
         let w_copy = tokio::spawn(zip!(dup(&w.0).map(Into::into), dup(&w.1).map(Into::into)).schedule(&devices[i])?);
@@ -129,7 +131,7 @@ async fn main() -> Result<(), DeviceError> {
     for i in 0..num_devices {
         let w = &model_weights[i];
         let (w0, w1) = (w.0.clone(), w.1.clone());
-        let data = api::randn(0.0, 1.0, [dim, dim], None).map(Into::into);
+        let data = api::randn(0.0, 1.0, [dim, dim], None);
         // Unified launcher: pass output partition and inputs directly.
         let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
         let out0 = gemm(out0, data, w0)
@@ -137,7 +139,7 @@ async fn main() -> Result<(), DeviceError> {
             .first()
             .unpartition();
         let out1 = api::zeros(&[dim]).partition([block_dim]);
-        let out1 = matvec(out1, out0.map(Into::into), w1)
+        let out1 = matvec(out1, out0, w1)
             .generics(output_layer.to_vec())
             .first()
             .unpartition();
@@ -173,7 +175,7 @@ for i in 0..num_devices {
     let (w0, w1) = (w.0.clone(), w.1.clone());
     // Sample random data. Although the sampling procedure is a simulation,
     // this can be replaced with a procedure that actually samples a batch of data.
-    let data = api::randn(0.0, 1.0, [dim, dim], None).map(Into::into);
+    let data = api::randn(0.0, 1.0, [dim, dim], None);
     // Unified launcher: pass output partition and inputs directly.
     let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
     let out0 = gemm(out0, data, w0)
@@ -182,7 +184,7 @@ for i in 0..num_devices {
         .unpartition();
     // Final output: matvec + relu.
     let out1 = api::zeros(&[dim]).partition([block_dim]);
-    let out1 = matvec(out1, out0.map(Into::into), w1)
+    let out1 = matvec(out1, out0, w1)
         .generics(output_layer.to_vec())
         .first()
         .unpartition();
