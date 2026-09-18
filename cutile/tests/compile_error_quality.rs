@@ -261,7 +261,7 @@ fn same_module_inline_error_location_points_to_helper_body() {
 }
 
 #[test]
-fn linked_inline_error_location_points_to_call_site() {
+fn linked_inline_error_location_points_to_helper_body() {
     common::with_test_stack(|| {
         let err = compile_and_get_error(
             error_quality_linked_caller::__module_ast_self(),
@@ -271,7 +271,7 @@ fn linked_inline_error_location_points_to_call_site() {
 
         assert_located_line(
             &err,
-            line_containing("linked_bad_helper();"),
+            line_containing("let _linked_module_literal = super::unsupported_dsl_call();"),
             "linked inline helper",
         );
     });

@@ -156,7 +156,8 @@ mod access_counts {
         .target("sm_120")
         .generics(generics)
         .strides(&strides)
-        .options(CompileOptions::default());
+        // Optimized-mode pins; debug-mode expectations are tested below.
+        .options(CompileOptions::default().device_debug(false));
         if let Some(grid) = p.grid {
             compiler = compiler.grid(grid);
         }

@@ -144,15 +144,22 @@ pub(crate) fn probe_stream(stream: &Stream) -> StreamHealth {
 /// wait failure the result is leaked — loudly, unless the future already
 /// delivered the stream's fault to its caller.
 ///
+/// cuTile registers owned storage and device access leases with the execution
+/// context before enqueueing work. These survive argument recovery, output
+/// projection, partial submission failures, and `mem::forget`. Forgetting the
+/// future leaks both storage and leases; conflicting cross-stream use remains
+/// rejected even after the original Rust borrow ends. Successful completion
+/// releases the registered owners before returning the result.
+///
 /// The wait is synchronous by necessity, not preference. The alternative —
 /// parking the result behind a CUDA event and dropping it later, once
 /// `cuEventQuery` passes (the design used by `simt::device_future`) — needs
 /// the result to be `'static`, and `DeviceOp::Output` is not: cutile
 /// launchers return borrowed inputs (`&'a Tensor<T>`,
 /// `Partition<&'a mut Tensor<T>>`) as part of their output. For those the
-/// borrow is what protects the caller's buffers, and cancellation ends the
-/// borrow — so the only sound release is to finish the work before the
-/// caller can free or reuse them. Rust cannot specialize on `'static`, so
+/// result itself cannot be handed to a background thread. Registered storage
+/// owners are independent of these borrows, but arbitrary custom outputs may
+/// still require waiting before destruction. Rust cannot specialize on `'static`, so
 /// the same rule applies to every output type until `Output: 'static` is a
 /// trait-level requirement; at that point the event-gated limbo becomes the
 /// default and blocking the last-resort fallback.
@@ -176,13 +183,15 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
         Self::default()
     }
 
-    /// Creates a device future scheduled on the given stream.
+    /// Creates a device future with the context's stream, device, and pool.
+    /// The submission is independent of any clones of the supplied context:
+    /// one future's completion must not release another future's resources.
     pub fn scheduled(op: DO, ctx: ExecutionContext) -> Self {
         // Spelled out rather than `..Default::default()`: struct update
         // syntax moves out of the default value, which `Drop` forbids.
         Self {
             device_operation: Some(op),
-            execution_context: Some(ctx),
+            execution_context: Some(ctx.fresh_submission()),
             result: None,
             error: None,
             state: DeviceFutureState::Idle,
@@ -267,15 +276,22 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
             .ok_or(DeviceError::Internal(
                 "Cannot execute future without setting stream on which to execute.".to_string(),
             ))?;
-        // TODO (hme): We may need to hold a reference to device_operation,
-        //  to ensure kernel launch structs (and their args) are dropped
-        //  when the future completes vs. when this function completes.
         let operation = self.device_operation.take().ok_or(DeviceError::Internal(
             "Unable to execute future: No operation has been set.".to_string(),
         ))?;
         let out = unsafe { operation.execute(ctx) }?;
         self.result = Some(out);
         Ok(())
+    }
+
+    fn take_completed_result(&mut self) -> T {
+        if let Some(ctx) = &self.execution_context {
+            // Called only after the stream or its completion marker finished.
+            unsafe { ctx.complete() };
+        }
+        self.result
+            .take()
+            .expect("Expected future result to be Some.")
     }
 
     /// Returns `true` when GPU work was submitted but the stored result has
@@ -468,10 +484,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                 match spin_outcome {
                     Ok(true) => {
                         self.state = DeviceFutureState::Complete;
-                        return Poll::Ready(Ok(self
-                            .result
-                            .take()
-                            .expect("Expected future result to be Some.")));
+                        return Poll::Ready(Ok(self.take_completed_result()));
                     }
                     Ok(false) => {}
                     Err(e) => {
@@ -501,10 +514,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                     // If the future was polled by some mechanism other than the waker,
                     // then the old waker still may fire, but the future will not be polled
                     // again if we return Poll::Ready.
-                    return Poll::Ready(Ok(self
-                        .result
-                        .take()
-                        .expect("Expected future result to be Some.")));
+                    return Poll::Ready(Ok(self.take_completed_result()));
                 }
                 // Not complete. This is a spurious wake, or the reactor woke
                 // us because the stream faulted (its flag write can never
@@ -531,10 +541,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                     }
                     StreamHealth::Idle => {
                         self.state = DeviceFutureState::Complete;
-                        return Poll::Ready(Ok(self
-                            .result
-                            .take()
-                            .expect("Expected future result to be Some.")));
+                        return Poll::Ready(Ok(self.take_completed_result()));
                     }
                     StreamHealth::Busy | StreamHealth::Capturing => {}
                 }
@@ -545,10 +552,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> Future for DeviceFuture<T, DO> {
                 // the newly registered waker will never be called.
                 if waker_state.complete.load(Ordering::Acquire) {
                     self.state = DeviceFutureState::Complete;
-                    Poll::Ready(Ok(self
-                        .result
-                        .take()
-                        .expect("Expected future result to be Some.")))
+                    Poll::Ready(Ok(self.take_completed_result()))
                 } else {
                     Poll::Pending
                 }

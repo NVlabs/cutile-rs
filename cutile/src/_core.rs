@@ -93,6 +93,9 @@ pub mod atomic {
 /// Memory ordering, with per-op-family sub-traits restricting which variants
 /// each op accepts (mirrors Tile IR `OnlyVariants` constraints).
 pub mod ordering {
+    mod sealed {
+        pub trait AtomicOrdering {}
+    }
     pub trait Mode {}
     /// `load_*_tko` ops: `Weak`, `Relaxed`, `Acquire`.
     pub trait LoadMode: Mode {}
@@ -100,6 +103,12 @@ pub mod ordering {
     pub trait StoreMode: Mode {}
     /// `atomic_*_tko` ops: `Relaxed`, `Acquire`, `Release`, `AcqRel`.
     pub trait AtomicMode: Mode {}
+    /// Atomic global loads: `Relaxed` or `Acquire`, never `Weak`.
+    pub trait AtomicLoadMode: LoadMode + sealed::AtomicOrdering {}
+    /// Atomic global stores: `Relaxed` or `Release`, never `Weak`.
+    pub trait AtomicStoreMode: StoreMode + sealed::AtomicOrdering {}
+    /// Atomic global read-modify-write orderings.
+    pub trait GlobalAtomicMode: AtomicMode + sealed::AtomicOrdering {}
 
     pub struct Weak;
     pub struct Relaxed;
@@ -126,18 +135,44 @@ pub mod ordering {
 
     impl Mode for AcqRel {}
     impl AtomicMode for AcqRel {}
+
+    impl sealed::AtomicOrdering for Relaxed {}
+    impl sealed::AtomicOrdering for Acquire {}
+    impl sealed::AtomicOrdering for Release {}
+    impl sealed::AtomicOrdering for AcqRel {}
+    impl AtomicLoadMode for Relaxed {}
+    impl AtomicLoadMode for Acquire {}
+    impl AtomicStoreMode for Relaxed {}
+    impl AtomicStoreMode for Release {}
+    impl GlobalAtomicMode for Relaxed {}
+    impl GlobalAtomicMode for Acquire {}
+    impl GlobalAtomicMode for Release {}
+    impl GlobalAtomicMode for AcqRel {}
 }
 
 /// Memory scope for atomics and load/store ordering. Mirrors Tile IR
 /// `MemoryScope`.
 pub mod scope {
+    mod sealed {
+        pub trait GlobalScope {}
+    }
     pub trait Mode {}
+    /// Scopes covering all tile programs that can safely share a global.
+    pub trait GlobalScope: Mode + sealed::GlobalScope {}
     pub struct TileBlock;
     pub struct Device;
     pub struct System;
     impl Mode for TileBlock {}
     impl Mode for Device {}
     impl Mode for System {}
+    impl sealed::GlobalScope for Device {}
+    impl sealed::GlobalScope for System {}
+    impl GlobalScope for Device {}
+    impl GlobalScope for System {}
+}
+
+mod global_sealed {
+    pub trait Atomic {}
 }
 
 /// Whether an op may use TMA (Tensor Memory Accelerator) when the hardware
@@ -152,7 +187,7 @@ pub mod tma {
 
 /// Latency hint (Tile IR `optimization_hints.latency`). Single value applied
 /// across SM archs; per-arch dictionary form is deferred.
-pub struct Latency<const CYCLES: u32>;
+pub struct Latency<const CYCLES: i32>;
 
 /// Integer-overflow behavior. Mirrors Tile IR `IntegerOverflow`.
 pub mod overflow {
@@ -465,43 +500,107 @@ pub mod core {
         }
     }
 
-    /// Module-scope mutable global memory.
+    /// A supported device atomic storage type. Sealed to the supplied markers.
+    ///
+    /// These are device-DSL types, not host `std::sync::atomic` objects.
+    /// `Value` is the scalar stored in device memory and returned by loads.
+    pub trait Atomic: super::global_sealed::Atomic + Copy + Clone {
+        type Value: ElementType;
+    }
+
+    /// Device atomic storage for `i32`.
+    #[derive(Copy, Clone)]
+    pub struct AtomicI32;
+    impl super::global_sealed::Atomic for AtomicI32 {}
+    impl Atomic for AtomicI32 {
+        type Value = i32;
+    }
+
+    /// Device atomic storage for `u32`.
+    #[derive(Copy, Clone)]
+    pub struct AtomicU32;
+    impl super::global_sealed::Atomic for AtomicU32 {}
+    impl Atomic for AtomicU32 {
+        type Value = u32;
+    }
+
+    /// Device atomic storage for `i64`.
+    #[derive(Copy, Clone)]
+    pub struct AtomicI64;
+    impl super::global_sealed::Atomic for AtomicI64 {}
+    impl Atomic for AtomicI64 {
+        type Value = i64;
+    }
+
+    /// Device atomic storage for `u64`.
+    #[derive(Copy, Clone)]
+    pub struct AtomicU64;
+    impl super::global_sealed::Atomic for AtomicU64 {}
+    impl Atomic for AtomicU64 {
+        type Value = u64;
+    }
+
+    /// Device atomic storage for `f32`.
+    #[derive(Copy, Clone)]
+    pub struct AtomicF32;
+    impl super::global_sealed::Atomic for AtomicF32 {}
+    impl Atomic for AtomicF32 {
+        type Value = f32;
+    }
+
+    /// Device atomic storage for `f64`.
+    #[derive(Copy, Clone)]
+    pub struct AtomicF64;
+    impl super::global_sealed::Atomic for AtomicF64 {}
+    impl Atomic for AtomicF64 {
+        type Value = f64;
+    }
+
+    /// Module-scope atomic global memory.
     ///
     /// `Global` is declared as a Rust `static` inside a `#[cutile::module]`.
     /// The Rust value is an immutable descriptor; mutability lives in the
-    /// device storage and is exposed through ordered memory operations.
+    /// device storage and is exposed only through scoped atomic accesses.
+    /// Use `Global<AtomicI32, { [] }>`, for example, rather than `Global<i32, { [] }>`.
+    /// Weak accesses and tile-block-only scope are not available on this API.
+    ///
+    /// Ordering follows Tile IR, not `std::sync::atomic`: these operations return
+    /// completion tokens but accept no input token. They do not automatically
+    /// order surrounding tensor or raw-pointer accesses; do not use them alone
+    /// for acquire/release publication protocols, which also require explicit
+    /// token dependencies. A load followed by a store is not an atomic RMW.
     #[cuda_tile::variadic_struct(N = 6)]
     #[derive(Copy, Clone)]
-    pub struct Global<E: ElementType, const D: [i32; N]> {
-        _type: PhantomData<E>,
+    pub struct Global<A: Atomic, const D: [i32; N]> {
+        _type: PhantomData<A>,
     }
 
     #[cuda_tile::variadic_impl(N = 6)]
-    unsafe impl<E: ElementType, const D: [i32; N]> Sync for Global<E, D> {}
+    unsafe impl<A: Atomic, const D: [i32; N]> Sync for Global<A, D> {}
 
     #[cuda_tile::variadic_impl(N = 6)]
-    impl<E: ElementType, const D: [i32; N]> Global<E, D> {
+    impl<A: Atomic, const D: [i32; N]> Global<A, D> {
         /// Declare a global with a scalar initializer.
         ///
         /// Today the JIT compiler only lowers scalar globals
-        /// (`Global<E, { [] }>`). Shaped globals are reserved for a follow-up pass.
-        pub const fn new(_value: E) -> Self {
+        /// (`Global<A, { [] }>`). Shaped globals are reserved for a follow-up pass.
+        pub const fn new(_value: A::Value) -> Self {
             Self { _type: PhantomData }
         }
 
         /// Load the scalar global. Returns the loaded value and completion token.
-        pub fn load<O: ordering::LoadMode, Sc: scope::Mode>(
+        pub fn load<O: ordering::AtomicLoadMode, Sc: scope::GlobalScope>(
             &self,
             memory_ordering: O,
             memory_scope: Sc,
-        ) -> (Tile<E, D>, Token) {
+        ) -> (Tile<A::Value, D>, Token) {
             unreachable!()
         }
 
         /// Store to the scalar global. Returns the completion token.
-        pub fn store<O: ordering::StoreMode, Sc: scope::Mode>(
+        pub fn store<O: ordering::AtomicStoreMode, Sc: scope::GlobalScope>(
             &self,
-            value: Tile<E, D>,
+            value: Tile<A::Value, D>,
             memory_ordering: O,
             memory_scope: Sc,
         ) -> Token {
@@ -509,12 +608,12 @@ pub mod core {
         }
 
         /// Atomic add on the scalar global. Returns the old value and token.
-        pub fn atomic_add<O: ordering::AtomicMode, Sc: scope::Mode>(
+        pub fn atomic_add<O: ordering::GlobalAtomicMode, Sc: scope::GlobalScope>(
             &self,
-            value: Tile<E, D>,
+            value: Tile<A::Value, D>,
             memory_ordering: O,
             memory_scope: Sc,
-        ) -> (Tile<E, D>, Token) {
+        ) -> (Tile<A::Value, D>, Token) {
             unreachable!()
         }
     }
@@ -2873,7 +2972,7 @@ pub mod core {
         const S: [i32; N],
         O: ordering::LoadMode,
         Sc: scope::Mode,
-        const CYCLES: u32,
+        const CYCLES: i32,
     >(
         source: PointerTile<P, S>,
         memory_ordering: O,
@@ -2903,7 +3002,7 @@ pub mod core {
         const S: [i32; N],
         O: ordering::StoreMode,
         Sc: scope::Mode,
-        const CYCLES: u32,
+        const CYCLES: i32,
     >(
         destination: PointerTile<P, S>,
         value: Tile<E, S>,

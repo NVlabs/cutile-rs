@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `Global` now requires a sealed device atomic type, such as
+  `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`.
+  Global accesses reject `Weak` ordering and `TileBlock` scope in both
+  Rust and the JIT; unsafe raw intrinsics are unchanged. This is a breaking
+  API change intended for 0.4.0.
+
+- Kernel-cache eviction APIs `clear_kernel_cache`, `evict_kernel`, and
+  `retain_kernels` are available without `experimental-tune`, allowing
+  serving engines to manage cached specializations independently of
+  autotuning. Their unsafe quiesce-before-eviction contracts and return
+  values are unchanged (#268).
+
 ## [0.3.1] - 2026-09-02
 
 A single `cargo add cutile` now suffices, kernels gain Triton-parity

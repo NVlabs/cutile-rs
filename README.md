@@ -43,30 +43,41 @@ fn main() -> Result<(), Error> {
     let y = api::ones::<f32>(&[1024]);
     let z = api::zeros::<f32>(&[1024]).partition([128]);
 
-    let (_z, _x, _y) = kernel::add(z, x, y).sync()?;
+    let (z, _x, _y) = kernel::add(z, x, y).sync()?;
+    let result = z.unpartition().to_host_vec().sync()?;
+    assert_eq!(result, vec![2.0_f32; 1024]);
     Ok(())
 }
 ```
 
 The `#[cutile::module]` macro transforms `add` into a GPU kernel and generates a host-side launcher. The host code constructs lazy tensor operations, partitions the mutable output into 128-element chunks, and calls `.sync()` to JIT-compile and execute the kernel.
 
+Launches return all runtime arguments in parameter order (`z, x, y` here), including inputs and scalars. `.unpartition().to_host_vec().sync()?` copies the partitioned tensor's contents into a vector on the host machine.
+
 The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result. The launch grid `(8, 1, 1)` is inferred from the partition: 1024÷128 = 8 tiles.
 
 - Run a similar example via `cargo run -p cutile-examples --example saxpy`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
+- For NVIDIA Nsight Compute, Nsight Systems, and cuda-gdb workflows, see
+  [Debugging and Profiling](cutile-book/guide/debugging-and-profiling.md).
 
 ## Setup
 
 ### Requirements
 
-- **NVIDIA GPU** with compute capability `sm_80` or higher (minimum supported architecture: `sm_80`).
-  - `sm_100+` is supported by CUDA 13.1+.
-  - `sm_8x` support was added in CUDA 13.2.
-  - CUDA 13.3 adds `sm_90` support, so CUDA 13.3 users now have `sm_80+` coverage.
-  - Architectures below `sm_80` (for example `sm_70` and `sm_75`) are out of scope, and we do not plan to support them.
-- **CUDA** 13.3 recommended (`sm_80+` support and CUDA Tile IR 13.3 features such as FP4 packing and block-scaled MMA).
-- **Rust** 1.89+
-- **Linux** (tested on Ubuntu 24.04)
+- **Rust:** stable 1.89+ (no nightly required).
+- **Linux:** tested on Ubuntu 24.04.
+
+GPU and toolkit requirements for cuTile Rust:
+
+| GPU compute capability | Minimum CUDA Toolkit |
+|---|---|
+| `sm_8x` (Ampere / Ada) | 13.2 |
+| `sm_90` (Hopper) | 13.3 |
+| `sm_100+` (Blackwell, including DGX Spark / GB10 `sm_121`) | 13.2 |
+
+CUDA **13.3 is recommended**. FP4 packing and block-scaled MMA require 13.3.
+GPUs below `sm_80` (such as `sm_70` and `sm_75`) are unsupported.
 
 ### Install
 
@@ -88,8 +99,8 @@ https://developer.nvidia.com/cuda-downloads
 Set `CUDA_TOOLKIT_PATH` (or `CUDA_HOME`, consulted second) to your CUDA 13.3
 install directory for a reproducible setup. If neither is set, cuTile
 searches standard CUDA 13.3/13.2 install locations such as
-`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`, and
-`/usr/local/cuda`.
+`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`,
+`/usr/local/cuda`, and `/opt/cuda`.
 
 Example `.cargo/config.toml`:
 ```toml

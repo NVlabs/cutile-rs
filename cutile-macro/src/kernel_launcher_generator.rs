@@ -1823,6 +1823,9 @@ fn get_tensor_code(
     let mut launch_grid_expr_strs = vec![];
     let validator_statements = if ty.mutability.is_some() {
         builder_statements.push(parse_stmt(format!(
+            "KernelOutputStored::retain(&{var_name}, ctx)?;"
+        )));
+        builder_statements.push(parse_stmt(format!(
             "KernelOutputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
         )));
         launch_grid_expr_strs.push(format!("KernelOutputStored::grid_bound(&{var_name})?"));
@@ -1852,6 +1855,9 @@ fn get_tensor_code(
         }})
         .unwrap()
     } else {
+        builder_statements.push(parse_stmt(format!(
+            "KernelInputStored::retain(&{var_name}, ctx)?;"
+        )));
         builder_statements.push(parse_stmt(format!(
             "KernelInputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
         )));

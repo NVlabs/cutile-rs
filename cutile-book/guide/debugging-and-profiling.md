@@ -132,16 +132,76 @@ Check the CUDA driver, CUDA Toolkit path, raw pointer lifetimes, spawned task li
 
 ## Debug Builds and Sanitizers
 
-`CompileOptions` selects debugging and instrumentation modes per launch. Each option is part of the JIT cache key, so a debug build and a release build never share a compiled kernel:
+Device debug information follows Cargo's profile `debug` setting by
+default. With the standard profiles, `cargo build` enables device-debug
+mode and `cargo build --release` disables it. This is independent of
+`debug-assertions`.
+
+For example, turn device debugging off in a development build through the
+workspace's `Cargo.toml`:
+
+```toml
+[profile.dev]
+debug = false
+```
+
+There is a limitation: Cargo provides only `DEBUG=true|false` to build
+scripts, not the exact debug level. Any enabled level currently selects
+device-debug mode, including `debug = "line-tables-only"` and `"limited"`.
+It also selects device optimization level 0 unless explicitly overridden,
+even in a release profile with `debug = true`. Automatic line-only mapping
+is not implemented. Use the explicit `line` override below for optimized
+profiling. See Cargo's [profile settings][cargo-profiles] and
+[build-script environment][cargo-build-env].
+
+`CUDA_RUST_DEBUG` overrides the Cargo-derived default when building the app.
+No per-launch `.compile_options()` call is needed:
+
+```bash
+# Optimized device code with source lines for profiling.
+CUDA_RUST_DEBUG=line cargo build --release
+
+# Unoptimized device code with source locations and inline frames.
+CUDA_RUST_DEBUG=full cargo build
+cuda-gdb --args ./target/debug/my_program
+```
+
+The accepted values are `none`, `line`, and `full`. Unset follows Cargo;
+other values fail the build. Cargo tracks changes, so no `cargo clean` is
+needed. The setting is captured when the target `cutile-compiler` library
+is built, not when the proc macro is built. A package-specific profile
+override for `cutile-compiler` affects this shared default; an override
+only for a kernel's crate does not. Setting the environment variable only
+when running an already-built binary does not change device compilation.
+
+`CompileOptions::new()` and `CompileOptions::default()` inherit this build
+default. Use `debug_info()` to replace it for one launch. It sets both debug
+flags, so it can also turn off a build-time `full` default:
 
 ```rust
-use cutile::tile_kernel::CompileOptions;
+use cutile::tile_kernel::{CompileOptions, DebugInfoLevel};
+
+my_kernel(args)
+    .compile_options(CompileOptions::new().debug_info(DebugInfoLevel::None))
+    .sync()?;
+```
+
+Each option is part of the JIT cache key, so the modes do not share a cached
+compiled kernel. The individual flags remain available, as does sanitizer
+instrumentation:
+
+```rust
+use cutile::tile_kernel::{CompileOptions, DebugInfoLevel};
 
 // cuda-gdb: debug information, no optimization.
-my_kernel(args).compile_options(CompileOptions::new().device_debug(true)).sync()?;
+my_kernel(args)
+    .compile_options(CompileOptions::new().debug_info(DebugInfoLevel::Full))
+    .sync()?;
 
 // Profiler correlation: line-number information only, full optimization.
-my_kernel(args).compile_options(CompileOptions::new().lineinfo(true)).sync()?;
+my_kernel(args)
+    .compile_options(CompileOptions::new().debug_info(DebugInfoLevel::Line))
+    .sync()?;
 
 // Compute Sanitizer: memory-access instrumentation.
 my_kernel(args).compile_options(CompileOptions::new().sanitize_memcheck(true)).sync()?;
@@ -149,21 +209,51 @@ my_kernel(args).compile_options(CompileOptions::new().sanitize_memcheck(true)).s
 
 What each option does:
 
-- `device_debug(true)` passes `--device-debug` to the device compiler and implies optimization level 0 (set `opt_level` explicitly to override). The frontend also stops hoisting bounds checks out of loops, so every check that runs on the device sits at the source line that wrote it. Checks the compiler proved impossible, and checks it moved to launch time on the host, are unaffected — they never reach device code in any mode.
+- `debug_info(level)` replaces both debug flags. The individual
+  `device_debug(bool)` and `lineinfo(bool)` setters change only their own
+  flag, leaving other inherited settings in place.
+- `device_debug(true)` passes `--device-debug` to the device compiler and
+  implies optimization level 0. An explicit `opt_level` takes precedence,
+  but `tileiras` currently rejects full debug information at optimized
+  levels. The frontend also stops hoisting bounds checks out of loops.
+  Checks it proved unnecessary or moved to launch time are unaffected;
+  they never reach device code in any mode.
 - `lineinfo(true)` passes `--lineinfo`: source-line correlation for Nsight Compute and Nsight Systems without changing code generation. This is the option for profiling optimized kernels.
 - `sanitize_memcheck(true)` passes `--sanitize=memcheck` for `compute-sanitizer --tool memcheck`.
 - `opt_level(n)` selects `--opt-level` directly; the default is 3.
 
+Full debug mode describes source locations and inline frames, not Rust
+variables or values. Tile IR currently supports control-flow debugging of
+unoptimized code but not inspection of user variables; see the
+[Tile IR debug-info documentation][tile-debug-info].
+
+User helpers and methods retain their definition's source file and line
+when inlined, including across modules. Core operations are attributed to
+the user's call site. Multiple generated instructions can still map to one
+Rust line; this is not a one-to-one mapping, especially with optimization.
+
 ## Profiling
 
-Use Nsight Compute for individual kernels:
+Use NVIDIA **Nsight Compute** (`ncu`, reports opened with `ncu-ui`) for
+individual kernels: throughput, occupancy, register use, and stalls.
+**Nsight Systems** (`nsys`, `nsys-ui`) shows the application timeline:
+CPU/GPU scheduling, transfers, synchronization, and launch gaps.
+
+For source correlation, build with `CUDA_RUST_DEBUG=line`. Keep the Rust
+sources available on the machine where you inspect the report. Profile the
+built executable, not the Cargo build itself:
 
 ```bash
+CUDA_RUST_DEBUG=line cargo build --release
 ncu --target-processes all ./my_cutile_program
 ncu --set full -o profile_report ./my_cutile_program
+ncu-ui profile_report.ncu-rep
 ```
 
-Watch memory throughput, compute throughput, occupancy, register spills, and stall reasons.
+Replace `./my_cutile_program` with your binary's path, such as
+`./target/release/my_program`. An `ERR_NVGPUCTRPERM` report means this
+machine's GPU performance-counter access needs to be enabled by its
+administrator; changing line-info settings will not fix that.
 
 Use Nsight Systems for CPU/GPU scheduling:
 
@@ -173,6 +263,44 @@ nsys-ui report.nsys-rep
 ```
 
 Look for launch gaps, unnecessary synchronization, memory transfer overlap, and whether independent kernels actually overlap on separate streams.
+
+Tile IR display is separate from Rust source-line correlation. NVIDIA lists
+the Tile IR Source view as a new feature in [Nsight Compute 2026.3][ncu-tile-ir].
+If it is missing, record the Nsight Compute and CUDA Toolkit versions,
+compile options, cubin, and report before diagnosing a metadata problem.
+The standalone Tile IR dumps above remain useful independently of that view.
+
+## Regression Checks
+
+The repository tests source provenance and compile-option cache separation
+without a GPU:
+
+```bash
+cargo test -p cutile --test debug_info
+bash scripts/test_debug_defaults.sh
+```
+
+The second command requires `jq`. It checks Cargo profiles, independent
+debug assertions and build-dependency settings, explicit overrides, and
+the line-only mapping limitation. It also checks that changing the runtime
+environment does not change the built default. Additional checks are opt-in:
+
+```bash
+# Requires tileiras, nvdisasm, and readelf, but no GPU.
+cargo test -p cutile --test debug_info cubin_has_rust_lines_and_inline_frames -- --ignored
+
+# Requires a supported GPU and tileiras.
+cargo test -p cutile --test debug_info kernel_executes_in_all_debug_modes -- --ignored
+
+# Also requires cuda-gdb and timeout; stops at a helper's source line and
+# checks its nested inline backtrace before completing the kernel.
+cargo test -p cutile --test debug_info cuda_gdb_stops_in_cross_file_helper -- --ignored
+```
+
+[tile-debug-info]: https://docs.nvidia.com/cuda/tile-ir/latest/sections/debug_info.html
+[ncu-tile-ir]: https://developer.nvidia.com/nsight-compute-2026_3-new-features
+[cargo-profiles]: https://doc.rust-lang.org/cargo/reference/profiles.html#debug
+[cargo-build-env]: https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts
 
 ## Debugging Checklist
 

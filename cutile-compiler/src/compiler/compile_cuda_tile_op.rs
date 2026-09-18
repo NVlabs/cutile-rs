@@ -225,18 +225,26 @@ fn extract_latency_cycles(expr: &Expr, generic_args: &GenericVars) -> Result<i32
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
         return JITError::generic("`latency` must specify a const generic, e.g. `Latency::<4>`");
     };
-    let Some(syn::GenericArgument::Const(cycles_expr)) = args.args.first() else {
+    let Some(cycles_arg) = args.args.first() else {
         return JITError::generic("`latency` must specify a const generic cycle count");
     };
-    match cycles_expr {
-        Expr::Lit(ExprLit {
+    match cycles_arg {
+        syn::GenericArgument::Const(Expr::Lit(ExprLit {
             lit: Lit::Int(int_lit),
             ..
-        }) => int_lit
+        })) => int_lit
             .base10_parse::<i32>()
             .map_err(|e| JITError::Generic(format!("invalid latency value: {e}"))),
-        Expr::Path(path_expr) => {
+        syn::GenericArgument::Const(Expr::Path(path_expr)) => {
             let ident = crate::syn_utils::get_ident_from_path_expr(path_expr);
+            generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "`latency`: const generic `{ident}` has no resolved value"
+                ))
+            })
+        }
+        syn::GenericArgument::Type(syn::Type::Path(type_path)) => {
+            let ident = crate::syn_utils::get_ident_from_path(&type_path.path);
             generic_args.get_i32(&ident.to_string()).ok_or_else(|| {
                 JITError::Generic(format!(
                     "`latency`: const generic `{ident}` has no resolved value"

@@ -10,7 +10,6 @@
 //! control flow, dispatch logic, and variable binding are identical.
 
 use syn::spanned::Spanned;
-use syn::visit_mut::VisitMut;
 
 use super::_function::CUDATileFunctionCompiler;
 use super::_value::{CompilerContext, Mutability, TileRustValue};
@@ -23,7 +22,6 @@ use crate::types::*;
 
 use cutile_ir::ir::{BlockId, Module};
 
-use proc_macro2::Span;
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::{Expr, ExprCall, ExprMethodCall, ItemFn, Type};
@@ -61,41 +59,6 @@ fn update_type_meta(
     }
 }
 
-/// Rewrites every span in a syn AST node to a fixed target span.
-///
-/// When inlining library/core functions, the callee body's spans point into
-/// the core module's source text.  Resolving those spans against the user
-/// module's [`SpanBase`] produces nonsensical line numbers.  By rewriting all
-/// spans to the call-site span we ensure errors point to the user's code.
-struct CallSiteSpanSetter {
-    target_span: Span,
-}
-
-impl VisitMut for CallSiteSpanSetter {
-    fn visit_span_mut(&mut self, span: &mut Span) {
-        *span = self.target_span;
-    }
-
-    fn visit_expr_lit_mut(&mut self, expr: &mut syn::ExprLit) {
-        syn::visit_mut::visit_expr_lit_mut(self, expr);
-        set_lit_span(&mut expr.lit, self.target_span);
-    }
-}
-
-fn set_lit_span(lit: &mut syn::Lit, span: Span) {
-    match lit {
-        syn::Lit::Str(lit) => lit.set_span(span),
-        syn::Lit::ByteStr(lit) => lit.set_span(span),
-        syn::Lit::Byte(lit) => lit.set_span(span),
-        syn::Lit::Char(lit) => lit.set_span(span),
-        syn::Lit::Int(lit) => lit.set_span(span),
-        syn::Lit::Float(lit) => lit.set_span(span),
-        syn::Lit::Bool(lit) => lit.span = span,
-        syn::Lit::Verbatim(_) => {}
-        _ => {}
-    }
-}
-
 impl<'m> CUDATileFunctionCompiler<'m> {
     #[allow(clippy::ptr_arg)] // public signature stays as-is
     pub fn inline_function_call(
@@ -123,13 +86,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             let call_arg_values =
                 self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
             // Arguments above belong to the caller's frame; everything from
-            // here on compiles the callee's body inline. Same-module
-            // callees keep their real spans and get full debug frames
-            // (callee subprogram + "inlined at" chain); cross-module
-            // callees have their spans rewritten to the call site below
-            // (CallSiteSpanSetter), so their ops are attributed to the call
-            // site itself.
-            let _call_site = if same_module_identity(module_name, &self.module_name) {
+            // here on compiles the callee's body inline. User functions keep
+            // their source spans, including across module/file boundaries.
+            // Core operations remain attributed to the user's call site.
+            let _call_site = if self.has_inline_source(module_name) {
                 self.push_call_site(
                     &call_expr.span(),
                     &fn_item.sig.ident.to_string(),
@@ -239,12 +199,6 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .map(|(name, value)| (name.clone(), value.ty.clone()))
                 .collect::<HashMap<_, _>>();
             let mut typed_fn_item = fn_item.clone();
-            if !same_module_identity(module_name, &self.module_name) {
-                let mut setter = CallSiteSpanSetter {
-                    target_span: call_expr.func.span(),
-                };
-                setter.visit_item_fn_mut(&mut typed_fn_item);
-            }
             crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);
             let typeck_results = crate::passes::type_inference::infer_function(
                 self,
@@ -362,12 +316,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let (module_name, impl_item, impl_method) = impl_item_fn.unwrap();
                     (module_name, impl_item, impl_method, None)
                 };
-            // Arguments (above) belong to the caller's frame. Method bodies
-            // always have their spans rewritten to the call site
-            // (CallSiteSpanSetter below), so their ops are attributed to
-            // this call expression — the way the reference frontend
-            // attributes its builtins.
-            let _call_site = self.push_opaque_call_site(&method_call_expr.span());
+            // User methods need the same source/inline-frame preservation
+            // as free functions. Core methods use the user's call site.
+            let _call_site = if self.has_inline_source(&module_name) {
+                self.push_call_site(
+                    &method_call_expr.span(),
+                    &impl_method.sig.ident.to_string(),
+                    &impl_method.sig.ident.span(),
+                    &module_name,
+                )
+            } else {
+                self.push_opaque_call_site(&method_call_expr.span())
+            };
             // println!("Expr::MethodCall: {:#?}, generic_vars: {generic_vars:#?}", impl_item_fn.to_token_stream().to_string());
 
             // Remap function parameters.
@@ -461,15 +421,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 call_variables.vars.insert(key.to_string(), tr_val);
             }
             // println!("inline_method_call {:#?}: generic_vars={generic_vars:#?} \nexpr_generic_args={expr_generic_args:#?} \ncall_generic_args={call_generic_args:#?}", impl_method.sig.ident.to_string());
-            // Method calls are always core/library methods (user kernel code
-            // does not define impl blocks).  Rewrite all spans to the call
-            // site so that errors point to the user's method call expression
-            // rather than into the library source.
+            // Keep the body in its original source coordinate system.
             let mut compile_block = impl_method.block.clone();
-            let mut setter = CallSiteSpanSetter {
-                target_span: method_call_expr.span(),
-            };
-            setter.visit_block_mut(&mut compile_block);
             crate::passes::node_ids::assign_block_expr_ids(&mut compile_block);
             let initial_types = call_variables
                 .vars
@@ -557,8 +510,4 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }) // stacker::maybe_grow
     }
-}
-
-fn same_module_identity(a: &str, b: &str) -> bool {
-    a == b || a.rsplit("::").next() == b.rsplit("::").next()
 }

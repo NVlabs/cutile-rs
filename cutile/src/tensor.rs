@@ -207,14 +207,17 @@ use crate::error::{tensor_error_result, Error};
 use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
 use cuda_async::device_buffer::{DeviceAllocation, DeviceBuffer, DevicePointer};
-use cuda_async::device_operation::{value, DeviceOp, IntoDeviceOp, Value};
+use cuda_async::device_operation::{
+    value, DeviceOp, ExecutionContext, IntoDeviceOp, ReplayResource, Value,
+};
+use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
 use cuda_core::{DType, DTypeId};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of, MaybeUninit};
 use std::ops::Index;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A partitioned view of a tensor that divides it into tiles for GPU kernel processing.
 ///
@@ -527,7 +530,13 @@ pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
 /// moment anything tries to actually run it. Reshape/view/slice recompute spec
 /// through `spec_ptr` instead, which never dereferences.
 #[derive(Debug)]
-pub(crate) enum Storage {
+pub(crate) struct Storage {
+    allocation: Allocation,
+    accesses: Mutex<Vec<StorageAccess>>,
+}
+
+#[derive(Debug)]
+enum Allocation {
     /// A real, owned GPU allocation.
     Device(DeviceBuffer),
     /// Metadata-only placeholder: valid shape/stride/spec, no device memory.
@@ -535,6 +544,73 @@ pub(crate) enum Storage {
 }
 
 impl Storage {
+    fn new(allocation: Allocation) -> Self {
+        Self {
+            allocation,
+            accesses: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn retain(
+        self: &Arc<Self>,
+        ctx: &ExecutionContext,
+        write: bool,
+    ) -> Result<(), DeviceError> {
+        if self.device_id() != ctx.get_device_id() {
+            return Err(DeviceError::Internal(
+                "tensor and execution stream are on different devices".into(),
+            ));
+        }
+        let access = self.acquire(
+            ctx.get_cuda_stream().cu_stream() as usize,
+            write,
+            ctx.is_recording(),
+        )?;
+        if ctx.is_recording() {
+            ctx.record_resource(Arc::new(access));
+            Ok(())
+        } else {
+            ctx.retain(access)
+        }
+    }
+
+    fn acquire(
+        self: &Arc<Self>,
+        stream: usize,
+        write: bool,
+        recording: bool,
+    ) -> Result<StorageLease, DeviceError> {
+        let mut accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
+        if !recording
+            && accesses.iter().any(|access| {
+                !access.recording && access.stream != stream && (write || access.write)
+            })
+        {
+            return Err(DeviceError::Internal(
+                "tensor has a conflicting in-flight access on another stream; await its operation before reusing it".into(),
+            ));
+        }
+        let lease = StorageLease {
+            storage: self.clone(),
+            id: Arc::new(()),
+            write,
+        };
+        accesses.push(StorageAccess {
+            id: lease.id.clone(),
+            stream,
+            write,
+            recording,
+        });
+        Ok(lease)
+    }
+
+    fn is_unique(self: &Arc<Self>) -> bool {
+        let accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
+        // Each lease has exactly one internal Arc. Only user-visible aliases
+        // prevent partitioning; same-stream leases are ordered on submission.
+        Arc::strong_count(self) == 1 + accesses.len()
+    }
+
     /// 16-aligned sentinel address fed to [`compute_spec`] for meta tensors.
     ///
     /// `DivHint::from_ptr` clamps pointer alignment to 16, and every
@@ -548,23 +624,23 @@ impl Storage {
     const META_SPEC_PTR: u64 = 16;
 
     fn len_bytes(&self) -> usize {
-        match self {
-            Storage::Device(b) => b.len_bytes(),
-            Storage::Meta { len_bytes, .. } => *len_bytes,
+        match &self.allocation {
+            Allocation::Device(b) => b.len_bytes(),
+            Allocation::Meta { len_bytes, .. } => *len_bytes,
         }
     }
 
     fn device_id(&self) -> usize {
-        match self {
-            Storage::Device(b) => b.device_id(),
-            Storage::Meta { device_id, .. } => *device_id,
+        match &self.allocation {
+            Allocation::Device(b) => b.device_id(),
+            Allocation::Meta { device_id, .. } => *device_id,
         }
     }
 
     fn cu_deviceptr(&self) -> CUdeviceptr {
-        match self {
-            Storage::Device(b) => b.cu_deviceptr(),
-            Storage::Meta { .. } => panic!(
+        match &self.allocation {
+            Allocation::Device(b) => b.cu_deviceptr(),
+            Allocation::Meta { .. } => panic!(
                 "cutile: read of a meta tensor's device pointer. Meta tensors \
                  (api::meta) carry only shape/stride metadata for warmup via \
                  `.compile()`; they have no device memory and cannot be launched \
@@ -579,10 +655,42 @@ impl Storage {
     /// panic on `Meta`. Meta returns the sentinel, keeping warmup of reshaping
     /// kernels on the meta path with a `base_ptr_div` that matches a real tensor's.
     fn spec_ptr(&self) -> CUdeviceptr {
-        match self {
-            Storage::Device(b) => b.cu_deviceptr(),
-            Storage::Meta { .. } => Storage::META_SPEC_PTR,
+        match &self.allocation {
+            Allocation::Device(b) => b.cu_deviceptr(),
+            Allocation::Meta { .. } => Storage::META_SPEC_PTR,
         }
+    }
+}
+
+#[derive(Debug)]
+struct StorageAccess {
+    id: Arc<()>,
+    stream: usize,
+    write: bool,
+    recording: bool,
+}
+
+struct StorageLease {
+    storage: Arc<Storage>,
+    id: Arc<()>,
+    write: bool,
+}
+
+impl ReplayResource for StorageLease {
+    fn retain_for_launch(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.storage.retain(ctx, self.write)
+    }
+}
+
+impl Drop for StorageLease {
+    fn drop(&mut self) {
+        // Remove the entry before dropping its Arc, so uniqueness checks can
+        // be conservative during release but can never overlook a real alias.
+        self.storage
+            .accesses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|access| !Arc::ptr_eq(&access.id, &self.id));
     }
 }
 
@@ -821,7 +929,7 @@ impl<T: DType> Tensor<T> {
         strides: Vec<i32>,
     ) -> Self {
         Self::assert_valid_metadata(&shape, &strides, device_buffer.len_bytes());
-        let storage = Arc::new(Storage::Device(device_buffer));
+        let storage = Arc::new(Storage::new(Allocation::Device(device_buffer)));
         let spec = compute_spec(
             storage.cu_deviceptr(),
             &shape,
@@ -980,7 +1088,7 @@ impl<T: DType> Tensor<T> {
 
     /// Builds a metadata-only tensor (no GPU allocation) with contiguous strides.
     ///
-    /// Backed by [`Storage::Meta`]. The spec is computed against a fixed
+    /// Backed by metadata-only storage. The spec is computed against a fixed
     /// 16-aligned sentinel pointer so the resulting cache key matches a real
     /// allocation's. Only usable for warmup via `.compile()`; any launch or copy
     /// panics when it reads the (absent) device pointer.
@@ -996,10 +1104,10 @@ impl<T: DType> Tensor<T> {
             size_of::<T>() as i32,
         );
         Self {
-            storage: Arc::new(Storage::Meta {
+            storage: Arc::new(Storage::new(Allocation::Meta {
                 len_bytes,
                 device_id,
-            }),
+            })),
             shape,
             strides,
             spec,
@@ -1055,10 +1163,10 @@ impl<T: DType> Tensor<T> {
     // storage: a second `Arc<Tensor>` over the same allocation (reshape_shared,
     // reinterpret, into_shared_alias) could be read by a concurrent launch.
     fn has_unique_storage(&self) -> bool {
-        Arc::strong_count(&self.storage) == 1
+        self.storage.is_unique()
     }
 
-    fn assert_unique_storage(&self) {
+    pub(crate) fn assert_unique_storage(&self) {
         assert!(
             self.has_unique_storage(),
             "Cannot create mutable partition from shared tensor storage."
@@ -1719,6 +1827,8 @@ pub enum GridBound {
 }
 
 pub trait KernelOutputStored<T: DType>: Send {
+    /// Retain storage and acquire exclusive device access before enqueueing.
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError>;
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn grid(&self) -> Result<(u32, u32, u32), Error>;
     /// This binding's launch-grid constraint. Defaults to exact coverage;
@@ -1752,6 +1862,9 @@ pub trait KernelOutput<T: DType>: Send + Sized {
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.object.storage.retain(ctx, true)
+    }
     fn grid_bound(&self) -> Result<GridBound, Error> {
         let grid = KernelOutputStored::grid(self)?;
         Ok(if self.prefix_coverage {
@@ -1804,6 +1917,9 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.object.storage.retain(ctx, true)
+    }
     fn grid_bound(&self) -> Result<GridBound, Error> {
         let grid = KernelOutputStored::grid(self)?;
         Ok(if self.prefix_coverage {
@@ -1856,6 +1972,9 @@ impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
 }
 
 impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<T>>> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.partition.retain(ctx)
+    }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         self.partition.push_kernel_args(launcher);
     }
@@ -1890,6 +2009,9 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<
 }
 
 impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&mut Tensor<T>>> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.partition.retain(ctx)
+    }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         self.partition.push_kernel_args(launcher);
     }
@@ -1981,6 +2103,8 @@ impl<'a, T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<&'a mut T
 /// Implemented for `Arc<Tensor<T>>` and `&Tensor<T>`. Both push the same
 /// data: device pointer, shape, and strides.
 pub trait KernelInputStored: Send {
+    /// Retain storage and acquire shared device access before enqueueing.
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError>;
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn shape(&self) -> &[i32];
     fn strides(&self) -> &[i32];
@@ -2006,6 +2130,9 @@ pub trait KernelInput<T: DType>: Send + Sized {
 // ── KernelInputStored impls ─────────────────────────────────────────────────
 
 impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.storage.retain(ctx, false)
+    }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());
@@ -2032,6 +2159,9 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
 }
 
 impl<T: DType + Sync> KernelInputStored for &Tensor<T> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.storage.retain(ctx, false)
+    }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
             launcher.push_device_ptr(self.cu_deviceptr());
@@ -2095,6 +2225,9 @@ impl<'a, T: DType + Sync> KernelInput<T> for &'a Tensor<T> {
 // ── TensorView KernelInput impls ────────────────────────────────────────────
 
 impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
+    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.base.storage.retain(ctx, false)
+    }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         // Push the already-offset device pointer. The offset is applied
         // host-side so the kernel sees the correct base address directly.
@@ -2208,6 +2341,56 @@ mod tests {
     // allocates nothing and its device pointer is never read on these paths.
     fn meta_f32(shape: &[i32]) -> Tensor<f32> {
         Tensor::<f32>::from_meta(shape.to_vec(), 0)
+    }
+
+    #[test]
+    fn forgotten_storage_lease_keeps_allocation_and_access_exclusion() {
+        let tensor = meta_f32(&[8]);
+        let weak = Arc::downgrade(&tensor.storage);
+        let lease = tensor.storage.acquire(1, true, false).unwrap();
+        std::mem::forget(lease);
+        assert!(tensor.storage.acquire(2, false, false).is_err());
+        assert!(tensor.storage.acquire(2, true, false).is_err());
+        drop(tensor);
+        assert!(weak.upgrade().is_some());
+    }
+
+    #[test]
+    fn storage_leases_allow_reads_and_ordered_same_stream_writes() {
+        let tensor = meta_f32(&[8]);
+        let read1 = tensor.storage.acquire(1, false, false).unwrap();
+        let read2 = tensor.storage.acquire(2, false, false).unwrap();
+        assert!(tensor.storage.acquire(1, true, false).is_err());
+        drop(read2);
+        let write = tensor.storage.acquire(1, true, false).unwrap();
+        assert!(tensor.storage.acquire(2, false, false).is_err());
+        drop((read1, write));
+        assert!(tensor.storage.acquire(2, true, false).is_ok());
+    }
+
+    #[test]
+    fn internal_storage_leases_do_not_hide_user_aliases() {
+        let mut tensor = meta_f32(&[8]);
+        let lease = tensor.storage.acquire(1, true, false).unwrap();
+        assert!(tensor.has_unique_storage());
+        drop((&mut tensor).partition([4]));
+        let alias = tensor.storage.clone();
+        assert!(!tensor.has_unique_storage());
+        drop(lease);
+        assert!(!tensor.has_unique_storage());
+        drop(alias);
+        assert!(tensor.has_unique_storage());
+    }
+
+    #[test]
+    fn recording_keeps_storage_without_claiming_executed_access() {
+        let tensor = meta_f32(&[8]);
+        let recorded = tensor.storage.acquire(1, true, true).unwrap();
+        assert!(tensor.storage.acquire(2, true, false).is_ok());
+        let executing = tensor.storage.acquire(2, true, false).unwrap();
+        assert!(recorded.storage.acquire(1, true, false).is_err());
+        drop(executing);
+        assert!(recorded.storage.acquire(1, true, false).is_ok());
     }
 
     #[test]
