@@ -230,8 +230,77 @@ where
     fn one() -> Self;
     fn min() -> Self;
     fn max() -> Self;
+    fn all_ones() -> Self;
 }
 
+impl Integer for u8 {
+    fn zero() -> u8 {
+        0u8
+    }
+    fn one() -> u8 {
+        1u8
+    }
+    fn min() -> u8 {
+        u8::MIN
+    }
+    fn max() -> u8 {
+        u8::MAX
+    }
+    fn all_ones() -> u8 {
+        !0u8
+    }
+}
+impl Integer for i8 {
+    fn zero() -> i8 {
+        0i8
+    }
+    fn one() -> i8 {
+        1i8
+    }
+    fn min() -> i8 {
+        i8::MIN
+    }
+    fn max() -> i8 {
+        i8::MAX
+    }
+    fn all_ones() -> i8 {
+        -1i8
+    }
+}
+impl Integer for u16 {
+    fn zero() -> u16 {
+        0u16
+    }
+    fn one() -> u16 {
+        1u16
+    }
+    fn min() -> u16 {
+        u16::MIN
+    }
+    fn max() -> u16 {
+        u16::MAX
+    }
+    fn all_ones() -> u16 {
+        !0u16
+    }
+}
+impl Integer for i16 {
+    fn zero() -> i16 {
+        0i16
+    }
+    fn one() -> i16 {
+        1i16
+    }
+    fn min() -> i16 {
+        i16::MIN
+    }
+    fn max() -> i16 {
+        i16::MAX
+    }
+    fn all_ones() -> i16 {
+        -1i16
+    }
+}
 impl Integer for i32 {
     fn zero() -> i32 {
         0i32
@@ -244,6 +313,9 @@ impl Integer for i32 {
     }
     fn max() -> i32 {
         i32::MAX
+    }
+    fn all_ones() -> i32 {
+        -1i32
     }
 }
 impl Integer for i64 {
@@ -259,6 +331,9 @@ impl Integer for i64 {
     fn max() -> i64 {
         i64::MAX
     }
+    fn all_ones() -> i64 {
+        -1i64
+    }
 }
 impl Integer for u32 {
     fn zero() -> u32 {
@@ -273,6 +348,9 @@ impl Integer for u32 {
     fn max() -> u32 {
         u32::MAX
     }
+    fn all_ones() -> u32 {
+        !0u32
+    }
 }
 impl Integer for u64 {
     fn zero() -> u64 {
@@ -286,6 +364,9 @@ impl Integer for u64 {
     }
     fn max() -> u64 {
         u64::MAX
+    }
+    fn all_ones() -> u64 {
+        !0u64
     }
 }
 
@@ -307,6 +388,7 @@ fn get_integer_const<T: Integer>(const_str: &str) -> Result<String, JITError> {
         "one" => Ok(T::one().to_hex()),
         "min" => Ok(T::min().to_hex()),
         "max" => Ok(T::max().to_hex()),
+        "all_ones" => Ok(T::all_ones().to_hex()),
         _ => SourceLocation::unknown()
             .jit_error_result(&format!("Unsupported integer constant type {}.", const_str)),
     }
@@ -319,6 +401,10 @@ pub fn get_const_hex(rust_element_type_str: &str, const_str: &str) -> Result<Str
         "f16" => get_float_const::<f16>(const_str),
         "f32" => get_float_const::<f32>(const_str),
         "f64" => get_float_const::<f64>(const_str),
+        "u8" => get_integer_const::<u8>(const_str),
+        "i8" => get_integer_const::<i8>(const_str),
+        "u16" => get_integer_const::<u16>(const_str),
+        "i16" => get_integer_const::<i16>(const_str),
         "i32" => get_integer_const::<i32>(const_str),
         "i64" => get_integer_const::<i64>(const_str),
         "u32" => get_integer_const::<u32>(const_str),
@@ -1032,5 +1118,30 @@ pub fn update_type_meta(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_const_hex_integers() {
+        assert_eq!(get_const_hex("u8", "zero").unwrap(), "0x0");
+        assert_eq!(get_const_hex("u8", "one").unwrap(), "0x1");
+        assert_eq!(get_const_hex("u8", "all_ones").unwrap(), "0xff");
+        assert_eq!(get_const_hex("i8", "all_ones").unwrap(), "0xff");
+        assert_eq!(get_const_hex("u16", "all_ones").unwrap(), "0xffff");
+        assert_eq!(get_const_hex("i16", "all_ones").unwrap(), "0xffff");
+        assert_eq!(get_const_hex("u32", "all_ones").unwrap(), "0xffffffff");
+        assert_eq!(get_const_hex("i32", "all_ones").unwrap(), "0xffffffff");
+        assert_eq!(
+            get_const_hex("u64", "all_ones").unwrap(),
+            "0xffffffffffffffff"
+        );
+        assert_eq!(
+            get_const_hex("i64", "all_ones").unwrap(),
+            "0xffffffffffffffff"
+        );
     }
 }
