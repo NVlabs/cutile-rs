@@ -39,6 +39,35 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
+/// Where an access obligation ended up.
+///
+/// The distinction between `Jit` and `Launch` is what lets a caller keep a
+/// compile-time proof while declining to turn the same obligation into an
+/// unconditional host check: a `Jit` discharge costs the kernel nothing and is
+/// always acceptable, whereas a `Launch` discharge constrains every launch and
+/// is therefore not acceptable for an access that sits behind a runtime guard
+/// (upstream issue #215, defect D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObligationOutcome {
+    /// Entailed by the compile-time fact set; nothing is emitted anywhere.
+    Jit,
+    /// Evacuated to a host launch check, collected in `launch_checks`.
+    Launch,
+    /// Not decided here; the caller must emit an in-kernel check.
+    Device,
+}
+
+impl ObligationOutcome {
+    /// The obligation needs no in-kernel check - whether that is because it was
+    /// proved at compile time or because a host check now covers it.
+    pub(crate) fn is_handled(self) -> bool {
+        match self {
+            Self::Jit | Self::Launch => true,
+            Self::Device => false,
+        }
+    }
+}
+
 /// Compiles a single Rust function into Tile IR bytecode.
 pub struct CUDATileFunctionCompiler<'m> {
     pub(crate) modules: &'m CUDATileModules,
@@ -186,7 +215,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         a_axis: usize,
         b_tensor: &str,
         b_axis: usize,
-    ) -> bool {
+    ) -> ObligationOutcome {
         use cuda_async::predicate::{Atom, Predicate, Term};
         // Resolve both tensor names to param indices; if either is not a
         // parameter, the equality can't be canonicalized — conservatively not
@@ -195,7 +224,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             self.param_index.get(a_tensor),
             self.param_index.get(b_tensor),
         ) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let a = Term::atom(Atom::Dim {
             param: a_param,
@@ -206,7 +235,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             axis: b_axis,
         });
         let Some(predicate) = Predicate::eq(&a, &b) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         self.lower_obligation(
             predicate,
@@ -237,14 +266,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         b_tensor: &str,
         b_axis: usize,
         tile: i32,
-    ) -> bool {
+        allow_launch: bool,
+    ) -> ObligationOutcome {
         use crate::passes::obligation::{resolve, Obligation, Resolution};
         use cuda_async::predicate::{Atom, Predicate, Term};
         let (Some(&a_param), Some(&b_param)) = (
             self.param_index.get(a_tensor),
             self.param_index.get(b_tensor),
         ) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let a = Term::atom(Atom::Dim {
             param: a_param,
@@ -259,7 +289,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         if let Some(eq) = Predicate::eq(&a, &b) {
             let obligation = Obligation::new(eq, "");
             if matches!(resolve(&obligation, &self.assumptions), Resolution::Jit) {
-                return true;
+                return ObligationOutcome::Jit;
             }
         }
         // Step 2: state the real goal — over TILE COUNTS, which is what the
@@ -271,11 +301,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // relocation the goal stays with the access as a device check;
         // step 1 still ran, because a declared fact is a verified proof,
         // not a placement.
-        if !self.check_opts.relocate_to_launch {
-            return false;
+        // `allow_launch` is false when the access sits behind a runtime guard.
+        // A launch check is unconditional, so emitting this one would reject
+        // launches whose guard is false - calls that run no offending access
+        // at all (issue #215, defect D1). Step 1 above still applies: a
+        // declared equality is a compile-time proof and costs nothing.
+        if !allow_launch || !self.check_opts.relocate_to_launch {
+            return ObligationOutcome::Device;
         }
         if tile < 1 {
-            return false;
+            return ObligationOutcome::Device;
         }
         let ta = Term::atom(Atom::TileCount {
             param: a_param,
@@ -288,7 +323,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             tile,
         });
         let Some(le) = Predicate::le(&ta, &tb) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         self.lower_obligation(
             le,
@@ -314,11 +349,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         &self,
         predicate: cuda_async::predicate::Predicate,
         cause: impl Into<String>,
-    ) -> bool {
+    ) -> ObligationOutcome {
         use crate::passes::obligation::{resolve, Obligation, Resolution};
         let obligation = Obligation::new(predicate, cause);
         match resolve(&obligation, &self.assumptions) {
-            Resolution::Jit => true,
+            Resolution::Jit => ObligationOutcome::Jit,
             Resolution::Launch(check) => {
                 // Canonical predicates make duplicate detection exact. Two
                 // obligations reducing to the same host compare (e.g. a shared
@@ -327,9 +362,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 if !checks.iter().any(|c| c.predicate == check.predicate) {
                     checks.push(check);
                 }
-                true
+                ObligationOutcome::Launch
             }
-            Resolution::Device => false,
+            Resolution::Device => ObligationOutcome::Device,
         }
     }
 

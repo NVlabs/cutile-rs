@@ -1750,6 +1750,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let (local_block_id, local_block_args) = build_block(module, local_var_types);
                     let local_var_names = ["curr", "prev"];
                     let mut local_vars = CompilerContext::empty();
+                    // The reduction body is emitted into the caller's current
+                    // block, so it inherits the caller's guard nesting: an
+                    // access inside a `reduce` that itself sits behind a
+                    // runtime guard is conditional and must not stake an
+                    // unconditional launch check (issue #215, D1).
+                    local_vars.condition_depth = ctx.condition_depth;
                     for i in 0..local_block_args.len() {
                         let value: Value = local_block_args[i];
                         let name = local_var_names[i];

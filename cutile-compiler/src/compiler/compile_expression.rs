@@ -1018,7 +1018,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "`with_bounds` bound {axis}: the partitioned extent must be divisible by the tile \
                  extent {tile_dim}, or the declared bound undercounts the tiles on axis {axis}"
             );
-            if self.lower_obligation(divisibility, cause) {
+            if self.lower_obligation(divisibility, cause).is_handled() {
                 return Ok(());
             }
         }
@@ -1056,8 +1056,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         (c - 1) * tile_dim,
                         c * tile_dim
                     );
-                    if self.lower_obligation(above, cause.clone())
-                        && self.lower_obligation(not_above, cause)
+                    if self.lower_obligation(above, cause.clone()).is_handled()
+                        && self.lower_obligation(not_above, cause).is_handled()
                     {
                         return Ok(());
                     }
@@ -1357,7 +1357,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     }
                 }
                 if let (Some(receiver_name), Some(other_name)) = (&receiver_name, &other_name) {
-                    if self.resolve_dim_eq(receiver_name, axis, other_name, axis) {
+                    if self
+                        .resolve_dim_eq(receiver_name, axis, other_name, axis)
+                        .is_handled()
+                    {
                         self.check_stats
                             .discharged
                             .set(self.check_stats.discharged.get() + 1);
@@ -2914,6 +2917,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         let mut block_vars = ctx.clone();
                         block_vars.carry_vars = Some(if_captured_var_names.clone());
                         block_vars.default_terminator = Some(BlockTerminator::Yield);
+                        // An access in this branch may not execute at all, so
+                        // its obligations must not become unconditional launch
+                        // checks (issue #215, D1).
+                        block_vars.condition_depth += 1;
                         let (then_block_id, _then_block_args) = build_block(module, &[]);
                         let result = self.compile_block(
                             module,
@@ -2950,6 +2957,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             let mut block_vars = ctx.clone();
                             block_vars.carry_vars = Some(if_captured_var_names.clone());
                             block_vars.default_terminator = Some(BlockTerminator::Yield);
+                            // Same as the then-branch: the else arm is also
+                            // conditional, including the `else` of an
+                            // `if`/`else if` chain.
+                            block_vars.condition_depth += 1;
                             let (else_block_id, _else_block_args) = build_block(module, &[]);
                             let result = self.compile_else_branch(
                                 module,

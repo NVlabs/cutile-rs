@@ -117,6 +117,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // The callee body is compiled into the caller's current block, so
             // the caller's loop context governs check hoisting inside it.
             call_variables.loop_frames = ctx.loop_frames.clone();
+            // ... and the caller's guard nesting governs whether an obligation
+            // inside the callee may become an unconditional launch check. An
+            // access behind a runtime guard in the caller is behind that guard
+            // after inlining too (issue #215, D1): dropping the count here made
+            // every inlined `Partition::load`/`store` look unconditional, which
+            // is how a guarded access kept staking a launch check.
+            call_variables.condition_depth = ctx.condition_depth;
             call_variables.module_scope.push(module_name.clone());
             // The callee's body block is a function body: a top-level `return`
             // there yields the call's value.
@@ -345,6 +352,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // The callee body is compiled into the caller's current block, so
             // the caller's loop context governs check hoisting inside it.
             call_variables.loop_frames = ctx.loop_frames.clone();
+            // ... and the caller's guard nesting governs whether an obligation
+            // inside the callee may become an unconditional launch check. Every
+            // partition access reaches its check through an inlined method
+            // (`Partition::load`/`store`, `check_partition_access`), so losing
+            // the count here silently un-guarded every conditional access in
+            // the language (issue #215, D1).
+            call_variables.condition_depth = ctx.condition_depth;
             call_variables.module_scope.push(module_name.clone());
             call_variables.fn_body = true;
             let mut outer2inner_map = HashMap::new();

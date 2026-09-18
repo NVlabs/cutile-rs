@@ -158,10 +158,11 @@ mod inferred_module {
             z.store(t, index);
         }
     }
-    /// KNOWN LIMITATION, pinned deliberately: the foreign access sits behind a
-    /// runtime condition, but the fact it needs is still hoisted, so the check
-    /// applies to every launch — including those where `flag <= 0` and the load
-    /// never runs. See LIMITATIONS in `HOISTING_COVERAGE.md`.
+    /// The foreign access sits behind a runtime condition, so its obligation
+    /// must stay inside that guard: a launch check is unconditional and would
+    /// reject calls whose `flag <= 0` run no offending access at all (issue
+    /// #215, D1). The in-kernel check it keeps instead is unobservable for
+    /// such a call, and still traps when the guard IS taken on a bad index.
     #[cutile::entry]
     fn conditional_foreign_access<const BM: i32, const BN: i32, const BK: i32>(
         z: &mut Tensor<f32, { [BK, BN] }>,
@@ -410,40 +411,45 @@ fn mapped_component_access_places_the_same_either_way() {
     });
 }
 
-// KNOWN LIMITATION — pinned so it cannot change silently, not because it is
-// desirable. A launch check is unconditional: it constrains every launch, even
-// ones where the access it guards never executes. Here the foreign load sits
-// behind `flag > 0`, yet the derived tile-count fact is still enforced at launch,
-// so a caller passing mismatched extents and `flag = 0` is rejected despite
-// running no offending access. Before cross-tensor facts relocated, that
-// caller got a device check inside the branch, which simply never fired.
+// FIXED (issue #215, defect D1 — the case above used to be a deliberate pin of
+// the opposite). A launch check is unconditional: it constrains every launch,
+// so relocating a guarded access's obligation to the host rejected callers
+// whose guard is false even though they run no offending access — a precision
+// failure, not a safety hole. The guarded access now keeps its check in the
+// kernel, inside its guard, and stakes no launch check at all.
 //
-// Fixing it means not lowering an obligation whose access is control-dependent
-// — trading hoisting coverage for not rejecting valid launches. That is a
-// design decision, not an oversight.
-// Name reviewed and approved by hme (2026-08-05): the length is fantastic.
-// It states the limitation being pinned, so whoever trips this failure knows
-// what changed before opening anything.
+// The trade this makes is explicit: a guarded access whose guard IS taken on a
+// bad index now traps on the device instead of being refused before the
+// launch. `differential_placement.rs` pins both halves on hardware —
+// `guarded_foreign_flag_on_short_target` must still stop, and
+// `guarded_foreign_flag_off_mismatched` must now run to completion.
+//
+// Unconditional accesses are untouched: `undeclared_cross_tensor_access_
+// relocates_to_launch` above still requires the same derived fact to leave the
+// kernel when nothing guards the access.
 #[test]
-fn control_dependent_access_still_imposes_an_unconditional_launch_check() {
+fn control_dependent_access_keeps_its_check_inside_the_guard() {
     common::with_test_stack(|| {
-        let artifacts = artifacts(
-            "conditional_foreign_access",
-            &["32", "32", "32"],
-            &[("z", &[32, 1]), ("x", &[32, 1]), ("y", &[32, 1])],
-        );
+        let strides: &[(&str, &[i32])] = &[("z", &[32, 1]), ("x", &[32, 1]), ("y", &[32, 1])];
+        let artifacts = artifacts("conditional_foreign_access", &["32", "32", "32"], strides);
         let causes: Vec<&str> = artifacts
             .launch_checks()
             .iter()
             .map(|c| c.cause.as_str())
             .collect();
         assert!(
-            causes
-                .iter()
-                .any(|c| c.contains("ceil(dim(x, 1)/32) <= ceil(dim(y, 0)/32)")),
-            "the guarded access's extent fact is hoisted regardless of the \
-             condition guarding it; if this ever stops being true, the \
-             limitation documented here has been addressed: {causes:?}"
+            causes.is_empty(),
+            "every access in this kernel is control-dependent, so nothing may be \
+             enforced on every launch; a caller with `flag <= 0` runs no offending \
+             access and must be accepted (issue #215, D1): {causes:?}"
+        );
+        let (discharged, hoisted, in_place, launch_checks) =
+            counts("conditional_foreign_access", &["32", "32", "32"], strides);
+        assert_eq!(
+            (discharged, hoisted, in_place, launch_checks),
+            (0, 0, 2, 0),
+            "both guarded coordinates must keep an in-kernel check of their own and \
+             neither may relocate to launch (discharged, hoisted, in_place, launch)"
         );
     });
 }

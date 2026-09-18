@@ -29,7 +29,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::ExprCall;
 
-use super::super::_function::CUDATileFunctionCompiler;
+use super::super::_function::{CUDATileFunctionCompiler, ObligationOutcome};
 use super::super::_value::{DimOrigin, TileRustValue};
 use crate::error::JITError;
 
@@ -173,7 +173,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         &self,
         goals: &AxisGoals<'_>,
         partition: &TileRustValue,
-    ) -> bool {
+        allow_launch: bool,
+    ) -> ObligationOutcome {
         if let (Some(origin), Some(target)) = (
             goals.index.partition_axis_origin.as_ref(),
             partition.tensor_origin.as_ref(),
@@ -186,15 +187,18 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // source side is guarded where the provenance is minted.
             if origin.tile_dim == goals.tile
                 && self.root_framed_param(target).is_some()
-                && self.resolve_dim_le(
-                    &origin.tensor,
-                    origin.axis,
-                    target,
-                    goals.extent_axis,
-                    goals.tile,
-                )
+                && self
+                    .resolve_dim_le(
+                        &origin.tensor,
+                        origin.axis,
+                        target,
+                        goals.extent_axis,
+                        goals.tile,
+                        allow_launch,
+                    )
+                    .is_handled()
             {
-                return true;
+                return ObligationOutcome::Jit;
             }
         }
         if let (
@@ -207,10 +211,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         ) = (goals.index.index_origin.as_ref(), partition.value)
         {
             if *view == partition_view && *axis == goals.axis && *tile_dim == goals.tile {
-                return true;
+                return ObligationOutcome::Jit;
             }
         }
-        false
+        ObligationOutcome::Device
     }
 
     /// The block-id axiom rung (plain family): a coordinate that IS the
@@ -238,38 +242,38 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         &self,
         goals: &AxisGoals<'_>,
         partition: &TileRustValue,
-    ) -> bool {
+    ) -> ObligationOutcome {
         use cuda_async::predicate::{Atom, Predicate, Term};
         let Some(term) = goals.index.term.as_ref() else {
-            return false;
+            return ObligationOutcome::Device;
         };
         if term.constant_part() != 0 || term.coeffs().len() != 1 {
-            return false;
+            return ObligationOutcome::Device;
         }
         let Some((atom, &coeff)) = term.coeffs().iter().next() else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let k = match (atom, coeff) {
             (Atom::TileBlockId(k), 1) => *k,
-            _ => return false,
+            _ => return ObligationOutcome::Device,
         };
         let Some(tensor) = partition.tensor_origin.as_ref() else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let Some(&param) = self.param_index.get(tensor) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let tile = goals.tile as i64;
         let Some(lhs) = Term::atom(Atom::NumTileBlocks(k)).mul_const(tile) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let Some(rhs) =
             Term::atom(self.extent_atom(param, goals.extent_axis)).add(&Term::constant(tile - 1))
         else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let Some(le) = Predicate::le(&lhs, &rhs) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let cause = format!(
             "num_tile_blocks({k}) <= ceil(extent({tensor}, {})/{})",
@@ -300,22 +304,22 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         &self,
         goals: &AxisGoals<'_>,
         partition: &TileRustValue,
-    ) -> bool {
+    ) -> ObligationOutcome {
         use cuda_async::predicate::{Predicate, Term};
         if goals.static_extent.is_some() {
-            return false;
+            return ObligationOutcome::Device;
         }
         let Some(bounds) = goals.index.bounds else {
-            return false;
+            return ObligationOutcome::Device;
         };
         if !(bounds.start == 0 && bounds.end == 0) {
-            return false;
+            return ObligationOutcome::Device;
         }
         let Some(tensor) = partition.tensor_origin.as_ref() else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let Some(&param) = self.param_index.get(tensor) else {
-            return false;
+            return ObligationOutcome::Device;
         };
         let predicate = Predicate::nonzero(Term::atom(self.extent_atom(param, goals.extent_axis)));
         let cause = format!(
