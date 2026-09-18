@@ -8,7 +8,7 @@
 use cutile_ir::ir::Attribute;
 
 // Re-export from hints.rs (canonical, melior-free location).
-pub use crate::hints::{CompileOptions, OptimizationHints, SMHints};
+pub use crate::hints::{CompileOptions, Optimization, OptimizationHints, SMHints};
 
 /// Named attribute pair (name, value).
 pub type NamedAttr = (String, Attribute);

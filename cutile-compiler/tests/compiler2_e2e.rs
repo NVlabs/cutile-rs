@@ -12,7 +12,11 @@ use cutile_ir::ir::{
     TileElementType, TileType, Type, DYNAMIC,
 };
 
-use cutile_compiler::cuda_tile_runtime_utils::{compile_tile_ir_module, tileiras_binary};
+use cutile_compiler::cuda_tile_runtime_utils::{
+    compile_tile_ir_module, run_tileiras, serialize_tile_ir_bytecode, tileiras_binary,
+    TileirasOptions,
+};
+use cutile_compiler::hints::{CompileOptions, Optimization};
 
 const DEFAULT_GPU_NAME: &str = "sm_120";
 
@@ -134,6 +138,31 @@ fn test_empty_kernel_tileiras() {
     let cubin = compile_tile_ir_module(&module, gpu_name).unwrap();
     println!("cubin: {} bytes", cubin.len());
     assert!(!cubin.is_empty(), "cubin image should be non-empty");
+}
+
+#[test]
+fn test_compile_options_reach_tileiras() {
+    let Some(gpu_name) = tileiras_target() else {
+        eprintln!("skipping tileiras: tileiras not available");
+        return;
+    };
+    let options = TileirasOptions::from_compile_options(&CompileOptions::new().opt_level(3))
+        .expect("compile options should resolve");
+    let mut args = format!("--opt-level {}", options.opt_level());
+    if matches!(options.optimization, Optimization::FullDebug) {
+        args.push_str(" --device-debug");
+    }
+    if options.lineinfo {
+        args.push_str(" --lineinfo");
+    }
+    if options.sanitize_memcheck {
+        args.push_str(" --sanitize=memcheck");
+    }
+    println!("tileiras options: {args}");
+    let (bytecode, _) = serialize_tile_ir_bytecode(&build_empty_kernel()).unwrap();
+    let cubin = run_tileiras(&bytecode, gpu_name, &options).unwrap();
+    println!("cubin: {} bytes", cubin.len());
+    assert!(!cubin.is_empty());
 }
 
 // =========================================================================
