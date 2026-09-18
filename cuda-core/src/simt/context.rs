@@ -509,17 +509,19 @@ impl CudaContext {
     /// decoded UTF-8 string with any trailing NULs stripped.
     pub fn device_name(&self) -> Result<String, DriverError> {
         self.bind_to_thread()?;
-        let mut buf = [0; 256];
+        // A `u8` buffer sidesteps `c_char`, which is `i8` on x86_64 but `u8`
+        // on aarch64 (where a `c as u8` cast trips `clippy::unnecessary_cast`).
+        let mut buf = [0u8; 256];
         unsafe {
-            cuda_bindings::cuDeviceGetName(buf.as_mut_ptr(), buf.len() as c_int, self.cu_device)
-                .result()?;
+            cuda_bindings::cuDeviceGetName(
+                buf.as_mut_ptr().cast(),
+                buf.len() as c_int,
+                self.cu_device,
+            )
+            .result()?;
         }
-        let bytes: Vec<u8> = buf
-            .iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| c as u8)
-            .collect();
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
     }
 
     /// Queries the compute capability (SM version) of the device.

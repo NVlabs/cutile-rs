@@ -12,7 +12,7 @@ use cutile::prelude::*;
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::{mpsc, Arc};
-use std::task::Context;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 #[cutile::module]
@@ -50,34 +50,106 @@ fn tracked(stream: &Arc<cuda_core::Stream>) -> (Tensor<f32>, Arc<Allocation>) {
     (tensor, allocation)
 }
 
-struct Gate(mpsc::Sender<()>);
+/// Diagnostics for the first-poll assertion: how many Gates were armed in
+/// this process and how many of their callbacks have started running.
+static GATES_ARMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static GATES_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static GATES_FINISHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static GATE_WAIT_OUTCOMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static LAST_GATE_ARMED_AT: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Upper bound on how long a Gate may hold its stream if a test never drops
+/// it. Only a safety net: a gated test's first poll can legitimately sit for
+/// many seconds behind other tests' context-wide synchronizes when the suite
+/// runs 20-wide on one GPU, so this must dwarf any such stall.
+const GATE_BOUND: Duration = Duration::from_secs(60);
+
+struct Gate {
+    release: mpsc::Sender<()>,
+    /// Set by the callback when it hit `GATE_BOUND`: this gate's stream drained
+    /// on its own, so a `Ready` first poll is a harness stall, not an ordering
+    /// bug. Per gate, because the process-wide counters below also see other
+    /// tests' gates when the suite runs in parallel.
+    expired: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Gate {
     fn arm(stream: &Arc<cuda_core::Stream>) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let expired_flag = expired.clone();
+        GATES_ARMED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *LAST_GATE_ARMED_AT.lock().unwrap() = Some(std::time::Instant::now());
         unsafe {
             stream
                 .launch_host_function(move || {
+                    GATES_STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     // Bounded even if an unexpected synchronous path is introduced.
-                    let _ = receiver.recv_timeout(Duration::from_secs(10));
+                    let outcome = receiver.recv_timeout(GATE_BOUND);
+                    if outcome.is_err() {
+                        expired_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    GATE_WAIT_OUTCOMES
+                        .lock()
+                        .unwrap()
+                        .push(format!("{outcome:?}"));
+                    GATES_FINISHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 })
                 .unwrap();
         }
-        Self(sender)
+        Self {
+            release: sender,
+            expired,
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.expired.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 impl Drop for Gate {
     fn drop(&mut self) {
-        let _ = self.0.send(());
+        let _ = self.release.send(());
     }
 }
 
-fn forget_pending<O: DeviceOp>(op: O, stream: &Arc<cuda_core::Stream>) {
+/// A poll issued while a Gate blocks `stream` must be `Pending` on either
+/// completion path. Anything else is reported with the process-wide Gate
+/// counters and a fresh stream query, so a failure names its mechanism.
+fn assert_gated_pending<T>(
+    outcome: Poll<Result<T, cuda_async::error::DeviceError>>,
+    stream: &Arc<cuda_core::Stream>,
+    gate: &Gate,
+) {
+    match outcome {
+        Poll::Pending => {}
+        Poll::Ready(Ok(_)) => {
+            let armed = GATES_ARMED.load(std::sync::atomic::Ordering::SeqCst);
+            let finished = GATES_FINISHED.load(std::sync::atomic::Ordering::SeqCst);
+            let age = LAST_GATE_ARMED_AT.lock().unwrap().map(|t| t.elapsed());
+            let outcomes = GATE_WAIT_OUTCOMES.lock().unwrap().clone();
+            if gate.expired() {
+                panic!(
+                    "harness stall: this test's Gate expired ({GATE_BOUND:?} bound) before the first poll; newest gate armed {age:?} ago. Not an ordering failure — the stream drained legitimately (gates armed: {armed}, finished: {finished}, outcomes: {outcomes:?})"
+                );
+            }
+            panic!(
+                "gated submission completed on the first poll while its Gate should still be blocking the stream (newest gate armed {age:?} ago; gates armed: {armed}, callbacks started: {}, finished: {finished}, wait outcomes: {outcomes:?}, stream query now: {:?})",
+                GATES_STARTED.load(std::sync::atomic::Ordering::SeqCst),
+                unsafe { stream.query() },
+            )
+        }
+        Poll::Ready(Err(e)) => panic!("gated submission failed on the first poll: {e}"),
+    }
+}
+
+fn forget_pending<O: DeviceOp>(op: O, stream: &Arc<cuda_core::Stream>, gate: &Gate) {
     let mut future = DeviceFuture::scheduled(op, ExecutionContext::new(stream.clone()));
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
-    assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+    assert_gated_pending(Pin::new(&mut future).poll(&mut cx), stream, gate);
     std::mem::forget(future);
 }
 
@@ -91,6 +163,18 @@ fn on_gpu(f: impl FnOnce(Arc<cuda_core::Stream>, Arc<cuda_core::Stream>) + Send 
         kernels::copy((&mut dst).partition([4]), &src)
             .sync_on(&stream)
             .unwrap();
+        // Warm every kernel variant and the allocator the gated tests use.
+        // Loading a freshly compiled module and growing the stream-ordered
+        // pool both synchronize the context; done for the first time under a
+        // Gate they wait on the test's own gated stream, and only the Gate's
+        // safety bound breaks the cycle (seen as 10 s stalls and spurious
+        // "completed early" failures on DGX Spark under 20-way parallelism).
+        let view = src.view(&[32]).unwrap();
+        kernels::copy((&mut dst).partition([4]).map([1], 8), &view)
+            .sync_on(&stream)
+            .unwrap();
+        let _ = api::dup(&src).sync_on(&stream).unwrap();
+        api::memcpy(&mut dst, &src).sync_on(&stream).unwrap();
         // Initialize the completion backend before placing any work behind a gate.
         unsafe {
             stream
@@ -117,7 +201,11 @@ fn forgotten_borrowed_kernel_retains_inputs_outputs_and_excludes_conflicts() {
             .graph_on(other.clone())
             .unwrap();
         let gate = Gate::arm(&stream);
-        forget_pending(kernels::copy((&mut dst).partition([4]), &src), &stream);
+        forget_pending(
+            kernels::copy((&mut dst).partition([4]), &src),
+            &stream,
+            &gate,
+        );
         assert!(api::memcpy(&mut scratch, &dst).sync_on(&other).is_err());
         assert!(api::memcpy(&mut src, &scratch).sync_on(&other).is_err());
         assert!(graph.launch().sync_on(&other).is_err());
@@ -146,6 +234,7 @@ fn forgotten_view_and_mapped_output_keep_their_storage() {
         forget_pending(
             kernels::copy((&mut dst).partition([4]).map([1], 8), &view).then(|_| value(())),
             &stream,
+            &gate,
         );
         drop(view);
         drop((src, dst));
@@ -162,7 +251,7 @@ fn forgotten_memcpy_keeps_both_allocations() {
         let (src, src_owner) = tracked(&stream);
         let (mut dst, dst_owner) = tracked(&stream);
         let gate = Gate::arm(&stream);
-        forget_pending(api::memcpy(&mut dst, &src), &stream);
+        forget_pending(api::memcpy(&mut dst, &src), &stream, &gate);
         drop((src, dst));
         assert!(Arc::strong_count(&src_owner) > 1);
         assert!(Arc::strong_count(&dst_owner) > 1);
@@ -182,9 +271,11 @@ fn projected_owned_inputs_live_until_ready_and_then_release() {
         );
         let gate = Gate::arm(&stream);
         let waker = noop_waker();
-        assert!(Pin::new(&mut future)
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending());
+        assert_gated_pending(
+            Pin::new(&mut future).poll(&mut Context::from_waker(&waker)),
+            &stream,
+            &gate,
+        );
         assert!(Arc::strong_count(&src_owner) > 1);
         assert!(Arc::strong_count(&dst_owner) > 1);
         drop(gate);
@@ -210,7 +301,7 @@ fn projected_dup_keeps_source_until_submission_completes() {
         let op = api::dup(&src).then(|_| value(()));
         drop(src);
         let gate = Gate::arm(&stream);
-        forget_pending(op, &stream);
+        forget_pending(op, &stream, &gate);
         assert!(Arc::strong_count(&owner) > 1);
         drop(gate);
         unsafe { stream.synchronize().unwrap() };
@@ -299,7 +390,7 @@ fn graph_replay_retains_projected_storage_and_releases_launch_accesses() {
         let launch = graph.launch();
         drop(graph);
         let gate = Gate::arm(&other);
-        forget_pending(launch, &other);
+        forget_pending(launch, &other, &gate);
         assert!(Arc::strong_count(&src_owner) > 1);
         assert!(Arc::strong_count(&dst_owner) > 1);
         drop(gate);
@@ -321,9 +412,9 @@ fn cloned_execution_contexts_have_independent_submission_owners() {
         let first_gate = Gate::arm(&stream);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        assert!(Pin::new(&mut first).poll(&mut cx).is_pending());
+        assert_gated_pending(Pin::new(&mut first).poll(&mut cx), &stream, &first_gate);
         let second_gate = Gate::arm(&stream);
-        assert!(Pin::new(&mut second).poll(&mut cx).is_pending());
+        assert_gated_pending(Pin::new(&mut second).poll(&mut cx), &stream, &second_gate);
         drop(first_gate);
         block_on(&mut first).unwrap();
         assert!(Arc::strong_count(&src_owner) > 1);

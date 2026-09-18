@@ -7,7 +7,8 @@ set -u
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_runner_common.sh"
 
-EXTRA_FEATURES=""
+# The CPU-reference examples need candle; see cutile-examples/Cargo.toml.
+EXTRA_FEATURES="--features reference-cpu"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --features) EXTRA_FEATURES="--features $2"; shift 2 ;;

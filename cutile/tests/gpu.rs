@@ -94,8 +94,10 @@ mod launcher_guards;
 #[path = "gpu/graph_scope_inputs.rs"]
 mod graph_scope_inputs;
 
-#[path = "gpu/submission_lifetimes.rs"]
-mod submission_lifetimes;
+// `gpu/submission_lifetimes.rs` has its own binary (`tests/submission_lifetimes.rs`):
+// its stream Gates deadlock with any context-wide synchronize elsewhere in the
+// same process (first-use module loads, eviction unloads), so it must not share
+// a process with the rest of the suite. See that file's header.
 // 2026-08 codegen audit regressions, one module per fix; `audit_common`
 // holds the shared compile/transfer/subprocess helpers.
 // ---------------------------------------------------------------------------

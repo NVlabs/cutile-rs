@@ -5,18 +5,23 @@
 
 //! Shared utilities and reference implementations for cutile examples.
 
+#[cfg(feature = "reference-cpu")]
 use candle_core::WithDType;
+#[cfg(feature = "reference-cpu")]
 use candle_nn::ops::softmax;
+#[cfg(feature = "reference-cpu")]
 use cuda_core::DType;
 
 use cuda_core::{get_device_clock_rate, Device};
 
 /// Convert a host slice to a candle CPU tensor.
+#[cfg(feature = "reference-cpu")]
 pub fn to_candle_tensor<T: DType + WithDType>(data: &[T], shape: &[usize]) -> candle_core::Tensor {
     candle_core::Tensor::from_slice(data, shape, &candle_core::Device::Cpu).unwrap()
 }
 
 /// Prints a 2D candle tensor in a formatted table for debugging.
+#[cfg(feature = "reference-cpu")]
 pub fn pretty_print_matrix<T: WithDType>(mat: &candle_core::Tensor) {
     let iter_dim = 0;
     let range = 0..mat.shape().dims()[iter_dim];
@@ -59,6 +64,7 @@ pub fn size_label(size_bytes: usize) -> String {
 /// Computes a reference FMHA result on the host: `softmax(scale(Q @ K^T)) @ V`.
 ///
 /// Takes host-side data as slices and shapes, constructs candle tensors internally.
+#[cfg(feature = "reference-cpu")]
 pub fn fmha_ref_exec<T: WithDType>(
     q_data: &[T],
     q_shape: &[usize],

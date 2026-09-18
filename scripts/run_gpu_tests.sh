@@ -49,6 +49,28 @@ run_step \
     "cutile GPU aggregate tests" \
     cargo test -p cutile --test gpu
 
+# Submission-lifetime tests: their own binary, single-threaded. Each test gates
+# a stream with a blocking host function, and any context-wide synchronize in
+# the same process (a first-use module load, a cache eviction's module unload,
+# pool growth) waits on that gate while the gate owner waits on the context;
+# only the Gate's safety bound breaks the cycle (60 s stalls and spurious
+# "completed early" failures in the aggregate binary on DGX Spark). Run at both
+# completion mechanisms: the default 20 us budget lets short pipelines complete
+# in the inline cuStreamQuery spin; 0 forces the reactor path, a large budget
+# forces the spin path to resolve against the tests' blocking Gates. Under a
+# Gate, `Pending` is the only correct first-poll outcome on either path.
+run_step \
+    "cutile GPU submission-lifetime tests" \
+    cargo test -p cutile --test submission_lifetimes -- --test-threads=1
+
+run_step \
+    "cutile GPU submission-lifetime tests (reactor path, CUDA_ASYNC_SPIN_BUDGET_US=0)" \
+    env CUDA_ASYNC_SPIN_BUDGET_US=0 cargo test -p cutile --test submission_lifetimes -- --test-threads=1
+
+run_step \
+    "cutile GPU submission-lifetime tests (spin path, CUDA_ASYNC_SPIN_BUDGET_US=200000)" \
+    env CUDA_ASYNC_SPIN_BUDGET_US=200000 cargo test -p cutile --test submission_lifetimes -- --test-threads=1
+
 run_step \
     "cutile cross-file debug source kernel" \
     cargo test -p cutile --test debug_info kernel_executes_in_all_debug_modes -- --ignored

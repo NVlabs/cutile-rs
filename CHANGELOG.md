@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `cutile-examples` no longer depends on candle by default: the CPU reference
+  helpers and the `flash_attention` example sit behind a `reference-cpu`
+  feature (`scripts/run_examples.sh` enables it). The default workspace build
+  therefore no longer fails on generic aarch64, where candle's `gemm-f16`
+  needs the `fullfp16` target feature (first seen bringing up DGX Spark).
+
+### Changed
+
 - `Global` now requires a sealed device atomic type, such as
   `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`.
   Global accesses reject `Weak` ordering and `TileBlock` scope in both

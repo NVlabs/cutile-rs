@@ -16,6 +16,7 @@ publish = false
 smoke-test = []
 
 [dev-dependencies]
+cutile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 
@@ -52,7 +53,6 @@ tokio = { workspace = true }
 cutile-compiler = { workspace = true }
 cuda-async = { workspace = true }
 cuda-core = { workspace = true }
-cutile = { workspace = true }
 
 [lints]
 workspace = true
