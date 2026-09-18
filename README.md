@@ -58,6 +58,8 @@ The kernel signature carries the access discipline into device code: `z` is the 
 
 - Run a similar example via `cargo run -p cutile-examples --example saxpy`.
 - More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
+- For NVIDIA Nsight Compute, Nsight Systems, and cuda-gdb workflows, see
+  [Debugging and Profiling](cutile-book/guide/debugging-and-profiling.md).
 
 ## Setup
 

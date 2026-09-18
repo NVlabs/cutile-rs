@@ -43,6 +43,7 @@ for test_target in \
     bitwise_and_bitcast_ops \
     compile_error_quality \
     compile_only \
+    debug_info \
     element_type_zero \
     element_type_zero_jit \
     error_quality \

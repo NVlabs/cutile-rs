@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Advisory Tile-floor warning at build time.
+//! Build-time device debug defaults and an advisory Tile-floor warning.
 //!
 //! The authoritative check runs at tool discovery in
 //! `cuda_tile_runtime_utils`, on the machine that executes the JIT. This
 //! warning covers the common case where the build box and the run box are
 //! the same, so a too-old toolkit is reported at compile time instead of
-//! first launch. It never fails the build: emitting bytecode and
+//! first launch. The toolkit check never fails the build: emitting bytecode and
 //! cross-building are legitimate on machines without a 13.2+ toolkit.
 
 use std::env;
@@ -21,6 +21,29 @@ const DEFAULT_TOOLKIT_DIR: &str = "/usr/local/cuda";
 const MIN_TILE_CUDA_VERSION: u32 = 13020;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CUDA_RUST_DEBUG");
+    let debug_info = match env::var("CUDA_RUST_DEBUG") {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => {
+            // Cargo supplies the profile of this library, not the profile of
+            // the build script or proc macro. `debug_assertions` is a separate
+            // setting and must not select device debug information.
+            // DEBUG is only a boolean: Cargo does not expose the distinction
+            // between line tables, limited, and full debug info here.
+            match env::var("DEBUG").as_deref() {
+                Ok("true") => "full".to_string(),
+                Ok("false") => "none".to_string(),
+                other => panic!("expected Cargo's DEBUG=true or false, got {other:?}"),
+            }
+        }
+        Err(error) => panic!("CUDA_RUST_DEBUG must be none, line, or full: {error}"),
+    };
+    assert!(
+        matches!(debug_info.as_str(), "none" | "line" | "full"),
+        "invalid CUDA_RUST_DEBUG={debug_info:?}; expected none, line, or full"
+    );
+    println!("cargo:rustc-env=CUTILE_BUILD_DEBUG_INFO={debug_info}");
+
     for var in TOOLKIT_ENV_VARS {
         println!("cargo:rerun-if-env-changed={var}");
     }

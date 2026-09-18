@@ -50,6 +50,10 @@ run_step \
     cargo test -p cutile --test gpu
 
 run_step \
+    "cutile cross-file debug source kernel" \
+    cargo test -p cutile --test debug_info kernel_executes_in_all_debug_modes -- --ignored
+
+run_step \
     "cuda-core GPU integration test vmm" \
     cargo test -p cuda-core --test vmm
 

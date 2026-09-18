@@ -908,14 +908,11 @@ impl DebugInfoCollector {
 
     /// Converts a location into an interned attribute id (0 = no info).
     ///
-    /// Known consumer limitation: the current `tileiras` accepts this
-    /// section everywhere (verifier and `--lineinfo` line tables, both
-    /// files/lines correct), but its full `--device-debug` DWARF emission
-    /// can reject real programs whose inline chains reference multiple
-    /// subprogram scopes (probed in `tests/bytecode_validate.rs` `dbg_v*`;
-    /// every isolated shape passes, whole programs can fail). Being raised
-    /// upstream; emission stays reference-conformant rather than degrading
-    /// the data.
+    /// Preserve the producer's scopes and call chains. The compiler uses
+    /// one compilation unit for a kernel and its inlined helpers, while
+    /// keeping each helper's source file on its subprogram. Live cross-file
+    /// scopes are exercised through tileiras --device-debug by cutile's
+    /// `debug_info` integration test, not just by verifier-only probes.
     fn attr_for(&mut self, strings: &mut StringManager, loc: &crate::ir::Location) -> u64 {
         use crate::ir::Location;
         match loc {

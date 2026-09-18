@@ -1420,7 +1420,7 @@ fn kv_loop_bounds_checks_hoist_to_the_preheader() {
             &[],
             &[],
             Some((4, 1, 1)),
-            &CompileOptions::default(),
+            &CompileOptions::default().device_debug(false),
         )
         .map_err(|err| err.to_string())
         .expect("Failed to compile hoisted-checks kernel");
@@ -1474,7 +1474,7 @@ fn compile_hoist_kernel(function_name: &str, generics: &[&str]) -> String {
         &[],
         &[],
         None,
-        &CompileOptions::default(),
+        &CompileOptions::default().device_debug(false),
     )
     .map_err(|err| err.to_string())
     .expect("Failed to compile hoist kernel")
