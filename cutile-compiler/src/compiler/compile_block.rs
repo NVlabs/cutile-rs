@@ -241,9 +241,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     ) -> Result<Option<TileRustValue>, JITError> {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
             let _block_debug_str = block_expr.to_token_stream().to_string();
-            // Only the function body block itself may `return`; every block
-            // compiled from a clone of this context (an `if` branch, a loop
-            // body, a nested `{}`) must see `false`.
+            // Top-level returns yield the inlined function's value. Nested
+            // returns need the separate 13.4 kernel-loop handling below.
             let is_fn_body = std::mem::replace(&mut ctx.fn_body, false);
             let mut terminator_encountered = None;
             let mut return_value: Option<TileRustValue> = None;
@@ -413,6 +412,32 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             ctx.vars.insert(var_name, ct_value);
                         }
                         Expr::Return(return_expr) => {
+                            if !is_fn_body
+                                && ctx.kernel_entry
+                                && !ctx.inside_for
+                                && ctx.innermost_loop == Some(LoopKind::Loop)
+                            {
+                                if let Some(caps) = &self.target_capabilities {
+                                    caps.require_version(
+                                        "cuda_tile.return inside loop",
+                                        cutile_ir::bytecode::BytecodeVersion::V13_4,
+                                        &self.ir_location(&expr.span()),
+                                    )
+                                    .map_err(JITError::from)?;
+                                }
+                                if return_expr.expr.is_some() {
+                                    return self.jit_error_result(
+                                        &expr.span(),
+                                        "returning a value from a kernel is not supported",
+                                    );
+                                }
+                                let (op, _) =
+                                    OpBuilder::new(Opcode::Return, self.ir_location(&expr.span()))
+                                        .build(module);
+                                append_op(module, block_id, op);
+                                terminator_encountered = Some(BlockTerminator::Return);
+                                break;
+                            }
                             // A `return` below the function body has nothing to
                             // lower to: the enclosing block's terminator (a
                             // `yield`/`continue`) would be emitted instead and
@@ -477,6 +502,17 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                             return_type.clone(),
                         )?;
                     }
+                }
+                // A constant-folded branch or bare block is emitted directly
+                // into this block. Do not emit code after its kernel return.
+                if module
+                    .block(block_id)
+                    .ops
+                    .last()
+                    .is_some_and(|id| module.op(*id).opcode == Opcode::Return)
+                {
+                    terminator_encountered = Some(BlockTerminator::Return);
+                    break;
                 }
             }
             if terminator_encountered.is_none() {

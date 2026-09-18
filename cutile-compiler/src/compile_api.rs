@@ -57,6 +57,7 @@ pub struct CheckPlacementCounts {
 /// do not require a GPU or CUDA driver.
 pub struct CompileArtifacts {
     module: cutile_ir::Module,
+    bytecode_version: Option<cutile_ir::bytecode::BytecodeVersion>,
     check_counts: CheckPlacementCounts,
     launch_checks: Vec<cuda_async::predicate::LaunchCheck>,
 }
@@ -85,11 +86,18 @@ impl CompileArtifacts {
     /// This is the JIT's own serializer: the module verifiers run first, and
     /// the image is written at the bytecode version negotiated for the
     /// resolved `tileiras` toolchain (`CUTILE_BYTECODE_VERSION`, the
-    /// toolkit's `cuda.h`, or a probe of the binary — see
+    /// assembler's supported versions, or a probe of the binary — see
     /// `cuda_tile_runtime_utils`), so the bytes are exactly what a launch
     /// would hand to `tileiras`. Fails when no version can be negotiated,
     /// e.g. no toolkit and no `tileiras` reachable.
     pub fn bytecode(&self) -> Result<Vec<u8>, JITError> {
+        if let Some(version) = self.bytecode_version {
+            return crate::cuda_tile_runtime_utils::serialize_tile_ir_bytecode_for_version(
+                &self.module,
+                version,
+            )
+            .map(|(bytes, _)| bytes);
+        }
         crate::cuda_tile_runtime_utils::serialize_tile_ir_bytecode(&self.module)
             .map(|(bytes, _version)| bytes)
     }
@@ -130,6 +138,7 @@ pub struct KernelCompiler<F: Fn() -> crate::ast::Module> {
     scalar_hints: Vec<(String, DivHint)>,
     const_grid: Option<(u32, u32, u32)>,
     compile_options: CompileOptions,
+    bytecode_version: Option<cutile_ir::bytecode::BytecodeVersion>,
 }
 
 impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
@@ -150,6 +159,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             scalar_hints: Vec::new(),
             const_grid: None,
             compile_options: CompileOptions::default(),
+            bytecode_version: None,
         }
     }
 
@@ -157,6 +167,13 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
     /// Defaults to `"sm_120"`.
     pub fn target(mut self, gpu_name: &str) -> Self {
         self.gpu_name = gpu_name.to_string();
+        self
+    }
+
+    /// Force a target version for driver-free compilation and capability tests.
+    /// This does not override the executable negotiation used for JIT launches.
+    pub fn bytecode_version(mut self, version: cutile_ir::bytecode::BytecodeVersion) -> Self {
+        self.bytecode_version = Some(version);
         self
     }
 
@@ -220,7 +237,18 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             &self.compile_options,
         );
         let artifacts = self.compile()?;
-        current_l2_key_for_module(artifacts.module(), &gpu_name, &tileiras_opts)
+        if let Some(version) = artifacts.bytecode_version {
+            let bytes = artifacts.bytecode()?;
+            Ok(crate::cuda_tile_runtime_utils::current_l2_key_for_bytecode(
+                &bytes,
+                version,
+                &gpu_name,
+                &tileiras_opts,
+            )
+            .0)
+        } else {
+            current_l2_key_for_module(artifacts.module(), &gpu_name, &tileiras_opts)
+        }
     }
 
     /// Compiles the kernel and returns the artifacts.
@@ -256,10 +284,18 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
             &spec_refs,
             &scalar_hint_refs,
             self.const_grid,
-            self.gpu_name,
+            self.gpu_name.clone(),
             &self.compile_options,
         )?;
 
+        let compiler = if let Some(version) = self.bytecode_version {
+            compiler.with_target_capabilities(cutile_ir::capabilities::TargetCapabilities::new(
+                version,
+                self.gpu_name,
+            ))?
+        } else {
+            compiler
+        };
         let module = compiler.compile()?;
         let check_counts = CheckPlacementCounts {
             discharged: compiler.check_stats.discharged.get(),
@@ -269,6 +305,7 @@ impl<F: Fn() -> crate::ast::Module> KernelCompiler<F> {
         let launch_checks = compiler.launch_checks.borrow().clone();
         Ok(CompileArtifacts {
             module,
+            bytecode_version: self.bytecode_version,
             check_counts,
             launch_checks,
         })

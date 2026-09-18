@@ -18,6 +18,42 @@ defaults:
     shell: bash -eou pipefail {0}
 
 jobs:
+  # Enable once a CTK 13.4 development image is available to this runner.
+  # Keep the 13.3 build and shared-crates 13.0 floor lanes below unchanged.
+  tile-ir-cuda13-4:
+    if: ${{ vars.CUDA_13_4_IMAGE != '' }}
+    runs-on: linux-amd64-cpu16
+    container:
+      image: ${{ vars.CUDA_13_4_IMAGE }}
+      env:
+        DEBIAN_FRONTEND: noninteractive
+    env:
+      CUDA_TOOLKIT_PATH: /usr/local/cuda
+    timeout-minutes: 30
+    steps:
+      - name: Install dependencies
+        run: |
+          apt update
+          apt install -y --no-install-recommends build-essential curl \
+            ca-certificates git cmake pkg-config libclang-dev zlib1g-dev \
+            libzstd-dev
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "${HOME}/.cargo/env"
+          rustup default nightly
+      - name: Verify assembler version
+        run: |
+          tileiras --version
+          tileiras --list-versions | grep -q '13.4'
+      - name: CPU and assembler tests
+        run: |
+          source "${HOME}/.cargo/env"
+          ./scripts/run_cpu_tests.sh
+
   build:
     runs-on: linux-amd64-cpu16
     container:

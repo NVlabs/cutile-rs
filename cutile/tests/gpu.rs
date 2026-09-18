@@ -8,6 +8,9 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "gpu/tile_ir_13_4.rs"]
+mod tile_ir_13_4;
+
 #[path = "gpu/tensor.rs"]
 mod tensor;
 

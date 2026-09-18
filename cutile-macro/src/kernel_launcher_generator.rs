@@ -1034,6 +1034,9 @@ pub fn generate_kernel_launcher(
     launcher_method.block.stmts.extend(validator_statements);
 
     // Above the `!_compile_only` gate so warmup validates the grid too.
+    launcher_method.block.stmts.push(parse_stmt(
+        "if self._programmatic_dependent_launch { validate_programmatic_dependent_launch(ctx.get_device_id())?; }".to_string(),
+    ));
     launcher_method.block.stmts.push(parse_stmt(format!(
         "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
         launch_grid_expr_strs.join(",")
@@ -1057,6 +1060,11 @@ pub fn generate_kernel_launcher(
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0
                 });
+            if self._programmatic_dependent_launch {
+                // SAFETY: the generated builder's unsafe opt-in transferred
+                // the dependency/lifetime obligations to its caller.
+                unsafe { kernel_launch.programmatic_dependent_launch(); }
+            }
             kernel_launch.execute(ctx)?;
         }})
         .unwrap()

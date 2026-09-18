@@ -46,6 +46,13 @@ pub struct f8e5m2(pub u8);
 #[allow(non_camel_case_types)]
 pub struct f8e8m0fnu(pub u8);
 
+/// Unsigned FP8 E5M3FNU storage (5 exponent bits, 3 fraction bits).
+/// Tile IR 13.4 introduces this scale format; arithmetic support is target-dependent.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[allow(non_camel_case_types)]
+pub struct f8e5m3fnu(pub u8);
+
 /// FP4 E2M1FN format (2-bit exponent, 1-bit mantissa, finite-only).
 ///
 /// This is a logical sub-byte Tile IR element type. It is the type consumed by
@@ -139,6 +146,7 @@ pub enum DTypeId {
     F8E4M3FN,
     F8E5M2,
     F8E8M0FNU,
+    F8E5M3FNU,
     F4E2M1FNX2,
 }
 
@@ -163,6 +171,7 @@ impl DTypeId {
             DTypeId::F8E4M3FN => "f8e4m3fn",
             DTypeId::F8E5M2 => "f8e5m2",
             DTypeId::F8E8M0FNU => "f8e8m0fnu",
+            DTypeId::F8E5M3FNU => "f8e5m3fnu",
             DTypeId::F4E2M1FNX2 => "f4e2m1fnx2",
         }
     }
@@ -174,7 +183,11 @@ impl DTypeId {
             DTypeId::U16 | DTypeId::I16 | DTypeId::F16 | DTypeId::BF16 => 2,
             DTypeId::U32 | DTypeId::I32 | DTypeId::F32 | DTypeId::TF32 => 4,
             DTypeId::U64 | DTypeId::I64 | DTypeId::F64 => 8,
-            DTypeId::F8E4M3FN | DTypeId::F8E5M2 | DTypeId::F8E8M0FNU | DTypeId::F4E2M1FNX2 => 1,
+            DTypeId::F8E4M3FN
+            | DTypeId::F8E5M2
+            | DTypeId::F8E8M0FNU
+            | DTypeId::F8E5M3FNU
+            | DTypeId::F4E2M1FNX2 => 1,
         }
     }
 }
@@ -243,6 +256,7 @@ impl_dtype!(
     f8e4m3fn => F8E4M3FN, f8e4m3fn(0), f8e4m3fn(0x38),  // 1.0 in E4M3FN
     f8e5m2 => F8E5M2, f8e5m2(0), f8e5m2(0x3C),          // 1.0 in E5M2
     f8e8m0fnu => F8E8M0FNU, f8e8m0fnu(0), f8e8m0fnu(0x7F),
+    f8e5m3fnu => F8E5M3FNU, f8e5m3fnu(0), f8e5m3fnu(0x78),
     f4e2m1fnx2 => F4E2M1FNX2, f4e2m1fnx2::from_bits(0), f4e2m1fnx2::from_nibbles(0x2, 0x2),
 );
 

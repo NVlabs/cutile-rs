@@ -386,19 +386,84 @@ functions. `cuda_tile.module`, `cuda_tile.entry`, `cuda_tile.return`, and
 control-flow operations are generated from Rust modules, entry attributes,
 `return`, `if`, `for`, `loop`, `while`, `break`, and `continue` syntax. This
 keeps user code Rust-shaped while still lowering to the corresponding Tile IR
-operations. Two forms have no Tile IR counterpart and are compile errors:
-`return` anywhere below the top level of a function body (inside `if`/`else`,
-a loop, or a nested block — Tile IR regions cannot exit the function early;
-guard the remaining statements with the condition instead), and `break`
-inside a `for` loop (`cuda_tile.for` cannot exit early; use `while`/`loop`,
-which lower to `cuda_tile.loop` and support `break`). `continue` is supported
-in every loop form.
+operations. Tile IR 13.4 additionally permits a kernel `return` inside
+`loop`/`while`, including a conditional branch within that loop. This exits
+the kernel, not just the loop. It is not supported inside an inlined helper
+or beneath any `for` loop. Other nested returns remain compile errors;
+guard the remaining statements with the condition instead. `break` inside
+`for` is also a compile error (`cuda_tile.for` cannot exit early; use
+`while`/`loop`). `continue` is supported in every loop form.
 
 Tile IR attributes such as memory ordering, memory scope, comparison predicate,
 rounding mode, overflow behavior, and flush-to-zero mode are represented as
 Rust marker types and traits where possible. This lets the Rust type checker
 reject unsupported attribute combinations before the JIT compiler lowers the
 operation.
+
+### Raw Tile IR versioned surface
+
+The raw intrinsics live in `cutile::core`; view constructors and their
+types also live in `cutile::tileir`. They are for callers that can uphold
+the documented unsafe invariants. Existing convenience APIs remain unchanged.
+The JIT checks both the selected assembler's bytecode version and the actual
+target architecture. Type, attribute and operand-configuration requirements
+apply even when an operation itself predates them.
+
+| API / option | Requires | Meaning |
+|---|---|---|
+| `unsafe insert(source, destination, indices)` | 13.4 | Replace one sub-tile; one scalar i32 index per axis, in units of the source tile |
+| `unsafe fpowi(base, exponent)` | 13.4 | Signed integer exponent tile with the same shape; at most 32-bit exponents |
+| `unsafe fpowf(base, exponent)` | 13.2 | Alias for the existing floating-point `pow` operation |
+| `unsafe gdc_launch_dependents_tko(Option<Token>)` | 13.4 | Signal that dependent grids may start; does not itself publish memory |
+| `unsafe gdc_wait_tko(Option<Token>)` | 13.4 | Wait for dependency completion; chain subsequent dependent memory operations to its result token |
+| `unsafe memory_fence_alias_tko(token)` | 13.4 | Establish the Tile IR alias fence required when changing access paths |
+| `unsafe alloca(num_elem, alignment, allocation::Local/Global)` | 13.3 | Per-tile-block allocation; compile-time nonnegative count and power-of-two alignment |
+| `unsafe ftoi_saturating(tile, saturating::Enabled/Disabled)` | 13.4 if enabled | Float-to-int with `NearestIntToZero`; saturation is opt-in |
+| `unsafe ptr_with_attr_none(pointer_tile)` | 13.4 | Explicit `ptr_attr<none>`, distinct from absent classification; inherited by derived views |
+| `unsafe mmaf_with_fast_acc(a, b, accumulator, fast_acc)` | 13.3 if enabled | Explicit `fast_acc::Enabled/Disabled`; normal MMA type/shape constraints apply |
+| `unsafe exp_with_rounding(tile, rounding)` | 13.3 for Approx | `rounding::Full` or f32 `rounding::Approx` |
+| `unsafe tanh_with_rounding(tile, rounding)` | 13.2 | `rounding::Full` or f32 `rounding::Approx` |
+| `rounding::NearestIntToZero` | 13.2 | Float-to-integer rounding mode |
+| `rounding::NearestAway` | 13.4 | Float conversion mode, only for supported source/destination combinations |
+| `f8e5m3fnu` | 13.4 and sm_107+ | Unsigned scale format; scaled MMA with this scale type requires sm_107 |
+
+`load_view_raw`, `store_view_raw`, and `atomic_red_view_raw` accept partition,
+gather/scatter, or strided views. The latter two view types require 13.3;
+view atomic reduction also requires 13.3 and an unpadded partition or strided
+view. Indices are an array or tuple in tensor-axis order; a gather/scatter
+view's sparse axis takes a rank-one integer tile, and its other axes take
+scalar i32 indices. Padding supports `None`, `Zero`, `Nan`, `PosInf`, and
+`NegInf` where the element type permits it.
+
+```rust,ignore
+let (value, done): (Tile<f32, {[4]}>, Token) = unsafe {
+    load_view_raw(&view, [0i32], None, ordering::Weak, scope::Device,
+        tma::Disabled, None, [false], shape![4])
+};
+let stored = unsafe {
+    store_view_raw(&view, value, [0i32], Some(done), ordering::Weak,
+        scope::Device, tma::Disabled, None, [false])
+};
+```
+
+These calls expose optional input tokens, ordering/scope, and (for loads and
+stores) TMA and latency hints. Each `inbounds` boolean corresponds to one
+index; any `true` requires 13.4 and promises that axis is in bounds. False
+does not make a raw unpadded access safe. The caller must ensure valid live
+storage, alignment, non-racing accesses, and all required token dependencies.
+Raw stores do not establish exclusive ownership through their `&view` argument.
+
+`assume_div_by_raw(value, divisor: u64, every: Option<i64>, along: Option<i64>)`,
+`assume_bounds_raw(value, lower: Option<i64>, upper: Option<i64>)`, and
+`assume_same_elements_raw(value, groups: [i64; N])` expose the full-width,
+arbitrary-rank predicates on 13.2+. They are unsafe promises, not runtime
+checks. A divisor must be a power of two no greater than 2^62; `every` and
+`along` must be supplied together. Bounds must fit the signed operand width.
+
+On 13.3+, `#[cutile::module(producer = "my compiler")]` writes producer
+metadata, and `#[cuda_tile::global(constant = true, visibility = "private")]`
+marks an existing `Global` static constant/private. Defaults remain mutable
+and public; constant globals cannot be written through the `Global` API.
 
 ### Memory: Load and Store
 

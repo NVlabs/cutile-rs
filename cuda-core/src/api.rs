@@ -69,6 +69,96 @@ pub unsafe fn launch_kernel(
     .result()
 }
 
+/// Launch with programmatic stream serialization enabled for this kernel.
+/// The driver entry point is resolved at runtime; a missing entry point is
+/// reported as unsupported. Ordinary launches keep using [`launch_kernel`].
+///
+/// # Safety
+/// The ordinary launch contract applies. Additionally, this kernel must wait
+/// for predecessor completion before dependent accesses, and work before that
+/// wait must not race predecessor work. Neither kernel may require overlap.
+/// All resources must outlive their last use by either kernel.
+#[inline]
+pub unsafe fn launch_kernel_pdl(
+    f: cuda_bindings::CUfunction,
+    grid_dim: (c_uint, c_uint, c_uint),
+    block_dim: (c_uint, c_uint, c_uint),
+    shared_mem_bytes: c_uint,
+    stream: cuda_bindings::CUstream,
+    kernel_params: &mut [*mut c_void],
+) -> Result<(), DriverError> {
+    let mut attribute = programmatic_launch_attribute();
+    let config = cuda_bindings::CUlaunchConfig_st {
+        gridDimX: grid_dim.0,
+        gridDimY: grid_dim.1,
+        gridDimZ: grid_dim.2,
+        blockDimX: block_dim.0,
+        blockDimY: block_dim.1,
+        blockDimZ: block_dim.2,
+        sharedMemBytes: shared_mem_bytes,
+        hStream: stream,
+        attrs: &mut attribute,
+        numAttrs: 1,
+    };
+    // SAFETY: the caller supplies valid launch handles/arguments. The driver
+    // copies config, attributes, and parameter values before returning.
+    let result = unsafe {
+        cuda_bindings::cuLaunchKernelEx(
+            &config,
+            f,
+            kernel_params.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == cuda_bindings::cudaError_enum_CUDA_ERROR_NOT_FOUND {
+        // There is no legacy launch with the requested overlap semantics.
+        return Err(DriverError(
+            cuda_bindings::cudaError_enum_CUDA_ERROR_NOT_SUPPORTED,
+        ));
+    }
+    result.result()
+}
+
+fn programmatic_launch_attribute() -> cuda_bindings::CUlaunchAttribute_st {
+    // The bindings intentionally keep this union opaque across CTK versions.
+    // CUDA's stable layout is id:u32 at 0, padding at 4, value union at 8.
+    // programmaticStreamSerializationAllowed is an int at union offset zero.
+    const {
+        assert!(std::mem::size_of::<cuda_bindings::CUlaunchAttribute_st>() >= 12);
+    }
+    // SAFETY: all-zero is a valid bit pattern for this C attribute storage.
+    let mut attribute = unsafe { std::mem::zeroed::<cuda_bindings::CUlaunchAttribute_st>() };
+    // SAFETY: writes stay within the checked storage; unaligned writes avoid
+    // depending on bindgen's opaque wrapper alignment.
+    unsafe {
+        let base = (&mut attribute as *mut cuda_bindings::CUlaunchAttribute_st).cast::<u8>();
+        base.cast::<u32>().write_unaligned(
+            cuda_bindings::CUlaunchAttributeID_enum_CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+        );
+        base.add(8).cast::<i32>().write_unaligned(1);
+    }
+    attribute
+}
+
+#[cfg(test)]
+mod pdl_attribute_tests {
+    #[test]
+    fn programmatic_launch_attribute_has_driver_abi_layout() {
+        let attribute = super::programmatic_launch_attribute();
+        // SAFETY: the helper initializes every byte of the opaque C storage.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&attribute as *const cuda_bindings::CUlaunchAttribute_st).cast::<u8>(),
+                std::mem::size_of_val(&attribute),
+            )
+        };
+        let id = cuda_bindings::CUlaunchAttributeID_enum_CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+        assert_eq!(&bytes[..4], &id.to_ne_bytes());
+        assert_eq!(&bytes[8..12], &1i32.to_ne_bytes());
+        assert!(bytes[4..8].iter().chain(&bytes[12..]).all(|b| *b == 0));
+    }
+}
+
 /// Asynchronously allocates `num_bytes` of device memory on the given stream.
 ///
 /// Driver failures (out of memory included) come back as `Err` for the

@@ -108,6 +108,7 @@ pub fn rounding_mode_attr(mode: &str) -> NamedAttr {
         "approx" => 4,
         "full" => 5,
         "nearest_int_to_zero" => 6,
+        "nearest_away" => 7,
         _ => panic!("unknown rounding mode: {mode}"),
     };
     int_attr("rounding_mode", val)

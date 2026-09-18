@@ -1749,6 +1749,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
         for_variables.innermost_loop = Some(LoopKind::For);
+        for_variables.inside_for = true;
         // Persistent tile-id loop: the step is the physical grid size, so
         // induction-substitution hoisting stays off (unit_step = false), but
         // loop-invariant checks in the body can still move to the preheader.
@@ -2220,6 +2221,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
         for_variables.innermost_loop = Some(LoopKind::For);
+        for_variables.inside_for = true;
 
         self.compile_block(
             module,
@@ -2598,6 +2600,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     for_variables.carry_vars = Some(loop_carry_vars.clone());
                     for_variables.default_terminator = Some(BlockTerminator::Continue);
                     for_variables.innermost_loop = Some(LoopKind::For);
+                    for_variables.inside_for = true;
                     // `return` inside the body is rejected by `compile_block`
                     // (it cannot be lowered); `break` too, since `cuda_tile.for`
                     // has no early exit.
@@ -4285,7 +4288,10 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
             let v = parse_float_or_hex(lit_string);
             v.to_le_bytes().to_vec()
         }
-        ScalarType::F8E4M3FN | ScalarType::F8E5M2 | ScalarType::F8E8M0FNU => {
+        ScalarType::F8E4M3FN
+        | ScalarType::F8E5M2
+        | ScalarType::F8E8M0FNU
+        | ScalarType::F8E5M3FNU => {
             let v: u8 = lit_string.parse().unwrap_or(0);
             vec![v]
         }

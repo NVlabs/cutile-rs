@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Raw Tile IR 13.4 operations: `insert`, `fpowi`, `fpowf` (the existing
+  `pow` spelling remains), GDC launch/wait tokens, and alias fencing.
+- `f8e5m3fnu`, explicit pointer classification, view `inbounds`, saturating
+  float-to-int, `NearestAway`, and kernel returns inside `loop`/`while`
+  on Tile IR 13.4. Returns in inlined helpers or beneath `for` remain
+  restricted.
+- Missing raw controls: allocation, arbitrary-rank gather/scatter and
+  strided view loads/stores, view atomic reduction, fast-accumulation MMA,
+  exp/tanh rounding, full-width/general-rank assumptions, private/constant
+  globals, and module producer metadata. Existing signatures are preserved.
+- Unsafe per-launch `programmatic_dependent_launch()` on generated builders
+  and `AsyncKernelLaunch`, with runtime driver entry-point lookup.
+- Tile IR 13.4 bytecode with selected-assembler version negotiation and
+  conjunctive version/architecture checks before JIT assembly. The writer
+  preserves 13.2/13.3 layouts and rejects newer features when targeting them.
+
 ### Changed
 
 - `cutile-examples` no longer depends on candle by default: the CPU reference
@@ -14,8 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   feature (`scripts/run_examples.sh` enables it). The default workspace build
   therefore no longer fails on generic aarch64, where candle's `gemm-f16`
   needs the `fullfp16` target feature (first seen bringing up DGX Spark).
-
-### Changed
 
 - `Global` now requires a sealed device atomic type, such as
   `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`.

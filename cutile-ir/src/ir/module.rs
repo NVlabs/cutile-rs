@@ -52,6 +52,8 @@ pub enum SymbolVisibility {
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
+    /// Optional producer identity, carried in its own bytecode section (13.3+).
+    pub producer: Option<String>,
 
     // ------ Arenas ------
     pub(crate) values: Vec<ValueData>,
@@ -70,6 +72,7 @@ impl Module {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            producer: None,
             values: Vec::new(),
             operations: Vec::new(),
             blocks: Vec::new(),
