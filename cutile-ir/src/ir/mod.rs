@@ -21,6 +21,7 @@ mod value;
 
 pub use attr::*;
 pub use block::*;
+pub use fmt::format_type;
 pub use location::*;
 pub use module::*;
 pub use op::*;

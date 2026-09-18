@@ -30,6 +30,7 @@ pub struct AsyncKernelLaunch {
     pub func: Arc<Function>,
     args: KernelArgStorage,
     cfg: Option<LaunchConfig>,
+    programmatic_dependent_launch: bool,
 }
 
 // SAFETY: `func` is an `Arc<Function>` (`Send + Sync`). Every pointer in `args`
@@ -108,6 +109,7 @@ impl AsyncKernelLaunch {
             func,
             args: KernelArgStorage::default(),
             cfg: None,
+            programmatic_dependent_launch: false,
         }
     }
 
@@ -153,6 +155,18 @@ impl AsyncKernelLaunch {
         self
     }
 
+    /// Enable programmatic dependent launch for this submission. Off by default.
+    ///
+    /// # Safety
+    /// The kernel must wait for predecessor completion before dependent memory
+    /// accesses (token-ordered after `gdc_wait_tko` for Tile kernels). Work before
+    /// the wait must not race predecessor work. Neither kernel may depend on
+    /// overlap, and all resources must remain valid through their last use.
+    pub unsafe fn programmatic_dependent_launch(&mut self) -> &mut Self {
+        self.programmatic_dependent_launch = true;
+        self
+    }
+
     /// Launches the kernel on the given CUDA stream.
     ///
     /// # Safety
@@ -161,7 +175,22 @@ impl AsyncKernelLaunch {
         let cfg = self.cfg.ok_or_else(|| {
             DeviceError::Launch("Await called before launching the kernel.".to_string())
         })?;
-        launch_kernel(
+        let launch = if self.programmatic_dependent_launch {
+            let architecture = cuda_core::get_device_sm_name(stream.device().cu_device())?;
+            let sm: u32 = architecture
+                .strip_prefix("sm_")
+                .and_then(|s| s.trim_end_matches(['a', 'f']).parse().ok())
+                .unwrap_or(0);
+            if sm < 90 {
+                return Err(DeviceError::Launch(format!(
+                    "programmatic dependent launch requires sm_90 or newer; target {architecture}"
+                )));
+            }
+            cuda_core::launch_kernel_pdl
+        } else {
+            launch_kernel
+        };
+        launch(
             self.func.cu_function(),
             cfg.grid_dim,
             cfg.block_dim,

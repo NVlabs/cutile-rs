@@ -121,6 +121,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // The callee's body block is a function body: a top-level `return`
             // there yields the call's value.
             call_variables.fn_body = true;
+            // The ABI wrapper's final call is the kernel body, not a helper.
+            call_variables.kernel_entry = ctx.kernel_entry
+                && module_name == &self.module_name
+                && crate::kernel_naming::KernelNaming::canonical_public_name(
+                    &fn_item.sig.ident.to_string(),
+                ) == self._function_name;
             let mut outer2inner_map = HashMap::new();
             let sig_param_mutability = get_sig_param_mutability(&fn_item.sig);
 

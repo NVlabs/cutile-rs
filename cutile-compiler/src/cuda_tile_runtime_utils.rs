@@ -17,11 +17,6 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
-/// The minimum CUDA toolkit the Tile compiler supports; `tileiras` ships
-/// with CUDA 13.2. The shared host-side crates support 13.0+ and enforce
-/// their own floor in `cuda-bindings`.
-const MIN_TILE_CUDA_VERSION: u32 = 13020;
-
 /// Environment variable used to override the `tileiras` executable.
 ///
 /// Set this to an absolute path such as `/opt/cuda-tile/bin/tileiras` to use
@@ -40,8 +35,60 @@ const TOOLKIT_ENV_VARS: [&str; 2] = [CUDA_TOOLKIT_PATH_ENV, CUDA_HOME_ENV];
 const MIN_CUDA_VERSION: u32 = 13020;
 
 /// Environment variable to force the emitted Tile IR bytecode version
-/// (e.g. `13.2`). Overrides toolkit detection and probing.
+/// (e.g. `13.2`). Must be supported by both the writer and selected assembler.
 pub const BYTECODE_VERSION_ENV: &str = "CUTILE_BYTECODE_VERSION";
+
+/// One immutable JIT snapshot. Discovery is process-wide and cached, but the
+/// target architecture belongs to the device selected for this launch.
+#[derive(Debug, Clone)]
+pub struct ToolkitCapabilities {
+    pub tileiras: PathBuf,
+    pub tileiras_version: &'static str,
+    pub target: cutile_ir::capabilities::TargetCapabilities,
+    /// Driver API version, for diagnostics and host API availability. This is
+    /// not a blanket veto on newer toolkits under CUDA minor compatibility.
+    pub driver_version: i32,
+}
+
+impl ToolkitCapabilities {
+    pub fn for_device(device_id: usize) -> Result<Arc<Self>, JITError> {
+        use cuda_core::IntoResult;
+        type Key = (String, Option<OsString>, String);
+        static CACHE: OnceLock<Mutex<HashMap<Key, Arc<ToolkitCapabilities>>>> = OnceLock::new();
+        let tileiras = tileiras_binary();
+        let device = Device::raw_device(device_id)
+            .map_err(|e| JITError::Generic(format!("cannot query CUDA device {device_id}: {e}")))?;
+        // SAFETY: the driver returned this device handle.
+        let architecture = unsafe { get_device_sm_name(device) }
+            .map_err(|e| JITError::Generic(format!("cannot query target architecture: {e}")))?;
+        let key = (
+            stat_fingerprint(&tileiras),
+            env::var_os(BYTECODE_VERSION_ENV),
+            architecture.clone(),
+        );
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(caps) = cache.lock().unwrap().get(&key) {
+            return Ok(Arc::clone(caps));
+        }
+        let bytecode_version = negotiate_bytecode_version(&tileiras, key.1.as_deref())?;
+        let mut driver_version = 0;
+        // SAFETY: this driver query writes one initialized local integer.
+        unsafe { cuda_core::sys::cuDriverGetVersion(&mut driver_version) }
+            .result()
+            .map_err(|e| JITError::Generic(format!("cannot query CUDA driver version: {e}")))?;
+        let caps = Arc::new(Self {
+            tileiras_version: fingerprint_of(&tileiras),
+            tileiras,
+            target: cutile_ir::capabilities::TargetCapabilities::new(
+                bytecode_version,
+                architecture,
+            ),
+            driver_version,
+        });
+        cache.lock().unwrap().insert(key, Arc::clone(&caps));
+        Ok(caps)
+    }
+}
 
 /// Returns the cutile compiler version (from the workspace Cargo.toml).
 pub fn get_compiler_version() -> String {
@@ -243,13 +290,14 @@ pub fn tileiras_fingerprint() -> &'static str {
 /// distinct binary; the interned string lives for the process (bounded: one per
 /// tileiras path, normally one).
 fn fingerprint_of(tileiras: &Path) -> &'static str {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, &'static str>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let key = stat_fingerprint(tileiras);
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(&fp) = cache.lock().unwrap().get(tileiras) {
+    if let Some(&fp) = cache.lock().unwrap().get(&key) {
         return fp;
     }
     let fp: &'static str = Box::leak(compute_tileiras_fingerprint(tileiras).into_boxed_str());
-    cache.lock().unwrap().insert(tileiras.to_path_buf(), fp);
+    cache.lock().unwrap().insert(key, fp);
     fp
 }
 
@@ -333,14 +381,26 @@ fn cached_tileiras_and_toolkit(
     tileiras_env: Option<OsString>,
     toolkit_env: Option<ToolkitEnv>,
 ) -> TileirasResolution {
-    type Key = (Option<OsString>, Option<ToolkitEnv>);
+    type Key = (Option<OsString>, Option<ToolkitEnv>, Option<OsString>);
     static CACHE: OnceLock<Mutex<HashMap<Key, TileirasResolution>>> = OnceLock::new();
-    let key: Key = (tileiras_env, toolkit_env);
+    let key: Key = (tileiras_env, toolkit_env, env::var_os("PATH"));
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(result) = cache.lock().unwrap().get(&key) {
         return result.clone();
     }
-    let result = resolve_tileiras_binary(key.0.clone(), key.1.clone());
+    let (mut binary, toolkit) = resolve_tileiras_binary(key.0.clone(), key.1.clone());
+    if binary.components().count() == 1 {
+        if let Some(path) = &key.2 {
+            if let Some(found) = env::split_paths(path)
+                .map(|dir| dir.join(&binary))
+                .find(|p| p.is_file())
+            {
+                binary = found;
+            }
+        }
+    }
+    let binary = std::fs::canonicalize(&binary).unwrap_or(binary);
+    let result = (binary, toolkit);
     cache.lock().unwrap().insert(key, result.clone());
     result
 }
@@ -353,23 +413,9 @@ fn cached_tileiras_and_toolkit(
 // older `tileiras`.
 // =========================================================================
 
-/// Selects the Tile IR bytecode version to emit for the active toolchain,
-/// caching the result per resolved (tileiras, toolkit) pair. Resolution order:
-///
-/// 1. `CUTILE_BYTECODE_VERSION` — explicit override (e.g. `13.2`).
-/// 2. The toolkit's `cuda.h` `CUDA_VERSION` — the coherent-install case.
-/// 3. Probing the resolved `tileiras` — the override / bare `PATH` case, where
-///    no trusted toolkit `cuda.h` is available.
-///
-/// The result is clamped to `[MIN_SUPPORTED, CURRENT]`. Feature
-/// incompatibilities (e.g. an FP4 kernel against a 13.2 toolchain) are left for
-/// `tileiras` to diagnose rather than pre-checked here.
-///
-/// Fails — instead of falling back to a version the toolchain may not accept
-/// — when the toolkit is older than the Tile floor or when the probe cannot
-/// be carried out (unwritable temp dir, `tileiras` not launchable or
-/// crashing, every version rejected).
-fn selected_bytecode_version() -> Result<BytecodeVersion, JITError> {
+/// Select the bytecode accepted by the executable we will actually run.
+/// Headers may belong to a different toolkit, especially with a path override.
+pub fn selected_bytecode_version() -> Result<BytecodeVersion, JITError> {
     let (tileiras, toolkit) = tileiras_and_toolkit();
     cached_bytecode_version(&tileiras, toolkit.as_deref())
 }
@@ -378,15 +424,16 @@ fn cached_bytecode_version(
     tileiras: &Path,
     toolkit_dir: Option<&Path>,
 ) -> Result<BytecodeVersion, JITError> {
-    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, Option<PathBuf>), BytecodeVersion>>> =
-        OnceLock::new();
-    let key = (tileiras.to_path_buf(), toolkit_dir.map(PathBuf::from));
+    type Key = (String, Option<OsString>);
+    static CACHE: OnceLock<Mutex<HashMap<Key, BytecodeVersion>>> = OnceLock::new();
+    let key = (
+        stat_fingerprint(tileiras),
+        env::var_os(BYTECODE_VERSION_ENV),
+    );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(&version) = cache.lock().unwrap().get(&key) {
         return Ok(version);
     }
-    // Only a successful negotiation is cached: a transient environment
-    // failure (a full temp dir, say) is retried on the next compile.
     let version = compute_bytecode_version(tileiras, toolkit_dir)?;
     cache.lock().unwrap().insert(key, version);
     Ok(version)
@@ -394,91 +441,90 @@ fn cached_bytecode_version(
 
 fn compute_bytecode_version(
     tileiras: &Path,
-    toolkit_dir: Option<&Path>,
+    _toolkit_dir: Option<&Path>,
 ) -> Result<BytecodeVersion, JITError> {
-    if let Some(value) = env::var_os(BYTECODE_VERSION_ENV).filter(|v| !v.is_empty()) {
-        let text = value.to_string_lossy();
-        match parse_bytecode_version(&text) {
-            Some(version) => {
-                emit_setup_diagnostic(format_args!("{BYTECODE_VERSION_ENV}={version} (override)"));
-                return Ok(version);
-            }
-            None => emit_setup_diagnostic(format_args!(
-                "ignoring invalid {BYTECODE_VERSION_ENV}={text}"
-            )),
-        }
-    }
+    let requested = env::var_os(BYTECODE_VERSION_ENV).filter(|v| !v.is_empty());
+    negotiate_bytecode_version(tileiras, requested.as_deref())
+}
 
-    if let Some(dir) = toolkit_dir {
-        if let Ok((cuda_h, cuda_version)) = cuda_version_from_toolkit(dir) {
-            // The Tile floor. The shared host-side crates support CUDA 13.0+,
-            // but the Tile compiler drives toolkit binaries (tileiras) that
-            // ship with CUDA 13.2+, so complain here, at tool discovery, with
-            // the context to say what was found. SIMT-only users never reach
-            // this path. An explicit TILEIRAS_PATH_ENV or bare-PATH resolution
-            // bypasses the check by design: the user picked their own binary.
-            // An error, not a panic: this runs inside the `Result`-returning
-            // JIT path, whose callers own cache-cleanup on failure.
-            if cuda_version < MIN_TILE_CUDA_VERSION {
+fn negotiate_bytecode_version(
+    tileiras: &Path,
+    requested: Option<&std::ffi::OsStr>,
+) -> Result<BytecodeVersion, JITError> {
+    let requested = requested
+        .map(|text| {
+            let text = text.to_string_lossy();
+            let version = parse_bytecode_version(&text).ok_or_else(|| {
+                JITError::Generic(format!(
+                    "invalid {BYTECODE_VERSION_ENV}={text}: expected major.minor[.tag]"
+                ))
+            })?;
+            if !BytecodeVersion::SUPPORTED.contains(&version) {
                 return Err(JITError::Generic(format!(
-                    "cuTile requires CUDA 13.2 or newer: the resolved toolkit at {} is CUDA {}. \
-                     Set {CUDA_TOOLKIT_PATH_ENV} or {CUDA_HOME_ENV} to a CUDA 13.2+ install \
-                     (the shared CUDA host-side crates themselves support 13.0+).",
-                    dir.display(),
-                    format_cuda_version(cuda_version),
+                    "{BYTECODE_VERSION_ENV}={version} is not supported by the cutile-ir writer"
                 )));
             }
-            let version = bytecode_version_from_cuda_version(cuda_version);
-            emit_setup_diagnostic(format_args!(
-                "bytecode version {version} from {}",
-                cuda_h.display()
-            ));
-            return Ok(version);
+            Ok(version)
+        })
+        .transpose()?;
+
+    // Recent assemblers enumerate their supported input formats. Do not
+    // infer this list from --version: tool and bytecode versions are distinct.
+    if let Ok(output) = Command::new(tileiras).arg("--list-versions").output() {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let versions: Option<Vec<_>> = text
+                .lines()
+                .filter(|s| !s.trim().is_empty())
+                .map(parse_bytecode_version)
+                .collect();
+            if let Some(versions) = versions.filter(|v| !v.is_empty()) {
+                if let Some(version) = requested {
+                    if versions.contains(&version) {
+                        return Ok(version);
+                    }
+                    return Err(JITError::Generic(format!(
+                        "{BYTECODE_VERSION_ENV}={version} is not accepted by {} (supports {})",
+                        tileiras.display(),
+                        versions
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                return BytecodeVersion::SUPPORTED.iter().rev()
+                    .find(|v| versions.contains(v)).copied()
+                    .ok_or_else(|| JITError::Generic(format!(
+                        "{} accepts none of the bytecode versions this compiler can emit; cuTile requires CUDA 13.2 or newer (assembler supports {})",
+                        tileiras.display(), versions.iter().map(ToString::to_string)
+                            .collect::<Vec<_>>().join(", ")
+                    )));
+            }
         }
     }
-
-    let version = probe_max_supported_bytecode_version(tileiras)?;
-    emit_setup_diagnostic(format_args!(
-        "bytecode version {version} from probing {}",
-        tileiras.display()
-    ));
-    Ok(version)
+    // Older/custom assemblers may not implement --list-versions. Compile a
+    // representative image, not an empty module, against the same executable.
+    let candidates = requested.map_or_else(
+        || BytecodeVersion::SUPPORTED.iter().rev().copied().collect(),
+        |version| vec![version],
+    );
+    probe_bytecode_versions(tileiras, &candidates)
 }
 
-/// Maps a CUDA `CUDA_VERSION` integer (e.g. `13030`) to a clamped bytecode version.
-fn bytecode_version_from_cuda_version(cuda_version: u32) -> BytecodeVersion {
-    let candidate = BytecodeVersion {
-        major: (cuda_version / 1000) as u8,
-        minor: ((cuda_version % 1000) / 10) as u8,
-        tag: 0,
-    };
-    clamp_bytecode_version(candidate)
-}
-
-/// Parses a `major.minor[.tag]` string (e.g. `13.2`) to a clamped bytecode version.
+/// Parses an exact version; an explicit unsupported request is never clamped.
 fn parse_bytecode_version(text: &str) -> Option<BytecodeVersion> {
     let mut parts = text.trim().split('.');
-    let major: u8 = parts.next()?.trim().parse().ok()?;
-    let minor: u8 = parts.next()?.trim().parse().ok()?;
-    let tag: u16 = match parts.next() {
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    let tag = match parts.next() {
         Some(part) => part.trim().parse().ok()?,
         None => 0,
     };
     if parts.next().is_some() {
         return None;
     }
-    Some(clamp_bytecode_version(BytecodeVersion {
-        major,
-        minor,
-        tag,
-    }))
-}
-
-/// Clamps a version to the range this writer can emit.
-fn clamp_bytecode_version(version: BytecodeVersion) -> BytecodeVersion {
-    version
-        .max(BytecodeVersion::MIN_SUPPORTED)
-        .min(BytecodeVersion::CURRENT)
+    Some(BytecodeVersion { major, minor, tag })
 }
 
 /// Builds the version-probe module: one entry with a pointer parameter, a
@@ -625,10 +671,25 @@ fn build_probe_module() -> cutile_ir::Module {
 /// against, and produced the confusing failure there instead of here.
 /// Rejection of every supported version is an error too, carrying the
 /// assembler's own diagnostic.
+#[cfg(test)]
 fn probe_max_supported_bytecode_version(tileiras: &Path) -> Result<BytecodeVersion, JITError> {
+    probe_bytecode_versions(
+        tileiras,
+        &BytecodeVersion::SUPPORTED
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn probe_bytecode_versions(
+    tileiras: &Path,
+    versions: &[BytecodeVersion],
+) -> Result<BytecodeVersion, JITError> {
     let tmp_dir = env::temp_dir();
     let mut last_rejection = String::new();
-    for &version in BytecodeVersion::SUPPORTED.iter().rev() {
+    for &version in versions {
         let module = build_probe_module();
         let bytes = write_bytecode_version(&module, version).map_err(|e| {
             JITError::Generic(format!(
@@ -732,6 +793,14 @@ impl Drop for ScopedTempFile {
 pub fn serialize_tile_ir_bytecode(
     module: &cutile_ir::Module,
 ) -> Result<(Vec<u8>, BytecodeVersion), JITError> {
+    serialize_tile_ir_bytecode_for_version(module, selected_bytecode_version()?)
+}
+
+/// Serialize with the version already negotiated for this JIT snapshot.
+pub fn serialize_tile_ir_bytecode_for_version(
+    module: &cutile_ir::Module,
+    bytecode_version: BytecodeVersion,
+) -> Result<(Vec<u8>, BytecodeVersion), JITError> {
     module
         .verify_dominance()
         .map_err(|e| JITError::Generic(format!("tile-ir dominance verification failed: {e}")))?;
@@ -752,7 +821,6 @@ pub fn serialize_tile_ir_bytecode(
         );
     }
 
-    let bytecode_version = selected_bytecode_version()?;
     let bytes = write_bytecode_version(module, bytecode_version).map_err(|e| {
         JITError::Generic(format!(
             "Failed to serialize bytecode for module {}: {e}",
@@ -869,6 +937,15 @@ pub fn run_tileiras(
     gpu_name: &str,
     opts: &TileirasOptions,
 ) -> Result<Vec<u8>, JITError> {
+    run_tileiras_at(&tileiras_binary(), bytecode, gpu_name, opts)
+}
+
+fn run_tileiras_at(
+    tileiras: &Path,
+    bytecode: &[u8],
+    gpu_name: &str,
+    opts: &TileirasOptions,
+) -> Result<Vec<u8>, JITError> {
     let base_filename = env::temp_dir().join(Uuid::new_v4().to_string());
     let bc_file = ScopedTempFile::new(base_filename.with_extension("bc"));
     let cubin_file = ScopedTempFile::new(base_filename.with_extension("cubin"));
@@ -879,7 +956,6 @@ pub fn run_tileiras(
         JITError::Generic(format!("Failed to write bytecode for {bc_filename}: {e}"))
     })?;
 
-    let tileiras = tileiras_binary();
     let opt_level_arg = opts.opt_level.to_string();
     let mut args = vec!["--gpu-name", gpu_name, "--opt-level", &opt_level_arg];
     if opts.device_debug {
@@ -892,11 +968,11 @@ pub fn run_tileiras(
         args.push("--sanitize=memcheck");
     }
     args.extend(["-o", &cubin_filename, &bc_filename]);
-    let output = match Command::new(&tileiras).args(&args).output() {
+    let output = match Command::new(tileiras).args(&args).output() {
         Ok(output) => output,
         Err(e) => {
             // The message names the bytecode, so it has to outlive this call.
-            let message = tileiras_launch_error(&tileiras, &args, &bc_filename, e);
+            let message = tileiras_launch_error(tileiras, &args, &bc_filename, e);
             bc_file.keep();
             return Err(JITError::Generic(message));
         }
@@ -918,7 +994,7 @@ pub fn run_tileiras(
              hint: run with CUTILE_DUMP=ir,bytecode to include the generated Tile IR and decoded bytecode in stderr.",
             tileiras.display(),
             output.status,
-            display_command(&tileiras, &args),
+            display_command(tileiras, &args),
         )));
     }
 
@@ -970,18 +1046,45 @@ pub fn compile_bytecode_cached(
     gpu_name: &str,
     opts: &TileirasOptions,
 ) -> Result<(Vec<u8>, Stage2Source), JITError> {
+    compile_bytecode_cached_at(&tileiras_binary(), bytecode, bc_version, gpu_name, opts)
+}
+
+/// Use the exact executable/version/target snapshot that lowered this kernel.
+pub fn compile_bytecode_cached_with_toolkit(
+    bytecode: &[u8],
+    opts: &TileirasOptions,
+    capabilities: &ToolkitCapabilities,
+) -> Result<(Vec<u8>, Stage2Source), JITError> {
+    compile_bytecode_cached_at(
+        &capabilities.tileiras,
+        bytecode,
+        capabilities.target.bytecode_version,
+        &capabilities.target.architecture,
+        opts,
+    )
+}
+
+fn compile_bytecode_cached_at(
+    tileiras: &Path,
+    bytecode: &[u8],
+    bc_version: BytecodeVersion,
+    gpu_name: &str,
+    opts: &TileirasOptions,
+) -> Result<(Vec<u8>, Stage2Source), JITError> {
     use crate::jit_cache::{self, EntryParams};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::Ordering;
 
     let Some(store) = jit_cache::installed_store() else {
-        return run_tileiras(bytecode, gpu_name, opts).map(|c| (c, Stage2Source::Tileiras));
+        return run_tileiras_at(tileiras, bytecode, gpu_name, opts)
+            .map(|c| (c, Stage2Source::Tileiras));
     };
 
     // `bc_version` is the version the caller actually serialized into `bytecode`,
     // not a fresh re-resolution — so the key's version field can never disagree
     // with the bytes it sits next to (see #7).
-    let (key, tileiras_fp) = current_l2_key_for_bytecode(bytecode, bc_version, gpu_name, opts);
+    let tileiras_fp = fingerprint_of(tileiras);
+    let key = jit_cache::l2_key(bytecode, bc_version, gpu_name, opts, tileiras_fp);
     let params = EntryParams {
         bc_sha256: Sha256::digest(bytecode).into(),
         gpu_name,
@@ -1019,7 +1122,7 @@ pub fn compile_bytecode_cached(
     }
 
     jit_cache::STATS.misses.fetch_add(1, Ordering::Relaxed);
-    let cubin = run_tileiras(bytecode, gpu_name, opts)?;
+    let cubin = run_tileiras_at(tileiras, bytecode, gpu_name, opts)?;
 
     match jit_cache::encode_entry(&params, &cubin) {
         Some(entry) => match store.put(&key, &entry) {
@@ -1059,6 +1162,35 @@ pub fn recompile_after_disk_rejection(
     gpu_name: &str,
     opts: &TileirasOptions,
 ) -> Result<Vec<u8>, JITError> {
+    recompile_after_disk_rejection_at(&tileiras_binary(), store, key, bytecode, gpu_name, opts)
+}
+
+/// Retry against the same toolchain that produced the original cache request.
+pub fn recompile_after_disk_rejection_with_toolkit(
+    store: &dyn crate::jit_cache::JitStore,
+    key: &str,
+    bytecode: &[u8],
+    opts: &TileirasOptions,
+    capabilities: &ToolkitCapabilities,
+) -> Result<Vec<u8>, JITError> {
+    recompile_after_disk_rejection_at(
+        &capabilities.tileiras,
+        store,
+        key,
+        bytecode,
+        &capabilities.target.architecture,
+        opts,
+    )
+}
+
+fn recompile_after_disk_rejection_at(
+    tileiras: &Path,
+    store: &dyn crate::jit_cache::JitStore,
+    key: &str,
+    bytecode: &[u8],
+    gpu_name: &str,
+    opts: &TileirasOptions,
+) -> Result<Vec<u8>, JITError> {
     use std::sync::atomic::Ordering;
 
     if let Err(e) = store.delete(key) {
@@ -1067,7 +1199,7 @@ pub fn recompile_after_disk_rejection(
             .fetch_add(1, Ordering::Relaxed);
         crate::jit_cache::cache_log(format_args!("failed to evict entry {key}: {e}"));
     }
-    run_tileiras(bytecode, gpu_name, opts)
+    run_tileiras_at(tileiras, bytecode, gpu_name, opts)
 }
 
 /// Compiles a `cutile_ir::Module` to a cubin image via bytecode serialization and
@@ -1123,11 +1255,13 @@ fn default_cuda_toolkit_candidates() -> &'static [PathBuf] {
     CANDIDATES.get_or_init(|| {
         #[cfg(windows)]
         let candidates = [
+            r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3",
             r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2",
         ];
         #[cfg(not(windows))]
         let candidates = [
+            "/usr/local/cuda-13.4",
             "/usr/local/cuda-13.3",
             "/usr/local/cuda-13.2",
             "/usr/local/cuda-13",
@@ -1388,9 +1522,13 @@ mod tests {
     /// A toolkit older than the Tile floor is an `Err` from the `Result`
     /// path, never a panic (the JIT callers own cache cleanup on failure).
     #[test]
+    #[cfg(unix)]
     fn pre_tile_toolkit_is_an_error_not_a_panic() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _override_guard = EnvVarGuard::unset(BYTECODE_VERSION_ENV);
         let temp_dir = env::temp_dir().join(format!("cutile_old_toolkit_{}", Uuid::new_v4()));
         let tileiras = create_fake_cuda_toolkit(&temp_dir, 13010, true);
+        write_fake_tileiras_script(&tileiras, "printf '13.1\\n'\n");
         let err = compute_bytecode_version(&tileiras, Some(temp_dir.as_path()))
             .expect_err("a CUDA 13.1 toolkit must be rejected");
         let text = err.to_string();
@@ -1575,29 +1713,58 @@ mod tests {
     }
 
     #[test]
-    fn maps_cuda_version_to_bytecode_version() {
-        assert_eq!(
-            bytecode_version_from_cuda_version(13030),
-            BytecodeVersion::V13_3
-        );
-        assert_eq!(
-            bytecode_version_from_cuda_version(13020),
-            BytecodeVersion::V13_2
-        );
-        // Out-of-range values clamp into [MIN_SUPPORTED, CURRENT]; 13.1 is
-        // below the Tile floor (and its toolkit is rejected before this).
-        assert_eq!(
-            bytecode_version_from_cuda_version(13010),
-            BytecodeVersion::MIN_SUPPORTED
-        );
-        assert_eq!(
-            bytecode_version_from_cuda_version(13000),
-            BytecodeVersion::MIN_SUPPORTED
-        );
-        assert_eq!(
-            bytecode_version_from_cuda_version(13040),
-            BytecodeVersion::CURRENT
-        );
+    #[cfg(unix)]
+    fn binary_version_wins_over_toolkit_headers() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _override_guard = EnvVarGuard::unset(BYTECODE_VERSION_ENV);
+        for (headers, assembler, expected) in [
+            (13040, "13.1\\n13.2\\n13.3\\n", BytecodeVersion::V13_3),
+            (
+                13030,
+                "13.1\\n13.2\\n13.3\\n13.4\\n",
+                BytecodeVersion::V13_4,
+            ),
+        ] {
+            let dir = env::temp_dir().join(format!("cutile_mixed_toolkit_{}", Uuid::new_v4()));
+            let binary = create_fake_cuda_toolkit(&dir, headers, true);
+            write_fake_tileiras_script(&binary, &format!("printf '{assembler}'\n"));
+            assert_eq!(
+                compute_bytecode_version(&binary, Some(&dir)).unwrap(),
+                expected
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bytecode_override_is_validated_and_part_of_the_cache_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = env::temp_dir().join(format!("cutile_bc_override_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("tileiras");
+        write_fake_tileiras_script(&binary, "printf '13.2\\n13.3\\n'\n");
+        for requested in ["13.4", "13.9", "13.1", "nonsense", "13.3.1"] {
+            assert!(
+                negotiate_bytecode_version(&binary, Some(std::ffi::OsStr::new(requested))).is_err(),
+                "{requested}"
+            );
+        }
+        {
+            let _override_guard = EnvVarGuard::set(BYTECODE_VERSION_ENV, Path::new("13.2"));
+            assert_eq!(
+                cached_bytecode_version(&binary, None).unwrap(),
+                BytecodeVersion::V13_2
+            );
+        }
+        {
+            let _override_guard = EnvVarGuard::set(BYTECODE_VERSION_ENV, Path::new("13.3"));
+            assert_eq!(
+                cached_bytecode_version(&binary, None).unwrap(),
+                BytecodeVersion::V13_3
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1611,10 +1778,14 @@ mod tests {
             parse_bytecode_version("13.3.0"),
             Some(BytecodeVersion::V13_3)
         );
-        // Out-of-range clamps to CURRENT; malformed input is rejected.
+        // Parse exactly; negotiation rejects unsupported requests.
         assert_eq!(
             parse_bytecode_version("13.9"),
-            Some(BytecodeVersion::CURRENT)
+            Some(BytecodeVersion {
+                major: 13,
+                minor: 9,
+                tag: 0
+            })
         );
         assert_eq!(parse_bytecode_version("13"), None);
         assert_eq!(parse_bytecode_version("nonsense"), None);
@@ -1622,12 +1793,16 @@ mod tests {
     }
 
     #[test]
-    fn selects_bytecode_version_from_toolkit_cuda_h() {
+    #[cfg(unix)]
+    fn selects_bytecode_version_from_toolkit_binary() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _override_guard = EnvVarGuard::unset(BYTECODE_VERSION_ENV);
         let temp_dir = env::temp_dir().join(format!("cutile_bc_ver_{}", Uuid::new_v4()));
         let tileiras = create_fake_cuda_toolkit(&temp_dir, 13020, true);
+        write_fake_tileiras_script(&tileiras, "printf '13.1\\n13.2\\n'\n");
         let toolkit = toolkit_root_of(&tileiras);
         assert_eq!(toolkit.as_deref(), Some(temp_dir.as_path()));
-        // cuda.h reports CUDA 13.2, so we emit bytecode 13.2 without probing.
+        // The binary reports 13.2, independently of the nearby header.
         assert_eq!(
             compute_bytecode_version(&tileiras, toolkit.as_deref()).expect("13.2 toolkit"),
             BytecodeVersion::V13_2

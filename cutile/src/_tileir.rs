@@ -24,7 +24,7 @@ pub mod tileir {
     /// for `f16`/`bf16`/`f32`/`f64`. `memory_ordering` must be `Relaxed`;
     /// `memory_scope` ⊆ {TileBlock, Device}. Returns the completion token.
     // TODO (hme): document safety
-    #[cuda_tile::op(name="cuda_tile.atomic_red_view_tko", params=["view", "value", "index"])]
+    #[cuda_tile::op(name="cuda_tile.atomic_red_view_tko", since="V13_3", params=["view", "value", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn atomic_red_view_tko<
         E: ElementType,
@@ -69,10 +69,14 @@ pub mod tileir {
     ///
     /// `_tile` encodes the output tile shape (a `Shape<TILE_SHAPE>` witness).
     /// `SPARSE_DIM` selects which tensor dimension uses sparse indexing.
-    /// `_padding` selects out-of-bounds fill (currently only `padding::None`
-    /// is wired through).
-    // TODO (hme): document safety
-    #[cuda_tile::op(name = "cuda_tile.make_gather_scatter_view")]
+    /// `_padding` selects out-of-bounds fill; nonzero padding modes require
+    /// floating-point elements. Requires Tile IR 13.3.
+    ///
+    /// # Safety
+    /// The tensor must describe valid live storage for every subsequent
+    /// unmasked access. Consumers must respect access bounds, aliasing and
+    /// token ordering; constructing a view does not establish ownership.
+    #[cuda_tile::op(name = "cuda_tile.make_gather_scatter_view", since = "V13_3")]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn make_gather_scatter_view<
         'a,
@@ -94,8 +98,14 @@ pub mod tileir {
     /// `sparse_index`: 1-D tile of integer indices into the sparse dimension.
     /// `dense_index`: scalar index for the dense dimension.
     /// Returns `(Tile<E, TILE_SHAPE>, Token)` with a fresh completion token.
-    // TODO (hme): document safety
-    #[cuda_tile::op(name = "cuda_tile.load_gather_scatter_view_tko")]
+    /// This convenience form is two-dimensional; use `load_view_raw` for
+    /// other ranks, explicit hints, or optional input tokens.
+    ///
+    /// # Safety
+    /// Every unpadded address must be valid and readable. The input token
+    /// must order conflicting prior accesses; sparse indices must not
+    /// introduce a data race with concurrent writes.
+    #[cuda_tile::op(name = "cuda_tile.load_gather_scatter_view_tko", since = "V13_3")]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn load_gather_scatter_view_tko<
         E: ElementType,
@@ -142,8 +152,11 @@ pub mod tileir {
     /// `TRAVERSAL_STRIDES` and `DIM_MAP` are encoded as const generic
     /// parameters on the return type; pass them via a turbofish or return-type
     /// annotation. `_tile` is a shape witness for `TILE_SHAPE`.
-    // TODO (hme): document safety
-    #[cuda_tile::op(name = "cuda_tile.make_strided_view")]
+    ///
+    /// # Safety
+    /// The tensor must describe valid live storage. Consumers must uphold
+    /// bounds and token ordering, including overlaps between traversals.
+    #[cuda_tile::op(name = "cuda_tile.make_strided_view", since = "V13_3")]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn make_strided_view<
         'a,
@@ -165,8 +178,11 @@ pub mod tileir {
     ///
     /// `index` is an N-element array of scalar indices, one per tile
     /// dimension. Returns `(Tile<E, TILE_SHAPE>, Token)`.
-    // TODO (hme): document safety
-    #[cuda_tile::op(name = "cuda_tile.load_strided_view_tko")]
+    ///
+    /// # Safety
+    /// Every unpadded address must be valid and readable, and the input
+    /// token must order conflicting prior accesses to the same storage.
+    #[cuda_tile::op(name = "cuda_tile.load_strided_view_tko", since = "V13_3")]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn load_strided_view_tko<
         E: ElementType,

@@ -48,12 +48,43 @@ pub mod rounding {
     pub struct Zero;
     pub struct Approx;
     pub struct Full;
+    pub struct NearestIntToZero;
+    pub struct NearestAway;
     impl Mode for NearestEven {}
     impl Mode for PositiveInf {}
     impl Mode for NegativeInf {}
     impl Mode for Zero {}
     impl Mode for Approx {}
     impl Mode for Full {}
+    impl Mode for NearestIntToZero {}
+    impl Mode for NearestAway {}
+}
+
+/// Whether an automatic allocation's address may be shared across tile threads.
+pub mod allocation {
+    pub trait Mode {}
+    pub struct Local;
+    pub struct Global;
+    impl Mode for Local {}
+    impl Mode for Global {}
+}
+
+/// Accumulation mode for the raw floating-point matrix multiply operation.
+pub mod fast_acc {
+    pub trait Mode {}
+    pub struct Enabled;
+    pub struct Disabled;
+    impl Mode for Enabled {}
+    impl Mode for Disabled {}
+}
+
+/// Saturation for raw float-to-integer conversion.
+pub mod saturating {
+    pub trait Mode {}
+    pub struct Enabled;
+    pub struct Disabled;
+    impl Mode for Enabled {}
+    impl Mode for Disabled {}
 }
 
 /// NaN propagation for maxf/minf operations.
@@ -294,9 +325,11 @@ pub mod signedness {
 #[cutile_macro::module(tile_rust_crate = true)]
 pub mod core {
 
+    pub use super::allocation;
     pub use super::atomic;
     pub use super::cmp_ordering;
     pub use super::dim_map;
+    pub use super::fast_acc;
     pub use super::ftz;
     pub use super::nan;
     pub use super::ordering;
@@ -305,6 +338,7 @@ pub mod core {
     pub use super::predicate;
     pub use super::reverse;
     pub use super::rounding;
+    pub use super::saturating;
     pub use super::scope;
     pub use super::signedness;
     pub use super::tma;
@@ -393,6 +427,7 @@ pub mod core {
     pub use cuda_core::f4e2m1fnx2;
     pub use cuda_core::f8e4m3fn;
     pub use cuda_core::f8e5m2;
+    pub use cuda_core::f8e5m3fnu;
     pub use cuda_core::f8e8m0fnu;
     pub use cuda_core::i4;
     pub use cuda_core::tf32;
@@ -412,6 +447,10 @@ pub mod core {
     #[cuda_tile::ty(name = "f8e8m0fnu")]
     impl ElementType for f8e8m0fnu {
         const ZERO: Self = f8e8m0fnu(0);
+    }
+    #[cuda_tile::ty(name = "f8e5m3fnu")]
+    impl ElementType for f8e5m3fnu {
+        const ZERO: Self = f8e5m3fnu(0);
     }
     #[cuda_tile::ty(name = "f4e2m1fn")]
     impl ElementType for f4e2m1fn {
@@ -563,6 +602,9 @@ pub mod core {
     /// device storage and is exposed only through scoped atomic accesses.
     /// Use `Global<AtomicI32, { [] }>`, for example, rather than `Global<i32, { [] }>`.
     /// Weak accesses and tile-block-only scope are not available on this API.
+    /// Tile IR 13.3+ also accepts `#[cuda_tile::global(constant=true,
+    /// visibility="private")]` on the static. Constant globals reject stores
+    /// and atomic updates; omitted options retain mutable/public behavior.
     ///
     /// Ordering follows Tile IR, not `std::sync::atomic`: these operations return
     /// completion tokens but accept no input token. They do not automatically
@@ -1596,13 +1638,13 @@ pub mod core {
     pub use cuda_tile_assert;
 
     /// Grid dimensions `(gridDim.x, gridDim.y, gridDim.z)`.
-    #[cuda_tile::op(name="cuda_tile.get_num_tile_blocks", params=[])]
+    #[cuda_tile::op(name="cuda_tile.get_num_tile_blocks", since="V13_2", params=[])]
     pub fn get_num_tile_blocks() -> (i32, i32, i32) {
         unreachable!()
     }
 
     /// Current block id `(blockIdx.x, blockIdx.y, blockIdx.z)`.
-    #[cuda_tile::op(name="cuda_tile.get_tile_block_id", params=[])]
+    #[cuda_tile::op(name="cuda_tile.get_tile_block_id", since="V13_2", params=[])]
     pub fn get_tile_block_id() -> (i32, i32, i32) {
         unreachable!()
     }
@@ -1893,7 +1935,7 @@ pub mod core {
     // ========================================================================
 
     /// Broadcast a tile to a new shape (size-1 dims expand).
-    #[cuda_tile::op(name="cuda_tile.broadcast", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.broadcast", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn broadcast<E: ElementType, const S: [i32; N], const R: [i32; N]>(
         source: Tile<E, S>,
@@ -1903,7 +1945,7 @@ pub mod core {
     }
 
     /// Concatenate `lhs` and `rhs` along `dim`. All other dims must match.
-    #[cuda_tile::op(name="cuda_tile.cat", params=["lhs", "rhs"], attribute_params=["dim:integer"])]
+    #[cuda_tile::op(name="cuda_tile.cat", since="V13_2", params=["lhs", "rhs"], attribute_params=["dim:integer"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn cat<E: ElementType, const SLhs: [i32; N], const SRhs: [i32; N], const SOut: [i32; N]>(
         lhs: Tile<E, SLhs>,
@@ -1914,7 +1956,7 @@ pub mod core {
     }
 
     /// Tile filled with a compile-time `value`.
-    #[cuda_tile::op(name="cuda_tile.constant", params=[], attribute_params=["value:dense"])]
+    #[cuda_tile::op(name="cuda_tile.constant", since="V13_2", params=[], attribute_params=["value:dense"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn constant<E: ElementType, const S: [i32; N]>(value: E, shape: Shape<S>) -> Tile<E, S> {
         unreachable!()
@@ -1922,7 +1964,7 @@ pub mod core {
 
     /// Extract a subtile. Result shape must evenly divide source shape.
     /// `indices` are slice indices (not byte offsets).
-    #[cuda_tile::op(name="cuda_tile.extract", params=["source", "...indices"])]
+    #[cuda_tile::op(name="cuda_tile.extract", since="V13_2", params=["source", "...indices"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn extract<E: ElementType, const SIn: [i32; N], const SOut: [i32; N]>(
         source: Tile<E, SIn>,
@@ -1931,8 +1973,24 @@ pub mod core {
         unreachable!()
     }
 
+    /// Insert a subtile at slice indices, not element offsets. Tile IR 13.4+.
+    ///
+    /// # Safety
+    /// For each axis, `indices[axis]` must be in
+    /// `0..(SOut[axis] / SIn[axis])`. Source shape must divide destination
+    /// shape evenly. Out-of-bounds indices are undefined behavior.
+    #[cuda_tile::op(name="cuda_tile.insert", since="V13_4", params=["source", "destination", "...indices"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn insert<E: ElementType, const SIn: [i32; N], const SOut: [i32; N]>(
+        source: Tile<E, SIn>,
+        destination: Tile<E, SOut>,
+        indices: [Tile<i32, { [] }>; N],
+    ) -> Tile<E, SOut> {
+        unreachable!()
+    }
+
     /// 1D sequence `[0, 1, …, N-1]`.
-    #[cuda_tile::op(name = "cuda_tile.iota")]
+    #[cuda_tile::op(name = "cuda_tile.iota", since = "V13_2")]
     pub fn iota<E: ElementType, const S: [i32; 1]>(shape: Shape<S>) -> Tile<E, S> {
         unreachable!()
     }
@@ -1948,7 +2006,7 @@ pub mod core {
     }
 
     /// Permute dimensions per the index array (e.g. `[1, 0]` = transpose).
-    #[cuda_tile::op(name="cuda_tile.permute", params=["source"], attribute_params=["permutation:array"])]
+    #[cuda_tile::op(name="cuda_tile.permute", since="V13_2", params=["source"], attribute_params=["permutation:array"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn permute<E: ElementType, const A: [i32; N], const I: [i32; N], const R: [i32; N]>(
         source: Tile<E, A>,
@@ -1958,7 +2016,7 @@ pub mod core {
     }
 
     /// Reshape a tile (element count must match).
-    #[cuda_tile::op(name="cuda_tile.reshape", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.reshape", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6, M = 6)]
     pub fn reshape<E: ElementType, const S: [i32; N], const R: [i32; M]>(
         source: Tile<E, S>,
@@ -1969,7 +2027,7 @@ pub mod core {
 
     /// Generic reduce along `dim` with closure `f` and `identity`.
     /// Closure body lowers to a Tile IR region at compile time.
-    #[cuda_tile::op(name="cuda_tile.reduce", params=["operand"])]
+    #[cuda_tile::op(name="cuda_tile.reduce", since="V13_2", params=["operand"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn reduce<E: ElementType, const S: [i32; N], F>(
         operand: Tile<E, S>,
@@ -2024,7 +2082,7 @@ pub mod core {
     }
 
     /// Prefix sum along `dim`. The compiler emits the addf/addi region.
-    #[cuda_tile::op(name="cuda_tile.scan", params=["operand"])]
+    #[cuda_tile::op(name="cuda_tile.scan", since="V13_2", params=["operand"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn scan_sum<E: ElementType, const S: [i32; N], R: reverse::Mode>(
         operand: Tile<E, S>,
@@ -2036,7 +2094,7 @@ pub mod core {
     }
 
     /// Generic prefix scan along `dim`. Closure body lowers to a Tile IR region.
-    #[cuda_tile::op(name="cuda_tile.scan", params=["operand"])]
+    #[cuda_tile::op(name="cuda_tile.scan", since="V13_2", params=["operand"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn scan<E: ElementType, const S: [i32; N], R: reverse::Mode, F>(
         operand: Tile<E, S>,
@@ -2052,7 +2110,7 @@ pub mod core {
     }
 
     /// `cond ? val_if_true : val_if_false` (element-wise).
-    #[cuda_tile::op(name="cuda_tile.select", params=["cond", "val_if_true", "val_if_false"])]
+    #[cuda_tile::op(name="cuda_tile.select", since="V13_2", params=["cond", "val_if_true", "val_if_false"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn select<E: ElementType, const S: [i32; N]>(
         cond: Tile<bool, S>,
@@ -2063,13 +2121,66 @@ pub mod core {
     }
 
     /// Creates a new unordered token.
-    #[cuda_tile::op(name="cuda_tile.make_token", params=[])]
+    #[cuda_tile::op(name="cuda_tile.make_token", since="V13_2", params=[])]
     pub fn new_token_unordered() -> Token {
         unreachable!()
     }
 
+    /// Allow PDL-dependent kernels to be scheduled. Tile IR 13.4+.
+    /// Every CTA must signal or exit. This is not a memory fence; it is a
+    /// no-op below sm_90 or without an applicable PDL launch relationship.
+    ///
+    /// # Safety
+    /// Dependent kernels must wait before conflicting accesses. Neither
+    /// kernel may rely on concurrent execution, and all allocations must
+    /// remain alive until their last use, not just until this signal.
+    #[cuda_tile::op(name="cuda_tile.gdc_launch_dependents_tko", since="V13_4", params=["token"])]
+    pub unsafe fn gdc_launch_dependents_tko(token: Option<Token>) -> Token {
+        unreachable!()
+    }
+
+    /// Wait for PDL predecessor completion and visibility of its stores.
+    /// Tile IR 13.4+; a no-op below sm_90 or without a PDL launch relationship.
+    ///
+    /// # Safety
+    /// Token-order every predecessor-dependent access after the returned
+    /// token. Merely putting a load after this call in source is insufficient.
+    /// Work before the wait must not race unfinished predecessor work.
+    #[cuda_tile::op(name="cuda_tile.gdc_wait_tko", since="V13_4", params=["token"])]
+    pub unsafe fn gdc_wait_tko(token: Option<Token>) -> Token {
+        unreachable!()
+    }
+
+    /// Token-ordered proxy alias fence. Tile IR 13.4+.
+    ///
+    /// # Safety
+    /// Chain earlier and later accesses through the input/output tokens.
+    /// The fence does not establish allocation validity or cross-thread
+    /// synchronization by itself; callers must uphold those contracts.
+    #[cuda_tile::op(name="cuda_tile.memory_fence_alias_tko", since="V13_4", params=["token"])]
+    pub unsafe fn memory_fence_alias_tko(token: Token) -> Token {
+        unreachable!()
+    }
+
+    /// Allocate `num_elem` elements for the current IR block. Tile IR 13.3+.
+    /// Size and nonzero power-of-two byte alignment must be compile-time constants.
+    ///
+    /// # Safety
+    /// The allocation is uninitialized and cannot outlive its IR block.
+    /// Local addresses must not escape the current tile thread. Global
+    /// addresses may be shared only with proper synchronization, and no
+    /// access may outlive the allocating block even in global mode.
+    #[cuda_tile::op(name="cuda_tile.alloca", since="V13_3", params=[], attribute_params=["num_elem:integer", "alignment:integer"], static_params=["visibility={Global: global=unit}"])]
+    pub unsafe fn alloca<E: ElementType, G: allocation::Mode>(
+        num_elem: i64,
+        alignment: i64,
+        visibility: G,
+    ) -> PointerTile<*mut E, { [] }> {
+        unreachable!()
+    }
+
     /// Combine independent tokens into one that depends on all of them.
-    #[cuda_tile::op(name="cuda_tile.join_tokens", params=["tokens"])]
+    #[cuda_tile::op(name="cuda_tile.join_tokens", since="V13_2", params=["tokens"])]
     pub fn join_tokens(tokens: &[Token]) -> Token {
         unreachable!()
     }
@@ -2162,7 +2273,7 @@ pub mod core {
     // ========================================================================
 
     /// Float-to-float conversion (e.g. `f32` → `f16`).
-    #[cuda_tile::op(name = "cuda_tile.ftof", params = ["x"], static_params = ["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::op(name = "cuda_tile.ftof", since="V13_2", params = ["x"], static_params = ["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>, NearestAway: rounding_mode=#cuda_tile.rounding<nearest_away>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn ftof<EIn: ElementType, EOut: ElementType, const S: [i32; N], R: rounding::Mode>(
         x: Tile<EIn, S>,
@@ -2172,7 +2283,7 @@ pub mod core {
     }
 
     /// Float-to-integer conversion. Destination signedness is inferred from `EOut`.
-    #[cuda_tile::op(name = "cuda_tile.ftoi", params = ["x"], static_params = ["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::op(name = "cuda_tile.ftoi", since="V13_2", params = ["x"], static_params = ["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>, NearestIntToZero: rounding_mode=#cuda_tile.rounding<nearest_int_to_zero>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn ftoi<EIn: ElementType, EOut: ElementType, const S: [i32; N], R: rounding::Mode>(
         x: Tile<EIn, S>,
@@ -2181,8 +2292,28 @@ pub mod core {
         unreachable!()
     }
 
+    /// Float-to-integer conversion with explicit saturation. Enabling
+    /// saturation requires Tile IR 13.4; disabled retains the older behavior.
+    ///
+    /// # Safety
+    /// The operand and destination types must support the requested conversion.
+    /// With saturation disabled, out-of-range inputs follow Tile IR semantics.
+    #[cuda_tile::op(name="cuda_tile.ftoi", since="V13_2", params=["x"], named_attributes=["rounding_mode=nearest_int_to_zero"], static_params=["saturation={Enabled: saturating=unit}"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn ftoi_saturating<
+        EIn: ElementType,
+        EOut: ElementType,
+        const S: [i32; N],
+        SMode: saturating::Mode,
+    >(
+        x: Tile<EIn, S>,
+        saturation: SMode,
+    ) -> Tile<EOut, S> {
+        unreachable!()
+    }
+
     /// Integer-to-float conversion. Source signedness is inferred from `EIn`.
-    #[cuda_tile::op(name = "cuda_tile.itof", params = ["x"], static_params = ["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::op(name = "cuda_tile.itof", since="V13_2", params = ["x"], static_params = ["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn itof<EIn: ElementType, EOut: ElementType, const S: [i32; N], R: rounding::Mode>(
         x: Tile<EIn, S>,
@@ -2192,7 +2323,7 @@ pub mod core {
     }
 
     /// Integer extension. Signedness is inferred from `EIn` by the JIT.
-    #[cuda_tile::op(name="cuda_tile.exti", params=["from"], named_attributes=["signedness=inferred_signedness"])]
+    #[cuda_tile::op(name="cuda_tile.exti", since="V13_2", params=["from"], named_attributes=["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn exti<EIn: ElementType, EOut: ElementType, const S: [i32; N]>(
         from: Tile<EIn, S>,
@@ -2201,7 +2332,7 @@ pub mod core {
     }
 
     /// Integer truncation.
-    #[cuda_tile::op(name = "cuda_tile.trunci", params = ["from"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
+    #[cuda_tile::op(name = "cuda_tile.trunci", since="V13_2", params = ["from"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn trunci<EIn: ElementType, EOut: ElementType, const S: [i32; N], O: overflow::Mode>(
         from: Tile<EIn, S>,
@@ -2211,7 +2342,7 @@ pub mod core {
     }
 
     /// Bit-reinterpretation between same-size types.
-    #[cuda_tile::op(name="cuda_tile.bitcast", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.bitcast", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn bitcast<EIn: ElementType, EOut: ElementType, const S: [i32; N]>(
         source: Tile<EIn, S>,
@@ -2220,7 +2351,7 @@ pub mod core {
     }
 
     /// Convert integer to pointer.
-    #[cuda_tile::op(name="cuda_tile.int_to_ptr", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.int_to_ptr", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn int_to_ptr<SRC_T: ElementType, PTR_T: ElementType, const S: [i32; N]>(
         source: Tile<SRC_T, S>,
@@ -2229,7 +2360,7 @@ pub mod core {
     }
 
     /// Convert pointer to integer.
-    #[cuda_tile::op(name="cuda_tile.ptr_to_int", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.ptr_to_int", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn ptr_to_int<E: ElementType, const S: [i32; N]>(
         source: PointerTile<*mut E, S>,
@@ -2238,11 +2369,26 @@ pub mod core {
     }
 
     /// Cast pointer type — reinterpret pointers as pointing to a different type.
-    #[cuda_tile::op(name="cuda_tile.ptr_to_ptr", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.ptr_to_ptr", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn ptr_to_ptr<EIn: ElementType, EOut: ElementType, const S: [i32; N]>(
         source: PointerTile<*mut EIn, S>,
     ) -> PointerTile<*mut EOut, S> {
+        unreachable!()
+    }
+
+    /// Attach the explicit `ptr_attr<none>` classification. Tile IR 13.4+.
+    /// Tensor/view constructors preserve its presence; an unclassified pointer
+    /// and an explicitly classified pointer are distinct Tile IR types.
+    ///
+    /// # Safety
+    /// This does not create storage or establish access permissions. All
+    /// subsequent accesses must satisfy the original pointer's invariants.
+    #[cuda_tile::op(name="cuda_tile.ptr_to_ptr", since="V13_4", params=["source"], pointer_attribute="none")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn ptr_with_attr_none<E: ElementType, const S: [i32; N]>(
+        source: PointerTile<*mut E, S>,
+    ) -> PointerTile<*mut E, S> {
         unreachable!()
     }
 
@@ -2255,7 +2401,7 @@ pub mod core {
 
     /// Element-wise integer add. `overflow` lets the compiler assume no
     /// signed/unsigned/both wrap.
-    #[cuda_tile::op(name = "cuda_tile.addi", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
+    #[cuda_tile::op(name = "cuda_tile.addi", since="V13_2", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn addi<E: ElementType, const S: [i32; N], O: overflow::Mode>(
         lhs: Tile<E, S>,
@@ -2266,7 +2412,7 @@ pub mod core {
     }
 
     /// Element-wise integer subtract.
-    #[cuda_tile::op(name = "cuda_tile.subi", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
+    #[cuda_tile::op(name = "cuda_tile.subi", since="V13_2", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn subi<E: ElementType, const S: [i32; N], O: overflow::Mode>(
         lhs: Tile<E, S>,
@@ -2277,7 +2423,7 @@ pub mod core {
     }
 
     /// Element-wise integer multiply.
-    #[cuda_tile::op(name = "cuda_tile.muli", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
+    #[cuda_tile::op(name = "cuda_tile.muli", since="V13_2", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn muli<E: ElementType, const S: [i32; N], O: overflow::Mode>(
         lhs: Tile<E, S>,
@@ -2289,7 +2435,7 @@ pub mod core {
 
     /// Element-wise integer divide. `Zero` rounding = truncation;
     /// `PositiveInf` = ceiling div; `NegativeInf` = floor div (signed only).
-    #[cuda_tile::op(name = "cuda_tile.divi", params = ["lhs", "rhs"], static_params = ["rounding={Zero: rounding=#cuda_tile.rounding<zero>, NearestEven: rounding=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding=#cuda_tile.rounding<negative_inf>, Approx: rounding=#cuda_tile.rounding<approx>, Full: rounding=#cuda_tile.rounding<full>}"], named_attributes = ["signedness=inferred_signedness"])]
+    #[cuda_tile::op(name = "cuda_tile.divi", since="V13_2", params = ["lhs", "rhs"], static_params = ["rounding={Zero: rounding=#cuda_tile.rounding<zero>, NearestEven: rounding=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding=#cuda_tile.rounding<negative_inf>, Approx: rounding=#cuda_tile.rounding<approx>, Full: rounding=#cuda_tile.rounding<full>}"], named_attributes = ["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn divi<E: ElementType, const S: [i32; N], R: rounding::Mode>(
         lhs: Tile<E, S>,
@@ -2300,14 +2446,14 @@ pub mod core {
     }
 
     /// Element-wise integer remainder. Result sign matches dividend.
-    #[cuda_tile::op(name = "cuda_tile.remi", params = ["lhs", "rhs"], named_attributes = ["signedness=inferred_signedness"])]
+    #[cuda_tile::op(name = "cuda_tile.remi", since="V13_2", params = ["lhs", "rhs"], named_attributes = ["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn remi<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise integer negation.
-    #[cuda_tile::op(name = "cuda_tile.negi", params = ["x"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
+    #[cuda_tile::op(name = "cuda_tile.negi", since="V13_2", params = ["x"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn negi<E: ElementType, const S: [i32; N], O: overflow::Mode>(
         x: Tile<E, S>,
@@ -2317,28 +2463,28 @@ pub mod core {
     }
 
     /// Element-wise integer absolute value. Note: cuTile maps signed ints to `i64` (not `i32`).
-    #[cuda_tile::op(name="cuda_tile.absi", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.absi", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn absi<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Multiply high — upper N bits of `x * y` for N-bit integer `E`.
-    #[cuda_tile::op(name="cuda_tile.mulhii", params=["x", "y"])]
+    #[cuda_tile::op(name="cuda_tile.mulhii", since="V13_2", params=["x", "y"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn mulhii<E: ElementType, const S: [i32; N]>(x: Tile<E, S>, y: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise integer maximum. Signedness inferred from `E`.
-    #[cuda_tile::op(name="cuda_tile.maxi", params=["lhs", "rhs"], named_attributes=["signedness=inferred_signedness"])]
+    #[cuda_tile::op(name="cuda_tile.maxi", since="V13_2", params=["lhs", "rhs"], named_attributes=["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn maxi<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise integer minimum. Signedness inferred from `E`.
-    #[cuda_tile::op(name="cuda_tile.mini", params=["lhs", "rhs"], named_attributes=["signedness=inferred_signedness"])]
+    #[cuda_tile::op(name="cuda_tile.mini", since="V13_2", params=["lhs", "rhs"], named_attributes=["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn mini<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
@@ -2346,7 +2492,7 @@ pub mod core {
 
     /// Integer Tensor-Core matrix multiply-accumulate.
     #[cuda_tile::op(
-        name = "cuda_tile.mmai",
+        name = "cuda_tile.mmai", since="V13_2",
         params = ["lhs", "rhs", "acc"],
         static_params = [
             "signedness_lhs={Signed: signedness_lhs=#cuda_tile.signedness<signed>, Unsigned: signedness_lhs=#cuda_tile.signedness<unsigned>}",
@@ -2374,7 +2520,7 @@ pub mod core {
     // ---- Float arithmetic --------------------------------------------------
 
     /// Element-wise float add.
-    #[cuda_tile::op(name="cuda_tile.addf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.addf", since="V13_2", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn addf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2386,7 +2532,7 @@ pub mod core {
     }
 
     /// Element-wise float subtract.
-    #[cuda_tile::op(name="cuda_tile.subf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.subf", since="V13_2", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn subf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2398,7 +2544,7 @@ pub mod core {
     }
 
     /// Element-wise float multiply.
-    #[cuda_tile::op(name="cuda_tile.mulf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.mulf", since="V13_2", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn mulf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2410,7 +2556,7 @@ pub mod core {
     }
 
     /// Element-wise float divide.
-    #[cuda_tile::op(name="cuda_tile.divf", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.divf", since="V13_2", params=["lhs", "rhs"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn divf<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2422,35 +2568,35 @@ pub mod core {
     }
 
     /// Element-wise float remainder.
-    #[cuda_tile::op(name = "cuda_tile.remf", params = ["lhs", "rhs"])]
+    #[cuda_tile::op(name = "cuda_tile.remf", since="V13_2", params = ["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn remf<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise float negation.
-    #[cuda_tile::op(name="cuda_tile.negf", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.negf", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn negf<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise float absolute value.
-    #[cuda_tile::op(name="cuda_tile.absf", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.absf", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn absf<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise `atan2(x, y)`.
-    #[cuda_tile::op(name = "cuda_tile.atan2", params = ["x", "y"])]
+    #[cuda_tile::op(name = "cuda_tile.atan2", since="V13_2", params = ["x", "y"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn atan2<E: ElementType, const S: [i32; N]>(x: Tile<E, S>, y: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Fused multiply-add: `lhs * rhs + acc` with one rounding step.
-    #[cuda_tile::op(name="cuda_tile.fma", params=["lhs", "rhs", "acc"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.fma", since="V13_2", params=["lhs", "rhs", "acc"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn fma<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2463,7 +2609,7 @@ pub mod core {
     }
 
     /// Floating-point Tensor-Core matrix multiply-accumulate.
-    #[cuda_tile::op(name = "cuda_tile.mmaf", params = ["lhs", "rhs", "acc"])]
+    #[cuda_tile::op(name = "cuda_tile.mmaf", since="V13_2", params = ["lhs", "rhs", "acc"])]
     #[cuda_tile::variadic_op(N = 3)]
     pub fn mmaf<
         EIn: ElementType,
@@ -2479,12 +2625,36 @@ pub mod core {
         unreachable!()
     }
 
+    /// Tensor-Core multiply-accumulate with explicit fast accumulation.
+    /// Tile IR 13.3+ when fast accumulation is enabled.
+    ///
+    /// # Safety
+    /// The selected input/accumulator types must support fast accumulation;
+    /// enabling it permits the reduced-precision accumulation defined by Tile IR.
+    #[cuda_tile::op(name="cuda_tile.mmaf", since="V13_2", params=["lhs", "rhs", "acc"], static_params=["fast={Enabled: fast_acc=unit}"])]
+    #[cuda_tile::variadic_op(N = 3)]
+    pub unsafe fn mmaf_with_fast_acc<
+        EIn: ElementType,
+        EOut: ElementType,
+        const LHS: [i32; N],
+        const RHS: [i32; N],
+        const ACC: [i32; N],
+        F: fast_acc::Mode,
+    >(
+        lhs: Tile<EIn, LHS>,
+        rhs: Tile<EIn, RHS>,
+        acc: Tile<EOut, ACC>,
+        fast: F,
+    ) -> Tile<EOut, ACC> {
+        unreachable!()
+    }
+
     /// Pack a numeric tile into bytes.
     ///
     /// This is the generic Tile IR pack operation for rank-1 sub-byte values.
     /// Reshape multi-dimensional tiles to rank 1 before packing, or use
     /// `Tile<f4e2m1fn, ...>::pack(shape)` for shaped NVFP4 tiles.
-    #[cuda_tile::op(name = "cuda_tile.pack", params = ["source"])]
+    #[cuda_tile::op(name = "cuda_tile.pack", since="V13_3", params = ["source"])]
     pub fn pack<EIn: ElementType, EByte: ByteElement, const S: [i32; 1], const R: [i32; 1]>(
         source: Tile<EIn, S>,
     ) -> Tile<EByte, R> {
@@ -2497,7 +2667,7 @@ pub mod core {
     /// It can be used with `Tile<u8, ...>` when raw byte interop is needed.
     /// Reshape the result after unpacking if a matrix tile is needed, or use
     /// `Tile<f4e2m1fnx2, ...>::unpack(shape)` for shaped NVFP4 storage tiles.
-    #[cuda_tile::op(name = "cuda_tile.unpack", params = ["source"])]
+    #[cuda_tile::op(name = "cuda_tile.unpack", since="V13_3", params = ["source"])]
     pub fn unpack<EOut: ElementType, EByte: ByteElement, const S: [i32; 1], const R: [i32; 1]>(
         source: Tile<EByte, S>,
     ) -> Tile<EOut, R> {
@@ -2532,7 +2702,7 @@ pub mod core {
     /// dimension reduced by the block size used by the quantized data layout.
     /// Accumulation is always `f32`.
     #[cuda_tile::op(
-        name = "cuda_tile.mmaf_scaled",
+        name = "cuda_tile.mmaf_scaled", since="V13_3", min_arch="sm_100",
         params = ["lhs", "rhs", "acc", "lhs_scale", "rhs_scale"]
     )]
     #[cuda_tile::variadic_op(N = 3)]
@@ -2555,7 +2725,7 @@ pub mod core {
     }
 
     /// Element-wise `source ^ exponent`.
-    #[cuda_tile::op(name="cuda_tile.pow", params=["source", "exponent"])]
+    #[cuda_tile::op(name="cuda_tile.pow", since="V13_2", params=["source", "exponent"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn pow<E: ElementType, const S: [i32; N]>(
         source: Tile<E, S>,
@@ -2564,8 +2734,35 @@ pub mod core {
         unreachable!()
     }
 
+    /// Tile IR's floating-exponent spelling; `pow` remains available.
+    ///
+    /// # Safety
+    /// Operands must satisfy the Tile IR floating-point power domain.
+    #[cuda_tile::op(name="cuda_tile.fpowf", since="V13_2", params=["source", "exponent"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn fpowf<E: ElementType, const S: [i32; N]>(
+        source: Tile<E, S>,
+        exponent: Tile<E, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
+    /// Floating-point power with a signed integer exponent. Tile IR 13.4+.
+    ///
+    /// # Safety
+    /// The exponent element type must be i1, i8, i16, or i32 and is always
+    /// interpreted as signed. Operands must satisfy the power domain.
+    #[cuda_tile::op(name="cuda_tile.fpowi", since="V13_4", params=["source", "exponent"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn fpowi<E: ElementType, I: ElementType, const S: [i32; N]>(
+        source: Tile<E, S>,
+        exponent: Tile<I, S>,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
     /// Element-wise float maximum. `-0.0 < +0.0`.
-    #[cuda_tile::op(name="cuda_tile.maxf", params=["lhs", "rhs"], static_params=["nan={Enabled: propagate_nan=unit}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.maxf", since="V13_2", params=["lhs", "rhs"], static_params=["nan={Enabled: propagate_nan=unit}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn maxf<E: ElementType, const S: [i32; N], P: nan::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2577,7 +2774,7 @@ pub mod core {
     }
 
     /// Element-wise float minimum.
-    #[cuda_tile::op(name="cuda_tile.minf", params=["lhs", "rhs"], static_params=["nan={Enabled: propagate_nan=unit}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.minf", since="V13_2", params=["lhs", "rhs"], static_params=["nan={Enabled: propagate_nan=unit}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn minf<E: ElementType, const S: [i32; N], P: nan::Mode, F: ftz::Mode>(
         lhs: Tile<E, S>,
@@ -2632,70 +2829,96 @@ pub mod core {
     // ---- Math --------------------------------------------------------------
 
     /// Element-wise ceiling.
-    #[cuda_tile::op(name="cuda_tile.ceil", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.ceil", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn ceil<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise floor.
-    #[cuda_tile::op(name="cuda_tile.floor", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.floor", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn floor<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise sine (radians).
-    #[cuda_tile::op(name="cuda_tile.sin", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.sin", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn sin<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise cosine (radians).
-    #[cuda_tile::op(name="cuda_tile.cos", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.cos", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn cos<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise tangent (radians).
-    #[cuda_tile::op(name="cuda_tile.tan", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.tan", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn tan<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise hyperbolic sine.
-    #[cuda_tile::op(name="cuda_tile.sinh", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.sinh", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn sinh<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise hyperbolic cosine.
-    #[cuda_tile::op(name="cuda_tile.cosh", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.cosh", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn cosh<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise hyperbolic tangent.
-    #[cuda_tile::op(name="cuda_tile.tanh", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.tanh", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn tanh<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
+    /// Hyperbolic tangent with explicit Tile IR rounding.
+    ///
+    /// # Safety
+    /// The element type and rounding mode must form a supported Tile IR pair.
+    #[cuda_tile::op(name="cuda_tile.tanh", since="V13_2", params=["x"], static_params=["rounding={Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn tanh_with_rounding<E: ElementType, const S: [i32; N], R: rounding::Mode>(
+        x: Tile<E, S>,
+        rounding: R,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
     /// Element-wise `e^x`.
-    #[cuda_tile::op(name="cuda_tile.exp", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.exp", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn exp<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
+    /// Exponential with explicit Tile IR rounding. Nondefault modes need 13.3+.
+    ///
+    /// # Safety
+    /// The element type and rounding mode must form a supported Tile IR pair.
+    #[cuda_tile::op(name="cuda_tile.exp", since="V13_2", params=["x"], static_params=["rounding={Approx: rounding_mode=#cuda_tile.rounding<approx>, Full: rounding_mode=#cuda_tile.rounding<full>}"])]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn exp_with_rounding<E: ElementType, const S: [i32; N], R: rounding::Mode>(
+        x: Tile<E, S>,
+        rounding: R,
+    ) -> Tile<E, S> {
+        unreachable!()
+    }
+
     /// Element-wise `2^x`.
-    #[cuda_tile::op(name="cuda_tile.exp2", params=["x"], static_params=["ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.exp2", since="V13_2", params=["x"], static_params=["ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn exp2<E: ElementType, const S: [i32; N], F: ftz::Mode>(
         x: Tile<E, S>,
@@ -2705,21 +2928,21 @@ pub mod core {
     }
 
     /// Element-wise natural log.
-    #[cuda_tile::op(name="cuda_tile.log", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.log", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn log<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise base-2 logarithm.
-    #[cuda_tile::op(name="cuda_tile.log2", params=["x"])]
+    #[cuda_tile::op(name="cuda_tile.log2", since="V13_2", params=["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn log2<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise square root.
-    #[cuda_tile::op(name="cuda_tile.sqrt", params=["x"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.sqrt", since="V13_2", params=["x"], static_params=["rounding={NearestEven: rounding_mode=#cuda_tile.rounding<nearest_even>, PositiveInf: rounding_mode=#cuda_tile.rounding<positive_inf>, NegativeInf: rounding_mode=#cuda_tile.rounding<negative_inf>, Zero: rounding_mode=#cuda_tile.rounding<zero>, Approx: rounding_mode=#cuda_tile.rounding<approx>}", "ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn sqrt<E: ElementType, const S: [i32; N], R: rounding::Mode, F: ftz::Mode>(
         x: Tile<E, S>,
@@ -2730,7 +2953,7 @@ pub mod core {
     }
 
     /// Element-wise `1 / sqrt(x)` (faster than `1.0 / sqrt(x)`).
-    #[cuda_tile::op(name="cuda_tile.rsqrt", params=["x"], static_params=["ftz={Enabled: flush_to_zero=unit}"])]
+    #[cuda_tile::op(name="cuda_tile.rsqrt", since="V13_2", params=["x"], static_params=["ftz={Enabled: flush_to_zero=unit}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn rsqrt<E: ElementType, const S: [i32; N], F: ftz::Mode>(
         x: Tile<E, S>,
@@ -2743,7 +2966,7 @@ pub mod core {
 
     /// Element-wise integer compare with explicit predicate.
     #[cuda_tile::op(
-        name = "cuda_tile.cmpi",
+        name = "cuda_tile.cmpi", since="V13_2",
         params = ["lhs", "rhs"],
         static_params = ["predicate={Equal: comparison_predicate=#cuda_tile.cmp_predicate<equal>, NotEqual: comparison_predicate=#cuda_tile.cmp_predicate<not_equal>, LessThan: comparison_predicate=#cuda_tile.cmp_predicate<less_than>, LessThanOrEqual: comparison_predicate=#cuda_tile.cmp_predicate<less_than_or_equal>, GreaterThan: comparison_predicate=#cuda_tile.cmp_predicate<greater_than>, GreaterThanOrEqual: comparison_predicate=#cuda_tile.cmp_predicate<greater_than_or_equal>}"],
         named_attributes = ["signedness=inferred_signedness"]
@@ -2760,7 +2983,7 @@ pub mod core {
     /// Element-wise float compare. `Ordered` requires both operands non-NaN;
     /// `Unordered` returns `true` if either is NaN.
     #[cuda_tile::op(
-        name = "cuda_tile.cmpf",
+        name = "cuda_tile.cmpf", since="V13_2",
         params = ["lhs", "rhs"],
         static_params = [
             "predicate={Equal: comparison_predicate=#cuda_tile.cmp_predicate<equal>, NotEqual: comparison_predicate=#cuda_tile.cmp_predicate<not_equal>, LessThan: comparison_predicate=#cuda_tile.cmp_predicate<less_than>, LessThanOrEqual: comparison_predicate=#cuda_tile.cmp_predicate<less_than_or_equal>, GreaterThan: comparison_predicate=#cuda_tile.cmp_predicate<greater_than>, GreaterThanOrEqual: comparison_predicate=#cuda_tile.cmp_predicate<greater_than_or_equal>}",
@@ -2837,35 +3060,35 @@ pub mod core {
     // ---- Bitwise -----------------------------------------------------------
 
     /// Element-wise bitwise AND.
-    #[cuda_tile::op(name="cuda_tile.andi", params=["lhs", "rhs"])]
+    #[cuda_tile::op(name="cuda_tile.andi", since="V13_2", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn andi<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise bitwise OR.
-    #[cuda_tile::op(name="cuda_tile.ori", params=["lhs", "rhs"])]
+    #[cuda_tile::op(name="cuda_tile.ori", since="V13_2", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn ori<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise bitwise XOR.
-    #[cuda_tile::op(name="cuda_tile.xori", params=["lhs", "rhs"])]
+    #[cuda_tile::op(name="cuda_tile.xori", since="V13_2", params=["lhs", "rhs"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn xori<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise bitwise NOT.
-    #[cuda_tile::op(name = "cuda_tile.noti", params = ["x"])]
+    #[cuda_tile::op(name = "cuda_tile.noti", since="V13_2", params = ["x"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn noti<E: ElementType, const S: [i32; N]>(x: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
     }
 
     /// Element-wise left shift.
-    #[cuda_tile::op(name = "cuda_tile.shli", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
+    #[cuda_tile::op(name = "cuda_tile.shli", since="V13_2", params = ["lhs", "rhs"], static_params = ["overflow={None: , NoSignedWrap: overflow=#cuda_tile.overflow<no_signed_wrap>, NoUnsignedWrap: overflow=#cuda_tile.overflow<no_unsigned_wrap>, NoWrap: overflow=#cuda_tile.overflow<no_wrap>}"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn shli<E: ElementType, const S: [i32; N], O: overflow::Mode>(
         lhs: Tile<E, S>,
@@ -2876,7 +3099,7 @@ pub mod core {
     }
 
     /// Element-wise right shift. Arithmetic for signed `E`, logical for unsigned.
-    #[cuda_tile::op(name="cuda_tile.shri", params=["lhs", "rhs"], named_attributes=["signedness=inferred_signedness"])]
+    #[cuda_tile::op(name="cuda_tile.shri", since="V13_2", params=["lhs", "rhs"], named_attributes=["signedness=inferred_signedness"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn shri<E: ElementType, const S: [i32; N]>(lhs: Tile<E, S>, rhs: Tile<E, S>) -> Tile<E, S> {
         unreachable!()
@@ -2900,7 +3123,7 @@ pub mod core {
     /// chosen `memory_ordering`/`memory_scope` with respect to every other
     /// access to that location.
     #[doc(hidden)]
-    #[cuda_tile::op(name="cuda_tile.atomic_rmw_tko", params=["pointers", "arg"])]
+    #[cuda_tile::op(name="cuda_tile.atomic_rmw_tko", since="V13_2", params=["pointers", "arg"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn atomic_rmw_tko<
         E: ElementType,
@@ -2932,7 +3155,7 @@ pub mod core {
     /// lifetime, and the caller upholds the memory-model contract of the
     /// chosen `memory_ordering`/`memory_scope` with respect to every other
     /// access to that location.
-    #[cuda_tile::op(name="cuda_tile.atomic_cas_tko", params=["pointers", "cmp", "val"])]
+    #[cuda_tile::op(name="cuda_tile.atomic_cas_tko", since="V13_2", params=["pointers", "cmp", "val"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn atomic_cas_tko<
         E: ElementType,
@@ -2964,7 +3187,7 @@ pub mod core {
     /// offsetting the pointer tile is safe, but the load is not: every lane's
     /// address (masked lanes excepted) must point to a valid, correctly-aligned
     /// `E` the kernel is allowed to read for the launch's lifetime.
-    #[cuda_tile::op(name="cuda_tile.load_ptr_tko", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.load_ptr_tko", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn load_ptr_tko<
         E: ElementType,
@@ -2994,7 +3217,7 @@ pub mod core {
     /// address (masked lanes excepted) must point to a valid, correctly-aligned
     /// `E` the kernel is allowed to write, with no aliasing that would race
     /// another access, for the launch's lifetime.
-    #[cuda_tile::op(name="cuda_tile.store_ptr_tko", params=["destination", "value"])]
+    #[cuda_tile::op(name="cuda_tile.store_ptr_tko", since="V13_2", params=["destination", "value"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn store_ptr_tko<
         E: ElementType,
@@ -3020,8 +3243,101 @@ pub mod core {
     // https://docs.nvidia.com/cuda/tile-ir/latest/sections/operations.html#views
     // ========================================================================
 
+    /// Raw load from a partition, strided, or gather/scatter view.
+    /// `index` is an array or tuple in tensor-axis order; a gather's sparse
+    /// axis takes a 1D integer tile, and the other axes take scalar indices.
+    /// `inbounds` has one compile-time boolean per index (true needs 13.4+).
+    ///
+    /// # Safety
+    /// All unpadded accesses must be valid. Each true inbounds entry promises
+    /// that axis is in bounds. Supply a token ordering all conflicting accesses
+    /// and keep the view's storage alive. Weak ordering ignores memory_scope.
+    #[cuda_tile::op(name = "cuda_tile.load_view_tko", since = "V13_2")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn load_view_raw<
+        E: ElementType,
+        const S: [i32; N],
+        V,
+        I,
+        O: ordering::LoadMode,
+        Sc: scope::Mode,
+        T: tma::Mode,
+    >(
+        view: &V,
+        index: I,
+        token: Option<Token>,
+        memory_ordering: O,
+        memory_scope: Sc,
+        tma: T,
+        latency: Option<i32>,
+        inbounds: [bool; N],
+        shape: Shape<S>,
+    ) -> (Tile<E, S>, Token) {
+        unreachable!()
+    }
+
+    /// Raw store through a partition, strided, or gather/scatter view.
+    /// Index, hint and inbounds conventions match [`load_view_raw`].
+    ///
+    /// # Safety
+    /// The addressed storage must be writable, alive, and free of conflicting
+    /// unordered accesses. True inbounds entries must hold for every lane.
+    /// In particular, repeated scatter indices must not create a write race.
+    #[cuda_tile::op(name = "cuda_tile.store_view_tko", since = "V13_2")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn store_view_raw<
+        E: ElementType,
+        const S: [i32; N],
+        V,
+        I,
+        O: ordering::StoreMode,
+        Sc: scope::Mode,
+        T: tma::Mode,
+    >(
+        view: &V,
+        value: Tile<E, S>,
+        index: I,
+        token: Option<Token>,
+        memory_ordering: O,
+        memory_scope: Sc,
+        tma: T,
+        latency: Option<i32>,
+        inbounds: [bool; N],
+    ) -> Token {
+        unreachable!()
+    }
+
+    /// Raw atomic reduction through an unpadded partition or strided view.
+    /// Gather/scatter views and exchange mode are not supported by Tile IR.
+    ///
+    /// # Safety
+    /// Every addressed location must be valid, writable and correctly aligned
+    /// for the selected atomic operation. Order other conflicting accesses
+    /// with the supplied token and keep storage alive through completion.
+    #[cuda_tile::op(name = "cuda_tile.atomic_red_view_tko", since = "V13_3")]
+    #[cuda_tile::variadic_op(N = 6)]
+    pub unsafe fn atomic_red_view_raw<
+        E: ElementType,
+        const S: [i32; N],
+        V,
+        I,
+        M: atomic::Mode,
+        O: ordering::AtomicMode,
+        Sc: scope::Mode,
+    >(
+        view: &V,
+        value: Tile<E, S>,
+        index: I,
+        mode: M,
+        memory_ordering: O,
+        memory_scope: Sc,
+        token: Option<Token>,
+    ) -> Token {
+        unreachable!()
+    }
+
     /// Query a partition view's index-space shape as scalar tile values.
-    #[cuda_tile::op(name = "cuda_tile.get_index_space_shape", params = ["src"])]
+    #[cuda_tile::op(name = "cuda_tile.get_index_space_shape", since="V13_2", params = ["src"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn get_index_space_shape<E: ElementType, const S: [i32; N]>(
         src: &Partition<E, S>,
@@ -3030,7 +3346,7 @@ pub mod core {
     }
 
     /// Query a tensor view's dynamic shape as scalar tile values.
-    #[cuda_tile::op(name = "cuda_tile.get_tensor_shape", params = ["src"])]
+    #[cuda_tile::op(name = "cuda_tile.get_tensor_shape", since="V13_2", params = ["src"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn get_tensor_shape<E: ElementType, const S: [i32; N]>(src: &Tensor<E, S>) -> [i32; N] {
         unreachable!()
@@ -3039,7 +3355,7 @@ pub mod core {
     /// Load a tile from a partition view at `index`. `tma::Disabled` suppresses
     /// TMA lowering. `memory_ordering` ⊆ {Weak, Relaxed, Acquire}.
     // TODO (hme): Mark loads from shared refs as unsafe and add `_unchecked` suffix.
-    #[cuda_tile::op(name = "load_view_tko", params = ["view", "index"])]
+    #[cuda_tile::op(name = "load_view_tko", since="V13_2", params = ["view", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn load_view_tko<
         E: ElementType,
@@ -3059,7 +3375,7 @@ pub mod core {
     }
 
     /// `load_view_tko` for a proof-bounded read-only partition.
-    #[cuda_tile::op(name = "load_view_tko", params = ["view", "index"])]
+    #[cuda_tile::op(name = "load_view_tko", since="V13_2", params = ["view", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn load_view_tko_bounded<
         E: ElementType,
@@ -3080,7 +3396,7 @@ pub mod core {
 
     /// `load_view_tko` for `PartitionMut`. Caller must ensure no aliasing.
     // TODO (hme): document safety
-    #[cuda_tile::op(name = "load_view_tko", params = ["view", "index"])]
+    #[cuda_tile::op(name = "load_view_tko", since="V13_2", params = ["view", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn load_view_tko_mut<
         E: ElementType,
@@ -3102,7 +3418,7 @@ pub mod core {
     /// Store a tile into a `BoundedPartitionMut` at a branded `index`. The
     /// mutable mirror of `load_view_tko_bounded`; lowers via the same
     /// `store_view_tko` op as `store_view_tko_mut`.
-    #[cuda_tile::op(name = "store_view_tko", params = ["view", "tile", "index"])]
+    #[cuda_tile::op(name = "store_view_tko", since="V13_2", params = ["view", "tile", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn store_view_tko_bounded<
         E: ElementType,
@@ -3125,7 +3441,7 @@ pub mod core {
     /// Store a tile into a `PartitionMut` at `index`. Returns the completion token.
     /// `memory_ordering` ⊆ {Weak, Relaxed, Release}.
     // TODO (hme): document safety
-    #[cuda_tile::op(name = "store_view_tko", params = ["view", "tile", "index"])]
+    #[cuda_tile::op(name = "store_view_tko", since="V13_2", params = ["view", "tile", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn store_view_tko_mut<
         E: ElementType,
@@ -3147,7 +3463,7 @@ pub mod core {
 
     /// Store a tile into a mapped mutable partition at `index`.
     /// `memory_ordering` ⊆ {Weak, Relaxed, Release}.
-    #[cuda_tile::op(name = "store_view_tko", params = ["view", "tile", "index"])]
+    #[cuda_tile::op(name = "store_view_tko", since="V13_2", params = ["view", "tile", "index"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub unsafe fn store_view_tko_mapped_mut<
         E: ElementType,
@@ -3170,7 +3486,7 @@ pub mod core {
 
     /// Build a `Tensor` view from a base pointer, shape, strides, and a token.
     /// Caller must guarantee the layout is valid.
-    #[cuda_tile::op(name="cuda_tile.make_tensor_view",
+    #[cuda_tile::op(name="cuda_tile.make_tensor_view", since="V13_2",
                     params=["base", "shape.dims", "strides.dims"],
                     has_variadic_params=true,
                     output_type_params=["strides"],
@@ -3192,7 +3508,7 @@ pub mod core {
     /// parameter, or a real padding marker such as `padding::Zero` to include
     /// it. Pass `dim_map::Identity` to omit `dim_map`, or an `Array` dim map
     /// to include it.
-    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+    #[cuda_tile::op(name="cuda_tile.make_partition_view", since="V13_2",
                     params=["tensor_view"],
                     output_type_params=["tensor_view", "padding_value", "dim_map"],
                     output_type_meta=["token", "tensor_view.shape()"])]
@@ -3224,7 +3540,7 @@ pub mod core {
     /// The returned partition lifetime is not tied to the tensor argument, and
     /// callers must preserve the aliasing guarantees required by mutable view
     /// access.
-    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+    #[cuda_tile::op(name="cuda_tile.make_partition_view", since="V13_2",
                     params=["tensor_view"],
                     output_type_params=["tensor_view", "padding_value"],
                     output_type_meta=["token", "tensor_view.shape()"]
@@ -3249,7 +3565,7 @@ pub mod core {
     ///
     /// This is used by generated entry wrappers for
     /// `MappedPartitionMut<_, _, _>` parameters.
-    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+    #[cuda_tile::op(name="cuda_tile.make_partition_view", since="V13_2",
                     params=["tensor_view"],
                     output_type_params=["tensor_view", "padding_value"],
                     output_type_meta=["token"]
@@ -3273,7 +3589,7 @@ pub mod core {
     /// Build a nested mutable partition view from an already partitioned
     /// mutable tensor. This still partitions the full tensor view; the compiler
     /// attaches metadata so tile accesses are offset by the enclosing CTA tile.
-    #[cuda_tile::op(name="cuda_tile.make_partition_view",
+    #[cuda_tile::op(name="cuda_tile.make_partition_view", since="V13_2",
                     params=["tensor_view"],
                     output_type_params=["tensor_view", "padding_value"],
                     output_type_meta=["token", "tensor_view.shape()"]
@@ -3297,13 +3613,13 @@ pub mod core {
     // ---- Core pointer helpers ---------------------------------------------
 
     /// Pointer to a kernel-module global declared via the `global` op.
-    #[cuda_tile::op(name="cuda_tile.get_global", params=[], named_attributes=["name:symbol_ref"])]
+    #[cuda_tile::op(name="cuda_tile.get_global", since="V13_2", params=[], named_attributes=["name:symbol_ref"])]
     pub fn get_global<E: ElementType>() -> PointerTile<*mut E, { [] }> {
         unreachable!()
     }
 
     /// `result[i] = ptr[i] + offset`.
-    #[cuda_tile::op(name="cuda_tile.offset", params=["ptr", "offset"])]
+    #[cuda_tile::op(name="cuda_tile.offset", since="V13_2", params=["ptr", "offset"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn addptr<P: Pointer, const D: [i32; N]>(
         ptr: PointerTile<P, D>,
@@ -3313,7 +3629,7 @@ pub mod core {
     }
 
     /// `result[i] = ptr[i] + offset[i]`.
-    #[cuda_tile::op(name="cuda_tile.offset", params=["ptr", "offset"])]
+    #[cuda_tile::op(name="cuda_tile.offset", since="V13_2", params=["ptr", "offset"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn addptr_tile<I: ElementType, P: Pointer, const D: [i32; N]>(
         ptr: PointerTile<P, D>,
@@ -3323,7 +3639,7 @@ pub mod core {
     }
 
     /// Broadcast a `PointerTile` to a new shape (size-1 dims expand).
-    #[cuda_tile::op(name="cuda_tile.broadcast", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.broadcast", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6, method = "broadcast")]
     pub fn broadcast_ptr<P: Pointer, const S: [i32; N], const R: [i32; N]>(
         source: PointerTile<P, S>,
@@ -3333,7 +3649,7 @@ pub mod core {
     }
 
     /// Reshape a `PointerTile` (element count must match).
-    #[cuda_tile::op(name="cuda_tile.reshape", params=["source"])]
+    #[cuda_tile::op(name="cuda_tile.reshape", since="V13_2", params=["source"])]
     #[cuda_tile::variadic_op(N = 6, M = 6, method = "reshape")]
     pub fn reshape_ptr<P: Pointer, const S: [i32; N], const R: [i32; M]>(
         source: PointerTile<P, S>,
@@ -3348,7 +3664,7 @@ pub mod core {
     // ========================================================================
 
     /// Token-ordered debug print for a single tile argument.
-    #[cuda_tile::op(name = "cuda_tile.print_tko", params = ["arg"])]
+    #[cuda_tile::op(name = "cuda_tile.print_tko", since="V13_2", params = ["arg"])]
     #[cuda_tile::variadic_op(N = 6)]
     pub fn print_tko<E: ElementType, const S: [i32; N]>(
         str: &str,
@@ -3367,6 +3683,41 @@ pub mod core {
     /// Assert `x` is divisible by `DIVISOR`. UB if it isn't.
     #[cuda_tile::compiler_op(name = "assume")]
     pub unsafe fn assume_div_by<T, const DIVISOR: i32>(x: T) -> T {
+        unreachable!()
+    }
+
+    /// Full-width divisibility predicate; all predicate arguments are JIT constants.
+    ///
+    /// # Safety
+    /// The promised divisibility must hold for every selected lane. `every`
+    /// and `along` must both be present or both absent, as in Tile IR div_by.
+    #[cuda_tile::op(name = "cuda_tile.assume", since = "V13_2")]
+    pub unsafe fn assume_div_by_raw<T>(
+        x: T,
+        divisor: u64,
+        every: Option<i64>,
+        along: Option<i64>,
+    ) -> T {
+        unreachable!()
+    }
+
+    /// Full-width inclusive signed bounds; bounds are JIT constants.
+    ///
+    /// # Safety
+    /// Every integer lane must lie within the provided signed bounds.
+    #[cuda_tile::op(name = "cuda_tile.assume", since = "V13_2")]
+    pub unsafe fn assume_bounds_raw<T>(x: T, lower: Option<i64>, upper: Option<i64>) -> T {
+        unreachable!()
+    }
+
+    /// One same-elements group size per tile axis, including ranks above four.
+    /// Group sizes are JIT constants.
+    ///
+    /// # Safety
+    /// The integer/pointer lanes must satisfy the Tile IR same_elements
+    /// predicate for every specified group.
+    #[cuda_tile::op(name = "cuda_tile.assume", since = "V13_2")]
+    pub unsafe fn assume_same_elements_raw<T, const N: usize>(x: T, groups: [i64; N]) -> T {
         unreachable!()
     }
 

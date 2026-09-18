@@ -40,6 +40,8 @@ struct GlobalInfo {
     element_ty: Type,
     element_name: String,
     shape: Vec<i32>,
+    constant: bool,
+    visibility: cutile_ir::ir::SymbolVisibility,
 }
 
 impl<'m> CUDATileFunctionCompiler<'m> {
@@ -65,6 +67,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     info.element_name
                 ))
             })?;
+            if info.constant || info.visibility != cutile_ir::ir::SymbolVisibility::Public {
+                if let Some(caps) = &self.target_capabilities {
+                    caps.require_version(
+                        "global constant/visibility",
+                        cutile_ir::bytecode::BytecodeVersion::V13_3,
+                        &self.ir_location(&item.span()),
+                    )?;
+                }
+            }
             let value_ty = TileIrType::Tile(TileType {
                 shape: vec![1],
                 element_type: TileElementType::Scalar(scalar),
@@ -82,8 +93,8 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     data,
                 },
                 alignment: scalar_alignment(scalar),
-                constant: false,
-                symbol_visibility: cutile_ir::ir::SymbolVisibility::Public,
+                constant: info.constant,
+                symbol_visibility: info.visibility,
             });
         }
         Ok(())
@@ -109,6 +120,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             );
         }
 
+        if info.constant && method_call.method != "load" {
+            return self.jit_error_result(
+                &method_call.span(),
+                "constant Global storage cannot be modified",
+            );
+        }
         match method_call.method.to_string().as_str() {
             "load" => self.compile_global_load(module, block_id, method_call, generic_vars, info, return_type),
             "store" => self.compile_global_store(module, block_id, method_call, generic_vars, ctx, info, return_type),
@@ -513,11 +530,32 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 .resolve_span(module_name, &item.ty.span())
                 .jit_error("`Global` requires a static shape: `Global<A, { [] }>`")
         })?;
+        let options = crate::syn_utils::get_meta_list("cuda_tile :: global", &item.attrs);
+        let constant = options
+            .as_ref()
+            .and_then(|o| o.parse_bool("constant"))
+            .unwrap_or(false);
+        let visibility = match options
+            .as_ref()
+            .and_then(|o| o.parse_string("visibility"))
+            .as_deref()
+        {
+            None | Some("public") => cutile_ir::ir::SymbolVisibility::Public,
+            Some("private") => cutile_ir::ir::SymbolVisibility::Private,
+            Some(_) => {
+                return self
+                    .modules
+                    .resolve_span(module_name, &item.span())
+                    .jit_error_result("global visibility must be public or private")
+            }
+        };
         Ok(Some(GlobalInfo {
             symbol: global_symbol_name(module_name, &item.ident.to_string()),
             element_ty,
             element_name,
             shape,
+            constant,
+            visibility,
         }))
     }
 
@@ -712,6 +750,7 @@ fn scalar_alignment(scalar: ScalarType) -> u64 {
         | ScalarType::F4E2M1FN
         | ScalarType::F8E4M3FN
         | ScalarType::F8E5M2
+        | ScalarType::F8E5M3FNU
         | ScalarType::F8E8M0FNU => 1,
         ScalarType::I16 | ScalarType::F16 | ScalarType::BF16 => 2,
         ScalarType::I32 | ScalarType::F32 | ScalarType::TF32 => 4,

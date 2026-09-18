@@ -58,6 +58,29 @@ impl Display for JITError {
 
 impl error::Error for JITError {}
 
+impl From<cutile_ir::capabilities::CapabilityError> for JITError {
+    fn from(error: cutile_ir::capabilities::CapabilityError) -> Self {
+        fn source(loc: &cutile_ir::ir::Location) -> SourceLocation {
+            use cutile_ir::ir::Location;
+            match loc {
+                Location::FileLineCol {
+                    filename,
+                    line,
+                    column,
+                } => SourceLocation::new(filename.clone(), *line as usize, *column as usize),
+                Location::DebugInfo(loc) => SourceLocation::new(
+                    loc.filename.clone(),
+                    loc.line as usize,
+                    loc.column as usize,
+                ),
+                Location::CallSite { callee, .. } => source(callee),
+                Location::Unknown => SourceLocation::unknown(),
+            }
+        }
+        Self::Located(error.message, source(&error.location))
+    }
+}
+
 impl JITError {
     /// Create a `Generic` error value (not wrapped in `Result`).
     pub fn generic_err(err_str: &str) -> JITError {

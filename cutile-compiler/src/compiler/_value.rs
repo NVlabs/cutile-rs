@@ -623,13 +623,16 @@ pub struct CompilerContext {
     /// innermost loop's preheader instead of the hot loop body.
     pub(crate) loop_frames: Vec<LoopFrame>,
     /// True while this context compiles a function body block itself — the
-    /// kernel entry body or an inlined callee's body — which is the only
-    /// place a `return` statement is supported. `compile_block` clears it
+    /// kernel entry body or an inlined callee's body. `compile_block` clears it
     /// on entry, so every nested block (an `if` branch, a loop body, a bare
     /// `{}`/`unsafe {}` block) compiled from a clone sees `false`: a
-    /// `return` there cannot be lowered (the enclosing block's terminator
-    /// would be emitted and control would fall through) and is rejected.
+    /// Nested returns require the separate kernel-loop permission below;
+    /// otherwise they would fall through and are rejected.
     pub(crate) fn_body: bool,
+    /// A nested Tile IR return exits the kernel, never an inlined helper.
+    pub(crate) kernel_entry: bool,
+    /// Return is prohibited under any `for`, including an inner `loop`.
+    pub(crate) inside_for: bool,
     /// The Tile IR loop op of the innermost enclosing source loop, if any.
     /// Inherited by nested blocks; decides whether a `break` is
     /// representable (only inside `cuda_tile.loop`).
@@ -645,6 +648,8 @@ impl CompilerContext {
             module_scope: vec![],
             loop_frames: vec![],
             fn_body: false,
+            kernel_entry: false,
+            inside_for: false,
             innermost_loop: None,
         }
     }
@@ -674,6 +679,8 @@ impl CompilerContext {
             module_scope,
             loop_frames: self.loop_frames.clone(),
             fn_body: false,
+            kernel_entry: self.kernel_entry,
+            inside_for: self.inside_for,
             innermost_loop: self.innermost_loop,
         })
     }

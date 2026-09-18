@@ -54,6 +54,15 @@ pub fn decode_bytecode(data: &[u8]) -> Result<String> {
     }
 
     // Parse type table.
+    if let Some(payload) = sections.get(Section::Producer as u8) {
+        let mut producer = Reader::new(payload);
+        let index = producer.read_varint()? as usize;
+        let name = strings
+            .get(index)
+            .ok_or_else(|| Error::BytecodeWrite("producer string index out of range".into()))?;
+        writeln!(out, "=== Producer ===\n  {name:?}\n").unwrap();
+    }
+
     let types = parse_type_section(sections.get(Section::Type as u8), version)?;
     if !types.is_empty() {
         writeln!(out, "=== Types ({}) ===", types.len()).unwrap();
@@ -494,11 +503,22 @@ fn decode_type_entry(data: &[u8], prev_types: &[String], version: BytecodeVersio
         t if t == TypeTag::F8E5M2 as u8 => "f8e5m2".into(),
         t if t == TypeTag::F8E8M0FNU as u8 => "f8e8m0fnu".into(),
         t if t == TypeTag::F4E2M1FN as u8 => "f4e2m1fn".into(),
+        t if t == TypeTag::F8E5M3FNU as u8 => "f8e5m3fnu".into(),
         t if t == TypeTag::Token as u8 => "token".into(),
         t if t == TypeTag::Pointer as u8 => {
+            let flags = if version >= BytecodeVersion::V13_4 {
+                r.read_varint().unwrap_or(0)
+            } else {
+                0
+            };
             let elem = r.read_varint().unwrap_or(0) as usize;
             let elem_name = prev_types.get(elem).cloned().unwrap_or("?".into());
-            format!("ptr<{elem_name}>")
+            if flags & 1 != 0 {
+                let attr = r.read_byte().unwrap_or(0);
+                format!("ptr<{elem_name}, ptr_attr={attr}>")
+            } else {
+                format!("ptr<{elem_name}>")
+            }
         }
         t if t == TypeTag::Tile as u8 => {
             let elem = r.read_varint().unwrap_or(0) as usize;
@@ -520,6 +540,11 @@ fn decode_type_entry(data: &[u8], prev_types: &[String], version: BytecodeVersio
             }
         }
         t if t == TypeTag::TensorView as u8 => {
+            let flags = if version >= BytecodeVersion::V13_4 {
+                r.read_varint().unwrap_or(0)
+            } else {
+                0
+            };
             let elem = r.read_varint().unwrap_or(0) as usize;
             let elem_name = prev_types.get(elem).cloned().unwrap_or("?".into());
             let rank = r.read_varint().unwrap_or(0) as usize;
@@ -554,7 +579,12 @@ fn decode_type_entry(data: &[u8], prev_types: &[String], version: BytecodeVersio
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("tensor_view<{shape_str}x{elem_name}, strides=[{stride_str}]>")
+            let ptr_attr = if flags & 1 != 0 {
+                format!(", ptr_attr={}", r.read_byte().unwrap_or(0))
+            } else {
+                String::new()
+            };
+            format!("tensor_view<{shape_str}x{elem_name}, strides=[{stride_str}]{ptr_attr}>")
         }
         t if t == TypeTag::PartitionView as u8 => {
             let mut padding_flag_from_bitfield = None;

@@ -74,10 +74,30 @@ GPU and toolkit requirements for cuTile Rust:
 |---|---|
 | `sm_8x` (Ampere / Ada) | 13.2 |
 | `sm_90` (Hopper) | 13.3 |
-| `sm_100+` (Blackwell, including DGX Spark / GB10 `sm_121`) | 13.2 |
+| Blackwell `sm_100`, `sm_103`, `sm_110`, `sm_120`, `sm_121` | 13.2 |
+| `sm_107` | 13.4 |
 
 CUDA **13.3 is recommended**. FP4 packing and block-scaled MMA require 13.3.
 GPUs below `sm_80` (such as `sm_70` and `sm_75`) are unsupported.
+
+Raw features have additional requirements. Toolkit and architecture checks
+are **both** required; an unsupported operation produces a source-located
+JIT error before assembly.
+
+| Raw feature | Requires |
+|---|---|
+| Allocation, gather/scatter and strided views, view atomic reduction | Tile IR 13.3 |
+| FP4 packing and block-scaled MMA | Tile IR 13.3 and `sm_100+`; valid operand/scale configuration |
+| `insert`, `fpowi`, GDC tokens, alias fence | Tile IR 13.4 |
+| Saturating float-to-int, explicit pointer classification, view `inbounds` | Tile IR 13.4 |
+| `f8e5m3fnu` | Tile IR 13.4 and `sm_107+`; scaled MMA with this scale type requires `sm_107` |
+| Programmatic dependent launch (unsafe, per launch) | Tile IR 13.4, `sm_90+`, driver `cuLaunchKernelEx` support |
+
+The selected `tileiras` determines the emitted bytecode version, including
+when `CUTILE_TILEIRAS_PATH` overrides the toolkit directory. CUDA 13.2 and
+13.3 retain their older wire layouts. See the
+[raw DSL reference](cutile-book/reference/dsl-api.md#raw-tile-ir-versioned-surface)
+and [launch contract](cutile-book/reference/host-api.md#programmatic-dependent-launch).
 
 ### Install
 
@@ -98,8 +118,8 @@ https://developer.nvidia.com/cuda-downloads
 
 Set `CUDA_TOOLKIT_PATH` (or `CUDA_HOME`, consulted second) to your CUDA 13.3
 install directory for a reproducible setup. If neither is set, cuTile
-searches standard CUDA 13.3/13.2 install locations such as
-`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`,
+searches standard CUDA 13.4/13.3/13.2 install locations such as
+`/usr/local/cuda-13.4`, `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`,
 `/usr/local/cuda`, and `/opt/cuda`.
 
 Example `.cargo/config.toml`:

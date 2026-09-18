@@ -13,9 +13,11 @@
 
 pub mod builder;
 pub mod bytecode;
+pub mod capabilities;
 pub mod ir;
 
 mod error;
+mod verify_target;
 
 pub use error::{Error, Result};
 

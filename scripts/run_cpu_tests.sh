@@ -61,6 +61,7 @@ for test_target in \
     registry_phase_a \
     span_source_location \
     trait_dispatch_probe \
+    tile_ir_capabilities \
     two_cga_trait_impl \
     type_inference_sanity \
     unary_math_ops \

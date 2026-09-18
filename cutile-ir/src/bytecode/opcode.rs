@@ -115,9 +115,147 @@ pub enum Opcode {
     MakeGatherScatterView = 0x73,
     MakeStridedView = 0x74,
     AtomicRedViewTko = 0x75,
+    Insert = 0x76,
+    GdcLaunchDependentsTko = 0x77,
+    GdcWaitTko = 0x78,
+    FPowI = 0x79,
+    MemoryFenceAliasTko = 0x7A,
 }
 
 impl Opcode {
+    /// Unqualified dialect operation name.
+    pub const fn name(self) -> &'static str {
+        use Opcode::*;
+        match self {
+            AbsF => "absf",
+            AbsI => "absi",
+            AddF => "addf",
+            AddI => "addi",
+            AndI => "andi",
+            Assert => "assert",
+            Assume => "assume",
+            Alloca => "alloca",
+            Atan2 => "atan2",
+            AtomicCAS => "atomic_cas_tko",
+            AtomicRedViewTko => "atomic_red_view_tko",
+            AtomicRMW => "atomic_rmw_tko",
+            Bitcast => "bitcast",
+            Break => "break",
+            Broadcast => "broadcast",
+            Cat => "cat",
+            Ceil => "ceil",
+            CmpF => "cmpf",
+            CmpI => "cmpi",
+            Constant => "constant",
+            Continue => "continue",
+            Cos => "cos",
+            CosH => "cosh",
+            DivF => "divf",
+            DivI => "divi",
+            Entry => "entry",
+            Exp => "exp",
+            Exp2 => "exp2",
+            ExtI => "exti",
+            Extract => "extract",
+            Floor => "floor",
+            Fma => "fma",
+            For => "for",
+            FToF => "ftof",
+            FToI => "ftoi",
+            GetGlobal => "get_global",
+            GetIndexSpaceShape => "get_index_space_shape",
+            GetNumTileBlocks => "get_num_tile_blocks",
+            GetTensorShape => "get_tensor_shape",
+            GetTileBlockId => "get_tile_block_id",
+            Global => "global",
+            If => "if",
+            IntToPtr => "int_to_ptr",
+            Iota => "iota",
+            IToF => "itof",
+            JoinTokens => "join_tokens",
+            LoadPtrTko => "load_ptr_tko",
+            LoadViewTko => "load_view_tko",
+            Log => "log",
+            Log2 => "log2",
+            Loop => "loop",
+            MakeGatherScatterView => "make_gather_scatter_view",
+            MakePartitionView => "make_partition_view",
+            MakeStridedView => "make_strided_view",
+            MakeTensorView => "make_tensor_view",
+            MakeToken => "make_token",
+            MaxF => "maxf",
+            MaxI => "maxi",
+            MinF => "minf",
+            MinI => "mini",
+            MmaF => "mmaf",
+            MmaFScaled => "mmaf_scaled",
+            MmaI => "mmai",
+            Module => "module",
+            MulF => "mulf",
+            MulhiI => "mulhii",
+            MulI => "muli",
+            NegF => "negf",
+            NegI => "negi",
+            Offset => "offset",
+            OrI => "ori",
+            Pack => "pack",
+            Permute => "permute",
+            Pow => "pow",
+            Print => "print_tko",
+            PtrToInt => "ptr_to_int",
+            PtrToPtr => "ptr_to_ptr",
+            Reduce => "reduce",
+            RemF => "remf",
+            RemI => "remi",
+            Reshape => "reshape",
+            Return => "return",
+            Rsqrt => "rsqrt",
+            Scan => "scan",
+            Select => "select",
+            ShLI => "shli",
+            ShRI => "shri",
+            Sin => "sin",
+            SinH => "sinh",
+            Sqrt => "sqrt",
+            StorePtrTko => "store_ptr_tko",
+            StoreViewTko => "store_view_tko",
+            SubF => "subf",
+            SubI => "subi",
+            Tan => "tan",
+            TanH => "tanh",
+            TruncI => "trunci",
+            Unpack => "unpack",
+            XOrI => "xori",
+            Yield => "yield",
+            Insert => "insert",
+            GdcLaunchDependentsTko => "gdc_launch_dependents_tko",
+            GdcWaitTko => "gdc_wait_tko",
+            FPowI => "fpowi",
+            MemoryFenceAliasTko => "memory_fence_alias_tko",
+        }
+    }
+
+    /// Minimum supported wire version for this opcode. Operand types and
+    /// nondefault attributes can impose a newer requirement of their own.
+    pub const fn minimum_version(self) -> super::BytecodeVersion {
+        use super::BytecodeVersion;
+        match self {
+            Self::Insert
+            | Self::GdcLaunchDependentsTko
+            | Self::GdcWaitTko
+            | Self::FPowI
+            | Self::MemoryFenceAliasTko => BytecodeVersion::V13_4,
+            Self::Pack
+            | Self::Unpack
+            | Self::Alloca
+            | Self::MmaFScaled
+            | Self::MakeGatherScatterView
+            | Self::MakeStridedView
+            | Self::AtomicRedViewTko => BytecodeVersion::V13_3,
+            _ => BytecodeVersion::V13_2,
+        }
+    }
+
     /// Return the raw u16 opcode value for bytecode emission.
     pub fn as_u16(self) -> u16 {
         self as u16
@@ -133,9 +271,9 @@ impl Opcode {
         use Opcode::*;
         match self {
             // Ops that write varint numResults (from Bytecode.inc audit):
-            Break | Continue | Extract | For | GetIndexSpaceShape | GetTensorShape | If
-            | JoinTokens | LoadViewTko | Loop | MakeTensorView | Print | Reduce | Return | Scan
-            | StoreViewTko | Yield => None,
+            Break | Continue | Extract | Insert | For | GetIndexSpaceShape | GetTensorShape
+            | If | JoinTokens | LoadViewTko | Loop | MakeTensorView | Print | Reduce | Return
+            | Scan | StoreViewTko | Yield => None,
 
             // Fixed-count ops (from Ops.td):
             // 0 results
@@ -163,6 +301,9 @@ impl Opcode {
             | Exp2
             | ExtI
             | Floor
+            | FPowI
+            | GdcLaunchDependentsTko
+            | GdcWaitTko
             | Fma
             | FToF
             | FToI
@@ -176,6 +317,7 @@ impl Opcode {
             | MakePartitionView
             | MakeStridedView
             | MakeToken
+            | MemoryFenceAliasTko
             | MaxF
             | MaxI
             | MinF

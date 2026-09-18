@@ -314,6 +314,31 @@ fn get_integer_const<T: Integer>(const_str: &str) -> Result<String, JITError> {
 
 /// Returns the hex-encoded constant string for a typed constant name (e.g. `"zero"`, `"one"`).
 pub fn get_const_hex(rust_element_type_str: &str, const_str: &str) -> Result<String, JITError> {
+    // Storage-only scalar wrappers use their raw byte encodings. In particular,
+    // scale formats must not pass through the f32 constant encoding path.
+    if const_str == "zero"
+        && matches!(
+            rust_element_type_str,
+            "i4" | "f4e2m1fn" | "f4e2m1fnx2" | "f8e4m3fn" | "f8e5m2" | "f8e8m0fnu" | "f8e5m3fnu"
+        )
+    {
+        return Ok("0".into());
+    }
+    if const_str == "one" {
+        let bits = match rust_element_type_str {
+            "i4" => Some(1),
+            "f4e2m1fn" => Some(2),
+            "f4e2m1fnx2" => Some(0x22),
+            "f8e4m3fn" => Some(0x38),
+            "f8e5m2" => Some(0x3c),
+            "f8e8m0fnu" => Some(0x7f),
+            "f8e5m3fnu" => Some(0x78),
+            _ => None,
+        };
+        if let Some(bits) = bits {
+            return Ok(bits.to_string());
+        }
+    }
     match rust_element_type_str {
         "bf16" => get_float_const::<bf16>(const_str),
         "f16" => get_float_const::<f16>(const_str),
