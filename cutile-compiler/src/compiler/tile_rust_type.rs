@@ -237,7 +237,7 @@ impl TileRustType {
             syn::parse_str::<syn::Type>(&format!("PointerTile<{prefix} {element_name}, {{[]}}>"))
                 .ok()?;
         Some(TileRustType {
-            kind: Kind::PrimitiveType,
+            kind: Kind::StructuredType,
             cuda_tile_name: Some("!cuda_tile.tile".into()),
             cuda_tile_ty_str: Some(type_str),
             tile_ir_ty: Some(tile_ir_ty),
@@ -350,5 +350,19 @@ impl TileRustType {
             type_instance,
             kind: Kind::Enum,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_pointer_tile_is_structured() {
+        let pointer = TileRustType::from_scalar_ptr("i32");
+        assert!(matches!(
+            pointer.as_ref().map(|ty| &ty.kind),
+            Some(Kind::StructuredType)
+        ));
     }
 }
