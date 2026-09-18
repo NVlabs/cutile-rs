@@ -223,3 +223,47 @@ pub unsafe fn malloc_host(num_bytes: usize) -> Result<*mut c_void, DriverError> 
 pub unsafe fn free_host(ptr: *mut c_void) -> Result<(), DriverError> {
     unsafe { cuda_bindings::cuMemFreeHost(ptr) }.result()
 }
+
+/// Page-locks and registers an existing host memory range with CUDA.
+///
+/// # Safety
+///
+/// - A CUDA context must be bound to the calling thread.
+/// - `ptr` must point to at least `num_bytes` of valid, allocated host memory.
+/// - `ptr` must remain allocated and must not be freed until [`host_unregister`] is called.
+pub unsafe fn host_register(
+    ptr: *mut c_void,
+    num_bytes: usize,
+    flags: std::ffi::c_uint,
+) -> Result<(), DriverError> {
+    unsafe { cuda_bindings::cuMemHostRegister_v2(ptr, num_bytes, flags) }.result()
+}
+
+/// Unregisters a host memory range previously registered with [`host_register`].
+///
+/// # Safety
+///
+/// - A CUDA context must be bound to the calling thread.
+/// - `ptr` must have been previously registered with [`host_register`].
+/// - No in-flight CUDA transfer or kernel may reference `ptr`.
+pub unsafe fn host_unregister(ptr: *mut c_void) -> Result<(), DriverError> {
+    unsafe { cuda_bindings::cuMemHostUnregister(ptr) }.result()
+}
+
+/// Retrieves the device pointer through which `ptr` can be accessed by the GPU.
+///
+/// # Safety
+///
+/// - A CUDA context must be bound to the calling thread.
+/// - `ptr` must have been previously registered with [`host_register`] using
+///   `CU_MEMHOSTREGISTER_DEVICEMAP`.
+pub unsafe fn host_get_device_pointer(
+    ptr: *mut c_void,
+    flags: std::ffi::c_uint,
+) -> Result<cuda_bindings::CUdeviceptr, DriverError> {
+    let mut dev_ptr = MaybeUninit::uninit();
+    unsafe {
+        cuda_bindings::cuMemHostGetDevicePointer_v2(dev_ptr.as_mut_ptr(), ptr, flags).result()?;
+        Ok(dev_ptr.assume_init())
+    }
+}

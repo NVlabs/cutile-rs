@@ -35,5 +35,5 @@ pub use simt::{
     DeviceCopy, DeviceLaunchLimits, DynamicSharedMemoryRequirement, EmbeddedModule,
     EmbeddedModuleError, KernelLaunchConfig, KernelLaunchContract, LaunchAxis, LaunchConfig1D,
     LaunchConfig2D, LaunchConfig3D, LaunchContractError, LaunchContractSpec, LaunchDimension,
-    PinnedHostBuffer, PreparedLaunch, StreamPriorityRange, SyncPolicy,
+    PinnedHostBuffer, PinnedHostMapping, PreparedLaunch, StreamPriorityRange, SyncPolicy,
 };

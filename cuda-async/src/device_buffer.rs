@@ -223,3 +223,17 @@ impl DeviceBuffer {
         self.device_id
     }
 }
+
+unsafe impl DeviceAllocation for cuda_core::PinnedHostMapping {
+    fn device_ptr(&self) -> CUdeviceptr {
+        self.device_ptr()
+    }
+
+    fn len_bytes(&self) -> usize {
+        self.len_bytes()
+    }
+
+    fn device_id(&self) -> usize {
+        self.device_id()
+    }
+}
