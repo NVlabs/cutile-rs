@@ -148,6 +148,8 @@ pub struct StridedViewType {
 }
 
 /// Padding value for out-of-bounds accesses in a partition view.
+///
+/// Writer serializes `value as u8` and the reader decodes with [`PaddingValue::from_u8`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PaddingValue {
@@ -156,6 +158,19 @@ pub enum PaddingValue {
     Nan = 2,
     PosInf = 3,
     NegInf = 4,
+}
+
+impl PaddingValue {
+    pub(crate) fn from_u8(p: u8) -> Option<Self> {
+        match p {
+            0 => Some(Self::Zero),
+            1 => Some(Self::NegZero),
+            2 => Some(Self::Nan),
+            3 => Some(Self::PosInf),
+            4 => Some(Self::NegInf),
+            _ => None,
+        }
+    }
 }
 
 /// Function signature type.
