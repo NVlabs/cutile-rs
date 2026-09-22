@@ -1,12 +1,14 @@
 # cuTile Rust
 
-**cuTile Rust** is a high-performance GPU programming library that lets you write Rust code that compiles directly to CUDA kernels.
+**cuTile Rust** compiles Rust tile programs into CUDA kernels.
 
 ---
 
 ## Project Status
 
-We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
+This is an early-stage research project under active development. Expect bugs,
+incomplete features, and breaking API changes. Feedback from using it in your
+own projects helps us decide what to work on next.
 
 ---
 
@@ -43,7 +45,9 @@ fn main() -> Result<(), Error> {
 
 The example separates host-side tensor setup from the device-side tile program. The host constructs tensors, partitions the mutable output into 128-element chunks, and launches the generated operation with `.sync()`.
 
-The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result.
+In the kernel signature, `z` is the exclusive mutable output; `x` and `y` are
+shared read-only inputs. The kernel adds input tiles matching the output
+partition and stores the result in `z`.
 
 ---
 
@@ -56,11 +60,11 @@ The kernel signature carries the access discipline into device code: `z` is the 
 Mutable tensors are partitioned into disjoint pieces before launch; immutable tensors are shared by `Arc`. The borrow checker covers GPU kernel arguments, not just host-side code.
 :::
 
-:::{grid-item-card} Tile programs, not threads
+:::{grid-item-card} Tile programs
 Tile kernels are written as single-threaded programs over tiles of data. The compiler maps tiles onto warps, blocks, and Tensor Cores; you don't manage shared memory or thread indices directly.
 :::
 
-:::{grid-item-card} Tile IR for performance
+:::{grid-item-card} CUDA Tile IR compilation
 Tile kernels lower through CUDA Tile IR, NVIDIA's tile-level compiler IR, to GPU cubins. On B200, the safe API reaches 2.07 PFlop/s on persistent GEMM (96.4% of cuBLAS); the safe mapped kernel matches the raw-pointer Rust baseline within measurement noise.
 :::
 
@@ -82,6 +86,7 @@ tutorials/08-data-parallel-mlp
 tutorials/09-pointer-addition
 tutorials/10-cuda-graphs
 tutorials/11-nvfp4-inference
+tutorials/12-dgx-spark-inference
 ```
 
 ```{toctree}

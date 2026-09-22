@@ -6,7 +6,8 @@ SAXPY stands for **S**ingle-precision **A**·**X** **P**lus **Y** — a classic 
 y = a * x + y    where a is a scalar, x and y are vectors
 ```
 
-In cutile, operations happen between **tiles**. A scalar is just one number, so it can't directly operate with a tile. The solution is to **broadcast** the scalar to match the tile's shape.
+cuTile arithmetic operates on tiles. To multiply a tile by a scalar,
+**broadcast** the scalar to the tile's shape.
 
 ---
 
@@ -16,7 +17,7 @@ Broadcasting takes a smaller value and replicates it to match a larger shape:
 
 ![Broadcasting transforms a scalar into a tile](../_static/images/saxpy-broadcasting.svg)
 
-Broadcasting is conceptual — the GPU doesn't actually allocate memory for all those copies. It's a compile-time transformation that generates efficient code.
+The compiler implements broadcasting without allocating memory for the copies.
 
 ---
 
@@ -103,9 +104,10 @@ This is an **in-place operation** — updating `y` rather than creating a new te
 
 - Global memory is **slow** (hundreds of cycles to access).
 - Registers are **fast** (single cycle).
-- We load once, compute in registers, store once.
+- Intermediate results stay in registers between the load and store.
 
-Combining operations into a single kernel — **kernel fusion** — keeps data in fast registers instead of bouncing to slow global memory.
+Combining operations in one kernel (**kernel fusion**) avoids writing
+intermediate results to global memory.
 
 ---
 

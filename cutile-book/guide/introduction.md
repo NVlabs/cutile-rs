@@ -43,7 +43,9 @@ fn main() -> Result<(), cuda_async::error::DeviceError> {
 }
 ```
 
-Here, `main` is host Rust code: it runs on the CPU, allocates tensors, and launches work. The `add` function is device Rust code because it is marked with `#[cutile::entry()]`; when `main` first calls `add(...)`, cuTile Rust JIT-compiles that function into optimized GPU code. The `#[cutile::module]` macro makes `my_module` expose the generated host-side APIs for launching `add`.
+`main` runs on the CPU and launches `add` on the GPU. The `#[cutile::module]`
+macro generates the host-side launcher for `add`, whose `#[cutile::entry()]`
+attribute marks it as a kernel entry point.
 
 At first call, the entry function is compiled through Rust AST -> Tile IR bytecode -> cubin. Subsequent calls with the same compiled variant reuse the cached binary.
 

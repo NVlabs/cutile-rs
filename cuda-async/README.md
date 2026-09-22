@@ -3,7 +3,7 @@
 CUDA Async lets programmers asynchronously compose DAGs of CUDA operations
 and execute them on multiple devices using any async Rust runtime (such as tokio).
 
-The design consists of three key pieces:
+The API separates composition, scheduling, and execution:
 - **Device operations** — composed using the `DeviceOp` trait and combinators.
 - **Scheduling** — an implementation of `SchedulingPolicy` maps `DeviceOp`s to streams.
 - **Execution** — `.sync_on(&stream)`, `.sync()`, or `.await`.
@@ -78,9 +78,9 @@ let shared = op.shared();
 A `.then()` closure runs under a per-thread execution lock and may not
 execute other operations (`.sync()`, `.sync_on()`, a nested `.await`); doing
 so returns a `DeviceError` rather than racing streams against each other.
-`unsafe { op.then_unchecked(|x| ...) }` releases the lock for the closure
-only, for callers who can vouch that nothing in it touches, on another
-stream, memory still in flight on the chain's stream.
+`unsafe { op.then_unchecked(|x| ...) }` releases the lock for the closure.
+The caller must ensure it does not access memory on another stream while
+the chain's stream is still using that memory.
 
 ## Scheduling
 
@@ -143,9 +143,8 @@ context; a future awaiting through them may not resolve after a fault.
 
 ### Cancellation and Forgotten Futures
 
-Dropping a `DeviceFuture` never cancels GPU work that was already
-submitted; kernels run to completion. What the drop decides is when the
-host releases the resources that work still uses. A future dropped after
+Dropping a `DeviceFuture` does not cancel submitted GPU work. It controls
+when the host releases the resources that work uses. A future dropped after
 its first poll but before completion therefore **waits for its stream to
 drain** before dropping its undelivered output (tensors, `Vec<T>` DMA
 targets, borrowed inputs). If the wait cannot be performed — the context

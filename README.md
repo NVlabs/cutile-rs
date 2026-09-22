@@ -10,7 +10,11 @@
 
 </div>
 
-cuTile Rust (`cutile-rs`) is a tile-based system for writing memory-safe, data-race-free GPU kernels in idiomatic Rust. It extends Rust's ownership discipline across the GPU launch boundary: mutable tensors are partitioned into disjoint pieces before launch, immutable tensors are shared, and generated launchers preserve ownership while GPU work is in flight. The same model supports synchronous launches, asynchronous pipelines, and CUDA graph replay. The `#[cutile::module]` macro embeds a captured Rust AST for each kernel in the host binary; when a kernel is needed, cuTile Rust JIT-compiles that AST through CUDA Tile IR into a GPU cubin. Local opt-outs remain available when lower-level control is needed.
+cuTile Rust (`cutile-rs`) is a tile-based system for writing memory-safe,
+data-race-free GPU kernels in Rust. It extends Rust's ownership rules across host
+and device: mutable outputs are split into disjoint pieces, while read-only inputs
+can be shared. Kernels are JIT-compiled through CUDA Tile IR. The same operations
+can run synchronously, with `async`/`await`, or as CUDA graph replay.
 
 ## Project Status
 We are excited to release this research project as a demonstration of how GPU programming can be made available in the Rust ecosystem. The software is in an early stage and under active development: you should expect bugs, incomplete features, and API breakage as we work to improve it. That being said, we hope you'll be interested to try it in your work and help shape its direction by providing feedback on your experience.
@@ -54,10 +58,13 @@ The `#[cutile::module]` macro transforms `add` into a GPU kernel and generates a
 
 Launches return all runtime arguments in parameter order (`z, x, y` here), including inputs and scalars. `.unpartition().to_host_vec().sync()?` copies the partitioned tensor's contents into a vector on the host machine.
 
-The kernel signature carries the access discipline into device code: `z` is the exclusive mutable output, while `x` and `y` are shared read-only inputs. The body loads input tiles matching the output partition, adds them, and stores the result. The launch grid `(8, 1, 1)` is inferred from the partition: 1024÷128 = 8 tiles.
+In the kernel signature, `z` is the exclusive mutable output; `x` and `y` are
+shared read-only inputs. The kernel adds input tiles matching the output
+partition and stores the result in `z`. The partition determines the launch
+grid `(8, 1, 1)`: 1024÷128 = 8 tiles.
 
 - Run a similar example via `cargo run -p cutile-examples --example saxpy`.
-- More kernels and usage examples of the host-side API can be found [here](cutile-examples/examples).
+- [More kernel and host API examples](cutile-examples/examples).
 - For NVIDIA Nsight Compute, Nsight Systems, and cuda-gdb workflows, see
   [Debugging and Profiling](cutile-book/guide/debugging-and-profiling.md).
 
@@ -78,6 +85,9 @@ GPU and emitted Tile IR requirements for cuTile Rust:
 | Blackwell `sm_100`, `sm_103`, `sm_110`, `sm_120`, `sm_121` | 13.2 |
 | `sm_107` | 13.4 |
 <!-- END TILE IR TARGETS -->
+
+For DGX Spark / GB10 (`sm_121`), see the
+[DGX Spark tutorial](https://nvlabs.github.io/cutile-rs/tutorials/12-dgx-spark-inference.html).
 
 CUDA **13.3 is recommended**. FP4 packing and block-scaled MMA require 13.3.
 GPUs below `sm_80` (such as `sm_70` and `sm_75`) are unsupported.
@@ -155,7 +165,8 @@ If everything works, you should see: `Hello, I am tile <0, 0, 0> in a kernel wit
 
 ## Via Nix
 
-We provide a Nix flake for easy setup and development. Flakes must be enabled in your Nix configuration, if not already, add to `~/.config/nix/nix.conf`:
+The repository includes a Nix flake. To enable flakes, add this to
+`~/.config/nix/nix.conf`:
 ```
 experimental-features = nix-command flakes
 ```
@@ -216,7 +227,8 @@ cuda-bindings          NVIDIA CUDA bindings
 
 ## Related Projects and References
 
-- [Grout](https://github.com/huggingface/grout): Qwen 3 inference engine in Rust by Hugging Face, built with cuTile Rust and useful as a reference for production kernel call sites.
+- [Candle](https://github.com/huggingface/candle): Hugging Face's Rust ML framework, with [mixture-of-experts (MoE) kernels written in cuTile Rust](https://github.com/huggingface/candle/blob/main/candle-nn/src/moe/cutile.rs).
+- [mistral.rs](https://github.com/EricLBuehler/mistral.rs): Rust LLM inference engine with [cuTile Rust kernels](https://github.com/EricLBuehler/mistral.rs/tree/master/mistralrs-quant/src/cutile) for quantized linear layers and MoE, enabled by the optional `cutile` feature.
 - [cuTile Python](https://github.com/nvidia/cutile-python): Python kernel programming with CUDA Tile.
 - [TileGym](https://github.com/NVIDIA/TileGym): CUDA Tile kernel examples and tuning patterns, including a set of ready-to-use cuTile Rust kernels under [`ops/cutile_rs`](https://github.com/NVIDIA/TileGym/tree/main/src/tilegym/ops/cutile_rs).
 - [cuda-oxide](https://github.com/NVlabs/cuda-oxide): NVlabs experimental Rust-to-CUDA compiler for writing SIMT-style GPU kernels in Rust.
@@ -226,11 +238,20 @@ cuda-bindings          NVIDIA CUDA bindings
 
 ## Paper
 
-The cuTile Rust paper, *Fearless Concurrency on the GPU*, is available [here](https://arxiv.org/abs/2606.15991). On NVIDIA B200, cuTile Rust reaches 7 TB/s for element-wise operations and 2 PFlop/s for GEMM, about 91% of peak memory bandwidth and 92% of dense `f16` peak, respectively. The GEMM result is competitive with cuBLAS, and the B200 safety-overhead microbenchmarks show that cuTile Rust adds safety without measurable runtime overhead: safe Rust persistent GEMM reaches 2.07 PFlop/s at `M=N=K=8192` (92% of the B200 dense `f16` peak), within 0.3% of the corresponding low-level Tile IR variant.
+[*Fearless Concurrency on the GPU*](https://arxiv.org/abs/2606.15991) evaluates the
+runtime cost of safety and the performance of applications built with cuTile Rust.
+On NVIDIA B200, element-wise operations reach 7 TB/s and `f16` GEMM reaches
+2.1 PFlop/s (98% of cuBLAS). At `M=N=K=8192`, safe and unchecked Rust GEMM
+perform within 0.1% of each other.
 
-The paper also evaluates Grout, a Qwen3 inference engine built with cuTile Rust in collaboration with Hugging Face. In batch-1 Qwen3 decode, Grout reaches 171 tokens/s for Qwen3-4B on NVIDIA GeForce RTX 5090 and 82 tokens/s for Qwen3-32B on B200, showing competitive state-of-the-art performance on memory-bound inference tasks as measured by our HBM roofline analysis.
+The paper also evaluates [Grout](https://github.com/huggingface/grout), a Qwen3
+inference engine built with cuTile Rust in collaboration with Hugging Face.
+Its batch-1 decode peaks at 171 tokens/s for Qwen3-4B on NVIDIA GeForce RTX 5090
+and 82 tokens/s for Qwen3-32B on B200, on par with vLLM and SGLang.
 
-Reproducibility artifacts for the paper evaluation are available [here](cutile-benchmarks/paper/). The paper-facing measurements were run against cuTile Rust 0.2.0, and the version of Grout used for the paper is available [here](https://github.com/huggingface/grout).
+The [reproducibility artifacts](cutile-benchmarks/paper/) use cuTile Rust 0.2.0.
+The [Grout repository](https://github.com/huggingface/grout) contains the version
+used for the paper.
 
 ## Citing
 

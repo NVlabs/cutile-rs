@@ -1,6 +1,10 @@
 # Host API
 
-Reference for everything host-side: creating and transferring tensors, managing contexts and streams, configuring kernel launches, the `DeviceOp` trait and its combinators, and CUDA graph integration. For tutorial-style introductions, see [Host vs. Device Code](../guide/host-vs-device.md), [Tensors and Tiles](../guide/tensors-and-tiles.md), and [Device Operations](../guide/device-operations.md).
+The host API covers tensors, CUDA contexts and streams, kernel launches, and
+`DeviceOp` execution. For an introduction, see
+[Host vs. Device Code](../guide/host-vs-device.md),
+[Tensors and Tiles](../guide/tensors-and-tiles.md), and
+[Device Operations](../guide/device-operations.md).
 
 ---
 
@@ -142,7 +146,8 @@ let block = matrix.slice(&[1..3, 2..6])?;        // rows 1-2, cols 2-5
 let inner = tensor.slice(&[100..200])?.slice(&[10..20])?;  // = tensor[110..120]
 ```
 
-Views and slices are passed to kernels as `&Tensor` parameters. They're the right tool when you want to process a subregion of an existing tensor — an attention kernel over a sub-sequence, a GEMM over a sub-matrix, a scan over a contiguous slice — without allocation or copying.
+Pass views and slices to kernels as `&Tensor` parameters to process part of an
+existing tensor without allocation or copying.
 
 ---
 
@@ -351,7 +356,7 @@ also exposes an unsafe mutable-builder method for lower-level callers.
 
 Enqueue both kernels on the same stream, enabling PDL on the **consumer**:
 
-```rust,ignore
+```rust
 unsafe {
     kernels::producer(input.device_pointer()).grid((1, 1, 1))
         .then(|_| kernels::consumer(input.device_pointer(), output.device_pointer())
@@ -406,11 +411,10 @@ descriptions of work that don't execute until driven:
 | Type erasure | `BoxFuture` | `.boxed()` → `BoxedDeviceOp` |
 | Output wrapper | `Poll<T>` | `Result<T, DeviceError>` |
 
-The key difference: a `Future` is pulled by an async runtime via `poll()`,
-while a `DeviceOp` is pushed to the GPU via `execute()`. When you convert
-a `DeviceOp` to a `Future` (via `.await` or `.into_future()`), cuTile bridges
-the two models — the runtime polls a `DeviceFuture` that checks whether the
-GPU has finished.
+An async runtime drives a `Future` through `poll()`. A `DeviceOp` submits
+GPU work through `execute()`. Converting it to a future with `.await` or
+`.into_future()` produces a `DeviceFuture`, which the runtime polls for GPU
+completion.
 
 ---
 
@@ -490,7 +494,7 @@ unsafe { raw_ptr_kernel(ptr, 1024) }.sync_on(&stream)?;
 
 ## Ownership Model
 
-The core invariant: **you get back what you put in**.
+Launchers return arguments in the same ownership form they received.
 
 ### Read-only inputs (`&Tensor` params)
 
@@ -553,16 +557,13 @@ let result = my_kernel(out_partition, &weights).sync_on(&stream)?;
 // weights is still available here.
 ```
 
-**Key safety property**: because `&Tensor<T>` is not `'static`,
+Because `&Tensor<T>` is not `'static`,
 `tokio::spawn` rejects operations that borrow tensors:
 
 ```rust
 let op = my_kernel(out, &weights);  // borrows weights
 tokio::spawn(op.into_future());      // ← compile error: not 'static
 ```
-
-This is enforced at compile time by Rust's lifetime system — no runtime
-checks needed.
 
 ### `.shared()`: Clone + Execute-Once
 

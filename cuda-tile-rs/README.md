@@ -14,10 +14,10 @@ from the LLVM + MLIR sources that cuda-tile's cmake downloads.
 `FetchContent` to clone a pinned LLVM commit and builds it as part of its
 configure step.
 
-### First-build cost (one-time, slow)
+<a id="first-build-cost-one-time-slow"></a>
+### First build
 
-**The first build takes a long time because it downloads and builds LLVM from
-source.** Specifically:
+The first build downloads and compiles LLVM from source:
 
 - network access is required to clone `https://github.com/llvm/llvm-project`
   at a commit pinned by cuda-tile (~several hundred MB of git history),
@@ -42,8 +42,7 @@ forces a full rebuild next time. To keep artifacts across `cargo clean`, opt
 into a persistent, content-addressed cache keyed by
 `(cuda-tile commit SHA, LLVM commit SHA)`.
 
-**Recommended: workspace `.cargo/config.toml`.** Add this once and every
-`cargo` invocation in the workspace picks it up automatically:
+To enable caching for the workspace, add this to `.cargo/config.toml`:
 
 ```toml
 # at <workspace-root>/.cargo/config.toml
@@ -63,8 +62,8 @@ CUDA_TILE_RS_CACHE=1 cargo build --release -p cuda-tile-rs
 CUDA_TILE_RS_CACHE_DIR=/path/to/cache cargo build --release -p cuda-tile-rs
 ```
 
-Bumping either pin rotates to a new key → fresh build in a new subdir. Old
-subdirs remain; clean manually or force-clear below.
+Changing either pinned commit starts a fresh build in a new cache directory.
+Old directories remain until you remove them.
 
 ### Force-clear the cache
 

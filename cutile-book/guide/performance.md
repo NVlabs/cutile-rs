@@ -1,6 +1,9 @@
 # Performance
 
-GPU performance is usually limited by memory bandwidth, compute throughput, or occupancy. Occupancy is how much work can remain resident on the GPU at once; too little resident work can leave hardware idle. A good cuTile Rust kernel keeps data movement low, expresses enough tile-level work for the compiler to use the right hardware instructions, and chooses tile shapes that fit the target architecture.
+GPU performance is usually limited by memory bandwidth, compute throughput,
+or occupancy. Occupancy is how much work can remain resident on the GPU at
+once; too little can leave hardware idle. Tile shape and memory access patterns
+affect all three limits.
 
 ```{figure} ../_static/images/performance-triangle.svg
 :width: 100%
@@ -24,7 +27,7 @@ Use profiling to tune from there, or search the candidates automatically with [a
 
 ## Memory Traffic and Fusion
 
-Global memory is slower than on-chip storage. Load once, compute as much as possible in tiles, and store once:
+Keep intermediate results in tiles to avoid repeated global-memory access:
 
 ```rust
 #[cutile::entry()]
@@ -168,14 +171,10 @@ Timing uses CUDA events (device timeline, not host clocks), warmup absorbs first
 
 ## Autotuning (experimental)
 
-`cutile::tune` automates the candidate search described in the sections
-above: declare the configurations, write a setup closure, and the tuner
-measures each one, persists the trials, and commits the winner to a
-verified record. It is gated behind the `experimental-tune` Cargo feature.
-The [Autotuning](autotuning.md) chapter covers the whole workflow — the
-search, engine-scale `Objective` implementations, committing winners, and warming
-the kernel cache — and the `autotune` example runs a complete search over
-the block size of an RMS normalization kernel:
+`cutile::tune` measures candidate configurations and saves the trials and
+winning configuration. It requires the `experimental-tune` Cargo feature;
+see [Autotuning](autotuning.md) for the API. This example searches block sizes
+for an RMS normalization kernel:
 
 ```sh
 cargo run -p cutile-examples --example autotune --features experimental-tune
@@ -184,4 +183,3 @@ cargo run -p cutile-examples --example autotune --features experimental-tune
 ---
 
 Continue to [Interoperability](interoperability.md).
-

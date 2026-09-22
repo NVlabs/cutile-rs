@@ -2,7 +2,7 @@
 
 Pure Rust IR builder and bytecode writer for the CUDA Tile dialect. Builds
 Tile IR programs in-memory and serializes them to the bytecode format consumed
-by `tileiras`. No LLVM, no C++ toolchain, no `mlir-sys` — just `cargo build`.
+by `tileiras`. Builds with Cargo without an LLVM or C++ toolchain.
 
 ## Example
 
@@ -167,8 +167,8 @@ The cuTile Rust compiler originally used
 [melior](https://github.com/edgl/melior) (thanks to
 [Yota Toyama](https://github.com/raviqqe) for that project) to construct
 MLIR operations in the CUDA Tile dialect. `cutile-ir` replaces the
-LLVM/MLIR dependency with a self-contained Rust crate — faster builds, no
-toolchain friction, and a lifetime-free API.
+LLVM/MLIR dependency with a Rust crate whose index-based API needs no
+lifetime parameters.
 
 ## License
 

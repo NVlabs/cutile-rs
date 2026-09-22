@@ -5,13 +5,13 @@ mapped persistent GEMM, unsafe optimization hints, and fully static GEMM. Split
 or streamline it when there is bandwidth: keep this page focused on the first
 GEMM path and move advanced performance variants to separate pages. -->
 
-Matrix multiplication (GEMM = General Matrix Multiply) is everywhere in modern computing:
+Matrix multiplication (GEMM, or General Matrix Multiply) is used in:
 
 | Application | Where GEMM is Used |
 |-------------|-------------------|
 | **Transformers** | Attention and Fully Connected layers — 90%+ of compute |
-| **CNNs** | Convolutions are matrix multiplications in disguise |
-| **Scientific Computing** | Simulations, solvers, basically everything |
+| **CNNs** | Convolutions expressed as matrix multiplications |
+| **Scientific Computing** | Simulations and solvers |
 | **Graphics** | Transformations, lighting calculations |
 
 ---
@@ -50,11 +50,13 @@ Memory loads: BM×K + K×BN    Compute: BM×BN×K ops
 Ratio: With BM=BN=BK=16: ~16× better data reuse!
 ```
 
-Each element of A is used BN times. Each element of B is used BM times. This **data reuse** is the key to fast GEMM.
+Each loaded element of A is reused BN times, and each element of B is reused
+BM times. This reduces global-memory traffic.
 
 ---
 
-## The Code
+<a id="the-code"></a>
+## GEMM kernel
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
@@ -201,7 +203,8 @@ With larger tiles (like 128×128), you can achieve even better ratios, approachi
 
 ## Const Generic Inference
 
-In the SAXPY tutorial, you may have noticed that no `.generics()` call was needed — cutile inferred all const generics automatically. This works because the partition of a `&mut Tensor` on the host side directly maps to the const generics in the kernel signature.
+SAXPY needs no `.generics()` call: cuTile infers the const generics from the
+host-side output partition.
 
 Consider SAXPY's kernel signature:
 
@@ -242,13 +245,15 @@ let part_x = x.partition(shape![BM, BK]);
 let part_y = y.partition(shape![BK, BN]);
 ```
 
-Since `BK` has no mapping to any host-side tensor or partition, the launcher cannot infer its value automatically. This is why GEMM requires an explicit `.generics()` call.
+The launcher cannot infer `BK` from a tensor or partition, so GEMM needs an
+explicit `.generics()` call.
 
 As a general rule: if every const generic appears somewhere in the kernel's `&Tensor` or `&mut Tensor` parameter types, inference will work and `.generics()` is optional. If any const generic is used only inside the kernel body (like `BK`), you must pass all generics explicitly.
 
 ---
 
-## Optimization: Achieving Speed-of-Light Performance
+(optimization-achieving-speed-of-light-performance)=
+## GEMM optimization
 
 The GEMM kernel above is correct but does not reach the GPU's theoretical peak
 (speed-of-light, or SoL) throughput. The recommended safe path is mapped
@@ -327,7 +332,10 @@ See [`cutile-examples/examples/persistent_gemm.rs`](https://github.com/nvlabs/cu
 
 ### Approach 2: Disabling Bounds Checks (Unsafe)
 
-The `#[cutile::entry()]` attribute accepts `unchecked_accesses` and `optimization_hints` to squeeze out maximum performance. Setting `unchecked_accesses = true` disables runtime bounds checks on all tensor loads and stores, and `optimization_hints` provides architecture-specific tuning parameters. Because bounds checks are disabled, the entry point must be marked `unsafe`:
+The `#[cutile::entry()]` attribute accepts `unchecked_accesses` and
+`optimization_hints`. Setting `unchecked_accesses = true` disables runtime
+bounds checks on all tensor loads and stores and requires an `unsafe` entry
+point. `optimization_hints` supplies architecture-specific tuning parameters:
 
 ```rust
 #[cutile::entry(
@@ -356,13 +364,14 @@ unsafe fn gemm<T: ElementType, const BM: i32, const BN: i32, const BK: i32>(
 }
 ```
 
-The key differences from the tutorial kernel:
+This version changes three parts of the kernel:
 
 - **`unchecked_accesses = true`** removes bounds-checking overhead on every `load` and `store` call.
 - **`sm_120 = (num_cta_in_cga = 2, max_divisibility = 16,)`** is an architecture-specific hint for Blackwell (SM 120) that groups two CTAs into a CGA for better inter-SM data sharing and caps auto-inferred alignment at 16.
 - **`k` is passed as a runtime `i32`** rather than a const generic, so changing the K dimension does not create a new compiled variant.
 
-Note that even though this approach is `unsafe`, many of cuTile Rust's static guarantees still apply: tile shapes are still checked at compile time, `mma` dimensions are still validated, and the type system still prevents dtype mismatches. The `unsafe` annotation specifically opts out of runtime bounds checking, not the DSL's compile-time checks.
+The compiler still checks tile shapes, `mma` dimensions, and element types.
+`unchecked_accesses` disables only runtime bounds checks.
 
 The call site must also use an `unsafe` block:
 
@@ -408,7 +417,7 @@ fn gemm<
 }
 ```
 
-The key differences:
+In this version:
 
 - **`x: &Tensor<E, { [M, K] }>` and `y: &Tensor<E, { [K, N] }>`** — input dimensions are fully static instead of dynamic (`-1`). The compiler sees the exact shape of every tensor.
 - **No `unsafe`, no `unchecked_accesses`** — bounds checks are present in the source but the JIT compiler proves they are redundant and eliminates them during optimization.
@@ -435,10 +444,10 @@ See [`cutile-examples/examples/gemm_static.rs`](https://github.com/nvlabs/cutile
 | **Compile-time checks** | Tile shapes, types, and mapped index proofs | Tile shapes and types still checked | All shapes and types checked |
 | **Best for** | Default high-performance safe GEMM | Escape hatch for manually proven kernels | Legacy fixed-size kernels |
 
-Use mapped persistent GEMM as the default high-performance safe approach. Use
-the unsafe approach only when the access pattern is manually proven and not yet
-expressible in the safe DSL. Use the fully static approach for older kernels or
-for workloads with a small, fixed set of full tensor shapes.
+Start with mapped persistent GEMM. An unsafe kernel requires a manual proof of
+its access pattern and is useful when that pattern cannot yet be expressed in
+the safe DSL. Fully static GEMM suits older kernels or a small, fixed set of
+tensor shapes.
 
 ---
 
@@ -465,7 +474,7 @@ Experiment with different `(BM, BN, BK)` values:
 - Try `(32, 32, 16)` — larger tiles.
 - Try `(8, 8, 4)` — smaller tiles.
 
-Which feels faster? (Note: proper benchmarking requires more than one run!)
+Measure each configuration over multiple runs. Which is faster?
 
 ### Exercise 2: Non-Square Matrices
 

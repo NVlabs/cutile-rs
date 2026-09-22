@@ -1,7 +1,7 @@
 # B200 Qwen3-32B Final Inference Results
 
-This directory is the stable committed handoff location for B200/Qwen3-32B
-inference results. The raw timestamped source directories were generated under
+This directory contains the B200/Qwen3-32B inference results used in the paper.
+The raw timestamped source directories were generated under
 `benchmark/results/sweep/`, which is ignored by default.
 
 ## Bundles
@@ -20,7 +20,8 @@ The public artifact keeps only result files consumed by the paper plot:
 `tg_sweep_pp18_8k/aggregate.csv`, plus `pp_sweep_tg36_8k/aggregate.csv` and
 `pp_sweep_tg36_8k/run.jsonl`.
 
-## Headline Results
+<a id="headline-results"></a>
+## Throughput
 
 TG sweep through 8192 generated tokens, request generation throughput:
 

@@ -1,8 +1,9 @@
 # Device Operations
 
-`DeviceOp` is how you describe and compose GPU work on the host. Tensor constructors, kernel launchers, and the `.then()` / `.shared()` / `zip!` / `unzip` combinators produce `DeviceOp`s. Composition is decoupled from execution: you build the operation graph with combinators, then run it in one of three execution modes — `.sync()` (blocking), `.await` (async), or `.graph()` (capture once, launch many).
-
-The `DeviceOp` model gives kernel launches, tensor constructors, memory copies, and CUDA graphs one composable execution interface.
+`DeviceOp` describes GPU work on the host. Tensor constructors, kernel
+launchers, and memory copies return operations that you can compose with
+`.then()`, `.shared()`, `zip!`, and `unzip`. Run the resulting graph with
+`.sync()` or `.await`, or capture it for replay with `.graph()`.
 
 ---
 
@@ -92,7 +93,8 @@ When you `.await`, the conversion goes through `into_future()` → `schedule()` 
 
 GPU work starts at `execute()`, which fires during the *first poll* — not at `.await` itself. `.await` is cheap; the DeviceFuture is built immediately at `into_future()`, and actual submission to the GPU happens when the runtime polls.
 
-This laziness is the whole point. Calling `.sync()` after every kernel forces the CPU to wait for the GPU and the GPU to idle between kernels:
+Calling `.sync()` after every kernel leaves gaps while the CPU waits for
+completion and submits the next launch:
 
 ```text
 CPU:  [launch] [wait......] [launch] [wait......] [launch] [wait......]
@@ -101,7 +103,9 @@ GPU:           [kernel████]          [kernel████]          [kern
                      idle gap                idle gap
 ```
 
-For inference-style workloads — kernels take microseconds; sync round-trips don't — these gaps dominate. A 22-layer transformer with 6 kernels per layer hits 132 sync gaps per token. Composing lazily and synchronizing once eliminates them:
+These gaps can dominate inference when kernels take only microseconds. A
+22-layer transformer with 6 kernels per layer has 132 sync gaps per token.
+Compose the operations and synchronize once to eliminate those gaps:
 
 ```rust
 let result = rms_norm(out1, hidden.clone(), weight.clone(), eps)
@@ -216,7 +220,8 @@ The execute-once mechanism assumes sequential polling from a single thread, whic
 
 ## Streams and Scheduling
 
-A CUDA stream is an ordered queue of GPU work. The foundational rule: operations on the **same stream** execute in submission order; operations on **different streams** may execute concurrently.
+A CUDA stream is an ordered queue of GPU work. Operations on the same stream
+execute in submission order; operations on different streams may overlap.
 
 By default, cuTile distributes operations across a pool of 4 streams using a round-robin policy, so independent operations land on different streams and can overlap:
 
@@ -311,7 +316,8 @@ See [Tutorial 10: CUDA Graphs](../tutorials/10-cuda-graphs.md) for a walkthrough
 
 ---
 
-## Practical Patterns
+(practical-patterns)=
+## Passing tensors and reading results
 
 Kernel `&Tensor` params accept three input forms, and `&mut Tensor` params accept two partition forms. You get back the same type you put in.
 
@@ -358,8 +364,6 @@ let data_op = z.to_host_vec();
 let z = kernel(x, y).first().sync_on(&stream)?;
 let data = z.to_host_vec().sync_on(&stream)?;
 ```
-
-Common pitfalls: syncing per operation in hot paths (build a graph and sync once instead); forgetting to compose for overlap (use `zip!` or `tokio::join!` for independent work); calling `.await` sequentially when operations are actually independent (this effectively serializes them across streams).
 
 ---
 

@@ -10,7 +10,7 @@ the Hugging Face Grout repository: https://github.com/huggingface/grout
 
 ## Provenance
 
-The paper-facing measurements were run against **cuTile Rust 0.2.0**.
+The paper's measurements were run against **cuTile Rust 0.2.0**.
 External engines and sibling projects used by the comparisons are recorded
 below. Commit hashes are full Git object IDs where the source checkout is
 available locally.
@@ -81,5 +81,5 @@ reproducibility. The execution-mode experiments use RTX 5090. End-to-end
 inference uses RTX 5090/Qwen3-4B and B200/Qwen3-32B at default GPU clocks.
 
 Raw profiling traces, model weights, build artifacts, and large generated
-outputs are intentionally omitted. Checked-in result files are the paper-facing
+outputs are omitted. Checked-in result files are the
 inputs needed to reproduce the plots and tables.

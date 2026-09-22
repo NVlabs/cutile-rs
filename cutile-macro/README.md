@@ -1,12 +1,9 @@
 # cuTile Rust Macros
 
-Procedural macros behind `cutile::module`. They expand cuTile Rust modules into:
+Procedural macros for declaring cuTile Rust kernels with `cutile::module`.
 
-- Type-checkable Rust items that drive rustc's validation of kernel code.
-- An AST capture (`__module_ast_self()`) plus a linker-registry entry that hands the original generic source to the JIT compiler.
-- Host-side kernel launch functions for `#[entry]` points.
-
-## Two-track design: macro output is for rustc, not the JIT
+<a id="two-track-design-macro-output-is-for-rustc-not-the-jit"></a>
+## Macro expansion and JIT compilation
 
 The macro runs at Rust compile time and emits three kinds of output:
 
@@ -14,7 +11,10 @@ The macro runs at Rust compile time and emits three kinds of output:
 2. **AST capture and registry registration.** `__module_ast_self()` stores the pre-expansion source text via `Span::source_text()` and re-parses it at runtime; a `linkme::distributed_slice` entry registers the module into a global registry the JIT consults. The JIT sees the *original generic* `fn foo<const S: [i32; N]>(...) { … real body … }`, not macro-emitted expansions. See *Linker-registry module discovery* below.
 3. **Kernel launchers** for `#[entry]` functions.
 
-The separation matters: items emitted in (1) exist only to make rustc type-check kernel bodies and give good error messages. The JIT does its own rank-instance specialization from the original source, independent of anything the macro emits. Consequently, the macro never has to grow to support new user-code language features — adding support for (say) user-defined structs or methods is the JIT's job. The macro only has to handle whatever Rust patterns appear in op signatures inside `_core.rs`.
+The expanded Rust lets rustc type-check kernel bodies and report errors.
+The JIT specializes ranks from the original source. Support for user-defined
+structs or methods belongs in the JIT; the macro handles the Rust patterns
+used by operation signatures in `_core.rs`.
 
 ## Linker-registry module discovery
 
@@ -92,7 +92,12 @@ Inherent impls instantiate the same way; their method bodies get walked by a `sy
 
 ## Shadow dispatch (`shadow_dispatch.rs`)
 
-Any function annotated with `#[cuda_tile::variadic_op(...)]`, or any trait declared with `#[cuda_tile::variadic_trait(...)]`, is treated as rank-polymorphic. Instead of emitting rank-suffixed callables that the user has to spell out, the macro synthesizes a *shadow trait* — a single CGA-erased rank-polymorphic trait that doesn't exist in user source — together with one `impl` per rank instance and (for free fns) a free-fn wrapper that delegates through the shadow trait. User code calls the unsuffixed name and rustc resolves it via normal trait lookup against the shadow's impls. The "shadow" framing captures the synthesis: the trait and impls are auxiliary scaffolding mirroring the user's variadic op, not part of the user's declared API.
+Functions marked `#[cuda_tile::variadic_op(...)]` and traits marked
+`#[cuda_tile::variadic_trait(...)]` are rank-polymorphic. The macro generates
+a *shadow trait* with the const generic arrays erased and one implementation
+per rank. For free functions, it also generates a wrapper that dispatches
+through the trait. User code calls the unsuffixed name; rustc selects the
+rank-specific implementation through trait lookup.
 
 Example — `addf` (same-shape case):
 

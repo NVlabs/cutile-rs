@@ -44,15 +44,20 @@ An alias for [Tile Program](#tile-program), emphasizing the single-threaded prog
 
 ## Concurrent Execution
 
-Multiple tile blocks making progress over a period of time by being scheduled onto available Streaming Multiprocessors (SMs). This aligns with Rust's definition of concurrency — different parts of a program executing *independently*, not necessarily at the exact same instant — extended to the GPU context: when a kernel is launched with more tile blocks than there are SMs, the GPU's hardware scheduler assigns tile blocks to SMs as resources become available. Some tile blocks execute in parallel while others are pending, but from the programmer's perspective all tile blocks are logically concurrent — their relative order of execution is unspecified and they are independent of one another.
+Multiple tile blocks making progress independently. The GPU scheduler assigns
+blocks to Streaming Multiprocessors (SMs) as resources become available. Some
+blocks run at the same time while others wait; their relative execution order
+is unspecified.
 
 On the host side, concurrency also arises through CUDA streams and async/await: multiple `DeviceOp`s submitted to different streams can overlap in time, and the async runtime schedules them without requiring the programmer to specify an exact execution order.
 
 ## Parallel Execution
 
-Multiple tile blocks executing **at the same time** on different SMs. All NVIDIA GPUs execute tile blocks in parallel — a modern GPU has tens to over a hundred SMs, each capable of running one or more tile blocks simultaneously. The distinction from concurrency is that parallelism refers specifically to simultaneous execution on separate hardware units, whereas concurrency is the broader concept of managing multiple in-progress tasks. In practice, a kernel launch exhibits both: tile blocks that fit on available SMs run in parallel, while the full set of tile blocks runs concurrently (scheduled over time as SMs become free).
-
-This matches Rust's distinction (see [The Rust Programming Language, Ch. 17](https://doc.rust-lang.org/book/ch17-00-async-await.html#parallelism-and-concurrency)): *parallelism* is work happening at the exact same time on different hardware, while *concurrency* is independently executing tasks making progress over time — which may or may not involve parallelism.
+Multiple tile blocks executing at the same time on different SMs. A kernel
+launch has both parallel and concurrent execution: blocks that fit on available
+SMs run in parallel, while the rest wait to be scheduled. See
+[The Rust Programming Language, Ch. 17](https://doc.rust-lang.org/book/ch17-00-async-await.html#parallelism-and-concurrency)
+for the same distinction in host programming.
 
 ## Streaming Multiprocessor (SM)
 
@@ -106,7 +111,11 @@ The fastest storage on the GPU, private to each thread within a tile block. `Til
 
 ## Shared Memory (SMEM)
 
-On-chip memory shared among all threads within a tile block. Shared memory is slower than registers but faster than global memory. In the tile programming model, **you never manage shared memory directly** — you simply load from and store to global memory (HBM), and the underlying [Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) compiler and runtime handle the mapping onto shared memory, registers, threads, and tensor cores automatically. For capacity and latency details across GPU architectures, see the [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/).
+On-chip memory shared among threads within a tile block. It is slower than
+registers but faster than global memory. The
+[Tile IR](https://docs.nvidia.com/cuda/tile-ir/latest/) compiler manages shared
+memory for tile kernels. For capacity and latency details, see the
+[CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/).
 
 ## Const Generics
 

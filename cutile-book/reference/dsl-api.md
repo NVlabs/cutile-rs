@@ -55,9 +55,9 @@ mod my_kernels {
 | `optimization_hints = expr` | expr | Pass an `OptimizationHints` expression to the compiler for target-specific optimization |
 | `dump_mlir_dir = "path"` | string | Write the compiled Tile IR text to a file in the specified directory |
 
-`unchecked_accesses` and `deny_in_kernel_checks` are opposite poles and are *not*
-interchangeable: `unchecked_accesses` removes verification (unsafe), while
-`deny_in_kernel_checks` demands full verification with zero in-kernel cost (safe).
+`unchecked_accesses` disables verification and requires `unsafe`.
+`deny_in_kernel_checks` keeps verification but rejects checks that remain
+inside the kernel.
 
 ```rust
 #[cutile::entry(print_ir = true)]
@@ -259,7 +259,8 @@ let shape: Shape<S> = tensor.shape();
 
 #### Const Generic Array (CGA) Syntax
 
-Shapes in the DSL use Rust's const generic arrays (`const S: [i32; N]`). There are two ways to specify them:
+Shapes can use literal dimensions, scalar const generics, or a const generic
+array (`const S: [i32; N]`):
 
 **1. Explicit values** — when dimensions are known literals:
 
@@ -288,7 +289,9 @@ fn add<const S: [i32; 1]>(                      // S is the whole shape
 )
 ```
 
-The CGA form (`const S: [i32; N]`) is concise but has a limitation: **the array length `N` must be fixed at definition time**. You cannot write `const S: [i32; N]` where `N` is itself generic — the rank must be a literal. This means you cannot write a single kernel that works for both 1D and 2D tensors:
+In `const S: [i32; N]`, the rank `N` must be a literal fixed at definition
+time. It cannot itself be generic, so this form cannot make one kernel work
+for both 1D and 2D tensors:
 
 ```rust
 // NOT supported: generic rank
@@ -384,9 +387,8 @@ Examples:
 Some Tile IR operations are intentionally compiler-owned rather than public DSL
 functions. `cuda_tile.module`, `cuda_tile.entry`, `cuda_tile.return`, and
 control-flow operations are generated from Rust modules, entry attributes,
-`return`, `if`, `for`, `loop`, `while`, `break`, and `continue` syntax. This
-keeps user code Rust-shaped while still lowering to the corresponding Tile IR
-operations. Tile IR 13.4 additionally permits a kernel `return` inside
+`return`, `if`, `for`, `loop`, `while`, `break`, and `continue` syntax.
+Tile IR 13.4 additionally permits a kernel `return` inside
 `loop`/`while`, including a conditional branch within that loop. This exits
 the kernel, not just the loop. It is not supported inside an inlined helper
 or beneath any `for` loop. Other nested returns remain compile errors;
@@ -435,7 +437,7 @@ view's sparse axis takes a rank-one integer tile, and its other axes take
 scalar i32 indices. Padding supports `None`, `Zero`, `Nan`, `PosInf`, and
 `NegInf` where the element type permits it.
 
-```rust,ignore
+```rust
 let (value, done): (Tile<f32, {[4]}>, Token) = unsafe {
     load_view_raw(&view, [0i32], None, ordering::Weak, scope::Device,
         tma::Disabled, None, [false], shape![4])
