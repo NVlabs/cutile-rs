@@ -9,6 +9,7 @@ use crate::device_future::{probe_stream, StreamHealth};
 use crate::device_operation::{ExecutionContext, ReplayResource};
 use crate::error::DeviceError;
 use cuda_core::Stream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -37,6 +38,10 @@ pub(crate) struct Submission {
     stream: Arc<Stream>,
     owners: Mutex<Owners>,
     recorded: Mutex<Vec<Arc<dyn ReplayResource>>>,
+    /// The future that owned this submission already resolved with the
+    /// stream's fault: a leak on release is that fault's documented
+    /// consequence, not news, so it is not reported again.
+    fault_delivered: AtomicBool,
 }
 
 impl std::fmt::Debug for Submission {
@@ -51,7 +56,12 @@ impl Submission {
             stream,
             owners: Mutex::new(Owners(Some(Vec::new()))),
             recorded: Mutex::new(Vec::new()),
+            fault_delivered: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn mark_fault_delivered(&self) {
+        self.fault_delivered.store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn retain(&self, owner: impl Send + 'static) -> Result<(), DeviceError> {
@@ -93,7 +103,14 @@ impl Submission {
 }
 
 impl Drop for Submission {
+    /// Releases the owners once the stream has drained. This is the blocking
+    /// last resort: a dropped in-flight future normally parks its context
+    /// with [`crate::reaper`], which drops it only after the flag behind the
+    /// work has landed, so the probe below finds the stream idle. A stream
+    /// that cannot be waited on (faulted, or mid-capture) leaks the owners,
+    /// loudly unless the owning future already delivered the fault.
     fn drop(&mut self) {
+        let quiet = self.fault_delivered.load(Ordering::Relaxed);
         self.owners
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
@@ -111,7 +128,13 @@ impl Drop for Submission {
                         )),
                     }
                 })();
-                if result.is_err() {
+                if let Err(error) = &result {
+                    if !quiet {
+                        crate::leak::report_leak(format_args!(
+                            "cuda-async: leaking the resources of an abandoned submission; the \
+                             driver could not prove its GPU work finished: {error}"
+                        ));
+                    }
                     // Keep the stream identity valid for leaked access leases too.
                     std::mem::forget(self.stream.clone());
                 }
