@@ -5,12 +5,13 @@
 
 use crate::device_context::with_default_device_policy;
 use crate::device_future::DeviceFuture;
-use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode};
+use crate::device_operation::{DeviceOp, ExecutionContext, GraphNode, ReplayResource};
 use crate::error::DeviceError;
 use cuda_core::{sys, Device, IntoResult, Stream};
+use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const CU_STREAM_CAPTURE_MODE_RELAXED: sys::CUstreamCaptureMode = 2;
 
@@ -57,7 +58,14 @@ pub struct CudaGraph<T> {
 /// launch — is dropped. `GraphLaunch` used to copy the raw `CUgraphExec`, so
 /// `let l = graph.launch(); drop(graph); l.sync()` launched a destroyed exec.
 struct GraphExecHandle {
-    resources: std::sync::Mutex<Vec<ExecutionContext>>,
+    /// The capture context: keeps host-side owners the recorded work needs
+    /// (pinned host buffers, ...) alive for as long as the graph can replay.
+    capture_ctx: OnceLock<ExecutionContext>,
+    /// The accesses the recorded work makes, one per distinct storage (a
+    /// write subsumes reads), reacquired on every replay. Frozen at capture.
+    captured: OnceLock<Vec<Arc<dyn ReplayResource>>>,
+    /// Contexts of `update` ops not yet consumed by a replay.
+    pending: Mutex<Vec<ExecutionContext>>,
     /// Bound before destruction: the driver needs the owning context current.
     device: Arc<Device>,
     cu_graph: sys::CUgraph,
@@ -93,7 +101,9 @@ impl GraphExecHandle {
             }
         };
         let handle = Self {
-            resources: std::sync::Mutex::new(Vec::new()),
+            capture_ctx: OnceLock::new(),
+            captured: OnceLock::new(),
+            pending: Mutex::new(Vec::new()),
             device,
             cu_graph,
             cu_graph_exec,
@@ -102,6 +112,31 @@ impl GraphExecHandle {
         // `handle` drops here and destroys both objects.
         unsafe { sys::cuGraphUpload(handle.cu_graph_exec, stream.cu_stream()).result()? };
         Ok(handle)
+    }
+
+    /// Takes ownership of the capture context and its recorded resources.
+    /// Resources are deduplicated by storage so a replay reacquires each
+    /// buffer once, however many recorded nodes touch it.
+    fn adopt_capture(&self, ctx: ExecutionContext) {
+        let recorded = ctx.take_recorded();
+        let mut index: HashMap<usize, usize> = HashMap::with_capacity(recorded.len());
+        let mut captured: Vec<Arc<dyn ReplayResource>> = Vec::with_capacity(recorded.len());
+        for resource in recorded {
+            let (storage, write) = resource.replay_identity();
+            match index.get(&storage) {
+                Some(&i) => {
+                    if write && !captured[i].replay_identity().1 {
+                        captured[i] = resource;
+                    }
+                }
+                None => {
+                    index.insert(storage, captured.len());
+                    captured.push(resource);
+                }
+            }
+        }
+        let _ = self.captured.set(captured);
+        let _ = self.capture_ctx.set(ctx);
     }
 }
 
@@ -205,10 +240,7 @@ impl<T: Send> CudaGraph<T> {
         let _execution_lock = crate::device_operation::acquire_execution_lock()?;
         let exec_ctx = ExecutionContext::for_capture(stream.clone());
         let (output, exec) = capture_on(&stream, || unsafe { op.execute(&exec_ctx) })?;
-        exec.resources
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(exec_ctx);
+        exec.adopt_capture(exec_ctx);
         Ok(Self {
             stream,
             exec,
@@ -284,7 +316,7 @@ impl<T: Send> CudaGraph<T> {
         // update contexts; otherwise the graph keeps them until destruction.
         let result = unsafe { op.execute(&ctx) };
         self.exec
-            .resources
+            .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(ctx);
@@ -336,26 +368,21 @@ impl DeviceOp for GraphLaunch {
 
     unsafe fn execute(self, context: &ExecutionContext) -> Result<(), DeviceError> {
         context.retain(self.exec.clone())?;
-        {
-            let mut resources = self
-                .exec
-                .resources
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            for recorded in resources.iter() {
-                recorded.replay_resources(context)?;
+        // Reacquire every captured buffer for this replay: one lease per
+        // distinct storage, registered on the launch submission so other
+        // streams see the replay's in-flight accesses.
+        if let Some(captured) = self.exec.captured.get() {
+            for resource in captured {
+                resource.retain_for_launch(context)?;
             }
-            // Pending updates need not accumulate over the graph's lifetime.
-            // The launch submission now owns them; their contexts wait on the
-            // update stream if it differs from the launch stream.
-            let mut i = 0;
-            while i < resources.len() {
-                if resources[i].is_recording() {
-                    i += 1;
-                } else {
-                    context.retain(resources.remove(i))?;
-                }
-            }
+        }
+        // Pending updates need not accumulate over the graph's lifetime.
+        // The launch submission now owns them; their contexts wait on the
+        // update stream if it differs from the launch stream.
+        let pending =
+            std::mem::take(&mut *self.exec.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        for ctx in pending {
+            context.retain(ctx)?;
         }
         sys::cuGraphLaunch(
             self.exec.cu_graph_exec,
@@ -552,10 +579,7 @@ impl CudaGraph<()> {
             _not_send: std::marker::PhantomData,
         };
         let ((), exec) = capture_on(stream, || f(&scope))?;
-        exec.resources
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(scope.ctx);
+        exec.adopt_capture(scope.ctx);
         Ok(CudaGraph {
             stream: stream.clone(),
             exec,

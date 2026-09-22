@@ -48,6 +48,10 @@ harness = false
 name = "launch_overhead"
 harness = false
 
+[[bench]]
+name = "host_overhead"
+harness = false
+
 [dependencies]
 tokio = { workspace = true }
 cutile-compiler = { workspace = true }
