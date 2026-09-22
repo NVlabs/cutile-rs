@@ -13,9 +13,10 @@ use cutile_compiler::ast::Module;
 use cutile_compiler::compile_api::KernelCompiler;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
-    compile_bytecode_cached, env_flag_enabled, get_compiler_version, get_gpu_name,
-    recompile_after_disk_rejection, serialize_tile_ir_bytecode, tileiras_fingerprint,
-    toolchain_env_snapshot, Stage2Source, TileirasOptions, ToolchainEnvSnapshot,
+    compile_bytecode_cached_with_toolkit, env_flag_enabled, get_compiler_version, get_gpu_name,
+    recompile_after_disk_rejection_with_toolkit, serialize_tile_ir_bytecode_for_version,
+    tileiras_fingerprint, toolchain_env_snapshot, Stage2Source, TileirasOptions,
+    ToolchainEnvSnapshot, ToolkitCapabilities,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;
@@ -25,6 +26,17 @@ use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+
+/// Capability guard shared by generated launchers, including compile-only warmup.
+#[doc(hidden)]
+pub fn validate_programmatic_dependent_launch(device_id: usize) -> Result<(), DeviceError> {
+    let capabilities = ToolkitCapabilities::for_device(device_id)
+        .map_err(|e| DeviceError::Launch(e.to_string()))?;
+    let location = cutile_ir::ir::Location::Unknown;
+    cutile_ir::requirements::Feature::ProgrammaticDependentLaunch
+        .check(&capabilities.target, &location)
+        .map_err(|e| DeviceError::Launch(e.to_string()))
+}
 
 // JIT diagnostic logging (set CUTILE_JIT_LOG=1, true, yes, or on to enable)
 
@@ -97,6 +109,7 @@ pub type ModuleAstFn = fn() -> Module;
 /// serialized bytecode rather than on this struct.
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TileFunctionKey {
+    bytecode_override: Option<std::ffi::OsString>,
     module_name: String,
     function_name: String,
     pub function_generics: Vec<String>,
@@ -197,6 +210,7 @@ impl TileFunctionKeyBuilder {
     }
     pub fn build(self) -> TileFunctionKey {
         TileFunctionKey {
+            bytecode_override: std::env::var_os("CUTILE_BYTECODE_VERSION"),
             module_name: self.module_name,
             function_name: self.function_name,
             function_generics: self.function_generics,
@@ -742,6 +756,7 @@ fn compile_and_load_kernel(
     let scalar_hints_refs: Vec<(&str, &DivHint)> =
         scalar_hints.iter().map(|x| (x.0.as_str(), &x.1)).collect();
 
+    let capabilities = ToolkitCapabilities::for_device(device_id)?;
     let stage1_start = std::time::Instant::now();
     let (tile_module, validator, check_stats) = {
         let compiler = CUDATileFunctionCompiler::new(
@@ -756,6 +771,7 @@ fn compile_and_load_kernel(
             gpu_name.to_string(),
             compile_options,
         )?;
+        let compiler = compiler.with_target_capabilities(capabilities.target.clone())?;
         let tile_module = compiler.compile()?;
         // AFTER compile, not before: the launch-check accumulator fills
         // DURING compilation, and this snapshot is the one the generated
@@ -801,10 +817,11 @@ fn compile_and_load_kernel(
             }
         }
     }
-    let (bytecode, bc_version) = serialize_tile_ir_bytecode(&tile_module)?;
+    let (bytecode, _) =
+        serialize_tile_ir_bytecode_for_version(&tile_module, capabilities.target.bytecode_version)?;
     let tileiras_opts = TileirasOptions::from_compile_options(compile_options);
     let (cubin, mut stage2_source) =
-        compile_bytecode_cached(&bytecode, bc_version, gpu_name, &tileiras_opts)?;
+        compile_bytecode_cached_with_toolkit(&bytecode, &tileiras_opts, &capabilities)?;
     let mut stage2_ms = stage2_start.elapsed().as_secs_f64() * 1000.0;
 
     // A retry recompile (below) runs inside the stage-3 window but is really
@@ -831,12 +848,12 @@ fn compile_and_load_kernel(
                      evicting and recompiling"
                 );
                 let recompile_start = std::time::Instant::now();
-                let cubin = recompile_after_disk_rejection(
+                let cubin = recompile_after_disk_rejection_with_toolkit(
                     store.as_ref(),
                     &key,
                     &bytecode,
-                    gpu_name,
                     &tileiras_opts,
+                    &capabilities,
                 )?;
                 recompile_ms = recompile_start.elapsed().as_secs_f64() * 1000.0;
                 stage2_ms += recompile_ms;

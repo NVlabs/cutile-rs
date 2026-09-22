@@ -99,6 +99,13 @@ mod custom_store_example_module {
 }
 
 fn main() {
+    if !cutile_examples::requirements::BASELINE
+        .check("jit_custom_store", 0)
+        .expect("query example capabilities")
+    {
+        return;
+    }
+
     let store = Arc::new(InMemoryJitStore {
         entries: Mutex::new(HashMap::new()),
     });

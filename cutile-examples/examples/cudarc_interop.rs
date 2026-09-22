@@ -90,6 +90,10 @@ mod tile_add {
 }
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("cudarc_interop", 0)? {
+        return Ok(());
+    }
+
     const N: usize = 1024;
     const TILE: usize = 128;
 

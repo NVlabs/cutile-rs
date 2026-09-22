@@ -5,6 +5,8 @@
 
 //! Shared utilities and reference implementations for cutile examples.
 
+pub mod requirements;
+
 #[cfg(feature = "reference-cpu")]
 use candle_core::WithDType;
 #[cfg(feature = "reference-cpu")]

@@ -60,6 +60,13 @@ mod persistent_gemm_kernels {
 }
 
 fn main() {
+    if !cutile_examples::requirements::BASELINE
+        .check("persistent_gemm", 0)
+        .expect("query example capabilities")
+    {
+        return;
+    }
+
     run().unwrap();
 }
 

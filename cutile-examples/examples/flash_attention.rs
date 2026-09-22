@@ -254,6 +254,10 @@ const HEAD_DIM: usize = 64; // or 128
 const N_CTX: usize = 1024; // or some multiple of 1024
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("flash_attention", 0)? {
+        return Ok(());
+    }
+
     let b = BATCH; // = batch size.
     let h = N_HEADS; // = number of heads (query).
     let hkv = N_HEADS; // = number of heads (key/value).

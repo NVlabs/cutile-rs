@@ -248,12 +248,14 @@ let opts = CompileOptions::default()
     .occupancy(4)
     .num_cta_in_cga(2)
     .max_divisibility(16)
-    .num_worker_warps_per_cta(4); // Bytecode 13.3+; valid values: 1, 2, 4, 8, 16, 32.
+    .num_worker_warps_per_cta(4); // Bytecode 13.3+; use 4 or 8.
 
 let result = my_kernel(args).compile_options(opts).grid(grid).await?;
 ```
 
-`num_worker_warps_per_cta` accepts powers of two in the inclusive range `[1, 32]`.
+Tile IR 13.4 restricts `num_worker_warps_per_cta` to 4 or 8. Tile IR 13.3
+accepts powers of two in `[1, 32]` (the assembler clamps to its supported
+worker counts). The JIT checks the selected version's range.
 
 Different `CompileOptions` values trigger separate JIT compilations and are part of the kernel cache key.
 
@@ -269,13 +271,20 @@ methods:
 
 The JIT compiler resolves `tileiras` in this order: `CUTILE_TILEIRAS_PATH`
 when set, then `$CUDA_TOOLKIT_PATH/bin/tileiras`, then the default CUDA 13.2+
-install directories (`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
+install directories (`/usr/local/cuda-13.4`, `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`,
 `/usr/local/cuda-13`, `/usr/local/cuda`), and finally `tileiras` through
 normal `PATH` lookup. Set `CUTILE_TILEIRAS_PATH` to force a specific binary:
 
 ```bash
 CUTILE_TILEIRAS_PATH=/opt/cuda-tile/bin/tileiras cargo test -p cutile
 ```
+
+The selected binary's supported bytecode versions determine emission, not
+the CUDA headers used to build the Rust crates. The default is the highest
+mutually supported version (13.2, 13.3, or 13.4). `CUTILE_BYTECODE_VERSION`
+can pin one of those versions, but cannot force a version that the selected
+assembler does not support. Configure these variables before launching;
+already-resolved launch sites retain their toolchain snapshot.
 
 **`LaunchConfig`** — grid/block/shared-memory specification for `AsyncKernelLaunch` (raw CUDA kernels launched outside the `#[cutile::entry]` path):
 
@@ -330,6 +339,56 @@ gemm(z, x, y).generics(generics).sync_on(&stream)?;
 Generic values are part of the kernel cache key: each unique combination triggers its own JIT compilation.
 
 ---
+
+### Programmatic dependent launch
+
+The generated kernel builder has an unsafe, consuming
+`.programmatic_dependent_launch()` method. It is disabled by default and is
+separate from `CompileOptions`. It requires Tile IR 13.4, sm_90 or newer,
+and a driver providing `cuLaunchKernelEx`; unsupported requests fail rather
+than silently using ordinary serialization. `cuda_async::AsyncKernelLaunch`
+also exposes an unsafe mutable-builder method for lower-level callers.
+
+Enqueue both kernels on the same stream, enabling PDL on the **consumer**:
+
+```rust,ignore
+unsafe {
+    kernels::producer(input.device_pointer()).grid((1, 1, 1))
+        .then(|_| kernels::consumer(input.device_pointer(), output.device_pointer())
+            .programmatic_dependent_launch().grid((1, 1, 1)))
+}.sync_on(&stream)?;
+```
+
+In the producer, chain its stores into
+`gdc_launch_dependents_tko(Some(stored))` when dependent kernels may begin;
+`Tensor::store` returns the token to chain from. Every producer tile block
+must signal or finish. In the consumer, call `gdc_wait_tko(None)` and make
+every predecessor-dependent memory operation consume its result token: for
+a tensor input, `input.set_token(ready)` (unsafe) before creating any view
+of it, so every later load through the tensor is chained after the wait;
+for pointer operations, pass the token directly. Source order alone does
+not establish that dependency. The launch signal permits scheduling; the
+wait establishes dependency completion before consuming data.
+
+Install the token on a function-level binding, outside conditionals and
+loops. An `unsafe { input.set_token(ready) }` block is fine when `input` is
+declared at function level. Block-local receivers and rebinding the tensor
+after installation are rejected by the JIT; explicit token updates do not
+yet participate in control-flow carries. Existing views keep their old
+token, so create views only after installation. The raw
+`make_partition_view` constructor is unsafe because its caller-supplied
+token can otherwise discard the ordering required by safe view loads.
+
+Work before the wait must not race unfinished producer work. Neither kernel
+may rely on actual overlap for progress, and all resources must remain alive
+until both kernels have finished using them. Raw pointers do not retain the
+owning tensors. PDL is an unsafe opt-in because these obligations exceed the
+ordinary stream-ordering guarantees of the safe tensor API.
+
+For a complete executable producer/consumer pair, see
+`cutile-examples/examples/pdl.rs` (with a stream-order vs PDL timing
+comparison) or the test
+`cutile/tests/gpu/tile_ir_13_4.rs::dependent_launch_waits_for_producer_data`.
 
 ## The Futures Analogy
 

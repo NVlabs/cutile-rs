@@ -287,6 +287,10 @@ fn eager_forward(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("cuda_graphs", 0)? {
+        return Ok(());
+    }
+
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
 

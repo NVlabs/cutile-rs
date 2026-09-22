@@ -119,8 +119,9 @@ mod opt_hints_module {
     fn load_view_latency_kernel<const S: [i32; 1]>(input: &Tensor<f32, S>) {
         let token: Token = new_token_unordered();
         let shape = input.shape();
+        // SAFETY: this read-only input has no preceding writes in the kernel.
         let partition: Partition<f32, S> =
-            make_partition_view(input, shape, padding::None, dim_map::Identity, token);
+            unsafe { make_partition_view(input, shape, padding::None, dim_map::Identity, token) };
         let idx: [i32; 1] = [0i32];
         let _tile: Tile<f32, S> = load_view_tko(
             &partition,
@@ -178,8 +179,9 @@ mod opt_hints_module {
     fn load_view_const_latency_kernel<const S: [i32; 1], const L: i32>(input: &Tensor<f32, S>) {
         let token: Token = new_token_unordered();
         let shape = input.shape();
+        // SAFETY: this read-only input has no preceding writes in the kernel.
         let partition: Partition<f32, S> =
-            make_partition_view(input, shape, padding::None, dim_map::Identity, token);
+            unsafe { make_partition_view(input, shape, padding::None, dim_map::Identity, token) };
         let idx: [i32; 1] = [0i32];
         let _tile: Tile<f32, S> = load_view_tko(
             &partition,

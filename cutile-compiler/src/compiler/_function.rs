@@ -74,6 +74,7 @@ pub struct CUDATileFunctionCompiler<'m> {
     /// once per launch by the host `validate_launch`.
     pub(crate) launch_checks: RefCell<Vec<cuda_async::predicate::LaunchCheck>>,
     pub(crate) gpu_name: String,
+    pub(crate) target_capabilities: Option<cutile_ir::capabilities::TargetCapabilities>,
     pub(crate) optimization_hints: OptimizationHints,
     pub(crate) stride_args: HashMap<String, Vec<i32>>,
     pub(crate) generic_vars: GenericVars,
@@ -661,6 +662,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             param_is_mutable,
             launch_checks: RefCell::new(Vec::new()),
             gpu_name,
+            target_capabilities: None,
             optimization_hints,
             _function: function,
             entry,
@@ -958,10 +960,48 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// Compile the kernel function into a `cutile_ir::Module`.
     pub fn compile(&self) -> Result<Module, JITError> {
         let mut module = Module::new(&self.module_name);
+        if let Some(item) = self.modules.modules().get(&self.module_name) {
+            for attr in &item.attrs {
+                if attr.path().is_ident("noname") {
+                    let options = crate::syn_utils::SingleMetaList::from_attribute(attr.clone());
+                    if let Some(producer) = options.parse_string("producer") {
+                        if let Some(caps) = &self.target_capabilities {
+                            caps.require_version(
+                                "module.producer",
+                                cutile_ir::requirements::Feature::Producer.since(),
+                                &self.ir_location(&item.span()),
+                            )?;
+                        }
+                        module.producer = Some(producer);
+                    }
+                }
+            }
+        }
         self.emit_module_globals(&mut module)?;
         let entry_op = self.compile_entry_function(&mut module)?;
         module.functions.push(entry_op);
+        if let Some(capabilities) = &self.target_capabilities {
+            capabilities
+                .validate_module(&module)
+                .map_err(JITError::from)?;
+        }
         Ok(module)
+    }
+
+    /// Attach the target already negotiated at JIT, or an explicit target in
+    /// driver-free compile tests. The constructor remains driver-independent.
+    pub fn with_target_capabilities(
+        mut self,
+        capabilities: cutile_ir::capabilities::TargetCapabilities,
+    ) -> Result<Self, JITError> {
+        if capabilities.architecture != self.gpu_name {
+            return Err(JITError::Generic(format!(
+                "compiler target {} differs from capability target {}",
+                self.gpu_name, capabilities.architecture
+            )));
+        }
+        self.target_capabilities = Some(capabilities);
+        Ok(self)
     }
 
     fn compile_function_param_types(
@@ -1118,6 +1158,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // syntax, for anything downstream to resolve it to a parameter.
                 val.tensor_origin = Some(name.clone());
                 ctx.vars.insert(name.clone(), val);
+                ctx.function_level_bindings.insert(name.clone());
             }
         }
 
@@ -1149,6 +1190,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
 
         ctx.default_terminator = Some(BlockTerminator::Return);
         ctx.fn_body = true;
+        ctx.kernel_entry = true;
 
         let mut typed_fn_item = fn_item.clone();
         crate::passes::node_ids::assign_expr_ids(&mut typed_fn_item);

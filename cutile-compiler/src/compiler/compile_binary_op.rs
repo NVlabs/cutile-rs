@@ -237,15 +237,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // `false && b` / `true || b`: `b` is never evaluated.
                 return Ok(Some(lhs));
             }
-            let Some(rhs) = self.compile_expression(
-                module,
-                block_id,
-                &bin_expr.right,
-                generic_vars,
-                ctx,
-                None,
-            )?
-            else {
+            let previous_region = ctx.token_update_in_region;
+            ctx.token_update_in_region = true;
+            let rhs =
+                self.compile_expression(module, block_id, &bin_expr.right, generic_vars, ctx, None);
+            ctx.token_update_in_region = previous_region;
+            let Some(rhs) = rhs? else {
                 return self.jit_error_result(
                     &bin_expr.right.span(),
                     &format!("failed to compile the right-hand side of `{op_name}`"),
@@ -263,6 +260,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // The region that evaluates `b`: `then` for `&&`, `else` for `||`.
         let (rhs_block_id, _) = cutile_ir::builder::build_block(module, &[]);
         let mut rhs_vars = ctx.clone();
+        rhs_vars.token_update_in_region = true;
         rhs_vars.default_terminator = None;
         rhs_vars.carry_vars = None;
         let Some(rhs) = self.compile_expression(

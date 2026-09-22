@@ -46,6 +46,10 @@ mod my_module {
 use my_module::batch_matmul;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("batch_matmul", 0)? {
+        return Ok(());
+    }
+
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
 

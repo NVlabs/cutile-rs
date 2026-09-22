@@ -32,10 +32,11 @@ pub enum Section {
     Constant = 0x04,
     Type = 0x05,
     Global = 0x06,
+    Producer = 0x07,
 }
 
 /// Total number of section kinds (excluding `EndOfBytecode` sentinel).
-pub const NUM_SECTIONS: u8 = 0x07;
+pub const NUM_SECTIONS: u8 = 0x08;
 
 // ---------------------------------------------------------------------------
 // Type tags
@@ -68,6 +69,7 @@ pub enum TypeTag {
     GatherScatterView = 20,
     StridedView = 21,
     I4 = 22,
+    F8E5M3FNU = 0x82,
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +145,7 @@ pub enum AttributeTag {
 ///
 /// Serialized as three little-endian fields in the file header
 /// (u8, u8, u16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BytecodeVersion {
     pub major: u8,
     pub minor: u8,
@@ -161,9 +163,14 @@ impl BytecodeVersion {
         minor: 3,
         tag: 0,
     };
+    pub const V13_4: Self = Self {
+        major: 13,
+        minor: 4,
+        tag: 0,
+    };
 
     /// Newest version this writer can emit.
-    pub const CURRENT: Self = Self::V13_3;
+    pub const CURRENT: Self = Self::V13_4;
 
     /// Oldest version this writer can emit.
     ///
@@ -176,7 +183,7 @@ impl BytecodeVersion {
 
     /// All emittable versions, oldest to newest. Used to probe the installed
     /// `tileiras` for the newest bytecode version it accepts.
-    pub const SUPPORTED: [Self; 2] = [Self::V13_2, Self::V13_3];
+    pub const SUPPORTED: [Self; 3] = [Self::V13_2, Self::V13_3, Self::V13_4];
 }
 
 impl std::fmt::Display for BytecodeVersion {

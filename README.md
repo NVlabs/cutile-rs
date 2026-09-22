@@ -68,16 +68,45 @@ The kernel signature carries the access discipline into device code: `z` is the 
 - **Rust:** stable 1.89+ (no nightly required).
 - **Linux:** tested on Ubuntu 24.04.
 
-GPU and toolkit requirements for cuTile Rust:
+GPU and emitted Tile IR requirements for cuTile Rust:
 
-| GPU compute capability | Minimum CUDA Toolkit |
+<!-- BEGIN TILE IR TARGETS -->
+| GPU compute capability | Minimum Tile IR version |
 |---|---|
-| `sm_8x` (Ampere / Ada) | 13.2 |
+| `sm_80`, `sm_86`, `sm_87`, `sm_88`, `sm_89` (Ampere / Ada) | 13.2 |
 | `sm_90` (Hopper) | 13.3 |
-| `sm_100+` (Blackwell, including DGX Spark / GB10 `sm_121`) | 13.2 |
+| Blackwell `sm_100`, `sm_103`, `sm_110`, `sm_120`, `sm_121` | 13.2 |
+| `sm_107` | 13.4 |
+<!-- END TILE IR TARGETS -->
 
 CUDA **13.3 is recommended**. FP4 packing and block-scaled MMA require 13.3.
 GPUs below `sm_80` (such as `sm_70` and `sm_75`) are unsupported.
+
+### Feature requirements
+
+Raw features have additional requirements. Toolkit and architecture checks
+are **both** required; an unsupported operation produces a source-located
+JIT error before assembly.
+
+<!-- BEGIN TILE IR REQUIREMENTS -->
+| Raw feature | Requires |
+|---|---|
+| Allocation | Tile IR 13.3 |
+| Gather/scatter views | Tile IR 13.3 |
+| Strided views | Tile IR 13.3 |
+| View atomic reduction | Tile IR 13.3 |
+| FP4 packing | Tile IR 13.3 and `sm_100+` |
+| Block-scaled MMA | Tile IR 13.3 and `sm_100+`; valid operand/scale configuration |
+| `insert`, `fpowi`, GDC tokens, alias fence | Tile IR 13.4 |
+| Saturating float-to-int, explicit pointer classification, view `inbounds` | Tile IR 13.4 |
+| `f8e5m3fnu` | Tile IR 13.4 and `sm_107+` |
+| Scaled MMA with `f8e5m3fnu` scales | Tile IR 13.4 and `sm_107` only |
+| Programmatic dependent launch (unsafe, per launch) | Tile IR 13.4 and `sm_90+`; driver `cuLaunchKernelEx` support |
+<!-- END TILE IR REQUIREMENTS -->
+
+See the [version/feature matrix](cutile-book/reference/compatibility.md),
+the [raw DSL reference](cutile-book/reference/dsl-api.md#raw-tile-ir-versioned-surface)
+and the [launch contract](cutile-book/reference/host-api.md#programmatic-dependent-launch).
 
 ### Install
 
@@ -98,9 +127,15 @@ https://developer.nvidia.com/cuda-downloads
 
 Set `CUDA_TOOLKIT_PATH` (or `CUDA_HOME`, consulted second) to your CUDA 13.3
 install directory for a reproducible setup. If neither is set, cuTile
-searches standard CUDA 13.3/13.2 install locations such as
-`/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`,
+searches standard CUDA 13.4/13.3/13.2 install locations such as
+`/usr/local/cuda-13.4`, `/usr/local/cuda-13.3`, `/usr/local/cuda-13.2`, `/usr/local/cuda-13`,
 `/usr/local/cuda`, and `/opt/cuda`.
+
+`CUTILE_TILEIRAS_PATH` is optional. If set, it overrides the `tileiras` binary
+that would otherwise be taken from the selected CUDA toolkit. The selected
+`tileiras` determines the emitted Tile IR bytecode version, and CUDA 13.2 and
+13.3 keep their older wire layouts. Mixing a `tileiras` from one CUDA version
+with a toolkit of another is not guaranteed to be compatible.
 
 Example `.cargo/config.toml`:
 ```toml

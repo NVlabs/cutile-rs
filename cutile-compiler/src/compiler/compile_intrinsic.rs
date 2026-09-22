@@ -2324,7 +2324,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 }
                 Ok(None)
             }
-            "set_type_meta_field" => {
+            "set_type_meta_field" | "set_access_token" => {
                 let Some(type_meta_field) = compiler_op_attrs.parse_string("type_meta_field")
                 else {
                     return self.jit_error_result(
@@ -2362,6 +2362,27 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         ),
                     );
                 }
+                let explicit_token_update =
+                    type_meta_field == "token" && compiler_op_name == "set_type_meta_field";
+                if explicit_token_update {
+                    // TODO (hme): Treat token installation as a mutation in
+                    // collect_mutated_variables_from_block, carrying token SSA
+                    // values through blocks, branches and loops uniformly. Then
+                    // remove the immutable-token metadata copy-back workaround.
+                    if ctx.inside_for || ctx.innermost_loop.is_some() || ctx.token_update_in_region
+                    {
+                        return self.jit_error_result(
+                            &call_expr.span(),
+                            "set_token/set_tensor_token is not supported inside conditional or loop regions; install the token before entering the region",
+                        );
+                    }
+                    if !ctx.function_level_bindings.contains(&var_name) {
+                        return self.jit_error_result(
+                            &call_expr.span(),
+                            "set_token/set_tensor_token requires a function-level tensor binding; bindings declared inside nested blocks are not supported",
+                        );
+                    }
+                }
                 let mut args =
                     self.compile_call_args(module, block_id, &call_expr.args, generic_vars, ctx)?;
                 let type_meta_value = args[1].clone();
@@ -2386,7 +2407,12 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 }
                 let result_value = type_value.clone();
-                if result_value.mutability != Mutability::Mutable {
+                // The ordering token is metadata, not data: installing one on
+                // a read-only tensor is how a kernel chains its loads after an
+                // external ordering point (a PDL wait). Every other field
+                // still requires a mutable binding.
+                let sets_ordering_token = type_meta_field == "token";
+                if result_value.mutability != Mutability::Mutable && !sets_ordering_token {
                     return self.jit_error_result(
                         &call_expr.args[0].span(),
                         &format!(
@@ -2396,6 +2422,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     );
                 }
                 ctx.vars.insert(var_name.clone(), result_value);
+                if explicit_token_update {
+                    ctx.explicit_token_updates.insert(var_name);
+                }
                 Ok(None)
             }
             "check" => {

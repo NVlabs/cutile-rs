@@ -20,8 +20,10 @@
 
 use super::encoding::EncodingWriter;
 use super::opcode::Opcode;
-use super::writer::WriterCtx;
+use super::writer::{require_version, WriterCtx};
+use super::BytecodeVersion;
 use crate::ir::{Attribute, Operation};
+use crate::requirements::{attribute_feature, Feature};
 use crate::{Error, Result};
 
 // =========================================================================
@@ -38,6 +40,12 @@ pub(super) fn write_op_body(
     ctx: &mut WriterCtx,
 ) -> Result<()> {
     use Opcode::*;
+    require_version(op.opcode.name(), op.opcode.minimum_version(), ctx.version)?;
+    for (name, attr) in &op.attributes {
+        if let Some(feature) = attribute_feature(op.opcode, name, attr) {
+            require_version(feature.name(), feature.since(), ctx.version)?;
+        }
+    }
     match op.opcode {
         // ----- Simple: result types + operands (no size) -----
         AbsF
@@ -50,11 +58,13 @@ pub(super) fn write_op_body(
         | Cos
         | CosH
         | Floor
+        | FPowI
         | IntToPtr
         | Log
         | Log2
         | MakeGatherScatterView
         | MakeStridedView
+        | MemoryFenceAliasTko
         | MmaFScaled
         | MulhiI
         | NegF
@@ -78,6 +88,15 @@ pub(super) fn write_op_body(
 
         Exp => {
             write_result_types(op, w, ctx)?;
+            if find_op_attr(op, "rounding_mode")
+                .is_some_and(|attr| !matches!(attr, Attribute::Integer(5, _)))
+            {
+                require_version(
+                    "exp.rounding_mode",
+                    Feature::ExpRounding.since(),
+                    ctx.version,
+                )?;
+            }
             if ctx.version >= super::enums::BytecodeVersion::V13_3 {
                 write_inline_attr_or_default(op, "rounding_mode", 5, w, ctx)?;
             }
@@ -86,6 +105,13 @@ pub(super) fn write_op_body(
 
         MmaF => {
             write_result_types(op, w, ctx)?;
+            if flag_if_bool_true(op, "fast_acc", 0) != 0 {
+                require_version(
+                    "mmaf.fast_acc",
+                    Feature::FastAccumulation.since(),
+                    ctx.version,
+                )?;
+            }
             if ctx.version >= super::enums::BytecodeVersion::V13_3 {
                 let flags = flag_if_bool_true(op, "fast_acc", 0);
                 w.write_varint(flags);
@@ -181,6 +207,17 @@ pub(super) fn write_op_body(
         }
         FToI => {
             write_result_types(op, w, ctx)?;
+            let flags = flag_if_bool_true(op, "saturating", 0);
+            if flags != 0 {
+                require_version(
+                    "ftoi.saturating",
+                    Feature::SaturatingFToI.since(),
+                    ctx.version,
+                )?;
+            }
+            if ctx.version >= BytecodeVersion::V13_4 {
+                w.write_varint(flags);
+            }
             write_inline_attr(op, "signedness", w, ctx)?;
             write_inline_attr(op, "rounding_mode", w, ctx)?;
             write_operands(op, w, ctx, false)?;
@@ -239,7 +276,7 @@ pub(super) fn write_op_body(
         }
 
         // ----- Extract: result count + variadic operands -----
-        Extract => {
+        Extract | Insert => {
             w.write_varint(op.result_types.len() as u64);
             write_result_types(op, w, ctx)?;
             write_operands(op, w, ctx, true)?;
@@ -291,6 +328,22 @@ pub(super) fn write_op_body(
         // ----- Global: result types + attrs (handled in global section, but also as op) -----
         Global => {
             write_result_types(op, w, ctx)?;
+            if flag_if_bool_true(op, "constant", 0) != 0 {
+                require_version(
+                    "global.constant",
+                    Feature::GlobalConstant.since(),
+                    ctx.version,
+                )?;
+            }
+            if find_op_attr(op, "symbol_visibility")
+                .is_some_and(|attr| !matches!(attr, Attribute::Integer(0, _)))
+            {
+                require_version(
+                    "global.symbol_visibility",
+                    Feature::GlobalVisibility.since(),
+                    ctx.version,
+                )?;
+            }
             if ctx.version >= super::enums::BytecodeVersion::V13_3 {
                 let flags = flag_if_bool_true(op, "constant", 0);
                 w.write_varint(flags);
@@ -306,6 +359,9 @@ pub(super) fn write_op_body(
         // ----- Module: result types + attr + regions -----
         Module => {
             write_result_types(op, w, ctx)?;
+            if find_op_attr(op, "producer").is_some() {
+                require_version("module.producer", Feature::Producer.since(), ctx.version)?;
+            }
             if ctx.version >= super::enums::BytecodeVersion::V13_3 {
                 let flags = flag_if_present(op, "producer", 0);
                 w.write_varint(flags);
@@ -477,6 +533,7 @@ pub(super) fn write_op_body(
             if flags & (1 << 1) != 0 {
                 write_inline_attr(op, "optimization_hints", w, ctx)?;
             }
+            write_inbounds(op, 1, w, ctx)?;
             write_operand_group(op, w, ctx, 0, 1)?;
             write_variadic_operand_group(op, w, ctx, 1)?;
             if flags & (1 << 2) != 0 {
@@ -520,12 +577,25 @@ pub(super) fn write_op_body(
             if flags & (1 << 1) != 0 {
                 write_inline_attr(op, "optimization_hints", w, ctx)?;
             }
+            write_inbounds(op, 2, w, ctx)?;
             write_operand_group(op, w, ctx, 0, 1)?;
             write_operand_group(op, w, ctx, 1, 1)?;
             write_variadic_operand_group(op, w, ctx, 2)?;
             if flags & (1 << 2) != 0 {
                 write_operand_group(op, w, ctx, 3, 1)?;
             }
+        }
+
+        GdcLaunchDependentsTko | GdcWaitTko => {
+            if op.operands.len() > 1 {
+                return Err(Error::BytecodeWrite(format!(
+                    "{} expects at most one token operand",
+                    op.opcode.name()
+                )));
+            }
+            write_result_types(op, w, ctx)?;
+            w.write_varint(u64::from(!op.operands.is_empty()));
+            write_operands(op, w, ctx, false)?;
         }
 
         // ----- Entry (function-like, with flags + optional attrs + regions) -----
@@ -836,6 +906,50 @@ fn write_attr_value_inline(
     Ok(())
 }
 
+/// 13.4 adds a dense byte-per-bool vector before view operands. An omitted
+/// attribute means all false, preserving the pre-13.4 bounds semantics.
+fn write_inbounds(
+    op: &Operation,
+    indices_group: usize,
+    w: &mut EncodingWriter,
+    ctx: &WriterCtx,
+) -> Result<()> {
+    let rank = operand_segment_sizes(op)
+        .get(indices_group)
+        .copied()
+        .unwrap_or(0);
+    let rank = usize::try_from(rank)
+        .map_err(|_| Error::BytecodeWrite("negative view index operand count".into()))?;
+    let values = match find_op_attr(op, "inbounds") {
+        None => vec![false; rank],
+        Some(Attribute::Array(attrs)) if attrs.len() == rank => attrs
+            .iter()
+            .map(|a| match a {
+                Attribute::Bool(value) => Ok(*value),
+                _ => Err(Error::BytecodeWrite(
+                    "inbounds requires boolean elements".into(),
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => {
+            return Err(Error::BytecodeWrite(format!(
+                "{}.inbounds must contain {rank} booleans (one per index dimension)",
+                op.opcode.name()
+            )))
+        }
+    };
+    if values.iter().any(|&value| value) {
+        require_version("inbounds=true", Feature::Inbounds.since(), ctx.version)?;
+    }
+    if ctx.version >= BytecodeVersion::V13_4 {
+        w.write_varint(rank as u64);
+        for value in values {
+            w.write_byte(u8::from(value));
+        }
+    }
+    Ok(())
+}
+
 fn find_op_attr<'a>(op: &'a Operation, name: &str) -> Option<&'a Attribute> {
     op.attributes
         .iter()
@@ -888,9 +1002,18 @@ mod tests {
     /// Serializes the body of the single op in `block` with a fresh context
     /// whose value map numbers the block arguments 0, 1, ...
     fn op_body_bytes(module: &Module, args: &[crate::ir::Value], op: crate::ir::OpId) -> Vec<u8> {
+        op_body_bytes_version(module, args, op, BytecodeVersion::CURRENT).expect("write_op_body")
+    }
+
+    fn op_body_bytes_version(
+        module: &Module,
+        args: &[crate::ir::Value],
+        op: crate::ir::OpId,
+        version: BytecodeVersion,
+    ) -> Result<Vec<u8>> {
         let mut ctx = WriterCtx {
             module,
-            version: BytecodeVersion::CURRENT,
+            version,
             value_map: args
                 .iter()
                 .enumerate()
@@ -903,8 +1026,188 @@ mod tests {
             debug: DebugInfoCollector::new(),
         };
         let mut w = EncodingWriter::new();
-        write_op_body(module.op(op), &mut w, &mut ctx).expect("write_op_body");
-        w.into_bytes()
+        write_op_body(module.op(op), &mut w, &mut ctx)?;
+        Ok(w.into_bytes())
+    }
+
+    fn compare_python(operation: &str, version: BytecodeVersion, option: bool, actual: &[u8]) {
+        let Some(source) = std::env::var_os("CUTILE_PYTHON_SOURCE") else {
+            eprintln!("Python differential check skipped: set CUTILE_PYTHON_SOURCE to a reference checkout");
+            return;
+        };
+        let output = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/python_encoding.py"
+            ))
+            .arg(source)
+            .arg(operation)
+            .arg(version.to_string())
+            .arg(option.to_string())
+            .output()
+            .expect("run Python reference encoder");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: String = actual.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            expected,
+            "{operation} {version}"
+        );
+    }
+
+    #[test]
+    fn gdc_optional_token_wire_layout_and_version_gate() {
+        for opcode in [Opcode::GdcLaunchDependentsTko, Opcode::GdcWaitTko] {
+            for present in [false, true] {
+                let mut module = Module::new("gdc");
+                let (_, _, args) = build_single_block_region(&mut module, &[Type::Token]);
+                let mut builder = OpBuilder::new(opcode, Location::Unknown).result(Type::Token);
+                if present {
+                    builder = builder.operand(args[0]);
+                }
+                let (op, _) = builder.build(&mut module);
+                // result type, optional-operand flag, optional token value.
+                assert_eq!(
+                    op_body_bytes(&module, &args, op),
+                    if present { vec![0, 1, 0] } else { vec![0, 0] }
+                );
+                compare_python(
+                    &format!("{opcode:?}"),
+                    BytecodeVersion::V13_4,
+                    present,
+                    &op_body_bytes(&module, &args, op),
+                );
+                for old in [BytecodeVersion::V13_2, BytecodeVersion::V13_3] {
+                    assert!(op_body_bytes_version(&module, &args, op, old)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("13.4"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn insert_fpowi_alias_fence_wire_layout_and_version_gate() {
+        for (opcode, count, expected) in [
+            (Opcode::Insert, 3, vec![1, 1, 3, 0, 1, 2]),
+            (Opcode::FPowI, 2, vec![1, 0, 1]),
+            (Opcode::MemoryFenceAliasTko, 1, vec![0, 0]),
+        ] {
+            let mut module = Module::new("new_ops");
+            let result = if opcode == Opcode::MemoryFenceAliasTko {
+                Type::Token
+            } else {
+                tile_f32()
+            };
+            let (_, _, args) = build_single_block_region(&mut module, &vec![result.clone(); count]);
+            let (op, _) = OpBuilder::new(opcode, Location::Unknown)
+                .operands(args.iter().copied())
+                .result(result)
+                .build(&mut module);
+            assert_eq!(op_body_bytes(&module, &args, op), expected, "{opcode:?}");
+            compare_python(
+                &format!("{opcode:?}"),
+                BytecodeVersion::V13_4,
+                false,
+                &op_body_bytes(&module, &args, op),
+            );
+            assert!(op_body_bytes_version(&module, &args, op, BytecodeVersion::V13_3).is_err());
+        }
+    }
+
+    #[test]
+    fn ftoi_flags_are_added_only_in_13_4() {
+        for saturating in [false, true] {
+            let mut module = Module::new("ftoi");
+            let (_, _, args) = build_single_block_region(&mut module, &[tile_f32()]);
+            let result = Type::Tile(TileType {
+                shape: vec![],
+                element_type: TileElementType::Scalar(ScalarType::I32),
+            });
+            let (op, _) = OpBuilder::new(Opcode::FToI, Location::Unknown)
+                .operand(args[0])
+                .result(result)
+                .attr("signedness", Attribute::i32(0))
+                .attr("rounding_mode", Attribute::i32(6))
+                .attr("saturating", Attribute::Bool(saturating))
+                .build(&mut module);
+            assert_eq!(
+                op_body_bytes(&module, &args, op),
+                vec![1, u8::from(saturating), 0, 6, 0]
+            );
+            compare_python(
+                "FToI",
+                BytecodeVersion::V13_4,
+                saturating,
+                &op_body_bytes(&module, &args, op),
+            );
+            for old in [BytecodeVersion::V13_2, BytecodeVersion::V13_3] {
+                let bytes = op_body_bytes_version(&module, &args, op, old);
+                if saturating {
+                    assert!(bytes.is_err());
+                } else {
+                    let bytes = bytes.unwrap();
+                    assert_eq!(bytes, vec![1, 0, 6, 0]);
+                    compare_python("FToI", old, false, &bytes);
+                }
+            }
+        }
+    }
+
+    /// `print_tko` with an ordering token: flags bit 0 set, the sized `args`
+    #[test]
+    fn view_inbounds_layout_matches_python_with_and_without_promises() {
+        for opcode in [Opcode::LoadViewTko, Opcode::StoreViewTko] {
+            for inbounds in [false, true] {
+                let mut module = Module::new("view_flags");
+                let count = if opcode == Opcode::LoadViewTko { 3 } else { 4 };
+                let (_, _, args) =
+                    build_single_block_region(&mut module, &vec![Type::Token; count]);
+                let mut builder = OpBuilder::new(opcode, Location::Unknown)
+                    .operands(args.iter().copied())
+                    .attr("inbounds", Attribute::dense_bool_array([inbounds]))
+                    .attr("memory_ordering_semantics", Attribute::i32(0))
+                    .attr(
+                        "operandSegmentSizes",
+                        Attribute::Array(vec![Attribute::i32(1); count]),
+                    );
+                if opcode == Opcode::LoadViewTko {
+                    builder = builder.result(tile_f32());
+                }
+                let (op, _) = builder.result(Type::Token).build(&mut module);
+                for version in BytecodeVersion::SUPPORTED {
+                    let bytes = op_body_bytes_version(&module, &args, op, version);
+                    if inbounds && version < BytecodeVersion::V13_4 {
+                        assert!(bytes.is_err());
+                    } else {
+                        compare_python(&format!("{opcode:?}"), version, inbounds, &bytes.unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn atan2_body_matches_python_on_all_versions() {
+        let mut module = Module::new("atan2");
+        let (_, _, args) = build_single_block_region(&mut module, &[tile_f32(), tile_f32()]);
+        let (op, _) = OpBuilder::new(Opcode::Atan2, Location::Unknown)
+            .operands(args.iter().copied())
+            .result(tile_f32())
+            .build(&mut module);
+        for version in BytecodeVersion::SUPPORTED {
+            compare_python(
+                "Atan2",
+                version,
+                false,
+                &op_body_bytes_version(&module, &args, op, version).unwrap(),
+            );
+        }
     }
 
     /// `print_tko` with an ordering token: flags bit 0 set, the sized `args`

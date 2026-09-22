@@ -114,9 +114,15 @@ write_bytecode_to_file(&module, "kernel.bc")?;
 // Then: tileiras --gpu-name sm_120 -o kernel.cubin kernel.bc
 ```
 
+`write_bytecode_to_file` uses the writer's current format, which may be newer
+than an installed assembler. Use `write_bytecode_version` when targeting an
+older format. The JIT, `build_basic` example and assembler-validation tests
+negotiate with the selected executable; they also handle older assemblers
+without `--list-versions`. See the [compatibility matrix](../cutile-book/reference/compatibility.md).
+
 cuTile's JIT resolves `tileiras` from `CUTILE_TILEIRAS_PATH` when set, then
 `$CUDA_TOOLKIT_PATH/bin/tileiras`, then the default CUDA 13.2+ install
-directories (`/usr/local/cuda-13.3` through `/usr/local/cuda`), and only then
+directories (`/usr/local/cuda-13.4` through `/usr/local/cuda`), and only then
 from `PATH`. Set `CUTILE_TILEIRAS_PATH` to force a specific binary, for
 example:
 
