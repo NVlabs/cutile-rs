@@ -68,7 +68,14 @@ pub fn negotiate_bytecode_version(
 
     // Recent assemblers enumerate their supported input formats. Do not
     // infer this list from --version: tool and bytecode versions are distinct.
-    if let Ok(output) = Command::new(tileiras).arg("--list-versions").output() {
+    let listed = Command::new(tileiras).arg("--list-versions").output();
+    if let Err(e) = &listed {
+        emit_setup_diagnostic(format_args!(
+            "could not launch {} --list-versions ({e}); falling back to compile probes",
+            tileiras.display()
+        ));
+    }
+    if let Ok(output) = listed {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             let versions: Option<Vec<_>> = text
@@ -393,7 +400,15 @@ mod tests {
                 BytecodeVersion::V13_4,
             ),
         ] {
-            write_fake_tileiras_script(&path, &format!("printf '{versions}'\n"));
+            // Answer only `--list-versions`; reject compile probes, so a
+            // fallthrough to probing fails loudly instead of accepting the
+            // newest version (seen once on CI when the list launch failed).
+            write_fake_tileiras_script(
+                &path,
+                &format!(
+                    "case \"$1\" in --list-versions) printf '{versions}';; *) exit 1;; esac\n"
+                ),
+            );
             assert_eq!(negotiate_bytecode_version(&path, None).unwrap(), expected);
             assert_eq!(
                 negotiate_bytecode_version(&path, Some("13.2".as_ref())).unwrap(),
@@ -569,8 +584,29 @@ minor=$(od -An -tu1 -j9 -N1 "$5" | tr -d ' ')
 
     #[cfg(unix)]
     fn write_fake_tileiras_script(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        use std::io::Write;
+        use std::process::Stdio;
+
+        // Keep writable executable fds out of this multithreaded process.
+        // A concurrent child can inherit one until exec, causing ETXTBSY in
+        // another launch even after fs::write has returned. Wait for a separate
+        // writer process to exit before executing the fixture.
+        let mut writer = Command::new("sh")
+            .args([
+                "-c",
+                "cat > \"$1\" && chmod 755 \"$1\"",
+                "write-fake-tileiras",
+            ])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("#!/bin/sh\n{body}").as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success());
     }
 }

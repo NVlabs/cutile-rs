@@ -1744,12 +1744,29 @@ printf 'fake cubin\n' > "$out"
     /// Writes an executable `sh` script standing in for `tileiras`.
     #[cfg(unix)]
     fn write_fake_tileiras_script(path: &std::path::Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::process::Stdio;
 
-        fs::write(path, format!("#!/bin/sh\nset -eu\n{body}")).unwrap();
-
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).unwrap();
+        // Keep writable executable fds out of this multithreaded process.
+        // A concurrent child can inherit one until exec, causing ETXTBSY in
+        // another launch even after fs::write has returned. Wait for a separate
+        // writer process to exit before executing the fixture.
+        let mut writer = Command::new("sh")
+            .args([
+                "-c",
+                "cat > \"$1\" && chmod 755 \"$1\"",
+                "write-fake-tileiras",
+            ])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("#!/bin/sh\nset -eu\n{body}").as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success());
     }
 }
