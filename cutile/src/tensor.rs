@@ -218,7 +218,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of, MaybeUninit};
 use std::ops::Index;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 /// A partitioned view of a tensor that divides it into tiles for GPU kernel processing.
@@ -534,7 +534,61 @@ pub use cutile_compiler::specialization::{compute_spec, SpecializationBits};
 #[derive(Debug)]
 pub(crate) struct Storage {
     allocation: Allocation,
-    accesses: Mutex<Vec<StorageAccess>>,
+    /// In-flight accesses, one packed [`access_word`] per slot; `0` is free.
+    /// Lock-free for the common case of a few concurrent leases per tensor.
+    slots: [AtomicU64; ACCESS_SLOTS],
+    /// Accesses beyond the slots (many concurrent leases on one tensor, or
+    /// a graph that recorded many nodes against it). Rarely non-empty.
+    overflow: Mutex<Vec<u64>>,
+    /// Mirrors `overflow.len()` so the hot path skips the lock when empty.
+    overflow_len: AtomicUsize,
+}
+
+/// Inline in-flight access slots per storage.
+const ACCESS_SLOTS: usize = 8;
+
+/// The packed representation of one in-flight access.
+///
+/// ```text
+///   bit 63      used (the slot holds an access)
+///   bit 62      write
+///   bit 61      recording (captured into a graph; exempt from conflicts)
+///   bits 60..29 stream id (`Stream::id`, 32 bits)
+///   bits 28..0  serial, so a lease releases exactly the access it took
+/// ```
+mod access_word {
+    use super::AtomicOrdering;
+    use std::sync::atomic::AtomicU32;
+
+    pub const USED: u64 = 1 << 63;
+    pub const WRITE: u64 = 1 << 62;
+    pub const RECORDING: u64 = 1 << 61;
+    const STREAM_SHIFT: u32 = 29;
+    const SERIAL_MASK: u64 = (1 << STREAM_SHIFT) - 1;
+
+    static NEXT_SERIAL: AtomicU32 = AtomicU32::new(1);
+
+    pub fn pack(stream: u32, write: bool, recording: bool) -> u64 {
+        let serial = NEXT_SERIAL.fetch_add(1, AtomicOrdering::Relaxed) as u64 & SERIAL_MASK;
+        USED | (if write { WRITE } else { 0 })
+            | (if recording { RECORDING } else { 0 })
+            | ((stream as u64) << STREAM_SHIFT)
+            | serial
+    }
+
+    pub fn stream(word: u64) -> u32 {
+        (word >> STREAM_SHIFT) as u32
+    }
+
+    /// The rule the mutex-based set enforced: an in-flight, non-recording
+    /// access on another stream conflicts with `write`, or with anything if
+    /// it is itself a write.
+    pub fn conflicts(word: u64, stream: u32, write: bool) -> bool {
+        word & USED != 0
+            && word & RECORDING == 0
+            && self::stream(word) != stream
+            && (write || word & WRITE != 0)
+    }
 }
 
 #[derive(Debug)]
@@ -549,7 +603,9 @@ impl Storage {
     fn new(allocation: Allocation) -> Self {
         Self {
             allocation,
-            accesses: Mutex::new(Vec::new()),
+            slots: [const { AtomicU64::new(0) }; ACCESS_SLOTS],
+            overflow: Mutex::new(Vec::new()),
+            overflow_len: AtomicUsize::new(0),
         }
     }
 
@@ -558,16 +614,42 @@ impl Storage {
         ctx: &ExecutionContext,
         write: bool,
     ) -> Result<(), DeviceError> {
+        match self.register_for(ctx, write)? {
+            Some(lease) => ctx.retain_lease(lease),
+            None => Ok(()),
+        }
+    }
+
+    /// [`retain`](Self::retain) for one argument of a launch: the lease goes
+    /// into `leases`, which the launcher hands to the context once for all
+    /// its arguments ([`ExecutionContext::retain_leases`]), so a launch
+    /// takes the submission lock once, not once per tensor.
+    pub(crate) fn retain_into(
+        self: &Arc<Self>,
+        ctx: &ExecutionContext,
+        write: bool,
+        leases: &mut LeaseBatch,
+    ) -> Result<(), DeviceError> {
+        if let Some(lease) = self.register_for(ctx, write)? {
+            leases.push(lease);
+        }
+        Ok(())
+    }
+
+    /// Registers this access on the storage. Under capture the access is
+    /// recorded with the graph and `None` is returned; otherwise the lease
+    /// the caller must hand to the context is returned.
+    fn register_for(
+        self: &Arc<Self>,
+        ctx: &ExecutionContext,
+        write: bool,
+    ) -> Result<Option<AccessLease>, DeviceError> {
         if self.device_id() != ctx.get_device_id() {
             return Err(DeviceError::Internal(
                 "tensor and execution stream are on different devices".into(),
             ));
         }
-        let id = self.register_access(
-            ctx.get_cuda_stream().cu_stream() as usize,
-            write,
-            ctx.is_recording(),
-        )?;
+        let id = self.register_access(ctx.get_cuda_stream().id(), write, ctx.is_recording())?;
         if ctx.is_recording() {
             // Owned by the graph; reacquired (as a plain lease) on each replay.
             ctx.record_resource(Arc::new(StorageLease {
@@ -575,11 +657,10 @@ impl Storage {
                 id,
                 write,
             }));
-            Ok(())
-        } else {
-            // Hot path: a refcount and an inline push, no allocation.
-            ctx.retain_lease(AccessLease::new(self.clone(), id))
+            return Ok(None);
         }
+        // Hot path: a refcount and an inline push, no allocation.
+        Ok(Some(AccessLease::new(self.clone(), id)))
     }
 
     /// Test spelling of [`register_access`](Self::register_access) that hands
@@ -587,7 +668,7 @@ impl Storage {
     #[cfg(test)]
     fn acquire(
         self: &Arc<Self>,
-        stream: usize,
+        stream: u32,
         write: bool,
         recording: bool,
     ) -> Result<StorageLease, DeviceError> {
@@ -599,39 +680,92 @@ impl Storage {
         })
     }
 
-    /// Registers an in-flight access and returns its id; released through
-    /// [`AccessTracked::release_access`] when the holding submission completes.
+    /// Registers an in-flight access and returns its packed word; released
+    /// through [`AccessTracked::release_access`] when the holding submission
+    /// completes.
+    ///
+    /// Lock-free in the common case: the access is claimed into a free slot
+    /// *first*, then the other slots are checked for a conflict, so of two
+    /// concurrent conflicting acquirers at least one observes the other (a
+    /// claim happens-before the checks that follow it). A spurious double
+    /// refusal is the only false outcome, never a missed conflict.
     fn register_access(
         self: &Arc<Self>,
-        stream: usize,
+        stream: u32,
         write: bool,
         recording: bool,
     ) -> Result<u64, DeviceError> {
-        let mut accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
-        if !recording
-            && accesses.iter().any(|access| {
-                !access.recording && access.stream != stream && (write || access.write)
-            })
-        {
+        let word = access_word::pack(stream, write, recording);
+        let mut claimed = None;
+        for (index, slot) in self.slots.iter().enumerate() {
+            if slot
+                .compare_exchange(0, word, AtomicOrdering::AcqRel, AtomicOrdering::Relaxed)
+                .is_ok()
+            {
+                claimed = Some(index);
+                break;
+            }
+        }
+        if claimed.is_none() {
+            let mut overflow = self.overflow.lock().unwrap_or_else(|e| e.into_inner());
+            overflow.push(word);
+            self.overflow_len
+                .store(overflow.len(), AtomicOrdering::Release);
+        }
+        if recording {
+            return Ok(word);
+        }
+        let conflict = self.slots.iter().enumerate().any(|(index, slot)| {
+            Some(index) != claimed
+                && access_word::conflicts(slot.load(AtomicOrdering::Acquire), stream, write)
+        }) || (self.overflow_len.load(AtomicOrdering::Acquire) > 0 && {
+            let overflow = self.overflow.lock().unwrap_or_else(|e| e.into_inner());
+            overflow
+                .iter()
+                .any(|&other| other != word && access_word::conflicts(other, stream, write))
+        });
+        if conflict {
+            self.release_word(word);
             return Err(DeviceError::Internal(
                 "tensor has a conflicting in-flight access on another stream; await its operation before reusing it".into(),
             ));
         }
-        let id = NEXT_ACCESS_ID.fetch_add(1, AtomicOrdering::Relaxed);
-        accesses.push(StorageAccess {
-            id,
-            stream,
-            write,
-            recording,
-        });
-        Ok(id)
+        Ok(word)
+    }
+
+    /// Forgets the access `word`; a no-op if it is not registered.
+    fn release_word(&self, word: u64) {
+        for slot in &self.slots {
+            if slot
+                .compare_exchange(word, 0, AtomicOrdering::AcqRel, AtomicOrdering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+        if self.overflow_len.load(AtomicOrdering::Acquire) > 0 {
+            let mut overflow = self.overflow.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = overflow.iter().position(|&other| other == word) {
+                overflow.swap_remove(pos);
+                self.overflow_len
+                    .store(overflow.len(), AtomicOrdering::Release);
+            }
+        }
+    }
+
+    /// Number of in-flight accesses (each holds one internal `Arc`).
+    fn in_flight(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.load(AtomicOrdering::Acquire) & access_word::USED != 0)
+            .count()
+            + self.overflow_len.load(AtomicOrdering::Acquire)
     }
 
     fn is_unique(self: &Arc<Self>) -> bool {
-        let accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
         // Each lease has exactly one internal Arc. Only user-visible aliases
         // prevent partitioning; same-stream leases are ordered on submission.
-        Arc::strong_count(self) == 1 + accesses.len()
+        Arc::strong_count(self) == 1 + self.in_flight()
     }
 
     /// 16-aligned sentinel address fed to [`compute_spec`] for meta tensors.
@@ -685,26 +819,12 @@ impl Storage {
     }
 }
 
-/// Process-wide access ids; never reused, so a stale release cannot match.
-static NEXT_ACCESS_ID: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug)]
-struct StorageAccess {
-    id: u64,
-    stream: usize,
-    write: bool,
-    recording: bool,
-}
-
 impl AccessTracked for Storage {
     fn release_access(&self, id: u64) {
         // Remove the entry before the lease drops its Arc, so uniqueness
         // checks can be conservative during release but can never overlook
         // a real alias.
-        let mut accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pos) = accesses.iter().position(|access| access.id == id) {
-            accesses.swap_remove(pos);
-        }
+        self.release_word(id);
     }
 }
 
@@ -1863,9 +1983,14 @@ pub enum GridBound {
     AtMost((u32, u32, u32)),
 }
 
+/// The access leases of one launch's arguments, retained by the context in
+/// one step (see [`ExecutionContext::retain_leases`]).
+pub type LeaseBatch = Vec<AccessLease>;
+
 pub trait KernelOutputStored<T: DType>: Send {
-    /// Retain storage and acquire exclusive device access before enqueueing.
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError>;
+    /// Register exclusive device access and add its lease to `leases`, which
+    /// the launcher retains on the context once all arguments are registered.
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError>;
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn grid(&self) -> Result<(u32, u32, u32), Error>;
     /// This binding's launch-grid constraint. Defaults to exact coverage;
@@ -1899,8 +2024,8 @@ pub trait KernelOutput<T: DType>: Send + Sized {
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.object.storage.retain(ctx, true)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.object.storage.retain_into(ctx, true, leases)
     }
     fn grid_bound(&self) -> Result<GridBound, Error> {
         let grid = KernelOutputStored::grid(self)?;
@@ -1954,8 +2079,8 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
 }
 
 impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.object.storage.retain(ctx, true)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.object.storage.retain_into(ctx, true, leases)
     }
     fn grid_bound(&self) -> Result<GridBound, Error> {
         let grid = KernelOutputStored::grid(self)?;
@@ -2009,8 +2134,8 @@ impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
 }
 
 impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<T>>> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.partition.retain(ctx)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.partition.retain(ctx, leases)
     }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         self.partition.push_kernel_args(launcher);
@@ -2046,8 +2171,8 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<
 }
 
 impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&mut Tensor<T>>> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.partition.retain(ctx)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.partition.retain(ctx, leases)
     }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         self.partition.push_kernel_args(launcher);
@@ -2140,8 +2265,9 @@ impl<'a, T: DType> KernelOutput<T> for MappedLaunchPartition<Partition<&'a mut T
 /// Implemented for `Arc<Tensor<T>>` and `&Tensor<T>`. Both push the same
 /// data: device pointer, shape, and strides.
 pub trait KernelInputStored: Send {
-    /// Retain storage and acquire shared device access before enqueueing.
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError>;
+    /// Register shared device access and add its lease to `leases`, which
+    /// the launcher retains on the context once all arguments are registered.
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError>;
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch);
     fn shape(&self) -> &[i32];
     fn strides(&self) -> &[i32];
@@ -2167,8 +2293,8 @@ pub trait KernelInput<T: DType>: Send + Sized {
 // ── KernelInputStored impls ─────────────────────────────────────────────────
 
 impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.storage.retain(ctx, false)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.storage.retain_into(ctx, false, leases)
     }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
@@ -2196,8 +2322,8 @@ impl<T: DType> KernelInputStored for Arc<Tensor<T>> {
 }
 
 impl<T: DType + Sync> KernelInputStored for &Tensor<T> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.storage.retain(ctx, false)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.storage.retain_into(ctx, false, leases)
     }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         unsafe {
@@ -2262,8 +2388,8 @@ impl<'a, T: DType + Sync> KernelInput<T> for &'a Tensor<T> {
 // ── TensorView KernelInput impls ────────────────────────────────────────────
 
 impl<'a, T: DType + Sync> KernelInputStored for &'a TensorView<'a, T> {
-    fn retain(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.base.storage.retain(ctx, false)
+    fn retain(&self, ctx: &ExecutionContext, leases: &mut LeaseBatch) -> Result<(), DeviceError> {
+        self.base.storage.retain_into(ctx, false, leases)
     }
     fn push_kernel_args(&self, launcher: &mut AsyncKernelLaunch) {
         // Push the already-offset device pointer. The offset is applied

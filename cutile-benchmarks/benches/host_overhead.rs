@@ -18,6 +18,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use cuda_async::cuda_graph::CudaGraph;
 use cuda_core::Device;
 use cutile::prelude::*;
+use std::future::IntoFuture;
 use std::time::{Duration, Instant};
 
 #[cutile::module]
@@ -100,6 +101,23 @@ fn host_overhead(c: &mut Criterion) {
                 done += batch;
             }
             elapsed
+        });
+    });
+
+    // Each launch awaited individually: the future path (poll, inline spin
+    // or reactor registration, completion, release of the submission).
+    group.bench_function("launch_awaited", |bench| {
+        bench.iter_custom(|iters| {
+            let mut z = fresh_z();
+            let start = Instant::now();
+            for _ in 0..iters {
+                let (local_z, _, _, _) = futures::executor::block_on(
+                    kernels::add3(z, a.clone(), b.clone(), c3.clone()).into_future(),
+                )
+                .expect("awaited launch");
+                z = local_z;
+            }
+            start.elapsed()
         });
     });
 

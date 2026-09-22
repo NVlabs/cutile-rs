@@ -287,6 +287,7 @@ impl Device {
             None => stream::create(stream::StreamKind::NonBlocking)?,
         };
         Ok(Arc::new(Stream {
+            id: intern_stream_id(cu_stream),
             cu_stream,
             device: self.clone(),
             owned: true,
@@ -543,12 +544,39 @@ pub struct PoolMemStats {
 ///   ordinal only, so an owned `Device` created later for the same ordinal
 ///   would pop a handle belonging to a context the external owner may already
 ///   have destroyed.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Stream {
     pub(crate) cu_stream: cuda_bindings::CUstream,
     pub(crate) device: Arc<Device>,
     owned: bool,
     _keep_alive: KeepAlive,
+    /// Small process-unique identity of the underlying handle (see
+    /// [`Stream::id`]); interned at construction so every wrapper of the
+    /// same `CUstream` shares it.
+    id: u32,
+}
+
+impl PartialEq for Stream {
+    fn eq(&self, other: &Self) -> bool {
+        self.cu_stream == other.cu_stream
+            && self.device == other.device
+            && self.owned == other.owned
+    }
+}
+impl Eq for Stream {}
+
+/// Interns a `CUstream` handle to a small integer, once per wrapper
+/// construction (never on a hot path). A destroyed handle's address reused
+/// by a new stream maps to the same id, exactly as comparing the raw
+/// pointers would.
+fn intern_stream_id(cu_stream: cuda_bindings::CUstream) -> u32 {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static IDS: Mutex<Option<HashMap<usize, u32>>> = Mutex::new(None);
+    let mut ids = IDS.lock().unwrap_or_else(|e| e.into_inner());
+    let ids = ids.get_or_insert_with(HashMap::new);
+    let next = ids.len() as u32 + 1;
+    *ids.entry(cu_stream as usize).or_insert(next)
 }
 
 /// Per-device pool of idle stream handles (all created `NonBlocking` by
@@ -725,6 +753,7 @@ impl Stream {
     /// - No concurrent destruction of the stream
     pub unsafe fn borrow_raw(cu_stream: *mut c_void, device: &Arc<Device>) -> Arc<Self> {
         Arc::new(Stream {
+            id: intern_stream_id(cu_stream as cuda_bindings::CUstream),
             cu_stream: cu_stream as cuda_bindings::CUstream,
             device: device.clone(),
             owned: false,
@@ -751,6 +780,7 @@ impl Stream {
         owner: Arc<dyn ForeignOwner>,
     ) -> Arc<Self> {
         Arc::new(Stream {
+            id: intern_stream_id(cu_stream as cuda_bindings::CUstream),
             cu_stream: cu_stream as cuda_bindings::CUstream,
             device: device.clone(),
             owned: false,
@@ -761,6 +791,13 @@ impl Stream {
     /// Returns the raw `CUstream` handle.
     pub fn cu_stream(&self) -> cuda_bindings::CUstream {
         self.cu_stream
+    }
+
+    /// A small process-unique identity of the underlying handle: two
+    /// `Stream`s wrapping the same `CUstream` share it. Cheap to store and
+    /// compare where the raw handle is too wide (packed atomic state).
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
     /// Returns a reference to the parent device.

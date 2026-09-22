@@ -147,6 +147,14 @@ impl ExecutionContext {
         self.submission.retain_lease(lease)
     }
 
+    /// Retain a launch's worth of access leases under one lock. The batch's
+    /// buffer becomes the submission's lease storage when it is the first,
+    /// so a launch costs one lock and no copy.
+    #[doc(hidden)]
+    pub fn retain_leases(&self, leases: Vec<AccessLease>) -> Result<(), DeviceError> {
+        self.submission.retain_leases(leases)
+    }
+
     #[doc(hidden)]
     pub fn is_recording(&self) -> bool {
         self.recording
@@ -167,11 +175,18 @@ impl ExecutionContext {
         }
     }
 
-    pub(crate) fn fresh_submission(&self) -> Self {
+    /// A context whose submission is shared with no other context. A context
+    /// that already owns its submission alone (the common case: a fresh
+    /// `ExecutionContext::new` handed straight to a future) is returned as
+    /// is, so scheduling an operation allocates one submission, not two.
+    pub(crate) fn into_fresh_submission(self) -> Self {
+        if !self.recording && Arc::strong_count(&self.submission) == 1 {
+            return self;
+        }
         Self {
             submission: Arc::new(crate::submission::Submission::new(self.cuda_stream.clone())),
             recording: false,
-            ..self.clone()
+            ..self
         }
     }
 

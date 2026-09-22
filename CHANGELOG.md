@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Lower host cost per launch on the await path: a scheduled future reuses
+  the context's submission instead of allocating a second one, in-flight
+  tensor accesses are tracked in lock-free packed slots (with a rarely used
+  overflow list) instead of a mutex-guarded list, and a launch retains all
+  of its arguments' leases under one lock. Cross-stream conflict detection
+  and lifetime retention are unchanged. `Stream::id()` exposes a small
+  interned identity of the underlying handle.
+
 - `Tensor::store` returns its completion `Token`; `Tensor::token` reads it
   and unsafe `Tensor::set_token` installs an external dependency. Explicit
   installation rejects conditional/loop regions, block-local receivers,

@@ -191,7 +191,7 @@ impl<T: Send, DO: DeviceOp<Output = T>> DeviceFuture<T, DO> {
         // syntax moves out of the default value, which `Drop` forbids.
         Self {
             device_operation: Some(op),
-            execution_context: Some(ctx.fresh_submission()),
+            execution_context: Some(ctx.into_fresh_submission()),
             result: None,
             error: None,
             state: DeviceFutureState::Idle,

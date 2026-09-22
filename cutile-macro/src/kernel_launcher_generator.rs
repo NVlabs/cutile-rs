@@ -1048,10 +1048,15 @@ pub fn generate_kernel_launcher(
             .to_string(),
     ));
 
-    let mut launch_only_stmts: Vec<Stmt> = vec![parse_stmt(
-        "let mut kernel_launch = AsyncKernelLaunch::new(function.clone());".to_string(),
-    )];
+    let mut launch_only_stmts: Vec<Stmt> = vec![
+        parse_stmt("let mut kernel_launch = AsyncKernelLaunch::new(function.clone());".to_string()),
+        // Every tensor argument's access lease lands in this batch; the
+        // context retains the batch once, so a launch takes the submission
+        // lock once rather than once per argument.
+        parse_stmt("let mut __leases: LeaseBatch = LeaseBatch::with_capacity(8);".to_string()),
+    ];
     launch_only_stmts.extend(builder_statements);
+    launch_only_stmts.push(parse_stmt("ctx.retain_leases(__leases)?;".to_string()));
     launch_only_stmts.extend(
         syn::parse2::<ExprBlock>(quote! {{
             kernel_launch
@@ -1831,7 +1836,7 @@ fn get_tensor_code(
     let mut launch_grid_expr_strs = vec![];
     let validator_statements = if ty.mutability.is_some() {
         builder_statements.push(parse_stmt(format!(
-            "KernelOutputStored::retain(&{var_name}, ctx)?;"
+            "KernelOutputStored::retain(&{var_name}, ctx, &mut __leases)?;"
         )));
         builder_statements.push(parse_stmt(format!(
             "KernelOutputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
@@ -1864,7 +1869,7 @@ fn get_tensor_code(
         .unwrap()
     } else {
         builder_statements.push(parse_stmt(format!(
-            "KernelInputStored::retain(&{var_name}, ctx)?;"
+            "KernelInputStored::retain(&{var_name}, ctx, &mut __leases)?;"
         )));
         builder_statements.push(parse_stmt(format!(
             "KernelInputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"

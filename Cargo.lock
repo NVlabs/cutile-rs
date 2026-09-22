@@ -503,6 +503,7 @@ dependencies = [
  "cuda-core",
  "cutile",
  "cutile-compiler",
+ "futures",
  "tokio",
 ]
 

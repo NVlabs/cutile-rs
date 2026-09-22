@@ -76,6 +76,16 @@ impl Owners {
         Ok(())
     }
 
+    fn retain_leases(&mut self, leases: Vec<AccessLease>) -> Result<(), DeviceError> {
+        let set = self.set()?;
+        if set.leases.is_empty() {
+            set.leases = leases;
+        } else {
+            set.leases.extend(leases);
+        }
+        Ok(())
+    }
+
     fn release(&mut self, wait: impl FnOnce() -> Result<(), DeviceError>) {
         let Some(owners) = self.0.take() else { return };
         if !owners.is_empty() && wait().is_err() {
@@ -119,6 +129,16 @@ impl Submission {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain_lease(lease)
+    }
+
+    pub(crate) fn retain_leases(&self, leases: Vec<AccessLease>) -> Result<(), DeviceError> {
+        if leases.is_empty() {
+            return Ok(());
+        }
+        self.owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain_leases(leases)
     }
 
     pub(crate) fn record(&self, resource: Arc<dyn ReplayResource>) {
