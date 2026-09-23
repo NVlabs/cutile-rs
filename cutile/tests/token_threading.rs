@@ -58,6 +58,17 @@ mod token_module {
         out.store(t);
     }
 
+    /// Two loads through one read-only partition must not be chained: a
+    /// load's completion token stays inside `Partition::load`, so both
+    /// loads start from the tensor's entry token and can be issued together.
+    #[cutile::entry()]
+    fn two_loads_one_partition(z: &mut Tensor<f32, { [4] }>, x: &Tensor<f32, { [-1] }>) {
+        let p = x.partition(shape![4]);
+        let a: Tile<f32, { [4] }> = p.load([program_id(0)]);
+        let b: Tile<f32, { [4] }> = p.load([program_id(0) + 1]);
+        z.store(a + b);
+    }
+
     /// Control: a wait whose token is never installed orders nothing.
     #[cutile::entry()]
     fn consumer_without_set(out: &mut Tensor<f32, { [4] }>, input: &Tensor<f32, { [-1] }>) {
@@ -476,5 +487,24 @@ fn rebinding_after_explicit_token_installation_is_rejected() {
         ] {
             assert_rejected(entry, &[("input", &[1]), ("other", &[1])], "cannot rebind a tensor after set_token/set_tensor_token; install the token on the final function-level binding before creating views");
         }
+    });
+}
+
+/// Regression for the #298 slowdown of load-bound kernels: the second load
+/// from a read-only partition consumed the first load's completion token,
+/// serializing the two loads. Both must consume the same (entry) token.
+#[test]
+fn loads_through_a_read_only_partition_are_not_chained() {
+    common::with_test_stack(|| {
+        let ir = compile("two_loads_one_partition", &[("z", &[1]), ("x", &[1])]);
+        let loads = lines_with(&ir, "load_view_tko");
+        assert_eq!(loads.len(), 2, "IR:\n{ir}");
+        assert_eq!(
+            token_operand(loads[0]),
+            token_operand(loads[1]),
+            "the second load must not depend on the first load's completion.\nIR:\n{ir}"
+        );
+        let first_result = result_of(loads[0]);
+        assert_ne!(token_operand(loads[1]), first_result, "IR:\n{ir}");
     });
 }

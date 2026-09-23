@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   conjunctive version/architecture checks before JIT assembly. The writer
   preserves 13.2/13.3 layouts and rejects newer features when targeting them.
 
+### Fixed
+
+- Loads through a read-only `Partition` are no longer chained on each
+  other's completion tokens. The token-threading work in 0.4.0's `set_token`
+  carried a load's completion token out of the inlined `Partition::load`
+  for immutable bindings, which serialized every read-only partition's
+  loads and slowed load-bound kernels by up to 35% (a fused norm+RoPE
+  kernel went from 20 to 27 µs). Only explicit `set_token` /
+  `set_tensor_token` installs now cross an inlining or block boundary for
+  immutable bindings; mutable bindings are unchanged.
+
 ### Changed
 
 - `Tensor::store` returns its completion `Token`; `Tensor::token` reads it

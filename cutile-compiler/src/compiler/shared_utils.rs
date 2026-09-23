@@ -1052,9 +1052,21 @@ pub fn update_type_meta(
         let Some(inner_val) = inner_block_vars.vars.get(inner_key) else {
             continue;
         };
-        // Ordering metadata can change through &Tensor, even when the caller
-        // used `let mut`. Compare view identity, not names or mutability.
-        if inner_val.value.is_some() && inner_val.value == outer_val.value {
+        // Ordering metadata can change through `&Tensor`, even when the
+        // caller used `let mut`: an explicit `set_token` /
+        // `set_tensor_token` installs an external ordering point (a PDL
+        // wait) that every later view must start from. Compare view
+        // identity, not names or mutability, and carry *only* explicit
+        // installs. The completion token a load writes into its own view
+        // (inside the inlined `Partition::load`) must not escape an
+        // immutable binding: reads need no ordering among themselves, and
+        // chaining a read-only partition's loads serializes them (a 35%
+        // slowdown in a load-bound kernel). Writable bindings keep the
+        // full metadata copy below, which carries their access tokens.
+        if inner_val.value.is_some()
+            && inner_val.value == outer_val.value
+            && inner_block_vars.explicit_token_updates.contains(inner_key)
+        {
             let inner_token = inner_val
                 .type_meta
                 .as_ref()
@@ -1065,11 +1077,9 @@ pub fn update_type_meta(
                     if meta.fields.contains_key("token") {
                         meta.fields.insert("token".to_string(), inner_token);
                         outer_block_vars.vars.insert(outer_key.clone(), new_val);
-                        if inner_block_vars.explicit_token_updates.contains(inner_key) {
-                            outer_block_vars
-                                .explicit_token_updates
-                                .insert(outer_key.clone());
-                        }
+                        outer_block_vars
+                            .explicit_token_updates
+                            .insert(outer_key.clone());
                     }
                 }
             }
