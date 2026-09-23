@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `CudaContext::mem_info`, the `(free, total)` device memory query
+  (`cuMemGetInfo`) for the context.
 - Raw Tile IR 13.4 operations: `insert`, `fpowi`, `fpowf` (the existing
   `pow` spelling remains), GDC launch/wait tokens, and alias fencing.
 - `f8e5m3fnu`, explicit pointer classification, view `inbounds`, saturating
