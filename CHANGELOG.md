@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   autotuning. Their unsafe quiesce-before-eviction contracts and return
   values are unchanged (#268).
 
+### Fixed
+
+- Debug info: kernels calling a trait-dispatch wrapper as a free function
+  (`load_tile_like(x, out)`) attributed the inlined body to the module's
+  first line instead of the call, so `break <call line>` had no code and
+  stepping skipped it. The lowered call now keeps the call-site span.
+
 ## [0.3.1] - 2026-09-02
 
 A single `cargo add cutile` now suffices, kernels gain Triton-parity
