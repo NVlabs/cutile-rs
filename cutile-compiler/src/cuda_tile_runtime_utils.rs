@@ -290,15 +290,60 @@ pub fn tileiras_fingerprint() -> &'static str {
 /// distinct binary; the interned string lives for the process (bounded: one per
 /// tileiras path, normally one).
 fn fingerprint_of(tileiras: &Path) -> &'static str {
+    // Fast path: the fingerprint this path resolved to within the last
+    // revalidation window. A launch-site miss calls this on every launch, and
+    // the `stat` fingerprint below costs `canonicalize` + `metadata` syscalls
+    // (about 1.5 us); a binary swapped in place is still noticed within
+    // [`REVALIDATE_EVERY`], which is the granularity the mid-process
+    // switch semantics need.
+    static FAST: OnceLock<Mutex<HashMap<PathBuf, (std::time::Instant, &'static str)>>> =
+        OnceLock::new();
+    let fast = FAST.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&(checked, fp)) = fast.lock().unwrap().get(tileiras) {
+        if checked.elapsed() < REVALIDATE_EVERY {
+            return fp;
+        }
+    }
     static CACHE: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
     let key = stat_fingerprint(tileiras);
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(&fp) = cache.lock().unwrap().get(&key) {
-        return fp;
-    }
-    let fp: &'static str = Box::leak(compute_tileiras_fingerprint(tileiras).into_boxed_str());
-    cache.lock().unwrap().insert(key, fp);
+    // Copy out of the guard: the lock must not be held while the
+    // `--version` spawn runs or while the insert below re-locks.
+    let cached = cache.lock().unwrap().get(&key).copied();
+    let fp = match cached {
+        Some(fp) => fp,
+        None => {
+            let fp: &'static str =
+                Box::leak(compute_tileiras_fingerprint(tileiras).into_boxed_str());
+            cache.lock().unwrap().insert(key, fp);
+            fp
+        }
+    };
+    fast.lock()
+        .unwrap()
+        .insert(tileiras.to_path_buf(), (std::time::Instant::now(), fp));
     fp
+}
+
+/// How long a cached toolchain fact (resolved binary, its fingerprint, the
+/// bytecode override) is trusted before the environment and filesystem are
+/// consulted again. Mid-process switches take effect within this window;
+/// steady-state launches pay none of the syscalls or `PATH` reads.
+const REVALIDATE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `CUTILE_BYTECODE_VERSION` as seen within the last revalidation window.
+/// Part of every kernel key, so it must be cheap on the launch-site miss path.
+pub fn bytecode_override() -> Option<OsString> {
+    static CACHED: Mutex<Option<(std::time::Instant, Option<OsString>)>> = Mutex::new(None);
+    let mut cached = CACHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((checked, value)) = cached.as_ref() {
+        if checked.elapsed() < REVALIDATE_EVERY {
+            return value.clone();
+        }
+    }
+    let value = env::var_os(BYTECODE_VERSION_ENV);
+    *cached = Some((std::time::Instant::now(), value.clone()));
+    value
 }
 
 fn compute_tileiras_fingerprint(tileiras: &Path) -> String {
@@ -370,7 +415,26 @@ fn toolkit_env() -> Option<ToolkitEnv> {
 /// [`cached_bytecode_version`] and [`fingerprint_of`].
 fn tileiras_and_toolkit() -> (PathBuf, Option<PathBuf>) {
     let tileiras_env = env::var_os(TILEIRAS_PATH_ENV).filter(|v| !v.as_os_str().is_empty());
-    cached_tileiras_and_toolkit(tileiras_env, toolkit_env())
+    let toolkit_env = toolkit_env();
+    // Fast path: the resolution for these env values within the last
+    // revalidation window. The full cache below is additionally keyed by
+    // `PATH`, whose read and hash are too expensive for the launch-site miss
+    // path; a `PATH` change is picked up at the next revalidation.
+    type FastKey = (Option<OsString>, Option<ToolkitEnv>);
+    static FAST: OnceLock<Mutex<HashMap<FastKey, (std::time::Instant, TileirasResolution)>>> =
+        OnceLock::new();
+    let fast = FAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let fast_key: FastKey = (tileiras_env, toolkit_env);
+    if let Some((checked, result)) = fast.lock().unwrap().get(&fast_key) {
+        if checked.elapsed() < REVALIDATE_EVERY {
+            return result.clone();
+        }
+    }
+    let result = cached_tileiras_and_toolkit(fast_key.0.clone(), fast_key.1.clone());
+    fast.lock()
+        .unwrap()
+        .insert(fast_key, (std::time::Instant::now(), result.clone()));
+    result
 }
 
 /// The resolved `tileiras` binary and, when found through a toolkit, that

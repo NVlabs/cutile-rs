@@ -1879,6 +1879,8 @@ pub trait KernelOutputStored<T: DType>: Send {
     }
     fn dtype_str(&self) -> &'static str;
     fn partition_shape_as_i32(&self) -> Vec<i32>;
+    /// The partition shape as bound, borrowed: what launch validation reads.
+    fn partition_shape(&self) -> &[usize];
     fn strides_hint(&self) -> Vec<i32>;
     fn spec(&self) -> &SpecializationBits;
     fn shape_as_i32(&self) -> Vec<i32>;
@@ -1937,6 +1939,9 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition_shape.iter().map(|&x| x as i32).collect()
     }
+    fn partition_shape(&self) -> &[usize] {
+        &self.partition_shape
+    }
     fn strides_hint(&self) -> Vec<i32> {
         self.object
             .spec
@@ -1992,6 +1997,9 @@ impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition_shape.iter().map(|&x| x as i32).collect()
     }
+    fn partition_shape(&self) -> &[usize] {
+        &self.partition_shape
+    }
     fn strides_hint(&self) -> Vec<i32> {
         self.object
             .spec
@@ -2031,6 +2039,9 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition.partition_shape_as_i32()
     }
+    fn partition_shape(&self) -> &[usize] {
+        KernelOutputStored::partition_shape(&self.partition)
+    }
 
     fn strides_hint(&self) -> Vec<i32> {
         self.partition.strides_hint()
@@ -2067,6 +2078,9 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&mut Te
 
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition.partition_shape_as_i32()
+    }
+    fn partition_shape(&self) -> &[usize] {
+        KernelOutputStored::partition_shape(&self.partition)
     }
 
     fn strides_hint(&self) -> Vec<i32> {

@@ -13,10 +13,10 @@ use cutile_compiler::ast::Module;
 use cutile_compiler::compile_api::KernelCompiler;
 use cutile_compiler::compiler::{CUDATileFunctionCompiler, CUDATileModules};
 use cutile_compiler::cuda_tile_runtime_utils::{
-    compile_bytecode_cached_with_toolkit, env_flag_enabled, get_compiler_version, get_gpu_name,
-    recompile_after_disk_rejection_with_toolkit, serialize_tile_ir_bytecode_for_version,
-    tileiras_fingerprint, toolchain_env_snapshot, Stage2Source, TileirasOptions,
-    ToolchainEnvSnapshot, ToolkitCapabilities,
+    bytecode_override, compile_bytecode_cached_with_toolkit, env_flag_enabled,
+    get_compiler_version, get_gpu_name, recompile_after_disk_rejection_with_toolkit,
+    serialize_tile_ir_bytecode_for_version, tileiras_fingerprint, toolchain_env_snapshot,
+    Stage2Source, TileirasOptions, ToolchainEnvSnapshot, ToolkitCapabilities,
 };
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 use dashmap::DashMap;
@@ -210,7 +210,7 @@ impl TileFunctionKeyBuilder {
     }
     pub fn build(self) -> TileFunctionKey {
         TileFunctionKey {
-            bytecode_override: std::env::var_os("CUTILE_BYTECODE_VERSION"),
+            bytecode_override: bytecode_override(),
             module_name: self.module_name,
             function_name: self.function_name,
             function_generics: self.function_generics,
@@ -1216,23 +1216,20 @@ pub fn infer_launch_grid(
     grid: (u32, u32, u32),
     bounds: &[GridBound],
 ) -> Result<(u32, u32, u32), Error> {
-    let exact: Vec<(u32, u32, u32)> = bounds
-        .iter()
-        .filter_map(|b| match b {
-            GridBound::Exact(g) => Some(*g),
-            GridBound::AtMost(_) => None,
-        })
-        .collect();
     if grid != (0, 0, 0) {
         // A launch grid was specified.
         validate_grid_bounds(grid, bounds)?;
         return Ok(grid);
     }
+    let exact = bounds.iter().find_map(|b| match b {
+        GridBound::Exact(g) => Some(*g),
+        GridBound::AtMost(_) => None,
+    });
     // Try to infer the launch grid. Only an EXACT binding can define it: a
     // partial-coverage binding is an upper bound, and inferring the bound
     // itself would silently reconstruct full coverage — the thing the
     // caller opted out of.
-    if exact.is_empty() {
+    let Some(grid) = exact else {
         if bounds.is_empty() {
             return kernel_launch_error_result("Launch grid required.");
         }
@@ -1241,8 +1238,7 @@ pub fn infer_launch_grid(
              only bounds the grid; specify the grid explicitly or bind with \
              partition().",
         );
-    }
-    let grid = exact[0];
+    };
     validate_grid_bounds(grid, bounds)?;
     Ok(grid)
 }

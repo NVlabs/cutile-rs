@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Launch-site cache misses (a scalar argument's divisibility hint changed,
+  or a new specialization) no longer pay filesystem and environment lookups
+  per launch: the assembler fingerprint, the resolved toolchain and the
+  `CUTILE_BYTECODE_VERSION` override are trusted for one second before the
+  environment and filesystem are consulted again. A mid-process toolchain
+  switch still takes effect, within that window.
+- Launch-site cache hits no longer allocate in the launcher: kernel arguments
+  are marshalled in an arena that lives inline in the launch (the heap is
+  used only beyond 32 parameter slots), shape validation compares in place,
+  and the site probe borrows fixed-size arrays. A four-tensor launch went
+  from 15 heap allocations to 2, both in the submission envelope.
+
 - `Tensor::store` returns its completion `Token`; `Tensor::token` reads it
   and unsafe `Tensor::set_token` installs an external dependency. Explicit
   installation rejects conditional/loop regions, block-local receivers,

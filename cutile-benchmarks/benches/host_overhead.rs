@@ -18,6 +18,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use cuda_async::cuda_graph::CudaGraph;
 use cuda_core::Device;
 use cutile::prelude::*;
+use std::future::IntoFuture;
 use std::time::{Duration, Instant};
 
 #[cutile::module]
@@ -35,6 +36,25 @@ mod kernels {
         let tb: Tile<f32, { [128] }> = b.load_like(z);
         let tc: Tile<f32, { [128] }> = c.load_like(z);
         z.store(ta + tb + tc);
+    }
+
+    /// Same kernel with a scalar argument: a scalar's divisibility hint is
+    /// part of the launch-site probe, so a value that changes every launch
+    /// defeats the site cache and takes the key-rebuild path each time.
+    #[cutile::entry()]
+    fn add3_scaled(
+        z: &mut Tensor<f32, { [128] }>,
+        a: &Tensor<f32, { [-1] }>,
+        b: &Tensor<f32, { [-1] }>,
+        c: &Tensor<f32, { [-1] }>,
+        k: i32,
+    ) {
+        let ta: Tile<f32, { [128] }> = a.load_like(z);
+        let tb: Tile<f32, { [128] }> = b.load_like(z);
+        let tc: Tile<f32, { [128] }> = c.load_like(z);
+        let kf: f32 = convert_scalar(k);
+        let scale: Tile<f32, { [128] }> = broadcast_scalar(kf, shape![128]);
+        z.store((ta + tb + tc) * scale);
     }
 }
 
@@ -78,6 +98,7 @@ fn host_overhead(c: &mut Criterion) {
         z = local_z;
     }
     drop(z);
+    let mut z = fresh_z();
 
     group.bench_function("launch", |bench| {
         bench.iter_custom(|iters| {
@@ -100,6 +121,56 @@ fn host_overhead(c: &mut Criterion) {
                 done += batch;
             }
             elapsed
+        });
+    });
+
+    // Launch-site miss on every launch: the scalar changes each time.
+    for _ in 0..50 {
+        let (local_z, _, _, _, _) = kernels::add3_scaled(z, a.clone(), b.clone(), c3.clone(), 3)
+            .sync_on(&stream)
+            .expect("warmup scaled");
+        z = local_z;
+    }
+    group.bench_function("launch_site_miss", |bench| {
+        bench.iter_custom(|iters| {
+            let mut z = fresh_z();
+            let mut elapsed = Duration::ZERO;
+            let mut done = 0u64;
+            let mut k: i32 = 1;
+            while done < iters {
+                let batch = BATCH.min(iters - done);
+                let start = Instant::now();
+                for _ in 0..batch {
+                    k = k % 97 + 1;
+                    let (local_z, _, _, _, _) = unsafe {
+                        kernels::add3_scaled(z, a.clone(), b.clone(), c3.clone(), k)
+                            .async_on(&stream)
+                            .expect("launch")
+                    };
+                    z = local_z;
+                }
+                elapsed += start.elapsed();
+                unsafe { stream.synchronize() }.expect("drain");
+                done += batch;
+            }
+            elapsed
+        });
+    });
+
+    // Each launch awaited individually: the future path (poll, inline spin
+    // or reactor registration, completion, release of the submission).
+    group.bench_function("launch_awaited", |bench| {
+        bench.iter_custom(|iters| {
+            let mut z = fresh_z();
+            let start = Instant::now();
+            for _ in 0..iters {
+                let (local_z, _, _, _) = futures::executor::block_on(
+                    kernels::add3(z, a.clone(), b.clone(), c3.clone()).into_future(),
+                )
+                .expect("awaited launch");
+                z = local_z;
+            }
+            start.elapsed()
         });
     });
 
