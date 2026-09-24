@@ -123,7 +123,7 @@ jobs:
 
       # Prebuilt binary instead of `cargo install` (which compiled the tool
       # from source on every run).
-      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
         with:
           tool: cargo-semver-checks
 
