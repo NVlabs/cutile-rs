@@ -23,30 +23,37 @@ use cutile_ir::read_bytecode_versioned;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Assert the full read/write round-trip at `version`.
+/// Assert the full read/write round-trip at every supported bytecode version.
 /// Bytes in should be identical to bytes out, with the rebuilt module passing
 /// the standard verifiers.
-fn assert_roundtrip(module: &Module, version: BytecodeVersion) {
+fn assert_roundtrip(module: &Module) {
+    for version in BytecodeVersion::SUPPORTED {
+        assert_roundtrip_at(module, version);
+    }
+}
+
+/// Assert the full read/write round-trip at `version`.
+fn assert_roundtrip_at(module: &Module, version: BytecodeVersion) {
     let bytes = write_bytecode_version(module, version)
-        .unwrap_or_else(|e| panic!("bytecode write failed: {e}"));
-    let (rebuilt, read_version) =
-        read_bytecode_versioned(&bytes).unwrap_or_else(|e| panic!("bytecode read failed: {e}"));
+        .unwrap_or_else(|e| panic!("bytecode write at {version} failed: {e}"));
+    let (rebuilt, read_version) = read_bytecode_versioned(&bytes)
+        .unwrap_or_else(|e| panic!("bytecode read at {version} failed: {e}"));
     assert_eq!(
         read_version, version,
-        "reader must report the header version"
+        "reader must report the header version ({version})"
     );
     rebuilt
         .verify_dominance()
-        .unwrap_or_else(|e| panic!("rebuilt module dominance: {e}"));
+        .unwrap_or_else(|e| panic!("rebuilt module dominance at {version}: {e}"));
     rebuilt
         .verify_bytecode_indices()
-        .unwrap_or_else(|e| panic!("rebuilt module bytecode indices: {e}"));
+        .unwrap_or_else(|e| panic!("rebuilt module bytecode indices at {version}: {e}"));
     let bytes2 = write_bytecode_version(&rebuilt, version)
-        .unwrap_or_else(|e| panic!("re-write of rebuilt module failed: {e}"));
+        .unwrap_or_else(|e| panic!("re-write of rebuilt module at {version} failed: {e}"));
     assert_eq!(
         bytes2.len(),
         bytes.len(),
-        "round-trip bytes diverged in length ({} vs {})\n--- original mlir ---\n{}\n--- rebuilt mlir ---\n{}",
+        "round-trip bytes at {version} diverged in length ({} vs {})\n--- original mlir ---\n{}\n--- rebuilt mlir ---\n{}",
         bytes2.len(),
         bytes.len(),
         module.to_mlir_text(),
@@ -65,7 +72,7 @@ fn assert_roundtrip(module: &Module, version: BytecodeVersion) {
                 .join(" ")
         };
         panic!(
-            "round-trip bytes diverged at byte {diff} of {}/{}\norig[{}..{}]: {}\nre  [{}..{}]: {}\n--- original mlir ---\n{}\n--- rebuilt mlir ---\n{}",
+            "round-trip bytes at {version} diverged at byte {diff} of {}/{}\norig[{}..{}]: {}\nre  [{}..{}]: {}\n--- original mlir ---\n{}\n--- rebuilt mlir ---\n{}",
             bytes.len(),
             bytes2.len(),
             lo,
@@ -231,7 +238,7 @@ fn dense_const(module: &mut Module, block: BlockId, ty: Type, data: Vec<u8>) -> 
 #[test]
 fn roundtrip_empty_module() {
     let module = Module::new("empty");
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -274,7 +281,7 @@ fn roundtrip_basic_arith_kernel() {
             .build(m);
         append_op(m, b, fadd);
     });
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -305,7 +312,7 @@ fn roundtrip_for_loop_with_carry() {
         append_op(m, b, for_op);
         let _ = for_op;
     });
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -367,7 +374,7 @@ fn roundtrip_if_else_and_loop() {
         append_op(m, b, loop_op);
         let _ = (cmp2_res, break_op, continue_op, loop_op);
     });
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -429,7 +436,7 @@ fn roundtrip_entry_with_optimization_hints() {
         .region(region_id)
         .build(&mut module);
     module.functions.push(entry);
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -508,7 +515,7 @@ fn roundtrip_views_and_reduce() {
             .build(m);
         append_op(m, b, reduce);
     });
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -520,8 +527,7 @@ fn roundtrip_v13_2() {
             .build(m);
         append_op(m, b, exp);
     });
-    assert_roundtrip(&module, BytecodeVersion::V13_2);
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 // ---------------------------------------------------------------------------
@@ -584,8 +590,7 @@ fn roundtrip_globals_and_get_global() {
         .build(&mut module);
     module.functions.push(entry);
 
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
-    assert_roundtrip(&module, BytecodeVersion::V13_2);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -636,7 +641,7 @@ fn roundtrip_ptr_store_and_atomics() {
             let _ = st_res;
         },
     );
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 #[test]
@@ -653,7 +658,7 @@ fn roundtrip_join_tokens() {
             .build(m);
         append_op(m, b, join);
     });
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 // ---------------------------------------------------------------------------
@@ -698,7 +703,7 @@ fn roundtrip_ops_with_file_line_col_locations() {
             let _ = (c_res, cmp_res);
         },
     );
-    assert_roundtrip(&module, BytecodeVersion::V13_3);
+    assert_roundtrip(&module);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,4 +757,47 @@ fn reader_roundtrip_is_stable_under_repeated_reads() {
         let b2 = write_bytecode_version(&m2, ver).unwrap();
         assert_eq!(b2, b1);
     }
+}
+
+#[test]
+fn roundtrip_v13_4_features() {
+    let f8_tile = Type::Tile(TileType {
+        shape: vec![128],
+        element_type: TileElementType::Scalar(ScalarType::F8E5M3FNU),
+    });
+    let mut module = build_kernel(
+        "v134",
+        &[tile_f32(), tile_f32(), tile_i32(), token(), f8_tile],
+        |m, b, a| {
+            let (fpowi, _) = OpBuilder::new(Opcode::FPowI, Location::Unknown)
+                .result(tile_f32())
+                .operand(a[0])
+                .operand(a[2])
+                .build(m);
+            append_op(m, b, fpowi);
+            let (insert, _) = OpBuilder::new(Opcode::Insert, Location::Unknown)
+                .result(tile_f32())
+                .operand(a[0])
+                .operand(a[1])
+                .operand(a[2])
+                .build(m);
+            append_op(m, b, insert);
+            let (gdc, _) = OpBuilder::new(Opcode::GdcLaunchDependentsTko, Location::Unknown)
+                .result(token())
+                .operand(a[3])
+                .build(m);
+            append_op(m, b, gdc);
+            let (gdc_wait, _) = OpBuilder::new(Opcode::GdcWaitTko, Location::Unknown)
+                .result(token())
+                .build(m);
+            append_op(m, b, gdc_wait);
+            let (fence, _) = OpBuilder::new(Opcode::MemoryFenceAliasTko, Location::Unknown)
+                .result(token())
+                .operand(a[3])
+                .build(m);
+            append_op(m, b, fence);
+        },
+    );
+    module.producer = Some("cutile-ir 13.4 roundtrip".into());
+    assert_roundtrip_at(&module, BytecodeVersion::V13_4);
 }

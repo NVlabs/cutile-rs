@@ -349,6 +349,11 @@ impl Opcode {
             0x73 => Self::MakeGatherScatterView,
             0x74 => Self::MakeStridedView,
             0x75 => Self::AtomicRedViewTko,
+            0x76 => Self::Insert,
+            0x77 => Self::GdcLaunchDependentsTko,
+            0x78 => Self::GdcWaitTko,
+            0x79 => Self::FPowI,
+            0x7A => Self::MemoryFenceAliasTko,
             _ => return None,
         };
         Some(op)

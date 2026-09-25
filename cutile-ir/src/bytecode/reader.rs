@@ -351,10 +351,12 @@ pub(crate) fn read_type_entry(
             }
         }
         t if t == TypeTag::PartitionView as u8 => {
-            let has_padding = if v13_3 {
-                r.read_varint()? & 1 != 0
+            // 13.3+ stores flags first.
+            // 13.2 stores flags after the dim_map.
+            let flags = if v13_3 {
+                Some(r.read_varint()? & 1 != 0)
             } else {
-                r.read_byte()? != 0
+                None
             };
             let tile_shape = r.read_le_var_size_i32()?;
             let tv = index(r, "partition_view tensor_view")?;
@@ -364,6 +366,10 @@ pub(crate) fn read_type_entry(
                 ));
             };
             let dim_map = r.read_le_var_size_i32()?;
+            let has_padding = match flags {
+                Some(has) => has,
+                None => r.read_byte()? != 0,
+            };
             let padding_value = if has_padding {
                 let p = if v13_3 {
                     r.read_byte()?
@@ -1561,16 +1567,22 @@ impl ReaderState {
             }
             FToI => {
                 let result_types = self.read_results_fixed(r, 1)?;
+                let saturating =
+                    self.version >= BytecodeVersion::V13_4 && r.read_varint()? & 1 != 0;
                 let signedness = read_inline_int(r)?;
                 let rounding_mode = read_inline_int(r)?;
                 let operands = self.read_operands_fixed(r, 1)?;
+                let mut attributes = vec![
+                    ("signedness".into(), signedness),
+                    ("rounding_mode".into(), rounding_mode),
+                ];
+                if saturating {
+                    attributes.push(("saturating".into(), Attribute::Bool(true)));
+                }
                 Ok(ParsedOp {
                     result_types,
                     operands,
-                    attributes: vec![
-                        ("signedness".into(), signedness),
-                        ("rounding_mode".into(), rounding_mode),
-                    ],
+                    attributes,
                     regions: Vec::new(),
                 })
             }
@@ -1686,7 +1698,8 @@ impl ReaderState {
 
             // ----- GDC PDL: result types + optional token operand -----
             GdcLaunchDependentsTko | GdcWaitTko => {
-                let result_types = self.read_results_varint(r)?;
+                let result_types =
+                    self.read_results_fixed(r, opcode.fixed_result_count().unwrap())?;
                 let operands = if r.read_varint()? != 0 {
                     vec![self.read_operand(r, "operand")?]
                 } else {
@@ -2102,6 +2115,7 @@ impl ReaderState {
                 } else {
                     None
                 };
+                let inbounds = read_inbounds(r, self.version >= BytecodeVersion::V13_4)?;
                 let view = self.read_operand_group(r, 1)?;
                 let index = self.read_variadic_operand_group(r)?;
                 let token = if flags & 4 != 0 {
@@ -2125,6 +2139,12 @@ impl ReaderState {
                 ));
                 if let Some(ms) = memory_scope {
                     attributes.push(("memory_scope".into(), ms));
+                }
+                if inbounds.iter().any(|&b| b) {
+                    attributes.push((
+                        "inbounds".into(),
+                        Attribute::Array(inbounds.into_iter().map(Attribute::Bool).collect()),
+                    ));
                 }
                 attributes.push(("operandSegmentSizes".into(), segment_sizes));
                 Ok(ParsedOp {
@@ -2208,6 +2228,7 @@ impl ReaderState {
                 } else {
                     None
                 };
+                let inbounds = read_inbounds(r, self.version >= BytecodeVersion::V13_4)?;
                 let tile = self.read_operand_group(r, 1)?;
                 let view = self.read_operand_group(r, 1)?;
                 let index = self.read_variadic_operand_group(r)?;
@@ -2233,6 +2254,12 @@ impl ReaderState {
                 ));
                 if let Some(ms) = memory_scope {
                     attributes.push(("memory_scope".into(), ms));
+                }
+                if inbounds.iter().any(|&b| b) {
+                    attributes.push((
+                        "inbounds".into(),
+                        Attribute::Array(inbounds.into_iter().map(Attribute::Bool).collect()),
+                    ));
                 }
                 attributes.push(("operandSegmentSizes".into(), segment_sizes));
                 Ok(ParsedOp {
@@ -2369,6 +2396,21 @@ fn fixed_operand_count(opcode: Opcode) -> usize {
 // ---------------------------------------------------------------------------
 // Attribute readers
 // ---------------------------------------------------------------------------
+
+/// Read the inbounds vector (rank + one byte per index dimension) that
+/// the writer emits before view operands according to version.
+/// Functionality added in v13.4
+fn read_inbounds(r: &mut EncodingReader, v13_4: bool) -> Result<Vec<bool>> {
+    if !v13_4 {
+        return Ok(Vec::new());
+    }
+    let rank = super::encoding::cap_count(r.read_varint()?, "inbounds")?;
+    let mut values = Vec::with_capacity(rank);
+    for _ in 0..rank {
+        values.push(r.read_byte()? != 0);
+    }
+    Ok(values)
+}
 
 /// Read an inline integer attribute
 /// (`write_attr_value_inline` drops the type for integers).
