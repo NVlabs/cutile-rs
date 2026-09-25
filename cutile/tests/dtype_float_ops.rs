@@ -12,10 +12,18 @@
 use cuda_core::{f8e4m3fn, f8e5m2};
 use cutile::tensor::PartitionMut;
 use cutile::tile_kernel::{DeviceOp, ToHostVecOp};
+use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
 use half::{bf16, f16};
 use std::sync::Arc;
 
 mod common;
+
+fn gpu_supports_fp8(gpu_name: &str) -> bool {
+    gpu_name
+        .strip_prefix("sm_")
+        .and_then(|sm| sm.parse::<u32>().ok())
+        .is_some_and(|sm| sm >= 100)
+}
 
 #[cutile::module]
 mod float_add_module {
@@ -193,7 +201,17 @@ fn add_ones_f64_and_convert_to_f32() {
 #[test]
 fn create_ones_f8e4m3fn_and_convert_to_f32() {
     common::with_test_stack(|| {
-        let ones = cutile::api::ones::<f8e4m3fn>(&[128]).sync().expect("alloc");
+        let gpu_name = get_gpu_name(0);
+
+        let ones_result = cutile::api::ones::<f8e4m3fn>(&[128]).sync();
+        if !gpu_supports_fp8(&gpu_name) {
+            assert!(
+                ones_result.is_err(),
+                "FP8 unexpectedly passed on {gpu_name}"
+            );
+            return;
+        }
+        let ones = ones_result.expect("alloc");
 
         let result_f32: Vec<f32> = cutile::api::convert::<f8e4m3fn, f32>(Arc::new(ones))
             .sync()
@@ -216,7 +234,17 @@ fn create_ones_f8e4m3fn_and_convert_to_f32() {
 #[test]
 fn create_ones_f8e5m2_and_convert_to_f32() {
     common::with_test_stack(|| {
-        let ones = cutile::api::ones::<f8e5m2>(&[128]).sync().expect("alloc");
+        let gpu_name = get_gpu_name(0);
+
+        let ones_result = cutile::api::ones::<f8e5m2>(&[128]).sync();
+        if !gpu_supports_fp8(&gpu_name) {
+            assert!(
+                ones_result.is_err(),
+                "FP8 unexpectedly passed on {gpu_name}"
+            );
+            return;
+        }
+        let ones = ones_result.expect("alloc");
 
         let result_f32: Vec<f32> = cutile::api::convert::<f8e5m2, f32>(Arc::new(ones))
             .sync()
