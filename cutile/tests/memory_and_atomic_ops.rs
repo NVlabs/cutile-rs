@@ -181,6 +181,30 @@ mod memory_and_atomic_ops_module {
     }
 
     #[cutile::entry()]
+    fn load_ptr_padding_without_mask_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        // Test load_ptr_tko with a padding value but no mask (padding is ignored)
+        let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
+        let ptrs_i64: PointerTile<*mut i64, S> = int_to_ptr(ptr_seed);
+        let ptrs: PointerTile<*mut f32, S> = ptr_to_ptr(ptrs_i64);
+
+        let padding = 0.0f32;
+
+        let (loaded_values, _token): (Tile<f32, S>, Token) = unsafe {
+            load_ptr_tko(
+                ptrs,
+                ordering::Relaxed,
+                Some(scope::Device),
+                None,
+                Some(padding),
+                None,
+                Latency::<0>,
+            )
+        };
+
+        output.store(loaded_values);
+    }
+
+    #[cutile::entry()]
     fn store_ptr_release_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
         // Test store_ptr_tko with release memory ordering (store-specific)
         let ptr_seed: Tile<i64, S> = constant(0i64, output.shape());
@@ -774,6 +798,38 @@ fn compile_load_ptr_with_mask() {
         );
 
         println!("\n✓ load_ptr_tko with mask and padding verified");
+    });
+}
+
+#[test]
+fn compile_load_ptr_padding_without_mask() {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir(
+            "load_ptr_padding_without_mask_kernel",
+            &[128.to_string()],
+            &[("output", &[1])],
+        );
+        println!(
+            "\n=== LOAD_PTR_PADDING_WITHOUT_MASK MLIR ===\n{}",
+            module_op_str
+        );
+
+        assert!(
+            module_op_str.contains("load_ptr_tko relaxed device"),
+            "Expected load_ptr_tko operation with relaxed/device semantics"
+        );
+        // Padding only applies to masked-off lanes, so without a mask it is dropped
+        // instead of being promoted to a shaped operand
+        assert!(
+            !module_op_str.contains("reshape") && !module_op_str.contains("broadcast"),
+            "Expected no reshape/broadcast: padding without a mask must not be promoted"
+        );
+        assert!(
+            !module_op_str.contains("tile<128xi1>"),
+            "Expected no i1 mask tile when no mask is given"
+        );
+
+        println!("\n✓ load_ptr_tko padding without mask verified");
     });
 }
 

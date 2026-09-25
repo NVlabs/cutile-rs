@@ -979,6 +979,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         }
 
         if let Some(padding_arg) = super::shared_utils::resolve_option_arg(&call_expr.args[4], ctx)
+            .filter(|_| mask_count == 1)
         {
             if let Some(padding_value) =
                 self.compile_expression(module, block_id, &padding_arg, generic_args, ctx, None)?
