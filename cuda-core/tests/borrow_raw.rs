@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//! Verifies the ownership contract of `Device::borrow_raw` and
-//! `Stream::borrow_raw`: dropping a borrowed wrapper must not release the
-//! primary context or destroy the stream, so the source handles keep
-//! working afterward.
+//! Verifies the ownership contract of `Device::borrow_raw`,
+//! `Stream::borrow_raw` and `CudaStream::borrow_raw`: dropping a borrowed
+//! wrapper must not release the primary context or destroy the stream, so
+//! the source handles keep working afterward.
 
 use core::ffi::{c_int, c_void};
 use cuda_core::{Device, Function, Module, Stream};
@@ -127,4 +127,24 @@ fn many_borrowed_drops_do_not_invalidate_source() {
 
     unsafe { source_stream.synchronize() }.unwrap();
     let _another = source_dev.new_stream().unwrap();
+}
+
+#[test]
+fn borrowed_cuda_stream_drop_leaves_source_usable() {
+    if !has_gpu() {
+        return;
+    }
+    let ctx = cuda_core::CudaContext::new(0).unwrap();
+    let source = ctx.new_stream().unwrap();
+
+    for _ in 0..8 {
+        let borrowed =
+            unsafe { cuda_core::CudaStream::borrow_raw(source.cu_stream() as *mut c_void, &ctx) };
+        assert_eq!(borrowed.cu_stream(), source.cu_stream());
+        borrowed.synchronize().unwrap();
+    }
+
+    // If a borrowed drop had destroyed the stream, this would fail.
+    source.synchronize().unwrap();
+    let _another = ctx.new_stream().unwrap();
 }
