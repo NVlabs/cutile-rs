@@ -617,11 +617,18 @@ pub fn get_rust_element_type_primitive(ty: &syn::Type) -> String {
 }
 
 /// Returns the CUDA Tile element type string for a Rust primitive type.
+///
+/// A scalar pointer tile (`PointerTile<*mut E, {[]}>`) is primitive; like a
+/// shaped pointer tile, its element type is that of its pointee `E`.
 pub fn get_cuda_tile_element_type_primitive(
     ty: &syn::Type,
     primitives: &HashMap<(String, String), ItemImpl>,
 ) -> String {
-    let rust_elem_ty_str = get_rust_element_type_primitive(ty);
+    let rust_elem_ty_str = if get_type_ident(ty).is_some_and(|ident| ident == "PointerTile") {
+        get_element_type_structured(ty, primitives).unwrap_or_default()
+    } else {
+        get_rust_element_type_primitive(ty)
+    };
     let element_type_attrs =
         get_primitives_attrs("ElementType", rust_elem_ty_str.as_str(), primitives);
     assert!(

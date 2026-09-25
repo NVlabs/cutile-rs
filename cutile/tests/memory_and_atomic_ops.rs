@@ -267,6 +267,22 @@ mod memory_and_atomic_ops_module {
     }
 
     #[cutile::entry()]
+    unsafe fn atomic_rmw_scalar_ptr_kernel(counter: *mut i32, increment: i32) {
+        // A scalar pointer tile: lowering the atomic queries its element type.
+        let ptr: PointerTile<*mut i32, { [] }> = pointer_to_tile(counter);
+        let arg: Tile<i32, { [] }> = scalar_to_tile(increment);
+        let (_old, _token): (Tile<i32, { [] }>, Token) = atomic_rmw_tko(
+            ptr,
+            arg,
+            atomic::Add,
+            ordering::Relaxed,
+            scope::Device,
+            None,
+            None,
+        );
+    }
+
+    #[cutile::entry()]
     fn atomic_cas_kernel<const S: [i32; 1]>(
         output: &mut Tensor<f32, S>,
         expected: &mut Tensor<f32, S>,
@@ -859,6 +875,19 @@ fn compile_atomic_rmw() {
         );
 
         println!("\n✓ atomic_rmw_tko lowering verified");
+    });
+}
+
+#[test]
+fn compile_atomic_rmw_scalar_ptr() {
+    common::with_test_stack(|| {
+        let module_op_str = compile_ir("atomic_rmw_scalar_ptr_kernel", &[], &[]);
+        assert!(
+            module_op_str.contains("atomic_rmw_tko")
+                && module_op_str.contains("tile<ptr<i32>>")
+                && module_op_str.contains("mode = 3"),
+            "Expected an integer atomic_rmw_tko on a scalar pointer tile\n{module_op_str}"
+        );
     });
 }
 
