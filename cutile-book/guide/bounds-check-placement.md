@@ -111,6 +111,19 @@ The `with_bounds`/`Dim` annotation family is deprecated: everything it
 proved is subsumed by the derived facts and declared preconditions above,
 with the checks landing at launch instead of possibly in the kernel.
 
+One rule bounds all of the above: **an access the kernel might not execute
+keeps its check in the kernel.** A launch check is unconditional — the host
+enforces it on every launch — so relocating an obligation out of a runtime
+guard would reject callers whose guard is false, even though they run no
+offending access at all. An access inside an `if`/`else`, or inside an
+inlined helper or `reduce` body that is itself guarded, therefore keeps an
+in-place check next to the access: invisible to a caller that never reaches
+it, and still a trap for one that does. Compile-time proofs are untouched by
+this rule — they constrain no launch — so a declared precondition still
+discharges a guarded access for free. The cost is that a guarded access to a
+tensor whose extent ties are unproven now traps on the device instead of
+being refused before the launch; that is the deliberate trade (issue #215).
+
 ## Reading the Compiler's Decision
 
 `CUTILE_JIT_TIMING=1` reports per-kernel totals on each compile line:

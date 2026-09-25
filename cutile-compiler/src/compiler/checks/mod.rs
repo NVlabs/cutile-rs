@@ -159,6 +159,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 axis,
                 index,
             );
+            // An access inside a conditional may not execute at all on a given
+            // run. A *launch* check is unconditional — it constrains every
+            // launch — so relocating such an access's obligation out of its
+            // guard would reject calls that run no offending access, turning a
+            // precision limitation into a rejected valid launch (issue #215,
+            // defect D1). Compile-time proofs stay available: they cost the
+            // kernel nothing and prove the access in range whenever it happens.
+            // So the rungs below keep their `Jit` arms and decline only their
+            // launch-relocating arms.
+            let relocate_to_launch = ctx.condition_depth == 0;
             // Rungs 1 and 2 are proofs, not placements — but the disabled
             // policy skips them anyway: that build is the differential
             // harness's semantic reference, and a reference that inherits
@@ -167,10 +177,14 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // its undischarged checks are compile errors, so it has no
             // device placement to fall back to.
             if self.check_opts.discharge_proofs {
-                // Rung 1/3: axis provenance — a same-view iterand, or a
-                // foreign iterand whose axis a declared root-dimension
-                // equality relates to this one.
-                if self.discharge_by_axis_provenance(&axis_goals, &partition_value) {
+                // Rung 1/3: axis provenance — a same-view iterand (a
+                // compile-time proof), or a foreign iterand whose axis a
+                // declared root-dimension equality relates to this one (a
+                // launch check, so declined for a guarded access).
+                if self
+                    .discharge_by_axis_provenance(&axis_goals, &partition_value, relocate_to_launch)
+                    .is_handled()
+                {
                     self.count_discharged();
                     continue;
                 }
@@ -194,13 +208,19 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 // Rung 2.5: the block-id axiom — `tile_block_id(k)` is
                 // grid-bounded by the execution model; the residual
                 // grid-vs-tile-count claim moves to a launch check
-                // (goals.rs, discharge_by_block_id_axiom).
-                if self.discharge_by_block_id_axiom(&axis_goals, &partition_value) {
+                // (goals.rs, discharge_by_block_id_axiom). The axiom itself is
+                // an execution-model fact, but the tile-count side of the claim
+                // only exists at launch, so a guarded access keeps its check.
+                if relocate_to_launch
+                    && self
+                        .discharge_by_block_id_axiom(&axis_goals, &partition_value)
+                        .is_handled()
+                {
                     self.count_discharged();
                     continue;
                 }
             }
-            // Rung 3/4: a constant `[0, 0]` coordinate against a dynamic
+            // Rungs 3/4: a constant `[0, 0]` coordinate against a dynamic
             // extent reduces to `extent > 0`, a launch-known predicate.
             // Gated on launch relocation because the check leaves the
             // kernel. Gated here, not inside the rung: the bounded family
@@ -208,7 +228,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // undischarged checks are compile errors rather than device
             // placements.
             if self.check_opts.relocate_to_launch
-                && self.hoist_zero_coordinate_nonempty_extent(&axis_goals, &partition_value)
+                && relocate_to_launch
+                && self
+                    .hoist_zero_coordinate_nonempty_extent(&axis_goals, &partition_value)
+                    .is_handled()
             {
                 self.count_discharged();
                 continue;
@@ -346,7 +369,10 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
             // Rung 3/4: a constant `[0, 0]` coordinate against a dynamic
             // extent reduces to `extent > 0`, a launch-known predicate.
-            if self.hoist_zero_coordinate_nonempty_extent(&axis_goals, &partition) {
+            if self
+                .hoist_zero_coordinate_nonempty_extent(&axis_goals, &partition)
+                .is_handled()
+            {
                 self.count_discharged();
                 continue;
             }

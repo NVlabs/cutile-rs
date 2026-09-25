@@ -646,6 +646,17 @@ pub struct CompilerContext {
     /// Inherited by nested blocks; decides whether a `break` is
     /// representable (only inside `cuda_tile.loop`).
     pub(crate) innermost_loop: Option<LoopKind>,
+    /// How many `if`/`else` branches enclose the code being compiled.
+    ///
+    /// Non-zero means the access under consideration may not execute on a
+    /// given run. That matters for *launch* checks specifically: a launch
+    /// check is enforced for every launch, so relocating an obligation out
+    /// of a conditional turns "this access is in range when it happens"
+    /// into "this access is in range always", and rejects calls whose guard
+    /// is false (issue #215, defect D1). Preheader hoisting does not consult
+    /// this — it has its own in-kernel conditional-block gate — so the field
+    /// only gates relocation to launch.
+    pub(crate) condition_depth: u32,
 }
 
 impl CompilerContext {
@@ -663,6 +674,7 @@ impl CompilerContext {
             kernel_entry: false,
             inside_for: false,
             innermost_loop: None,
+            condition_depth: 0,
         }
     }
 
@@ -697,6 +709,7 @@ impl CompilerContext {
             kernel_entry: self.kernel_entry,
             inside_for: self.inside_for,
             innermost_loop: self.innermost_loop,
+            condition_depth: self.condition_depth,
         })
     }
 

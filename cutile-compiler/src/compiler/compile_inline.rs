@@ -120,6 +120,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // The callee body is compiled into the caller's current block, so
             // the caller's loop context governs check hoisting inside it.
             call_variables.loop_frames = ctx.loop_frames.clone();
+            call_variables.condition_depth = ctx.condition_depth;
             call_variables.token_update_in_region =
                 ctx.token_update_in_region || ctx.inside_for || ctx.innermost_loop.is_some();
             call_variables.module_scope.push(module_name.clone());
@@ -364,6 +365,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             // The callee body is compiled into the caller's current block, so
             // the caller's loop context governs check hoisting inside it.
             call_variables.loop_frames = ctx.loop_frames.clone();
+            call_variables.condition_depth = ctx.condition_depth;
             call_variables.token_update_in_region =
                 ctx.token_update_in_region || ctx.inside_for || ctx.innermost_loop.is_some();
             call_variables.module_scope.push(module_name.clone());

@@ -25,11 +25,19 @@
 //! CUDA context; the runner executes one case per process and reports one
 //! `OUTCOME:` line.
 //!
-//! Known precision violations are pinned in `KNOWN_P_VIOLATIONS` with the
-//! defect they trace to, so the harness both proves it can detect them and
+//! Known precision violations are pinned per row (`known_p_violation`) with
+//! the defect they trace to, so the harness both proves it can detect them and
 //! fails the moment one appears or disappears unannounced. Fixing a defect
 //! moves its rows out of the ledger in the same commit. Soundness violations
 //! have no ledger: one observed is a hard failure.
+//!
+//! The ledger is currently EMPTY. Its last entry was
+//! `guarded_foreign_flag_off_mismatched`, pinned to D1 (issue #215: launch
+//! checks ignore control dependence). It left the ledger when a
+//! control-dependent access stopped relocating its obligation to the host: the
+//! row has to refine like every other now, and its twin
+//! `guarded_foreign_flag_on_short_target` covers the other direction on
+//! hardware — the same kernel with its guard TAKEN must still stop.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -50,8 +58,10 @@ mod diff_module {
 
     /// A foreign access behind a runtime flag. The `k` walk is bounded by
     /// `x`'s axis 1; using it on `y` derives `dim(x,1) <= dim(y,0)` plus a
-    /// non-empty-extent fact — both currently enforced at launch regardless
-    /// of `flag` (defect D1 in `CHECK_PLACEMENT_CONTROL_FLOW.md`).
+    /// non-empty-extent fact. Both are conditional on `flag > 0`, so since
+    /// the D1 fix neither may become a launch check: with `flag = 0` the
+    /// walk runs no offending access and the launch must be accepted
+    /// (defect D1 in `CHECK_PLACEMENT_CONTROL_FLOW.md`).
     #[cutile::entry]
     fn guarded_foreign<const B: i32>(
         z: &mut Tensor<f32, { [B, B] }>,
@@ -67,6 +77,28 @@ mod diff_module {
                 let t = py.load([k, 0i32]);
                 acc = acc + t;
             }
+        }
+        z.store(acc);
+    }
+
+    /// The guarded walk with the guard removed: every launch runs the foreign
+    /// access, so the same derived fact must still leave the kernel and be
+    /// enforced at launch. Without this twin the D1 fix would be
+    /// indistinguishable from "cross-tensor facts no longer relocate at all",
+    /// which would quietly give up the placement the whole mechanism exists
+    /// for.
+    #[cutile::entry]
+    fn unconditional_foreign<const B: i32>(
+        z: &mut Tensor<f32, { [B, B] }>,
+        x: &Tensor<f32, { [-1, -1] }>,
+        y: &Tensor<f32, { [-1, -1] }>,
+    ) {
+        let px = x.partition(shape![B, B]);
+        let py = y.partition(shape![B, B]);
+        let mut acc: Tile<f32, { [B, B] }> = constant(0.0, shape![B, B]);
+        for k in 0i32..num_tiles(&px, 1) {
+            let t = py.load([k, 0i32]);
+            acc = acc + t;
         }
         z.store(acc);
     }
@@ -222,9 +254,10 @@ struct Case {
 const CASES: &[Case] = &[
     Case {
         name: "guarded_foreign_flag_off_mismatched",
-        known_p_violation: Some(
-            "D1: launch checks ignore control dependence; enforced with flag = 0",
-        ),
+        // D1 fixed: the guarded access no longer stakes a launch check, so a
+        // caller whose flag is off runs to completion however mismatched the
+        // extents are. This row was the ledger's last D1 entry.
+        known_p_violation: None,
         reference_must_stop: false,
     },
     Case {
@@ -238,7 +271,26 @@ const CASES: &[Case] = &[
         reference_must_stop: false,
     },
     Case {
+        // The negative direction of the D1 fix, on hardware: the guard is
+        // taken, so the obligation is live, and the walk really does leave
+        // `y`'s axis — the launch must still stop.
         name: "guarded_foreign_flag_on_short_target",
+        known_p_violation: None,
+        reference_must_stop: true,
+    },
+    Case {
+        // The unconditional twin of the row above: every launch runs the
+        // access, so the extent fact must still leave the kernel and the
+        // launch must still be accepted when it holds.
+        name: "unconditional_foreign_matching",
+        known_p_violation: None,
+        reference_must_stop: false,
+    },
+    Case {
+        // ... and the same kernel with `y` short, which must stop before the
+        // kernel starts rather than on the device (see
+        // `launch_checks_are_enforced_at_launch`).
+        name: "unconditional_foreign_short_target",
         known_p_violation: None,
         reference_must_stop: true,
     },
@@ -345,6 +397,29 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
             let (z, _x, _y, _flag) = diff_module::guarded_foreign(z.partition([B, B]), x, y, flag)
                 .generics(vec![B.to_string()])
                 .compile_options(options)
+                .sync()
+                .map_err(e)?;
+            z.unpartition().to_host_vec().sync().map_err(e)
+        }
+        n if n.starts_with("unconditional_foreign") => {
+            let y_rows = if n.ends_with("matching") {
+                4 * B
+            } else {
+                3 * B
+            };
+            let x: Arc<Tensor<f32>> = api::copy_host_vec_to_device(&patterned(B * 4 * B))
+                .reshape(&[B, 4 * B])
+                .sync()
+                .map_err(e)?
+                .into();
+            let y: Arc<Tensor<f32>> = api::copy_host_vec_to_device(&patterned(y_rows * B))
+                .reshape(&[y_rows, B])
+                .sync()
+                .map_err(e)?
+                .into();
+            let z = api::zeros::<f32>(&[B, B]).sync().map_err(e)?;
+            let (z, _x, _y) = diff_module::unconditional_foreign(z.partition([B, B]), x, y)
+                .generics(vec![B.to_string()])
                 .sync()
                 .map_err(e)?;
             z.unpartition().to_host_vec().sync().map_err(e)
@@ -685,10 +760,15 @@ fn force_device_checks_ablate_provenance_and_static_folds() {
 // silently dropped at launch and the discharged accesses ran unchecked. A
 // launch rejection happens before any kernel starts, so this is safe to
 // assert in-process.
+//
+// The case has to be UNCONDITIONAL: the derived fact for a guarded access now
+// stays on the device with the access it belongs to (issue #215, D1), so only
+// an access every launch executes still stakes the host-side comparison this
+// test exists to prove is enforced.
 #[test]
 fn launch_checks_are_enforced_at_launch() {
     common::with_test_stack(|| {
-        let result = execute_case("guarded_foreign_flag_on_short_target");
+        let result = execute_case("unconditional_foreign_short_target");
         let err = result.expect_err(
             "a launch violating dim(x, 1) <= dim(y, 0) must be rejected before the kernel runs",
         );
