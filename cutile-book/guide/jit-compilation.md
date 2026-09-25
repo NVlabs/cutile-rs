@@ -135,6 +135,28 @@ let _ = optimized_kernel(args)
 
 `num_worker_warps_per_cta` requires bytecode version 13.3 or newer. It must be a power of two in the inclusive range `[1, 32]` (`1`, `2`, `4`, `8`, `16`, or `32`).
 
+### Valid hint values
+
+Each hint has a fixed set of legal values, taken from the Tile IR attribute definitions. A value outside its range is rejected by cuTile Rust with an error naming the hint and the accepted range, rather than being forwarded to the backend:
+
+| Hint | Accepted values |
+|---|---|
+| `occupancy` | integer in `[1, 32]` |
+| `num_cta_in_cga` | power of two in `[1, 16]` |
+| `num_worker_warps_per_cta` | power of two in `[1, 32]`; also requires bytecode 13.3+ |
+| `latency` (per-op) | integer in `[1, 10]` |
+| `max_divisibility` | any integer; a ceiling on inferred divisibility, not a Tile IR attribute |
+
+The check is applied on every path that can set a hint, so a direct assignment to a `CompileOptions` field is rejected exactly like a builder call or an entry-level attribute. Only the value range is checked here — the bytecode-version requirement for `num_worker_warps_per_cta` is enforced separately when the image is serialized, so a value can be well-formed and still unusable on an older toolkit.
+
+Because the entry-level form is parsed when the kernel is compiled, its diagnostic points at the hint expression in your source. The runtime `CompileOptions` builder has no source position and reports the option name and value instead:
+
+```rust
+// Rejected at the call site: "invalid value 3 for optimization hint
+// 'num_cta_in_cga': expected a power of two in [1, 16]".
+let opts = CompileOptions::default().num_cta_in_cga(3)?;
+```
+
 Different `CompileOptions` values produce separate JIT cache entries.
 
 Per-operation hints are available on lower-level memory APIs when a specific load or store needs a latency hint or a Tensor Memory Accelerator (TMA) hint:

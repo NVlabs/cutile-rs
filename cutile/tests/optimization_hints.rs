@@ -174,6 +174,48 @@ mod opt_hints_module {
         output.store(tile);
     }
 
+    // -----------------------------------------------------------------------
+    // Out-of-range hint values.
+    //
+    // Each of these sits next to a legal counterpart above, so a rejection is
+    // attributable to the value rather than to the surrounding shape. They must
+    // be rejected by the frontend, with a diagnostic that points at the
+    // offending value, so the invalid attribute never reaches the backend.
+    // -----------------------------------------------------------------------
+
+    #[cutile::entry(optimization_hints = (
+        sm_120 = (occupancy = 33,),
+    ))]
+    fn occupancy_out_of_range_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = constant(1.0f32, output.shape());
+        output.store(tile);
+    }
+
+    #[cutile::entry(optimization_hints = (
+        sm_120 = (num_cta_in_cga = 3,),
+    ))]
+    fn cga_not_power_of_two_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = constant(1.0f32, output.shape());
+        output.store(tile);
+    }
+
+    #[cutile::entry(optimization_hints = (
+        sm_120 = (num_worker_warps_per_cta = 33,),
+    ))]
+    fn worker_warps_out_of_range_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = constant(1.0f32, output.shape());
+        output.store(tile);
+    }
+
+    /// The low end of the `occupancy` range, which is legal.
+    #[cutile::entry(optimization_hints = (
+        sm_120 = (occupancy = 1,),
+    ))]
+    fn occupancy_low_bound_kernel<const S: [i32; 1]>(output: &mut Tensor<f32, S>) {
+        let tile: Tile<f32, S> = constant(1.0f32, output.shape());
+        output.store(tile);
+    }
+
     /// Latency as a const generic — specialized at launch time.
     #[cutile::entry]
     fn load_view_const_latency_kernel<const S: [i32; 1], const L: i32>(input: &Tensor<f32, S>) {
@@ -656,6 +698,80 @@ fn compile_kernel(name: &str, strides: &[(&str, &[i32])], options: &CompileOptio
         options,
     )
     .expect("Failed to compile")
+}
+
+/// Compiles a kernel expecting failure, returning the diagnostic text.
+fn compile_kernel_err(name: &str) -> String {
+    match common::compile_to_ir(
+        __module_ast_self,
+        "opt_hints_module",
+        name,
+        &[128.to_string()],
+        &[("output", &[1])],
+        &[],
+        &[],
+        None,
+        &CompileOptions::default(),
+    ) {
+        Ok(ir) => panic!("kernel `{name}` should have been rejected, but compiled:\n{ir}"),
+        Err(err) => format!("{err}"),
+    }
+}
+
+/// An out-of-range entry-level hint must be rejected by the frontend, and the
+/// diagnostic must name the hint, state the range, and carry the position of
+/// the offending expression — not surface later as a backend verifier error.
+#[test]
+fn entry_level_out_of_range_hints_are_rejected_with_a_location() {
+    common::with_test_stack(|| {
+        let cases = [
+            ("occupancy_out_of_range_kernel", "occupancy", "[1, 32]"),
+            (
+                "cga_not_power_of_two_kernel",
+                "num_cta_in_cga",
+                "power of two",
+            ),
+            (
+                "worker_warps_out_of_range_kernel",
+                "num_worker_warps_per_cta",
+                "power of two",
+            ),
+        ];
+        for (kernel, hint, range) in cases {
+            let message = compile_kernel_err(kernel);
+            assert!(
+                message.contains(hint),
+                "diagnostic for `{kernel}` must name the hint `{hint}`:\n{message}"
+            );
+            assert!(
+                message.contains(range),
+                "diagnostic for `{kernel}` must state the accepted range ({range}):\n{message}"
+            );
+            assert!(
+                message.contains("optimization_hints.rs"),
+                "diagnostic for `{kernel}` must carry a source location:\n{message}"
+            );
+        }
+    });
+}
+
+/// The valid kernels next to the rejected ones must still compile, so the
+/// rejection is attributable to the value and not to the surrounding shape.
+#[test]
+fn valid_entry_level_hints_still_compile() {
+    common::with_test_stack(|| {
+        for kernel in [
+            "entry_hints_kernel",
+            "worker_warps_value_kernel",
+            "occupancy_low_bound_kernel",
+        ] {
+            let ir = compile_kernel(kernel, &[("output", &[1])], &CompileOptions::default());
+            assert!(
+                !ir.is_empty(),
+                "`{kernel}` carries legal hints and must still compile"
+            );
+        }
+    });
 }
 
 // The re-based row axis of a mutable partition is dynamic (extent set per-block
@@ -1242,8 +1358,11 @@ fn compile_options_override_entry_hints() {
     common::with_test_stack(|| {
         let options = CompileOptions::default()
             .occupancy(8)
+            .expect("8 is a valid occupancy")
             .num_cta_in_cga(4)
-            .num_worker_warps_per_cta(8);
+            .expect("4 is a valid CGA size")
+            .num_worker_warps_per_cta(8)
+            .expect("8 is a valid worker-warp count");
         let mlir = compile_kernel("entry_hints_kernel", &[("output", &[1])], &options);
         println!("{mlir}");
         assert!(
@@ -1274,7 +1393,9 @@ fn worker_warps_values_are_forwarded_to_backend() {
         let options_mlir = compile_kernel(
             "entry_hints_kernel",
             &[("output", &[1])],
-            &CompileOptions::default().num_worker_warps_per_cta(32),
+            &CompileOptions::default()
+                .num_worker_warps_per_cta(32)
+                .expect("32 is a valid worker-warp count"),
         );
         assert!(options_mlir.contains("num_worker_warps_per_cta = 32"));
     });
@@ -1286,12 +1407,16 @@ fn different_compile_options_produce_different_mlir() {
         let mlir_a = compile_kernel(
             "entry_hints_kernel",
             &[("output", &[1])],
-            &CompileOptions::default().occupancy(2),
+            &CompileOptions::default()
+                .occupancy(2)
+                .expect("2 is a valid occupancy"),
         );
         let mlir_b = compile_kernel(
             "entry_hints_kernel",
             &[("output", &[1])],
-            &CompileOptions::default().occupancy(16),
+            &CompileOptions::default()
+                .occupancy(16)
+                .expect("16 is a valid occupancy"),
         );
         assert!(
             mlir_a.contains("occupancy = 2"),

@@ -135,10 +135,18 @@ fn cache_key_different_spec_args() {
 #[test]
 fn cache_key_different_compile_options() {
     let key_a = default_key()
-        .compile_options(CompileOptions::default().max_divisibility(8))
+        .compile_options(
+            CompileOptions::default()
+                .max_divisibility(8)
+                .expect("any integer is a valid max_divisibility"),
+        )
         .build();
     let key_b = default_key()
-        .compile_options(CompileOptions::default().max_divisibility(16))
+        .compile_options(
+            CompileOptions::default()
+                .max_divisibility(16)
+                .expect("any integer is a valid max_divisibility"),
+        )
         .build();
     assert_ne!(
         key_a, key_b,
@@ -146,18 +154,34 @@ fn cache_key_different_compile_options() {
     );
 
     let key_c = default_key()
-        .compile_options(CompileOptions::default().occupancy(2))
+        .compile_options(
+            CompileOptions::default()
+                .occupancy(2)
+                .expect("2 is a valid occupancy"),
+        )
         .build();
     let key_d = default_key()
-        .compile_options(CompileOptions::default().occupancy(4))
+        .compile_options(
+            CompileOptions::default()
+                .occupancy(4)
+                .expect("4 is a valid occupancy"),
+        )
         .build();
     assert_ne!(key_c, key_d);
 
     let key_e = default_key()
-        .compile_options(CompileOptions::default().num_worker_warps_per_cta(4))
+        .compile_options(
+            CompileOptions::default()
+                .num_worker_warps_per_cta(4)
+                .expect("4 is a valid worker-warp count"),
+        )
         .build();
     let key_f = default_key()
-        .compile_options(CompileOptions::default().num_worker_warps_per_cta(8))
+        .compile_options(
+            CompileOptions::default()
+                .num_worker_warps_per_cta(8)
+                .expect("8 is a valid worker-warp count"),
+        )
         .build();
     assert_ne!(key_e, key_f);
 }

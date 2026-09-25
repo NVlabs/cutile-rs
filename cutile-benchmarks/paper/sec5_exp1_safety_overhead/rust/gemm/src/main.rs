@@ -723,18 +723,18 @@ impl HintConfig {
         })
     }
 
-    fn compile_options(self) -> CompileOptions {
+    fn compile_options(self) -> Result<CompileOptions, Box<dyn std::error::Error>> {
         let mut options = CompileOptions::default();
         if let Some(v) = self.num_cta_in_cga {
-            options = options.num_cta_in_cga(v);
+            options = options.num_cta_in_cga(v)?;
         }
         if let Some(v) = self.occupancy {
-            options = options.occupancy(v);
+            options = options.occupancy(v)?;
         }
         if let Some(v) = self.max_divisibility {
-            options = options.max_divisibility(v);
+            options = options.max_divisibility(v)?;
         }
-        options
+        Ok(options)
     }
 
     fn num_cta_label(self) -> String {
@@ -1732,7 +1732,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hints.occupancy = Some(persistent_config.occupancy);
             }
         }
-        let compile_options = hints.compile_options();
+        let compile_options = hints.compile_options()?;
         let group_size_m = parse_arg(
             &args,
             "--group-size-m",
@@ -1981,8 +1981,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hints.num_cta_in_cga = Some(persistent_config.num_cta_in_cga);
             hints.occupancy = Some(persistent_config.occupancy);
             compile_options = compile_options
-                .num_cta_in_cga(persistent_config.num_cta_in_cga)
-                .occupancy(persistent_config.occupancy);
+                .num_cta_in_cga(persistent_config.num_cta_in_cga)?
+                .occupancy(persistent_config.occupancy)?;
             launch_grid = Some(persistent_config.launch_grid(m, n, num_sms));
         }
         let swizzle_enabled = swizzle_override.unwrap_or_else(|| {

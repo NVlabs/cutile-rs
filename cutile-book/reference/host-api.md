@@ -250,13 +250,24 @@ Several types configure how kernels compile and launch.
 use cutile::tile_kernel::CompileOptions;
 
 let opts = CompileOptions::default()
-    .occupancy(4)
-    .num_cta_in_cga(2)
-    .max_divisibility(16)
-    .num_worker_warps_per_cta(4); // Bytecode 13.3+; use 4 or 8.
+    .occupancy(4)?
+    .num_cta_in_cga(2)?
+    .max_divisibility(16)?
+    .num_worker_warps_per_cta(4)?; // Bytecode 13.3+.
 
 let result = my_kernel(args).compile_options(opts).grid(grid).await?;
 ```
+
+Each hint setter validates its value and returns `Result`, so an out-of-range value is reported at the call that wrote it:
+
+| Hint | Accepted values |
+|---|---|
+| `occupancy` | integer in `[1, 32]` |
+| `num_cta_in_cga` | power of two in `[1, 16]` |
+| `num_worker_warps_per_cta` | power of two in `[1, 32]`; also requires bytecode 13.3+ |
+| `max_divisibility` | any integer; a ceiling on inferred divisibility, not a Tile IR attribute |
+
+The `CompileOptions` hint fields are public, so they can also be written directly. `CompileOptions::validate` re-checks every field, and the compile boundary calls it, so a directly assigned value cannot bypass the range check.
 
 Tile IR 13.4 restricts `num_worker_warps_per_cta` to 4 or 8. Tile IR 13.3
 accepts powers of two in `[1, 32]` (the assembler clamps to its supported
