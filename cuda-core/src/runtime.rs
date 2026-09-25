@@ -27,6 +27,64 @@ pub struct LaunchConfig {
     pub shared_mem_bytes: u32,
 }
 
+/// Integer-valued properties reported by `cuDeviceGetAttribute`.
+///
+/// Values use the units documented on each variant. Unsupported attributes are
+/// reported as a [`DriverError`] by [`Device::attribute`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceAttribute {
+    /// Compute capability major version.
+    ComputeCapabilityMajor,
+    /// Compute capability minor version.
+    ComputeCapabilityMinor,
+    /// Number of streaming multiprocessors.
+    MultiprocessorCount,
+    /// Peak device-memory clock rate in kHz.
+    MemoryClockRate,
+    /// Global-memory bus width in bits.
+    GlobalMemoryBusWidth,
+    /// L2 cache capacity in bytes.
+    L2CacheSize,
+    /// Maximum L2 capacity that can be reserved for persisting accesses, in bytes.
+    MaxPersistingL2CacheSize,
+    /// Maximum access-policy window size in bytes.
+    MaxAccessPolicyWindowSize,
+    /// Number of 32-bit registers available per streaming multiprocessor.
+    MaxRegistersPerMultiprocessor,
+    /// Maximum resident threads per streaming multiprocessor.
+    MaxThreadsPerMultiprocessor,
+    /// Maximum resident thread blocks per streaming multiprocessor.
+    MaxBlocksPerMultiprocessor,
+    /// Maximum shared memory available per streaming multiprocessor, in bytes.
+    MaxSharedMemoryPerMultiprocessor,
+    /// Peak streaming-multiprocessor clock rate in kHz.
+    ClockRate,
+    /// Warp width in threads.
+    WarpSize,
+}
+
+impl DeviceAttribute {
+    fn as_raw(self) -> cuda_bindings::CUdevice_attribute {
+        match self {
+            Self::ComputeCapabilityMajor => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+            Self::ComputeCapabilityMinor => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+            Self::MultiprocessorCount => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            Self::MemoryClockRate => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE,
+            Self::GlobalMemoryBusWidth => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH,
+            Self::L2CacheSize => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE,
+            Self::MaxPersistingL2CacheSize => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
+            Self::MaxAccessPolicyWindowSize => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+            Self::MaxRegistersPerMultiprocessor => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR,
+            Self::MaxThreadsPerMultiprocessor => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+            Self::MaxBlocksPerMultiprocessor => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR,
+            Self::MaxSharedMemoryPerMultiprocessor => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR,
+            Self::ClockRate => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_CLOCK_RATE,
+            Self::WarpSize => cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+        }
+    }
+}
+
 /// Anything that owns an external CUDA resource. A borrowed handle can hold an
 /// `Arc<dyn ForeignOwner>` as a *liveness token*: while the handle (and anything
 /// derived from it) is alive, the token's refcount is nonzero, so the external
@@ -232,6 +290,16 @@ impl Device {
     /// Get the name of this device.
     pub fn name(&self) -> Result<String, DriverError> {
         device::get_name(self.cu_device)
+    }
+
+    /// Queries an integer-valued property of this device.
+    pub fn attribute(&self, attribute: DeviceAttribute) -> Result<i32, DriverError> {
+        let mut value = 0;
+        unsafe {
+            cuda_bindings::cuDeviceGetAttribute(&mut value, attribute.as_raw(), self.cu_device)
+                .result()?;
+        }
+        Ok(value)
     }
 
     /// Returns the raw `CUdevice` handle.
@@ -666,17 +734,7 @@ impl Device {
 
     /// Returns the device's L2 cache size in bytes.
     pub fn l2_cache_size_bytes(&self) -> Result<usize, DriverError> {
-        let mut value: core::ffi::c_int = 0;
-        // Safety: out-pointer is valid; the device handle is valid by
-        // construction.
-        unsafe {
-            cuda_bindings::cuDeviceGetAttribute(
-                &mut value,
-                cuda_bindings::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE,
-                self.cu_device,
-            )
-            .result()?;
-        }
+        let value = self.attribute(DeviceAttribute::L2CacheSize)?;
         Ok(value.max(0) as usize)
     }
 }
