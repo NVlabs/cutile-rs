@@ -42,6 +42,9 @@ pub struct CudaStream {
     pub(crate) cu_stream: cuda_bindings::CUstream,
     /// Owning context. Kept alive for the lifetime of this stream.
     pub(crate) ctx: Arc<CudaContext>,
+    /// Whether dropping this stream destroys `cu_stream`. False for a stream
+    /// wrapped with [`CudaStream::borrow_raw`].
+    pub(crate) owned: bool,
 }
 
 /// # Safety
@@ -56,10 +59,13 @@ unsafe impl Sync for CudaStream {}
 /// Destroys the underlying `CUstream` on drop and decrements the context's
 /// live stream count.
 ///
-/// The default stream (null handle) is never destroyed. Errors during
-/// teardown are recorded on the context rather than panicking.
+/// The default stream (null handle) and borrowed streams are never destroyed.
+/// Errors during teardown are recorded on the context rather than panicking.
 impl Drop for CudaStream {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         self.ctx.record_err(self.ctx.bind_to_thread());
         if !self.cu_stream.is_null() {
             self.ctx.num_streams.fetch_sub(1, Ordering::Relaxed);
@@ -70,6 +76,28 @@ impl Drop for CudaStream {
 }
 
 impl CudaStream {
+    /// Wraps an externally-owned CUDA stream of `ctx`'s context, such as
+    /// another library's current stream, without taking ownership: dropping
+    /// the returned stream does not destroy the handle.
+    ///
+    /// `cu_stream` is the raw `CUstream` opaque pointer, as in
+    /// [`Stream::borrow_raw`](crate::Stream::borrow_raw). Null is the
+    /// context's default stream.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `cu_stream` is null or a valid CUDA stream of `ctx`'s context
+    /// - The stream outlives the returned `CudaStream`
+    /// - No concurrent destruction of the stream
+    pub unsafe fn borrow_raw(cu_stream: *mut c_void, ctx: &Arc<CudaContext>) -> Arc<Self> {
+        Arc::new(CudaStream {
+            cu_stream: cu_stream as cuda_bindings::CUstream,
+            ctx: ctx.clone(),
+            owned: false,
+        })
+    }
+
     /// Returns the raw `CUstream` handle (null for the default stream).
     pub fn cu_stream(&self) -> cuda_bindings::CUstream {
         self.cu_stream
@@ -155,6 +183,7 @@ impl CudaStream {
         let stream = Arc::new(CudaStream {
             cu_stream,
             ctx: self.ctx.clone(),
+            owned: true,
         });
         stream.join(self)?;
         Ok(stream)
