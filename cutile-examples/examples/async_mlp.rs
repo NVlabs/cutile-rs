@@ -71,6 +71,10 @@ fn load_data<const RANK: usize>(batch_size: [usize; RANK]) -> impl DeviceOp<Outp
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("async_mlp", 0)? {
+        return Ok(());
+    }
+
     // Get device scheduling policies.
     let num_devices = 4;
     let devices = {

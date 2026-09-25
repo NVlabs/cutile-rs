@@ -70,6 +70,10 @@ use cutile_examples::to_candle_tensor;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), cuda_async::error::DeviceError> {
+    if !cutile_examples::requirements::BASELINE.check("async_gemm", 0)? {
+        return Ok(());
+    }
+
     type In = f16;
     type Out = f32;
     let (m, n, k) = (64, 64, 16);

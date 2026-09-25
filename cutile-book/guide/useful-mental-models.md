@@ -1,6 +1,7 @@
 # Useful Mental Models
 
-The main cuTile Rust workflow does not require writing thread-level CUDA code. These models help explain what the compiler and runtime do beneath the tile API.
+cuTile Rust kernels operate on tiles. The compiler and runtime map those tiles
+onto CUDA threads and memory.
 
 ## Tile-Based Programming
 
@@ -109,7 +110,7 @@ Host-side `DeviceOp` composition uses the same idea. Independent operations can 
 
 ## Coming from CUDA or Triton
 
-In CUDA C++ and Triton, performance often depends on explicit thread, warp, shared-memory, and scheduling choices. cuTile Rust raises the programming level to tiles:
+Common CUDA and Triton concepts have these cuTile Rust counterparts:
 
 | Low-level concern | cuTile Rust expression |
 |---|---|

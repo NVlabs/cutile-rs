@@ -4,7 +4,7 @@ orphan: true
 
 # The cuTile Rust Book
 
-This directory contains the source for the cuTile Rust Book. To build the book:
+Source for the cuTile Rust Book. To build and serve it locally:
 
 ```
 make setup
@@ -12,7 +12,7 @@ source .venv/bin/activate
 make livehtml
 ```
 
-By default, the book will be locally hosted here: `http://127.0.0.1:8000/`
+The local server runs at `http://127.0.0.1:8000/` by default.
 
 For local development, use the single-version book build:
 

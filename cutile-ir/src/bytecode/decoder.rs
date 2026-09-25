@@ -54,6 +54,15 @@ pub fn decode_bytecode(data: &[u8]) -> Result<String> {
     }
 
     // Parse type table.
+    if let Some(payload) = sections.get(Section::Producer as u8) {
+        let mut producer = EncodingReader::new(payload);
+        let index = producer.read_varint()? as usize;
+        let name = strings
+            .get(index)
+            .ok_or_else(|| Error::BytecodeWrite("producer string index out of range".into()))?;
+        writeln!(out, "=== Producer ===\n  {name:?}\n").unwrap();
+    }
+
     let types = super::reader::parse_type_section(sections.get(Section::Type as u8), version)?;
     if !types.is_empty() {
         writeln!(out, "=== Types ({}) ===", types.len()).unwrap();

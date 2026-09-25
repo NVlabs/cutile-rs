@@ -91,11 +91,16 @@ impl Drop for ExecutionLockRelease {
 
 pub type DeviceOrdinal = usize;
 
+pub use crate::submission::{AccessLease, AccessTracked};
+
 /// A graph-owned resource whose device accesses must be acquired on each replay.
 /// Implementations must register the access with the supplied execution context.
 #[doc(hidden)]
 pub trait ReplayResource: Send + Sync {
     fn retain_for_launch(&self, ctx: &ExecutionContext) -> Result<(), DeviceError>;
+    /// `(storage identity, writes)`: resources with the same identity are
+    /// reacquired once per replay, a write subsuming reads.
+    fn replay_identity(&self) -> (usize, bool);
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +139,14 @@ impl ExecutionContext {
         self.submission.retain(owner)
     }
 
+    /// Retain an in-flight access lease until this submission completes.
+    /// The allocation-free counterpart of [`retain`](Self::retain) for the
+    /// per-argument hot path.
+    #[doc(hidden)]
+    pub fn retain_lease(&self, lease: AccessLease) -> Result<(), DeviceError> {
+        self.submission.retain_lease(lease)
+    }
+
     #[doc(hidden)]
     pub fn is_recording(&self) -> bool {
         self.recording
@@ -162,8 +175,10 @@ impl ExecutionContext {
         }
     }
 
-    pub(crate) fn replay_resources(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
-        self.submission.replay(ctx)
+    /// Drains the resources recorded during capture; the graph owns them
+    /// from here on and reacquires them on each replay.
+    pub(crate) fn take_recorded(&self) -> Vec<Arc<dyn ReplayResource>> {
+        self.submission.take_recorded()
     }
 
     /// The caller has proved completion, or explicitly assumes responsibility

@@ -1,6 +1,7 @@
 # Interoperability
 
-cuTile Rust is designed to coexist with existing CUDA infrastructure. The main interop paths are:
+cuTile Rust can launch external CUDA kernels and borrow handles from other
+libraries:
 
 - **Integrating external PTX or CUBIN kernels** — for CUDA C++ kernels, cuda-oxide-generated PTX, or other CUDA module artifacts that you want to launch alongside cuTile kernels.
 - **Borrowing foreign CUDA handles** — wrap a `CUcontext` / `CUstream` from another Rust binding crate (cudarc, Candle, hand-rolled FFI) so cuTile kernels can run on handles you already own.
@@ -76,7 +77,12 @@ launcher.set_launch_config(LaunchConfig {
 launcher.await?;
 ```
 
-Scalar arguments (types implementing `DType`) push safely with `push_arg`. Device pointers require `unsafe { push_device_ptr() }`: the Rust compiler has no visibility into GPU kernel code and cannot verify that the pointer refers to a valid allocation on the correct GPU, that the allocation is large enough for the kernel's access pattern, that no other operation is concurrently touching the same memory, or that the argument order and types match the kernel's signature. Neither the Rust compiler nor the CUDA driver validates these invariants — mistakes result in silent undefined behavior or hard-to-diagnose GPU faults, so you must verify them manually.
+Scalar arguments implementing `DType` use the safe `push_arg` method. Device
+pointers require `unsafe { push_device_ptr() }`. The caller must check that
+allocations are valid on the target GPU, large enough for the kernel, and free
+of conflicting accesses. Argument order and types must match the kernel's
+signature. Rust and the CUDA driver cannot validate these conditions; getting
+them wrong can cause undefined behavior or GPU faults.
 
 To prevent data races, use stream ordering: operations chained with `.then()` on the same stream execute in order and see each other's writes. Operations on different streams require explicit synchronization.
 
@@ -211,7 +217,8 @@ with_context(move |ctx: &ExecutionContext| {
 .await?;
 ```
 
-This gives you full access to the CUDA driver API while participating in the `DeviceOp` model. Everything inside the `unsafe` block is your responsibility to get right.
+Driver calls inside the `unsafe` block must satisfy the CUDA API's safety
+requirements.
 
 ---
 

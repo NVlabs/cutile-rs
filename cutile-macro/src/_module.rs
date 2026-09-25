@@ -294,7 +294,9 @@ fn process_items(
                 concrete_items.push(const_item.to_token_stream());
             }
             syn::Item::Static(static_item) => {
-                concrete_items.push(instantiate_static_for_rank(static_item)?.to_token_stream());
+                let mut concrete = instantiate_static_for_rank(static_item)?;
+                clear_attributes(HashSet::from(["cuda_tile :: global"]), &mut concrete.attrs);
+                concrete_items.push(concrete.to_token_stream());
             }
             syn::Item::Mod(submod) => {
                 let Some(sub_content) = &submod.content else {
@@ -940,6 +942,7 @@ pub fn kernel_launcher(
             _compile_options: CompileOptions,
             // When true, `execute` skips its launch block (set by `.compile()`).
             _compile_only: bool,
+            _programmatic_dependent_launch: bool,
         }
 
         impl #tile_kernel_impl_type_params #launcher_ident #struct_args {
@@ -952,6 +955,7 @@ pub fn kernel_launcher(
                     _phantom: std::marker::PhantomData,
                     _compile_options: CompileOptions::default(),
                     _compile_only: false,
+                    _programmatic_dependent_launch: false,
                 }
             }
 
@@ -971,6 +975,21 @@ pub fn kernel_launcher(
                 self._compile_only = true;
                 self.sync_on(stream)?;
                 Ok(())
+            }
+
+            /// Permit this kernel to overlap its predecessor on the same stream.
+            /// Disabled by default; requires Tile IR 13.4 and sm_90 or newer.
+            /// This is a launch setting, independent of compile options.
+            ///
+            /// # Safety
+            /// Every predecessor-dependent access must be token-ordered after
+            /// `gdc_wait_tko`. Source order alone does not establish that chain.
+            /// Work before the wait must not race unfinished predecessor work.
+            /// Neither kernel may depend on overlap for progress, and resources
+            /// must remain alive through their last use by either kernel.
+            pub unsafe fn programmatic_dependent_launch(mut self) -> Self {
+                self._programmatic_dependent_launch = true;
+                self
             }
 
             /// Resolves the specialization identity for this launch without compiling or launching the kernel.

@@ -510,8 +510,9 @@ mod memory_and_atomic_ops_module {
     fn padded_partition_view_kernel<const S: [i32; 1]>(input: &Tensor<f32, S>) {
         let token: Token = new_token_unordered();
         let shape = input.shape();
+        // SAFETY: this read-only input has no preceding writes in the kernel.
         let partition: Partition<f32, S> =
-            make_partition_view(input, shape, padding::NegInf, dim_map::Identity, token);
+            unsafe { make_partition_view(input, shape, padding::NegInf, dim_map::Identity, token) };
         let idx: [i32; 1] = [0i32];
         let _tile: Tile<f32, S> = load_view_tko(
             &partition,

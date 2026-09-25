@@ -30,6 +30,20 @@ mod debug_kernel {
     }
 }
 
+#[cutile::module]
+mod dispatch_kernel {
+    use cutile::core::*;
+
+    // `load_tile_like(x, out)` is a trait-dispatch wrapper: type inference
+    // lowers the free-function call to `x.load_tile_like(out)` before the
+    // inline compiler runs. The lowered call must keep this call site.
+    #[cutile::entry()]
+    fn dispatch_source<const S: [i32; 1]>(out: &mut Tensor<i32, S>, x: &Tensor<i32, { [-1] }>) {
+        let tile = load_tile_like(x, out);
+        out.store(tile);
+    }
+}
+
 fn compile(level: DebugInfoLevel) -> CompileArtifacts {
     KernelCompiler::new(
         debug_kernel::__module_ast_self,
@@ -333,5 +347,49 @@ fn cross_file_functions_and_methods_keep_inline_scopes() {
         assert!(dump.contains("CallSite(callee=di["), "{dump}");
         // Builtin expansions should not displace the user's source with _core.rs.
         assert!(!dump.contains("_core.rs"), "{dump}");
+    });
+}
+
+#[test]
+fn lowered_dispatch_call_keeps_its_call_site() {
+    common::with_test_stack(|| {
+        let artifacts = KernelCompiler::new(
+            dispatch_kernel::__module_ast_self,
+            "dispatch_kernel",
+            "dispatch_source",
+        )
+        .target("sm_120")
+        .generics(vec!["32".into()])
+        .strides(&[("out", &[1]), ("x", &[1])])
+        .options(CompileOptions::new().debug_info(DebugInfoLevel::Line))
+        .compile()
+        .expect("compile dispatch kernel");
+        let source = include_str!("debug_info.rs");
+        let call_line = source_line(source, "let tile = load_tile_like(x, out);");
+        let module_line = source_line(source, "mod dispatch_kernel {");
+        let mut load_lines = Vec::new();
+        visit_ops(
+            artifacts.module(),
+            &artifacts.module().functions,
+            &mut |op| {
+                if op.opcode != cutile_ir::bytecode::Opcode::LoadViewTko {
+                    return;
+                }
+                let mut location = &op.location;
+                while let Location::CallSite { callee, .. } = location {
+                    location = callee;
+                }
+                match location {
+                    Location::DebugInfo(info) => load_lines.push(info.line),
+                    Location::FileLineCol { line, .. } => load_lines.push(*line),
+                    other => panic!("load without a source location: {other:?}"),
+                }
+            },
+        );
+        assert!(!load_lines.is_empty(), "no load_view_tko op");
+        assert!(
+            load_lines.iter().all(|&line| line == call_line),
+            "inlined dispatch body must sit on the call line {call_line}, not the module line {module_line}: {load_lines:?}"
+        );
     });
 }

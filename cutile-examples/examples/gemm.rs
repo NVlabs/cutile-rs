@@ -62,5 +62,9 @@ fn gemm<T: DType + std::fmt::Display>() -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("gemm", 0)? {
+        return Ok(());
+    }
+
     gemm::<f32>()
 }

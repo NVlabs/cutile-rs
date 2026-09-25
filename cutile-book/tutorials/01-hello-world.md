@@ -1,8 +1,12 @@
 # 1. Hello World
 
-Tile kernels are functions which run as `N` copies concurrently and in parallel when invoked. The primary difference between tile-based kernels and CUDA C++ kernels is the basic unit of execution: a *tile program* (also called a *tile block*), which expresses the computation performed by a single logical thread operating over a multi-dimensional *tile of data*.
+Launching a tile kernel starts `N` concurrent copies of the same function.
+Each copy is a *tile program* (also called a *tile block*): a single logical
+thread operating on a multi-dimensional tile of data.
 
-> **Note**: The distinction between parallel execution and concurrent execution is intentional: The CUDA runtime executes tile kernels concurrently, many of which may execute in parallel. While some support for inter-tile communication is possible, in-depth knowledge of the CUDA runtime is required to achieve this.
+> **Note**: Tile programs run concurrently, but the CUDA runtime may not run
+> all of them at the same time. Communication between tile programs requires
+> detailed knowledge of the CUDA runtime.
 
 ![Thread-centric vs Tile-centric GPU programming models](../_static/images/mental-model-shift.svg)
 
@@ -79,7 +83,7 @@ mod hello_world_module {
 - `#[cutile::module]` marks a module as containing GPU code.
 - `#[cutile::entry()]` marks a function as a kernel entry point.
 
-The kernel function runs **many times concurrently and in parallel** — once for each coordinate in the kernel launch grid.
+Each coordinate in the launch grid gets one instance of the kernel function.
 
 
 The following host-side code will launch the device-side code:
@@ -111,7 +115,7 @@ For each axis `k`, `0 <= program_id(k) < num_programs(k)`. The tuple forms `get_
 
 ![A grid of tile programs showing (x,y) coordinates](../_static/images/hello-world-grid.svg)
 
-Each program runs the same code but with different coordinates. This is how programs divide up work — each one handles a different piece of data based on its ID.
+Programs use their coordinates to select which data to process.
 
 ---
 

@@ -58,6 +58,7 @@ run_examples() {
 
     local examples_passed=0
     local examples_failed=0
+    local examples_skipped=0
     local failed_examples=()
 
     mapfile -t examples < <(find "$examples_dir" -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
@@ -72,15 +73,26 @@ run_examples() {
         done
         if [[ "$should_skip" == true ]]; then
             echo "Skipping example: $example"
+            ((examples_skipped++))
             continue
         fi
 
         echo -e "  Running example: ${example}"
-        if cargo run --example "$example" "${cargo_extra[@]}" --quiet >/dev/null 2>&1; then
-            echo -e "  ${GREEN}✓${NC} ${example}"
-            ((examples_passed++))
+        local output skip_reason
+        if output=$(cargo run --example "$example" "${cargo_extra[@]}" --quiet 2>&1); then
+            # Examples print this marker only for unmet runtime prerequisites.
+            # A nonzero exit is always a failure, even if it printed a marker.
+            skip_reason=$(printf '%s\n' "$output" | sed -n "/^SKIP ${example}: /p")
+            if [[ -n "$skip_reason" ]]; then
+                echo -e "  ${YELLOW}-${NC} ${skip_reason}"
+                ((examples_skipped++))
+            else
+                echo -e "  ${GREEN}✓${NC} ${example}"
+                ((examples_passed++))
+            fi
         else
             echo -e "  ${RED}✗${NC} ${example}"
+            printf '%s\n' "$output"
             ((examples_failed++))
             failed_examples+=("$example")
             OVERALL_SUCCESS=false
@@ -89,9 +101,9 @@ run_examples() {
 
     echo ""
     if [[ $examples_failed -eq 0 ]]; then
-        echo -e "${GREEN}✓ All ${examples_passed} examples passed${NC}"
+        echo -e "${GREEN}✓ ${examples_passed} examples passed, ${examples_skipped} skipped${NC}"
     else
-        echo -e "${RED}✗ ${examples_failed} examples failed, ${examples_passed} passed${NC}"
+        echo -e "${RED}✗ ${examples_failed} examples failed, ${examples_passed} passed, ${examples_skipped} skipped${NC}"
         echo -e "${RED}Failed examples: ${failed_examples[*]}${NC}"
     fi
     echo ""

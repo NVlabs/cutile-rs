@@ -9,10 +9,8 @@ feature, and the API may change between releases:
 cutile = { version = "...", features = ["experimental-tune"] }
 ```
 
-Two workflows share the machinery: a closure front-end for tuning one
-kernel in isolation, and a caller-implemented `Objective` for engine-scale
-objectives where "fast" means the whole request, not one launch. The
-`autotune` example runs the closure workflow end to end:
+Use a closure to tune an individual kernel, or implement `Objective` to
+measure a whole request. The `autotune` example uses a closure:
 `cargo run -p cutile-examples --example autotune --features experimental-tune`.
 
 ## Declaring a space and running the search
@@ -53,17 +51,18 @@ let output = Autotuner::new("fmha_decode")
 let best: Config = output.best.expect("a winner");
 ```
 
-Three behaviors are worth knowing rather than discovering. The winner is
-decided by a paired A/B runoff between the two best candidates, because
-sequential medians drift with clocks and temperature; a finalist that fails
-its runoff setup forfeits. A `require`d configuration must be a member of
-the space (a missing incumbent is an error, not a silent omission) and is
-measured before the searcher runs, so no budget cutoff can skip it — the
-winner always beat, or is, every incumbent. And the trial log is headed by
-tuner name and a hash of the space: a log written by a different tuner or
-space is refused, never silently adopted.
+The two best candidates are compared in a paired A/B runoff to account for
+clock and temperature drift. A finalist that fails setup forfeits.
 
-## Engine-scale measurement implements Objective
+Every `require`d configuration must belong to the search space. These
+configurations are measured first, before the budget can cut off the search.
+The winner must match or beat each of them.
+
+Trial logs record the tuner name and a hash of the search space. A log from
+a different tuner or space is rejected.
+
+(engine-scale-measurement-implements-objective)=
+## Measuring a full request with `Objective`
 
 When the objective is end-to-end (tokens per second, request latency), the
 library cannot own the launch. Implement `Objective` instead: `configs()`
@@ -82,13 +81,13 @@ let output = Autotuner::new("engine_prefill")
     .run_objective(&mut objective)?;
 ```
 
-There is no paired runoff on this path — re-timing finalists requires the
-library's bench closures, which an engine objective does not expose —
-so `Output::best` is the best sequential median and contemporaneous
-re-measurement of finalists, if wanted, stays with the caller. The
-serialized `Trial` form is a stable contract: resumable logs survive cutile
-upgrades, and an incompatible change bumps the log header's schema, which
-`TrialLog::open` refuses rather than silently discarding resume state.
+This path has no paired runoff: the library cannot re-time an engine
+objective through its bench closures. `Output::best` is the best sequential
+median. The caller can re-measure finalists together to check for drift.
+
+Serialized `Trial` records remain compatible across cuTile upgrades. An
+incompatible change increments the log schema version, and `TrialLog::open`
+rejects the old schema.
 
 
 ## Committing winners
@@ -134,21 +133,16 @@ committed file, not inputs to verification. The `l2_key` is the winner's
 persistent-cache key, computed from the composed builder without
 compiling or launching (`.l2_cache_key()`).
 
-`load_verified` refuses a record whose kernel, architecture, source hash,
-or search space does not match the running workspace, and refuses any
-entry whose stored cache key no longer matches the recomputed one — that
-last check covers the kernel's dependencies and the toolchain, so a stale
-winner fails loudly instead of applying silently. Drift that only shifts
-timings comes back as warnings. A record either verifies or it does not
-load; there is no best-effort application.
+`load_verified` rejects a record if its kernel, architecture, source hash,
+or search space differs from the running workspace. It also recomputes each
+entry's cache key to check the kernel's dependencies and toolchain. Changes
+that affect only timing produce warnings.
 
 ## Warming and managing the kernel cache during sweeps
 
-Warm exactly what you dispatch: the compile-only `.compile()` terminal sits
-on the same composed builder as `.execute` and `.sync_on`, so warmup uses
-the dispatch call expression itself and cannot drift from it. `api::meta`
-placeholder tensors carry shape and dtype without allocating, so warming
-performs no launches and no device allocation:
+Call `.compile()` on the same builder used for `.execute` or `.sync_on` to
+warm the specialization that will run. `api::meta` tensors supply shape and
+dtype without device allocation or kernel launches:
 
 ```rust
 my_module::my_kernel(api::meta::<f32>(&[64, 64]).sync()?.partition([16, 16]), ...)
@@ -163,9 +157,8 @@ kernel cache is intentionally unbounded. The `unsafe` functions
 `clear_kernel_cache()`, `evict_kernel(&key)`, and `retain_kernels(pred)` in
 `cutile::tile_kernel` are available without any Cargo feature. They remove
 entries, releasing each module's device memory when its last holder drops.
-They are `unsafe` because of the one obligation they cannot check: quiesce
-first. A launched kernel executes after the launch call returns, so
-synchronize every stream that may still be running cached kernels before
-evicting. Between tuning trials or at a serving engine's quiescent point,
+These functions are `unsafe`: synchronize every stream that may still be
+running a cached kernel before evicting it. Between tuning trials or while
+a serving engine is idle,
 callers can evict and then reload the needed specializations. The autotuning
 API in `cutile::tune` still requires `experimental-tune`.

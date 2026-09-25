@@ -39,6 +39,7 @@ pub enum RoundingMode {
     Approx = 4,
     Full = 5,
     NearestIntToZero = 6,
+    NearestAway = 7,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,6 +159,11 @@ pub enum Attribute {
 }
 
 impl Attribute {
+    /// Dense boolean op attribute, e.g. the per-index `inbounds` vector.
+    pub fn dense_bool_array(values: impl IntoIterator<Item = bool>) -> Self {
+        Self::Array(values.into_iter().map(Self::Bool).collect())
+    }
+
     /// Create a typed integer attribute. Shorthand for `Attribute::Integer(v, Type::Scalar(ty))`.
     pub fn int(v: i64, ty: ScalarType) -> Self {
         Attribute::Integer(v, Type::Scalar(ty))

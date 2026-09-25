@@ -12,6 +12,28 @@ use cutile_compiler::compiler::utils::CompileOptions;
 use cutile_compiler::error::JITError;
 use cutile_compiler::specialization::{DivHint, SpecializationBits};
 
+/// Runtime prerequisites only. Failed discovery is a test failure; an
+/// unsupported feature is a visible skip. Never catch JIT/execution errors.
+#[allow(dead_code)]
+pub fn supports_tile_ir(features: &[cutile_ir::requirements::Feature]) -> bool {
+    use cutile_compiler::cuda_tile_runtime_utils::ToolkitCapabilities;
+    use cutile_ir::ir::{Location, Module};
+    let caps = ToolkitCapabilities::for_device(0).expect("selected toolkit capabilities");
+    let result = caps
+        .target
+        .validate_module(&Module::new("test_prerequisites"))
+        .and_then(|()| {
+            features
+                .iter()
+                .try_for_each(|feature| feature.check(&caps.target, &Location::Unknown))
+        });
+    if let Err(error) = result {
+        eprintln!("SKIP Tile IR execution: {error}");
+        return false;
+    }
+    true
+}
+
 /// Process-wide lock serializing tests that assert on global kernel-cache
 /// state (presence of a key) or the global JIT compile counter.
 ///

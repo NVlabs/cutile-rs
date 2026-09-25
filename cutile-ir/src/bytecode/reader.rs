@@ -37,11 +37,11 @@ pub fn read_bytecode(data: &[u8]) -> Result<Module> {
 pub fn read_bytecode_versioned(data: &[u8]) -> Result<(Module, BytecodeVersion)> {
     let mut r = EncodingReader::new(data);
     let version = r.read_header()?;
-    if version < BytecodeVersion::MIN_SUPPORTED || version > BytecodeVersion::V13_3 {
+    if version < BytecodeVersion::MIN_SUPPORTED || version > BytecodeVersion::V13_4 {
         return Err(Error::BytecodeRead(format!(
             "unsupported bytecode version {version}; supported range is {}..={}",
             BytecodeVersion::MIN_SUPPORTED,
-            BytecodeVersion::V13_3
+            BytecodeVersion::V13_4
         )));
     }
 
@@ -75,6 +75,11 @@ pub fn read_bytecode_versioned(data: &[u8]) -> Result<(Module, BytecodeVersion)>
     };
 
     reader.parse_global_section(sections.get(Section::Global as u8))?;
+    if let Some(payload) = sections.get(Section::Producer as u8) {
+        let mut r = EncodingReader::new(payload);
+        let idx = r.read_varint()?;
+        reader.module.producer = Some(table_get(&reader.strings, idx, "producer string")?);
+    }
     if let Some(payload) = sections.get(Section::Func as u8) {
         let mut r = EncodingReader::new(payload);
         reader.parse_func_section(&mut r)?;
@@ -257,6 +262,7 @@ pub(crate) fn read_type_entry(
     version: BytecodeVersion,
 ) -> Result<Type> {
     let v13_3 = version >= BytecodeVersion::V13_3;
+    let v13_4 = version >= BytecodeVersion::V13_4;
     let tag = r.read_varint()? as u8;
     let index = |r: &mut EncodingReader, what: &str| -> Result<Type> {
         table_get(prev, r.read_varint()?, what)
@@ -277,14 +283,24 @@ pub(crate) fn read_type_entry(
         t if t == TypeTag::F8E5M2 as u8 => Ok(Type::Scalar(ScalarType::F8E5M2)),
         t if t == TypeTag::F8E8M0FNU as u8 => Ok(Type::Scalar(ScalarType::F8E8M0FNU)),
         t if t == TypeTag::F4E2M1FN as u8 => Ok(Type::Scalar(ScalarType::F4E2M1FN)),
+        t if t == TypeTag::F8E5M3FNU as u8 => Ok(Type::Scalar(ScalarType::F8E5M3FNU)),
         t if t == TypeTag::Token as u8 => Ok(Type::Token),
         t if t == TypeTag::Pointer as u8 => {
+            let has_attr = v13_4 && r.read_varint()? != 0;
             let elem = index(r, "pointee")?;
-            match elem {
-                Type::Scalar(s) => Ok(Type::Pointer(crate::ir::PointerType { pointee: s })),
-                other => Err(Error::BytecodeRead(format!(
-                    "pointer pointee must be a scalar, got {other:?}"
-                ))),
+            let base = match elem {
+                Type::Scalar(s) => Type::Pointer(crate::ir::PointerType { pointee: s }),
+                other => {
+                    return Err(Error::BytecodeRead(format!(
+                        "pointer pointee must be a scalar, got {other:?}"
+                    )))
+                }
+            };
+            if has_attr {
+                let attr = read_pointer_attribute(r)?;
+                Ok(Type::WithPointerAttribute(Box::new(base), attr))
+            } else {
+                Ok(base)
             }
         }
         t if t == TypeTag::Tile as u8 => {
@@ -292,6 +308,14 @@ pub(crate) fn read_type_entry(
             let element_type = match elem {
                 Type::Scalar(s) => TileElementType::Scalar(s),
                 Type::Pointer(p) => TileElementType::Pointer(Box::new(p)),
+                // An attributed pointer here means the tile was serialized
+                // through WithPointerAttribute; the tile element type cannot
+                // carry the attribute, so this is not representable.
+                Type::WithPointerAttribute(base, _) if matches!(*base, Type::Pointer(_)) => {
+                    return Err(Error::BytecodeRead(
+                        "attributed pointer tile elements are not supported by the reader".into(),
+                    ))
+                }
                 other => {
                     return Err(Error::BytecodeRead(format!(
                         "tile element must be a scalar or pointer, got {other:?}"
@@ -305,6 +329,7 @@ pub(crate) fn read_type_entry(
             }))
         }
         t if t == TypeTag::TensorView as u8 => {
+            let has_attr = v13_4 && r.read_varint()? != 0;
             let elem = index(r, "tensor_view element")?;
             let Type::Scalar(element_type) = elem else {
                 return Err(Error::BytecodeRead(
@@ -313,11 +338,17 @@ pub(crate) fn read_type_entry(
             };
             let shape = r.read_le_var_size_i64()?;
             let strides = r.read_le_var_size_i64()?;
-            Ok(Type::TensorView(crate::ir::TensorViewType {
+            let base = Type::TensorView(crate::ir::TensorViewType {
                 element_type,
                 shape,
                 strides,
-            }))
+            });
+            if has_attr {
+                let attr = read_pointer_attribute(r)?;
+                Ok(Type::WithPointerAttribute(Box::new(base), attr))
+            } else {
+                Ok(base)
+            }
         }
         t if t == TypeTag::PartitionView as u8 => {
             let has_padding = if v13_3 {
@@ -410,6 +441,19 @@ pub(crate) fn read_type_entry(
             Ok(Type::Func(crate::ir::FuncType { inputs, results }))
         }
         t => Err(Error::BytecodeRead(format!("unknown type tag {t}"))),
+    }
+}
+
+/// Read a 13.4 pointer-attribute byte (inverse of the writer's
+/// `attr as u8`).
+fn read_pointer_attribute(r: &mut EncodingReader) -> Result<crate::ir::PointerAttribute> {
+    let b = r.read_byte()?;
+    if b == 0 {
+        Ok(crate::ir::PointerAttribute::None)
+    } else {
+        Err(Error::BytecodeRead(format!(
+            "unknown pointer attribute {b}"
+        )))
     }
 }
 
@@ -1214,12 +1258,14 @@ impl ReaderState {
             | Ceil
             | Cos
             | CosH
+            | FPowI
             | Floor
             | IntToPtr
             | Log
             | Log2
             | MakeGatherScatterView
             | MakeStridedView
+            | MemoryFenceAliasTko
             | MmaFScaled
             | MulhiI
             | NegF
@@ -1591,8 +1637,8 @@ impl ReaderState {
             }
 
             // ----- Variadic result count + operands -----
-            JoinTokens | Break | Continue | Return | Yield | Extract | For | Loop | Reduce
-            | Scan => {
+            JoinTokens | Break | Continue | Return | Yield | Extract | For | Insert | Loop
+            | Reduce | Scan => {
                 let result_types = self.read_results_varint(r)?;
                 let mut attributes = Vec::new();
                 match opcode {
@@ -1635,6 +1681,22 @@ impl ReaderState {
                     operands,
                     attributes,
                     regions,
+                })
+            }
+
+            // ----- GDC PDL: result types + optional token operand -----
+            GdcLaunchDependentsTko | GdcWaitTko => {
+                let result_types = self.read_results_varint(r)?;
+                let operands = if r.read_varint()? != 0 {
+                    vec![self.read_operand(r, "operand")?]
+                } else {
+                    Vec::new()
+                };
+                Ok(ParsedOp {
+                    result_types,
+                    operands,
+                    attributes: Vec::new(),
+                    regions: Vec::new(),
                 })
             }
 
@@ -2273,6 +2335,7 @@ fn fixed_operand_count(opcode: Opcode) -> usize {
         | MakeGatherScatterView
         | MakePartitionView
         | MakeStridedView
+        | MemoryFenceAliasTko
         | NegF
         | NegI
         | Pack
@@ -2289,9 +2352,9 @@ fn fixed_operand_count(opcode: Opcode) -> usize {
         | TanH
         | TruncI
         | Unpack => 1,
-        AddF | AddI | AndI | Atan2 | Cat | CmpF | CmpI | DivF | DivI | MaxF | MaxI | MinF
-        | MinI | MulF | MulI | MulhiI | Offset | OrI | Pow | RemF | RemI | ShLI | SubF | SubI
-        | XOrI => 2,
+        AddF | AddI | AndI | Atan2 | Cat | CmpF | CmpI | DivF | DivI | FPowI | MaxF | MaxI
+        | MinF | MinI | MulF | MulI | MulhiI | Offset | OrI | Pow | RemF | RemI | ShLI | SubF
+        | SubI | XOrI => 2,
         Fma | MmaI | Select => 3,
         MmaF => 3,
         MmaFScaled => 5,

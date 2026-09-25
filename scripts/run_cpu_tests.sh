@@ -14,6 +14,14 @@ run_step \
     cargo test -p cutile-ir
 
 run_step \
+    "example capability checks (driver-free)" \
+    cargo test -p cutile-examples --lib requirements::
+
+run_step \
+    "example runner accounting tests" \
+    bash "$REPO_ROOT/scripts/test_example_runner.sh"
+
+run_step \
     "cutile-compiler CPU unit tests" \
     cargo test -p cutile-compiler --lib
 
@@ -61,6 +69,8 @@ for test_target in \
     registry_phase_a \
     span_source_location \
     trait_dispatch_probe \
+    tile_ir_capabilities \
+    token_threading \
     two_cga_trait_impl \
     type_inference_sanity \
     unary_math_ops \

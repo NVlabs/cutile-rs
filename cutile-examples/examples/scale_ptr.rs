@@ -82,6 +82,10 @@ use my_module::scale_ptr;
 
 #[tokio::main()]
 async fn main() -> Result<(), cutile::error::Error> {
+    if !cutile_examples::requirements::BASELINE.check("scale_ptr", 0)? {
+        return Ok(());
+    }
+
     let len = 1024usize;
     let scale = 3.0f32;
 

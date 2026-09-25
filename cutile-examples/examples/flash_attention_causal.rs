@@ -292,6 +292,10 @@ fn run_attention_fmha(causal: bool) -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("flash_attention_causal", 0)? {
+        return Ok(());
+    }
+
     run_attention_fmha(false)?;
     run_attention_fmha(true)?;
     Ok(())

@@ -37,6 +37,10 @@ mod hello_world_module {
 use hello_world_module::hello_world_kernel;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("hello_world", 0)? {
+        return Ok(());
+    }
+
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
     let launcher = hello_world_kernel();

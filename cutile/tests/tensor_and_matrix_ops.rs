@@ -7,16 +7,9 @@ use cutile::prelude::{
     api, Arc, Device, DeviceOp, DeviceOpReshape, IntoPartition, Tensor, ToHostVec,
 };
 use cutile_compiler::compiler::utils::CompileOptions;
-use cutile_compiler::cuda_tile_runtime_utils::get_gpu_name;
+use cutile_ir::requirements::Feature;
 
 mod common;
-
-fn supports_native_nvfp4(gpu_name: &str) -> bool {
-    gpu_name
-        .strip_prefix("sm_")
-        .and_then(|sm| sm.parse::<u32>().ok())
-        .is_some_and(|sm| sm >= 100)
-}
 
 #[cutile::module]
 mod tensor_and_matrix_ops_module {
@@ -616,9 +609,7 @@ fn compile_raw_mmaf_scaled_nvfp4_e4_scale() {
 #[test]
 fn execute_raw_mmaf_scaled_nvfp4_e4_scale() {
     common::with_test_stack(|| {
-        let gpu_name = get_gpu_name(0);
-        if !supports_native_nvfp4(&gpu_name) {
-            eprintln!("Skipping NVFP4 runtime test on {gpu_name}: native NVFP4 requires sm_100+");
+        if !common::supports_tile_ir(&[Feature::ScaledMma, Feature::Fp4]) {
             return;
         }
 

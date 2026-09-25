@@ -1,6 +1,8 @@
 # 6. Fused Multihead Attention
 
-Attention is a performance-critical operation at the heart of transformer models (BERT, GPT, etc.). It computes a weighted combination of values, where the weights reflect the relevance of each position in the sequence. Given parameters Q, K, and V constructed from an input sequence, attention is computed as:
+Attention computes a weighted combination of values across a sequence. In
+transformers such as BERT and GPT, the input sequence produces query (Q),
+key (K), and value (V) tensors:
 
 ```
 Attention(Q, K, V) = softmax(Q @ K^T / √d) @ V
@@ -14,11 +16,15 @@ Where:
 
 The softmax produces **attention weights** — a probability distribution over positions in the sequence.
 
-> **Note**: In this tutorial, we write a fused multihead attention (FMHA) kernel using cuTile Rust's tile abstractions. The programmer expresses the algorithm — tiled Q/K/V access, online softmax, streaming accumulation — while the compiler handles the heavy lifting that makes this a "Flash Attention"-caliber implementation: staging data through shared memory, mapping operations onto Tensor Cores, managing the register file, and coalescing memory accesses. In a traditional CUDA C++ Flash Attention kernel, these low-level details dominate the code; here, the tile programming model abstracts them away. In parts of this project outside of this tutorial, we may refer to Flash Attention and Fused MHA interchangeably.
+This fused multihead attention (FMHA) kernel processes Q, K, and V in tiles
+using online softmax. The compiler handles shared-memory staging, Tensor Core
+mapping, register allocation, and memory coalescing. Elsewhere in the project,
+FMHA is also called Flash Attention.
 
 ---
 
-## The Memory Problem
+(the-memory-problem)=
+## Attention score memory
 
 The intermediate attention scores matrix is quadratic in the sequence length:
 
@@ -35,7 +41,8 @@ For N=65k, the scores matrix alone requires **4 billion elements**. Long sequenc
 
 ---
 
-## The Softmax Challenge
+(the-softmax-challenge)=
+## Row-wise softmax
 
 Softmax requires access to **all values in a row** to compute `reduce_max` and `reduce_sum`:
 
@@ -118,7 +125,8 @@ For each Q tile (row block of the output):
 
 ---
 
-## The Code
+<a id="the-code"></a>
+## FMHA kernel
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
@@ -269,11 +277,13 @@ Output length: 65536
 | K,V access pattern | Load all at once | Stream tile by tile |
 | Low-level optimization | Manual (shared memory, warps, coalescing) | Handled by the compiler |
 
-This fused kernel trades extra compute (rescaling) for dramatically less memory, achieving Flash Attention-level performance. The programmer writes the algorithm at the tile level, while the compiler generates the shared memory staging, Tensor Core mappings, and memory coalescing that would otherwise require hundreds of lines of CUDA C++. For long sequences, this means running workloads that would otherwise not fit in GPU memory.
+Rescaling adds computation, but avoids storing the full attention matrix.
+This allows longer sequences to fit in GPU memory.
 
 ---
 
-## Full Production Example
+(full-production-example)=
+## Reference implementation
 
 A complete implementation with Multi-Query Attention (MQA) support and reference validation:
 

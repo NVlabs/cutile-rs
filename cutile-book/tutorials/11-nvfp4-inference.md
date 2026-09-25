@@ -13,12 +13,8 @@ Rust value: packed FP4 bytes become `f4e2m1fnx2`, logical FP4 compute uses
 `f4e2m1fn`, and scale tensors use an FP8 scale type such as `f8e4m3fn` or
 `f8e8m0fnu`.
 
-This tutorial shows that boundary and the corresponding kernel pattern. It uses
-a linear layer as the concrete example because FP4 inference data commonly flows
-into GEMM-like projection kernels, but the storage rules are the important part.
-The final section shows how to use the same `mmaf_scaled` pattern with FP8 data
-and E8M0 block scales, which is the low-level kernel shape for MXFP8-style
-matrix multiply.
+The examples use a linear layer with `mmaf_scaled` for matrix multiplication.
+The same operation supports MXFP8 with FP8 data and E8M0 block scales.
 
 ---
 
@@ -32,7 +28,7 @@ along K. The matrix multiply consumes both pieces: the packed FP4 data carries
 the low-precision values, and the scale tensors restore the range needed for
 useful computation.
 
-The direct win is operand bandwidth. Sixteen `f16` values take 32 bytes. The
+Sixteen `f16` values take 32 bytes. The
 same 16 logical values in this NVFP4 layout take 8 packed FP4 bytes plus one FP8
 scale byte, or 9 bytes total. That is about 28% of the `f16` operand storage,
 or about 3.6x less operand bandwidth before accounting for output traffic.
@@ -50,10 +46,9 @@ A packed FP4: 128 bytes + A scale values: 16 bytes
 B packed FP4: 128 bytes + B scale values: 16 bytes
 ```
 
-The output and accumulator path is still `f32`, so this does not make total
-kernel traffic 3.6x smaller. It reduces the input operand traffic, which is the
-reason this layout is attractive for inference workloads that repeatedly read
-large activation and weight matrices.
+The 3.6x reduction applies to input operands. Outputs and accumulators still
+use `f32`. Inference benefits when it repeatedly reads large activation and
+weight matrices.
 
 Conceptually, `mmaf_scaled` computes a matrix multiply where each operand value
 is multiplied by the scale for its K-group:
@@ -79,9 +74,6 @@ out[i, j] = acc[i, j] +
 ```rust
 let out = mmaf_scaled(lhs, rhs, acc, lhs_scale, rhs_scale);
 ```
-
-The rest of the tutorial shows how to get from byte-addressable model storage to
-the logical FP4 and scale tiles that `mmaf_scaled` expects.
 
 ---
 
@@ -128,10 +120,8 @@ this:
 | weight scales | `f8e4m3fn` or `f8e8m0fnu` | `[N, K / 16]` for the layout used here |
 | output | `f32` | `[M, N]` |
 
-The packing itself is part of the model format contract. cuTile treats
-`f4e2m1fnx2` values as already-packed bytes; it does not infer, reorder, or
-repair the low and high nibbles. Code that produces or loads the model data must
-pack each pair correctly.
+cuTile reads `f4e2m1fnx2` values as already-packed bytes. The model loader must
+put each pair in the correct nibble order.
 
 This tutorial uses logical row-major scale tensors with the `V = 16` group size
 described above. If your model-loading layer uses a different scale tensor
@@ -189,16 +179,14 @@ let y_scales = api::copy_host_vec_to_device(&fp8_e4m3(weight_scale_bytes))
 let alpha = 1.0f32;
 ```
 
-The important part is the explicit conversion:
+Convert each byte to packed FP4 storage:
 
 ```rust
 u8 -> f4e2m1fnx2::from_bits(byte)
 ```
 
-That conversion does not change the memory layout. It tells Rust and cuTile that
-the byte is packed FP4 storage, not an arbitrary integer. If you are producing
-packed FP4 bytes yourself, use `f4e2m1fnx2::from_nibbles(low, high)` to make the
-low-first, high-second packing order explicit at the construction site.
+The conversion changes the type without changing the memory layout. To pack
+FP4 values yourself, use `f4e2m1fnx2::from_nibbles(low, high)`.
 
 ### Tensor<u8> Escape Hatch
 
@@ -221,10 +209,7 @@ fn unpack_packed_fp4_bytes(
 }
 ```
 
-This is safe because every `u8` bit pattern is valid byte storage. A
-`Tensor<f4e2m1fnx2, ...>` still carries more information in the kernel
-signature, so use `Tensor<u8, ...>` only when the surrounding interop boundary
-already exposes packed FP4 data as bytes.
+Every `u8` bit pattern is valid byte storage, so this unpacking is safe.
 
 ---
 
@@ -282,7 +267,7 @@ mod nvfp4_linear {
 }
 ```
 
-The key shape conversion is:
+Unpacking doubles the number of elements:
 
 ```text
 Tile<f4e2m1fnx2, [BM, BK_PACKED]>  // BK_PACKED = BK / 2
@@ -337,9 +322,6 @@ let (z, ..) = nvfp4_linear::linear_tile(
 
 ## Architecture Tradeoffs
 
-The storage layout and the compute instruction are separate performance
-questions.
-
 Packing FP4 values reduces operand bytes before the data reaches the kernel.
 That can reduce memory traffic whenever the model is stored and moved in packed
 form. The larger speedup comes when the target GPU also has hardware support for
@@ -352,9 +334,6 @@ not mean every Tile IR type or MMA operation is native on every target.
 `mmaf_scaled` with scaled floating-point inputs is an `sm_100` and newer
 operation, and `f4E2M1FN` is a Blackwell-supported Tile IR type.
 
-The table below summarizes whether each target family natively supports the
-NVFP4 element type and whether it has specialized scaled FP4 MMA instructions:
-
 | Target family | Native `f4E2M1FN` type | Specialized scaled FP4 MMA |
 |---|---|---|
 | `sm_80` / Ampere | No | No |
@@ -362,12 +341,9 @@ NVFP4 element type and whether it has specialized scaled FP4 MMA instructions:
 | `sm_100` / Blackwell | Yes | Yes, through `mmaf_scaled` lowering to NVFP4 Tensor Core instructions |
 | `sm_120` / Blackwell | Yes | Yes, through `mmaf_scaled` lowering to NVFP4 Tensor Core instructions |
 
-On targets without the native path, packed FP4 bytes are still just bytes. A
-fallback will usually unpack or convert into another compute format before the
-GEMM. In that path, the speedup is mostly a bandwidth question, and unpacking,
-scaling, or conversion overhead may offset some of the storage benefit.
-Benchmark against the established target-specific path instead of assuming FP4
-storage alone will make the GEMM faster.
+Targets without native support usually need to unpack or convert FP4 before
+the GEMM. That work can offset the bandwidth savings. Benchmark the fallback
+against the established implementation for the target GPU.
 
 The runnable example in the repository is `cutile-examples/examples/nvfp4.rs`.
 On native NVFP4 targets, it checks the kernel output against an all-ones input

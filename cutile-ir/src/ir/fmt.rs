@@ -847,6 +847,65 @@ impl<'a> ModulePrinter<'a> {
                 writeln!(out).unwrap();
             }
 
+            Opcode::FPowI => {
+                let op = self.module.op(op_id);
+                self.print_binary_operands(op_id, out);
+                self.print_attr_dict(op_id, &[], out);
+                if op.operands.len() >= 2 {
+                    write!(
+                        out,
+                        " : {}, {}",
+                        format_type(self.module.value_type(op.operands[0])),
+                        format_type(self.module.value_type(op.operands[1]))
+                    )
+                    .unwrap();
+                }
+                writeln!(out).unwrap();
+            }
+
+            Opcode::Insert => {
+                let op = self.module.op(op_id);
+                self.print_binary_operands(op_id, out);
+                write!(out, "[").unwrap();
+                for (i, value) in op.operands.iter().skip(2).enumerate() {
+                    if i != 0 {
+                        write!(out, ", ").unwrap();
+                    }
+                    write!(out, "%{}", value.index()).unwrap();
+                }
+                write!(out, "]").unwrap();
+                self.print_attr_dict(op_id, &[], out);
+                if let (Some(source), Some(result)) = (op.operands.first(), op.result_types.first())
+                {
+                    write!(
+                        out,
+                        " : {}, {}",
+                        format_type(self.module.value_type(*source)),
+                        format_type(result)
+                    )
+                    .unwrap();
+                }
+                writeln!(out).unwrap();
+            }
+
+            Opcode::GdcLaunchDependentsTko | Opcode::GdcWaitTko => {
+                let op = self.module.op(op_id);
+                if let Some(token) = op.operands.first() {
+                    write!(out, " token = %{}", token.index()).unwrap();
+                }
+                self.print_attr_dict(op_id, &[], out);
+                writeln!(out, " -> token").unwrap();
+            }
+
+            Opcode::MemoryFenceAliasTko => {
+                let op = self.module.op(op_id);
+                if let Some(token) = op.operands.first() {
+                    write!(out, " %{}", token.index()).unwrap();
+                }
+                self.print_attr_dict(op_id, &[], out);
+                writeln!(out).unwrap();
+            }
+
             // ---- Extract: `$source[$indices] attr-dict : type($source) -> type($result)` ----
             Opcode::Extract => {
                 let op = self.module.op(op_id);
@@ -1947,114 +2006,25 @@ impl<'a> ModulePrinter<'a> {
 
 /// Map opcode to its MLIR operation name.
 fn opcode_name(opcode: Opcode) -> &'static str {
-    use Opcode::*;
-    match opcode {
-        AbsF => "absf",
-        AbsI => "absi",
-        AddF => "addf",
-        AddI => "addi",
-        AndI => "andi",
-        Assert => "assert",
-        Assume => "assume",
-        Alloca => "alloca",
-        Atan2 => "atan2",
-        AtomicCAS => "atomic_cas_tko",
-        AtomicRedViewTko => "atomic_red_view_tko",
-        AtomicRMW => "atomic_rmw_tko",
-        Bitcast => "bitcast",
-        Break => "break",
-        Broadcast => "broadcast",
-        Cat => "cat",
-        Ceil => "ceil",
-        CmpF => "cmpf",
-        CmpI => "cmpi",
-        Constant => "constant",
-        Continue => "continue",
-        Cos => "cos",
-        CosH => "cosh",
-        DivF => "divf",
-        DivI => "divi",
-        Entry => "entry",
-        Exp => "exp",
-        Exp2 => "exp2",
-        ExtI => "exti",
-        Extract => "extract",
-        Floor => "floor",
-        Fma => "fma",
-        For => "for",
-        FToF => "ftof",
-        FToI => "ftoi",
-        GetGlobal => "get_global",
-        GetIndexSpaceShape => "get_index_space_shape",
-        GetNumTileBlocks => "get_num_tile_blocks",
-        GetTensorShape => "get_tensor_shape",
-        GetTileBlockId => "get_tile_block_id",
-        Global => "global",
-        If => "if",
-        IntToPtr => "int_to_ptr",
-        Iota => "iota",
-        IToF => "itof",
-        JoinTokens => "join_tokens",
-        LoadPtrTko => "load_ptr_tko",
-        LoadViewTko => "load_view_tko",
-        Log => "log",
-        Log2 => "log2",
-        Loop => "cuda_tile.loop",
-        MakeGatherScatterView => "make_gather_scatter_view",
-        MakePartitionView => "make_partition_view",
-        MakeStridedView => "make_strided_view",
-        MakeTensorView => "make_tensor_view",
-        MakeToken => "make_token",
-        MaxF => "maxf",
-        MaxI => "maxi",
-        MinF => "minf",
-        MinI => "mini",
-        MmaF => "mmaf",
-        MmaFScaled => "mmaf_scaled",
-        MmaI => "mmai",
-        Module => "module",
-        MulF => "mulf",
-        MulhiI => "mulhii",
-        MulI => "muli",
-        NegF => "negf",
-        NegI => "negi",
-        Offset => "offset",
-        OrI => "ori",
-        Pack => "pack",
-        Permute => "permute",
-        Pow => "pow",
-        Print => "print_tko",
-        PtrToInt => "ptr_to_int",
-        PtrToPtr => "ptr_to_ptr",
-        Reduce => "reduce",
-        RemF => "remf",
-        RemI => "remi",
-        Reshape => "reshape",
-        Return => "return",
-        Rsqrt => "rsqrt",
-        Scan => "scan",
-        Select => "select",
-        ShLI => "shli",
-        ShRI => "shri",
-        Sin => "sin",
-        SinH => "sinh",
-        Sqrt => "sqrt",
-        StorePtrTko => "store_ptr_tko",
-        StoreViewTko => "store_view_tko",
-        SubF => "subf",
-        SubI => "subi",
-        Tan => "tan",
-        TanH => "tanh",
-        TruncI => "trunci",
-        Unpack => "unpack",
-        XOrI => "xori",
-        Yield => "yield",
+    if opcode == Opcode::Loop {
+        "cuda_tile.loop"
+    } else {
+        opcode.name()
     }
 }
 
 /// Format a tile-ir `Type` as an MLIR type string (shorthand, no `!cuda_tile.` prefix).
 pub fn format_type(ty: &Type) -> String {
     match ty {
+        Type::WithPointerAttribute(base, _) => {
+            let mut text = format_type(base);
+            if let Some(start) = text.find("ptr<").or_else(|| text.find("tensor_view<")) {
+                if let Some(end) = text[start..].find('>') {
+                    text.insert_str(start + end, ", #cuda_tile.ptr_attr<none>");
+                }
+            }
+            text
+        }
         Type::Scalar(s) => format_scalar(*s),
         Type::Pointer(p) => format!("ptr<{}>", format_scalar(p.pointee)),
         Type::Tile(t) => {
@@ -2229,6 +2199,7 @@ fn format_scalar(s: ScalarType) -> String {
         ScalarType::F8E4M3FN => "f8e4m3fn",
         ScalarType::F8E5M2 => "f8e5m2",
         ScalarType::F8E8M0FNU => "f8e8m0fnu",
+        ScalarType::F8E5M3FNU => "f8e5m3fnu",
         ScalarType::F4E2M1FN => "f4e2m1fn",
     }
     .into()
@@ -2386,6 +2357,7 @@ fn rounding_mode_name(v: i64) -> &'static str {
         4 => "approx",
         5 => "full",
         6 => "nearest_int_to_zero",
+        7 => "nearest_away",
         _ => "nearest_even",
     }
 }
@@ -2596,6 +2568,7 @@ fn decode_scalar(sc: ScalarType, data: &[u8], byte_offset: usize) -> String {
         | ScalarType::F4E2M1FN
         | ScalarType::F8E4M3FN
         | ScalarType::F8E5M2
+        | ScalarType::F8E5M3FNU
         | ScalarType::F8E8M0FNU => {
             if byte_offset < data.len() {
                 format!("{}", data[byte_offset])

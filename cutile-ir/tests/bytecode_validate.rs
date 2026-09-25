@@ -97,7 +97,7 @@ fn validate_module(module: &Module) {
         .verify_bytecode_indices()
         .expect("bytecode index check failed");
 
-    let bc = cutile_ir::write_bytecode(module).expect("write_bytecode failed");
+    let bc = write_test_bytecode(module).expect("write_bytecode failed");
 
     // Verify our own decoder can parse it.
     cutile_ir::decode_bytecode(&bc).expect("our decoder rejected the bytecode");
@@ -128,18 +128,49 @@ fn run_tileiras(bc: &[u8], name: &str) {
                 panic!("tileiras rejected bytecode for module '{name}':\n{stderr}");
             }
         }
-        Err(_) => {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && std::env::var_os("CUTILE_TILEIRAS_PATH")
+                    .filter(|v| !v.is_empty())
+                    .is_none() =>
+        {
             // tileiras not available -- skip byte-level check
             std::fs::remove_file(&tmp).ok();
         }
+        Err(e) => panic!("cannot run tileiras: {e}"),
     }
 }
 
 fn tileiras_binary() -> std::path::PathBuf {
-    std::env::var_os("CUTILE_TILEIRAS_PATH")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("tileiras"))
+    cutile_ir::toolchain::tileiras_from_env()
+}
+
+// Send the same format the JIT would emit, including on pre--list-versions
+// assemblers. A writer-only run may omit tileiras; a broken explicit override
+// must not quietly turn assembler validation off.
+fn write_test_bytecode(module: &Module) -> cutile_ir::Result<Vec<u8>> {
+    use cutile_ir::bytecode::BytecodeVersion;
+    static VERSION: std::sync::OnceLock<BytecodeVersion> = std::sync::OnceLock::new();
+    let version = *VERSION.get_or_init(|| {
+        let requested = std::env::var_os("CUTILE_BYTECODE_VERSION").filter(|v| !v.is_empty());
+        match cutile_ir::toolchain::negotiate_bytecode_version(
+            &tileiras_binary(),
+            requested.as_deref(),
+        ) {
+            Ok(version) => version,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && std::env::var_os("CUTILE_TILEIRAS_PATH")
+                        .filter(|v| !v.is_empty())
+                        .is_none()
+                    && requested.is_none() =>
+            {
+                BytecodeVersion::CURRENT
+            }
+            Err(e) => panic!("cannot select tileiras bytecode version: {e}"),
+        }
+    });
+    cutile_ir::bytecode::write_bytecode_version(module, version)
 }
 
 // =========================================================================
@@ -686,7 +717,7 @@ fn dbg_v2_foreign_scope_requires_call_site() {
         floc("src/k.rs", 5, 0),
     );
     m.verify_dominance().expect("dominance");
-    let bc = cutile_ir::write_bytecode(&m).expect("write");
+    let bc = write_test_bytecode(&m).expect("write");
     cutile_ir::decode_bytecode(&bc).expect("our decoder accepts it");
     expect_tileiras_rejects(&bc, "dbg_v2", "debug info scope");
 }
@@ -809,11 +840,7 @@ fn dbg_v6_line_before_decl() {
         floc("src/k.rs", 5, 0),
     );
     if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
-        std::fs::write(
-            format!("{dir}/v6.bc"),
-            cutile_ir::write_bytecode(&m).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(format!("{dir}/v6.bc"), write_test_bytecode(&m).unwrap()).unwrap();
     }
     validate_module(&m);
 }
@@ -841,11 +868,7 @@ fn dbg_v7_duplicate_subprogram_name() {
         floc("src/k.rs", 5, 0),
     );
     if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
-        std::fs::write(
-            format!("{dir}/v7.bc"),
-            cutile_ir::write_bytecode(&m).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(format!("{dir}/v7.bc"), write_test_bytecode(&m).unwrap()).unwrap();
     }
     validate_module(&m);
 }
@@ -936,7 +959,7 @@ fn dbg_dump_variants_for_external_probe() {
     ];
     for (name, locs) in variants {
         let m = debug_variant(name, locs, floc("src/k.rs", 5, 0));
-        let bc = cutile_ir::write_bytecode(&m).unwrap();
+        let bc = write_test_bytecode(&m).unwrap();
         std::fs::write(format!("{dir}/{name}.bc"), bc).unwrap();
     }
 }
@@ -979,7 +1002,7 @@ fn dbg_v9_deep_mixed_chain() {
         [chain, floc("src/k.rs", 8, 4)],
         floc("src/k.rs", 5, 0),
     );
-    let bc = cutile_ir::write_bytecode(&m).unwrap();
+    let bc = write_test_bytecode(&m).unwrap();
     if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
         std::fs::write(format!("{dir}/v9.bc"), &bc).unwrap();
     }
@@ -1046,7 +1069,7 @@ fn dbg_v11_chain_on_special_ops() {
     if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
         std::fs::write(
             format!("{dir}/v11.bc"),
-            cutile_ir::write_bytecode(&module).unwrap(),
+            write_test_bytecode(&module).unwrap(),
         )
         .unwrap();
     }
@@ -1075,11 +1098,7 @@ fn dbg_v12_caller_equals_function_attr() {
         floc("src/k.rs", 5, 0),
     );
     if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
-        std::fs::write(
-            format!("{dir}/v12.bc"),
-            cutile_ir::write_bytecode(&m).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(format!("{dir}/v12.bc"), write_test_bytecode(&m).unwrap()).unwrap();
     }
     validate_module(&m);
 }
@@ -1133,7 +1152,7 @@ fn dbg_v13_dissolved_op_with_record_caller() {
     if let Ok(dir) = std::env::var("CUTILE_DBG_DUMP_DIR") {
         std::fs::write(
             format!("{dir}/v13.bc"),
-            cutile_ir::write_bytecode(&module).unwrap(),
+            write_test_bytecode(&module).unwrap(),
         )
         .unwrap();
     }

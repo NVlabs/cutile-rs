@@ -13,9 +13,17 @@
 
 pub mod builder;
 pub mod bytecode;
+pub mod capabilities;
 pub mod ir;
 
+// Shared implementation details; not re-exported by the cuTile user API.
+#[doc(hidden)]
+pub mod requirements;
+#[doc(hidden)]
+pub mod toolchain;
+
 mod error;
+mod verify_target;
 
 pub use error::{Error, Result};
 

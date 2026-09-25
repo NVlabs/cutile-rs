@@ -2,7 +2,7 @@
 
 Pure Rust IR builder and bytecode writer for the CUDA Tile dialect. Builds
 Tile IR programs in-memory and serializes them to the bytecode format consumed
-by `tileiras`. No LLVM, no C++ toolchain, no `mlir-sys` — just `cargo build`.
+by `tileiras`. Builds with Cargo without an LLVM or C++ toolchain.
 
 ## Example
 
@@ -114,9 +114,15 @@ write_bytecode_to_file(&module, "kernel.bc")?;
 // Then: tileiras --gpu-name sm_120 -o kernel.cubin kernel.bc
 ```
 
+`write_bytecode_to_file` uses the writer's current format, which may be newer
+than an installed assembler. Use `write_bytecode_version` when targeting an
+older format. The JIT, `build_basic` example and assembler-validation tests
+negotiate with the selected executable; they also handle older assemblers
+without `--list-versions`. See the [compatibility matrix](../cutile-book/reference/compatibility.md).
+
 cuTile's JIT resolves `tileiras` from `CUTILE_TILEIRAS_PATH` when set, then
 `$CUDA_TOOLKIT_PATH/bin/tileiras`, then the default CUDA 13.2+ install
-directories (`/usr/local/cuda-13.3` through `/usr/local/cuda`), and only then
+directories (`/usr/local/cuda-13.4` through `/usr/local/cuda`), and only then
 from `PATH`. Set `CUTILE_TILEIRAS_PATH` to force a specific binary, for
 example:
 
@@ -161,8 +167,8 @@ The cuTile Rust compiler originally used
 [melior](https://github.com/edgl/melior) (thanks to
 [Yota Toyama](https://github.com/raviqqe) for that project) to construct
 MLIR operations in the CUDA Tile dialect. `cutile-ir` replaces the
-LLVM/MLIR dependency with a self-contained Rust crate — faster builds, no
-toolchain friction, and a lifetime-free API.
+LLVM/MLIR dependency with a Rust crate whose index-based API needs no
+lifetime parameters.
 
 ## License
 

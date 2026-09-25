@@ -35,9 +35,15 @@ pub enum ScalarType {
     F8E5M2,
     F8E8M0FNU,
     F4E2M1FN,
+    F8E5M3FNU,
 }
 
 impl ScalarType {
+    /// Minimum bytecode version that can represent this element type.
+    pub const fn minimum_version(self) -> crate::bytecode::BytecodeVersion {
+        crate::requirements::scalar_requirement(self).since
+    }
+
     /// Byte width of this scalar type (I1 rounds up to 1 byte).
     pub fn byte_width(self) -> usize {
         match self {
@@ -47,7 +53,8 @@ impl ScalarType {
             | Self::F8E4M3FN
             | Self::F8E5M2
             | Self::F8E8M0FNU
-            | Self::F4E2M1FN => 1,
+            | Self::F4E2M1FN
+            | Self::F8E5M3FNU => 1,
             Self::I16 | Self::F16 | Self::BF16 => 2,
             Self::I32 | Self::F32 | Self::TF32 => 4,
             Self::I64 | Self::F64 => 8,
@@ -71,6 +78,7 @@ impl ScalarType {
             Self::F8E5M2 => TypeTag::F8E5M2,
             Self::F8E8M0FNU => TypeTag::F8E8M0FNU,
             Self::F4E2M1FN => TypeTag::F4E2M1FN,
+            Self::F8E5M3FNU => TypeTag::F8E5M3FNU,
         }
     }
 
@@ -101,6 +109,14 @@ pub enum TileElementType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PointerType {
     pub pointee: ScalarType,
+}
+
+/// Public Tile IR 13.4 pointer classifications. Absence is represented by an
+/// unqualified type; explicit `None` remains distinct from absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PointerAttribute {
+    None = 0,
 }
 
 /// A statically-shaped tile of elements.
@@ -192,6 +208,32 @@ pub enum Type {
     StridedView(StridedViewType),
     Func(FuncType),
     Token,
+    /// Attach a classification to a pointer, pointer tile, or a view's base
+    /// tensor. A wrapper preserves the existing public carrier structs.
+    WithPointerAttribute(Box<Type>, PointerAttribute),
+}
+
+impl Type {
+    pub fn with_pointer_attribute(self, attribute: PointerAttribute) -> Self {
+        Self::WithPointerAttribute(
+            Box::new(self.without_pointer_attribute().clone()),
+            attribute,
+        )
+    }
+
+    pub fn without_pointer_attribute(&self) -> &Type {
+        match self {
+            Self::WithPointerAttribute(base, _) => base.without_pointer_attribute(),
+            _ => self,
+        }
+    }
+
+    pub fn pointer_attribute(&self) -> Option<PointerAttribute> {
+        match self {
+            Self::WithPointerAttribute(_, attr) => Some(*attr),
+            _ => None,
+        }
+    }
 }
 
 impl From<ScalarType> for Type {
@@ -261,6 +303,10 @@ impl Type {
     /// Returns `None` if the string doesn't match any known type.
     pub fn parse(s: &str) -> Option<Type> {
         let s = s.trim();
+        if s.contains(", #cuda_tile.ptr_attr<none>") {
+            return Self::parse(&s.replace(", #cuda_tile.ptr_attr<none>", ""))
+                .map(|ty| ty.with_pointer_attribute(PointerAttribute::None));
+        }
         // Accept both `!cuda_tile.token` and shorthand `token`.
         if s == "!cuda_tile.token" || s == "token" {
             return Some(Type::Token);
@@ -358,6 +404,7 @@ fn parse_scalar(s: &str) -> Option<ScalarType> {
         "f8E5M2" | "f8e5m2" => Some(ScalarType::F8E5M2),
         "f8E8M0FNU" | "f8e8m0fnu" => Some(ScalarType::F8E8M0FNU),
         "f4E2M1FN" | "f4e2m1fn" => Some(ScalarType::F4E2M1FN),
+        "f8E5M3FNU" | "f8e5m3fnu" => Some(ScalarType::F8E5M3FNU),
         // Rust-facing names used by the compiler.
         "bool" => Some(ScalarType::I1),
         _ => None,

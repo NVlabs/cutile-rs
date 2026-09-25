@@ -107,8 +107,7 @@ struct LayerBuffers {
 
 ## Building the Lazy Graph
 
-The core of the approach: build the entire forward pass as a `DeviceOp`
-without executing anything. This is the graph that will be captured.
+Build the forward pass as a lazy `DeviceOp` for graph capture:
 
 ```rust
 fn build_forward(
@@ -181,7 +180,7 @@ fn build_forward(
 }
 ```
 
-Key patterns to notice:
+The combinators in `build_forward` have these roles:
 
 - **`.shared()`** — Each intermediate result is shared so it can feed into
   both the next kernel and the final buffer collection. The underlying
@@ -196,7 +195,6 @@ Key patterns to notice:
 - **`DeviceOpVec`** — Collects boxed ops for each layer's graph work. Its
   output is `Vec<()>`, so the trailing `.map(|_| ())` is what makes the
   captured graph a `CudaGraph<()>`.
-- **No GPU work yet** — Everything above is pure graph construction.
 
 ---
 
@@ -232,7 +230,7 @@ After capture:
 
 ## The Module Pattern
 
-Wrap the graph in a `Module` trait for clean inference:
+Implement `Module` to call the graph through `forward`:
 
 ```rust
 trait Module {
@@ -273,7 +271,8 @@ Each `forward` call:
 
 ---
 
-## Putting It Together
+<a id="putting-it-together"></a>
+## Inference loop
 
 ```rust
 fn main() -> Result<(), Error> {
@@ -354,8 +353,6 @@ let graph = CudaGraph::scope(&stream, |s| {
 
 graph.launch().sync_on(&stream)?;
 ```
-
-Key differences from the combinator approach:
 
 | | Combinator (`.graph()`) | Scope (`CudaGraph::scope`) |
 |---|---|---|

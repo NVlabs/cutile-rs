@@ -1,8 +1,8 @@
 # 8. Data Parallel MLP
 
-> Note: While async concepts are taught using the `tokio` runtime, any async runtime can be used.
+> Note: These examples use `tokio`, but cuTile works with other async runtimes.
 
-In this tutorial we show how to build a single-layer MLP, copy it to multiple GPUs, and execute distinct batches of data on each instance:
+Each GPU holds a copy of this single-layer MLP and processes a separate batch:
 
 ```text
 Input → Linear → ReLU → Output
@@ -14,7 +14,8 @@ Where:
 
 ---
 
-## The Code
+<a id="the-code"></a>
+## Multi-GPU forward pass
 
 ```rust
 #[cutile::module]
@@ -163,9 +164,10 @@ async fn main() -> Result<(), DeviceError> {
 
 ---
 
-## Key Pattern: Compose Device Operations, Then Spawn
+(key-pattern-compose-device-operations-then-spawn)=
+## Spawning device operations
 
-Every device operation in the loop below is non-blocking. The loop itself is non-blocking:
+The loop schedules each forward pass without waiting for GPU completion:
 
 ```rust
 let mut futures: Vec<JoinHandle<Result<Partition<Tensor<f32>>, cuda_async::error::DeviceError>>> = vec![];

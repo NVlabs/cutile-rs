@@ -2,7 +2,7 @@
 
 Generated raw Rust FFI bindings to the CUDA toolkit libraries used by this workspace.
 
-This crate is intentionally low level. Most code should depend on `cuda-core` instead of calling these bindings directly.
+Use `cuda-core` for wrappers around these raw bindings.
 
 # Notes
 

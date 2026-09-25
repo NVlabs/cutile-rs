@@ -1749,6 +1749,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
         for_variables.innermost_loop = Some(LoopKind::For);
+        for_variables.inside_for = true;
         // Persistent tile-id loop: the step is the physical grid size, so
         // induction-substitution hoisting stays off (unit_step = false), but
         // loop-invariant checks in the body can still move to the preheader.
@@ -2220,6 +2221,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         for_variables.carry_vars = Some(loop_carry_vars.clone());
         for_variables.default_terminator = Some(BlockTerminator::Continue);
         for_variables.innermost_loop = Some(LoopKind::For);
+        for_variables.inside_for = true;
 
         self.compile_block(
             module,
@@ -2598,6 +2600,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     for_variables.carry_vars = Some(loop_carry_vars.clone());
                     for_variables.default_terminator = Some(BlockTerminator::Continue);
                     for_variables.innermost_loop = Some(LoopKind::For);
+                    for_variables.inside_for = true;
                     // `return` inside the body is rejected by `compile_block`
                     // (it cannot be lowered); `break` too, since `cuda_tile.for`
                     // has no early exit.
@@ -2828,6 +2831,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                         if bounds.is_exact() {
                             // Emit the corresponding conditional, if it's defined.
                             let mut block_vars = ctx.clone();
+                            block_vars.token_update_in_region = true;
                             // This is inlined, so no need to inject a terminator.
                             block_vars.default_terminator = None;
                             let (res, carry_vars) = match (bounds.start, &if_expr.else_branch) {
@@ -2912,6 +2916,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     // Build then region.
                     let (then_region_id, then_return_type, branch_result_type) = {
                         let mut block_vars = ctx.clone();
+                        block_vars.token_update_in_region = true;
                         block_vars.carry_vars = Some(if_captured_var_names.clone());
                         block_vars.default_terminator = Some(BlockTerminator::Yield);
                         let (then_block_id, _then_block_args) = build_block(module, &[]);
@@ -2948,6 +2953,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let (else_region_id, _else_return_type) = {
                         if let Some((_Else, else_expr)) = &if_expr.else_branch {
                             let mut block_vars = ctx.clone();
+                            block_vars.token_update_in_region = true;
                             block_vars.carry_vars = Some(if_captured_var_names.clone());
                             block_vars.default_terminator = Some(BlockTerminator::Yield);
                             let (else_block_id, _else_block_args) = build_block(module, &[]);
@@ -4285,7 +4291,10 @@ pub fn encode_literal_bytes(lit_string: &str, cuda_tile_ty: &str) -> Vec<u8> {
             let v = parse_float_or_hex(lit_string);
             v.to_le_bytes().to_vec()
         }
-        ScalarType::F8E4M3FN | ScalarType::F8E5M2 | ScalarType::F8E8M0FNU => {
+        ScalarType::F8E4M3FN
+        | ScalarType::F8E5M2
+        | ScalarType::F8E8M0FNU
+        | ScalarType::F8E5M3FNU => {
             let v: u8 = lit_string.parse().unwrap_or(0);
             vec![v]
         }

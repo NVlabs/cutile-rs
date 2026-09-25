@@ -314,6 +314,31 @@ fn get_integer_const<T: Integer>(const_str: &str) -> Result<String, JITError> {
 
 /// Returns the hex-encoded constant string for a typed constant name (e.g. `"zero"`, `"one"`).
 pub fn get_const_hex(rust_element_type_str: &str, const_str: &str) -> Result<String, JITError> {
+    // Storage-only scalar wrappers use their raw byte encodings. In particular,
+    // scale formats must not pass through the f32 constant encoding path.
+    if const_str == "zero"
+        && matches!(
+            rust_element_type_str,
+            "i4" | "f4e2m1fn" | "f4e2m1fnx2" | "f8e4m3fn" | "f8e5m2" | "f8e8m0fnu" | "f8e5m3fnu"
+        )
+    {
+        return Ok("0".into());
+    }
+    if const_str == "one" {
+        let bits = match rust_element_type_str {
+            "i4" => Some(1),
+            "f4e2m1fn" => Some(2),
+            "f4e2m1fnx2" => Some(0x22),
+            "f8e4m3fn" => Some(0x38),
+            "f8e5m2" => Some(0x3c),
+            "f8e8m0fnu" => Some(0x7f),
+            "f8e5m3fnu" => Some(0x78),
+            _ => None,
+        };
+        if let Some(bits) = bits {
+            return Ok(bits.to_string());
+        }
+    }
     match rust_element_type_str {
         "bf16" => get_float_const::<bf16>(const_str),
         "f16" => get_float_const::<f16>(const_str),
@@ -454,7 +479,7 @@ pub fn resolve_option_arg(expr: &syn::Expr, ctx: &CompilerContext) -> Option<syn
 // Variable mutation analysis
 // ---------------------------------------------------------------------------
 
-fn collect_pattern_bindings(pat: &Pat, names: &mut Vec<String>) -> Result<(), JITError> {
+pub(super) fn collect_pattern_bindings(pat: &Pat, names: &mut Vec<String>) -> Result<(), JITError> {
     match pat {
         Pat::Ident(ident) => {
             names.push(ident.ident.to_string());
@@ -1018,19 +1043,53 @@ pub fn update_type_meta(
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
     for outer_key in &outer_keys {
-        let Some(outer_val) = outer_block_vars.vars.get(outer_key) else {
+        let Some(outer_val) = outer_block_vars.vars.get(outer_key).cloned() else {
             continue;
         };
-        if outer_val.mutability == Mutability::Mutable {
-            if let Some(inner_key) = outer2inner_vars.get(outer_key) {
-                if let Some(inner_val) = inner_block_vars.vars.get(inner_key) {
-                    if inner_val.mutability == Mutability::Mutable {
-                        let mut new_val = outer_val.clone();
-                        new_val.type_meta = inner_val.type_meta.clone();
+        let Some(inner_key) = outer2inner_vars.get(outer_key) else {
+            continue;
+        };
+        let Some(inner_val) = inner_block_vars.vars.get(inner_key) else {
+            continue;
+        };
+        // Ordering metadata can change through `&Tensor`, even when the
+        // caller used `let mut`: an explicit `set_token` /
+        // `set_tensor_token` installs an external ordering point (a PDL
+        // wait) that every later view must start from. Compare view
+        // identity, not names or mutability, and carry *only* explicit
+        // installs. The completion token a load writes into its own view
+        // (inside the inlined `Partition::load`) must not escape an
+        // immutable binding: reads need no ordering among themselves, and
+        // chaining a read-only partition's loads serializes them (a 35%
+        // slowdown in a load-bound kernel). Writable bindings keep the
+        // full metadata copy below, which carries their access tokens.
+        if inner_val.value.is_some()
+            && inner_val.value == outer_val.value
+            && inner_block_vars.explicit_token_updates.contains(inner_key)
+        {
+            let inner_token = inner_val
+                .type_meta
+                .as_ref()
+                .and_then(|meta| meta.fields.get("token").cloned());
+            if let Some(inner_token) = inner_token {
+                let mut new_val = outer_val.clone();
+                if let Some(meta) = new_val.type_meta.as_mut() {
+                    if meta.fields.contains_key("token") {
+                        meta.fields.insert("token".to_string(), inner_token);
                         outer_block_vars.vars.insert(outer_key.clone(), new_val);
+                        outer_block_vars
+                            .explicit_token_updates
+                            .insert(outer_key.clone());
                     }
                 }
             }
+        }
+        if outer_val.mutability == Mutability::Mutable
+            && inner_val.mutability == Mutability::Mutable
+        {
+            let mut new_val = outer_val;
+            new_val.type_meta = inner_val.type_meta.clone();
+            outer_block_vars.vars.insert(outer_key.clone(), new_val);
         }
     }
 }

@@ -1330,8 +1330,8 @@ fn typeck_dump_golden_for_struct_literal_field() {
 expr#1: Tile < f32 , { [4] } >
 expr#2: f32
 expr#3: Shape < { [4] } >
-expr#4: ()
-method#4: core::store -> _
+expr#4: Token
+method#4: core::store -> Token
 expr#5: & mut Tensor < f32 , { [4] } >
 expr#6: Tile < f32 , { [4] } >
 expr#7: TileCarrier"#;

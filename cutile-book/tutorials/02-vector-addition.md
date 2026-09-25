@@ -96,17 +96,16 @@ let part_x = x.partition(shape![BM, BK]);
 let tile = part_x.load([i, j]);
 ```
 
-This is more flexible — the same `&Tensor` can be partitioned in different ways within the same kernel (e.g., in GEMM, `x` and `y` use different partition shapes).
+The same `&Tensor` can use different partition shapes within one kernel. GEMM,
+for example, uses different shapes for `x` and `y`.
 
 In this tutorial, we use `x.load_like(z)` instead of explicit device-side partitioning. This convenience function partitions `x` using the same shape and coordinates as `z`, which is the common case for element-wise operations. Later tutorials (starting with [matrix multiplication](./04-matrix-multiplication.md)) use explicit device-side partitioning when inputs need different access patterns.
 
-### Putting It Together
+<a id="putting-it-together"></a>
+### Launch grid
 
-When you call `add(z, x, y)`, cutile automatically:
-
-1. Determines the grid size from `z`'s host-side partition (8×8×1 = 64 tile blocks).
-2. Launches 64 tiles in parallel.
-3. Each tile processes its 4×4 chunk.
+Calling `add(z, x, y)` launches an 8×8×1 grid from `z`'s host-side partition.
+Each of the 64 tile blocks processes a 4×4 chunk.
 
 ---
 

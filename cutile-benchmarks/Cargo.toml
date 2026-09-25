@@ -19,6 +19,7 @@ smoke-test = []
 cutile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 
 [[bench]]
 name = "gemm"
@@ -46,6 +47,10 @@ harness = false
 
 [[bench]]
 name = "launch_overhead"
+harness = false
+
+[[bench]]
+name = "host_overhead"
 harness = false
 
 [dependencies]

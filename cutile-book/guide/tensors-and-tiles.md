@@ -41,8 +41,6 @@ let scaled = shifted * 2.0f32;
 z.store(scaled);
 ```
 
-The core data flow is:
-
 ![Data flow: Load from Tensor to Tile, Compute in registers, Store back to Tensor](../_static/images/data-flow.svg)
 
 ```text
@@ -120,9 +118,8 @@ let acc = load_tile_mut(z);
 z.store(acc + update);
 ```
 
-## Operations at a Glance
-
-The DSL API reference has complete signatures. These are the operation families used most often inside kernels:
+(operations-at-a-glance)=
+## Kernel operations
 
 | Category | Examples |
 |---|---|

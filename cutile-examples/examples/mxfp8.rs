@@ -67,6 +67,10 @@ mod mxfp8_linear {
 use mxfp8_linear::linear_tile;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BLOCK_SCALED_MMA.check("mxfp8", 0)? {
+        return Ok(());
+    }
+
     run()
 }
 
@@ -75,11 +79,6 @@ fn run() -> Result<(), Error> {
     let stream = device.new_stream()?;
     let gpu_name = get_gpu_name(0);
     println!("Target GPU: {gpu_name}");
-
-    if !supports_native_mxfp8(&gpu_name) {
-        println!("Skipping runtime check: this example requires native MXFP8 support on sm_100+.");
-        return Ok(());
-    }
 
     const BM: usize = 16;
     const BN: usize = 16;
@@ -139,11 +138,4 @@ fn run() -> Result<(), Error> {
         z_host.len()
     );
     Ok(())
-}
-
-fn supports_native_mxfp8(gpu_name: &str) -> bool {
-    gpu_name
-        .strip_prefix("sm_")
-        .and_then(|sm| sm.parse::<u32>().ok())
-        .is_some_and(|sm| sm >= 100)
 }

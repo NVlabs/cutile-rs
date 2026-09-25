@@ -503,6 +503,7 @@ dependencies = [
  "cuda-core",
  "cutile",
  "cutile-compiler",
+ "futures",
  "tokio",
 ]
 
@@ -548,6 +549,7 @@ dependencies = [
  "half",
  "indexmap",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

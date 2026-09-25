@@ -208,7 +208,8 @@ use crate::tile_kernel::UnwrapPartition;
 use anyhow::Result;
 use cuda_async::device_buffer::{DeviceAllocation, DeviceBuffer, DevicePointer};
 use cuda_async::device_operation::{
-    value, DeviceOp, ExecutionContext, IntoDeviceOp, ReplayResource, Value,
+    value, AccessLease, AccessTracked, DeviceOp, ExecutionContext, IntoDeviceOp, ReplayResource,
+    Value,
 };
 use cuda_async::error::DeviceError;
 use cuda_core::sys::CUdeviceptr;
@@ -217,6 +218,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of, MaybeUninit};
 use std::ops::Index;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 /// A partitioned view of a tensor that divides it into tiles for GPU kernel processing.
@@ -561,25 +563,50 @@ impl Storage {
                 "tensor and execution stream are on different devices".into(),
             ));
         }
-        let access = self.acquire(
+        let id = self.register_access(
             ctx.get_cuda_stream().cu_stream() as usize,
             write,
             ctx.is_recording(),
         )?;
         if ctx.is_recording() {
-            ctx.record_resource(Arc::new(access));
+            // Owned by the graph; reacquired (as a plain lease) on each replay.
+            ctx.record_resource(Arc::new(StorageLease {
+                storage: self.clone(),
+                id,
+                write,
+            }));
             Ok(())
         } else {
-            ctx.retain(access)
+            // Hot path: a refcount and an inline push, no allocation.
+            ctx.retain_lease(AccessLease::new(self.clone(), id))
         }
     }
 
+    /// Test spelling of [`register_access`](Self::register_access) that hands
+    /// back a lease, so an access is released when the lease drops.
+    #[cfg(test)]
     fn acquire(
         self: &Arc<Self>,
         stream: usize,
         write: bool,
         recording: bool,
     ) -> Result<StorageLease, DeviceError> {
+        let id = self.register_access(stream, write, recording)?;
+        Ok(StorageLease {
+            storage: self.clone(),
+            id,
+            write,
+        })
+    }
+
+    /// Registers an in-flight access and returns its id; released through
+    /// [`AccessTracked::release_access`] when the holding submission completes.
+    fn register_access(
+        self: &Arc<Self>,
+        stream: usize,
+        write: bool,
+        recording: bool,
+    ) -> Result<u64, DeviceError> {
         let mut accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
         if !recording
             && accesses.iter().any(|access| {
@@ -590,18 +617,14 @@ impl Storage {
                 "tensor has a conflicting in-flight access on another stream; await its operation before reusing it".into(),
             ));
         }
-        let lease = StorageLease {
-            storage: self.clone(),
-            id: Arc::new(()),
-            write,
-        };
+        let id = NEXT_ACCESS_ID.fetch_add(1, AtomicOrdering::Relaxed);
         accesses.push(StorageAccess {
-            id: lease.id.clone(),
+            id,
             stream,
             write,
             recording,
         });
-        Ok(lease)
+        Ok(id)
     }
 
     fn is_unique(self: &Arc<Self>) -> bool {
@@ -662,17 +685,34 @@ impl Storage {
     }
 }
 
+/// Process-wide access ids; never reused, so a stale release cannot match.
+static NEXT_ACCESS_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug)]
 struct StorageAccess {
-    id: Arc<()>,
+    id: u64,
     stream: usize,
     write: bool,
     recording: bool,
 }
 
+impl AccessTracked for Storage {
+    fn release_access(&self, id: u64) {
+        // Remove the entry before the lease drops its Arc, so uniqueness
+        // checks can be conservative during release but can never overlook
+        // a real alias.
+        let mut accesses = self.accesses.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = accesses.iter().position(|access| access.id == id) {
+            accesses.swap_remove(pos);
+        }
+    }
+}
+
+/// A recorded (graph-owned) access: alive for as long as the graph can
+/// replay, and reacquired as a plain lease on each replay.
 struct StorageLease {
     storage: Arc<Storage>,
-    id: Arc<()>,
+    id: u64,
     write: bool,
 }
 
@@ -680,17 +720,14 @@ impl ReplayResource for StorageLease {
     fn retain_for_launch(&self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
         self.storage.retain(ctx, self.write)
     }
+    fn replay_identity(&self) -> (usize, bool) {
+        (Arc::as_ptr(&self.storage) as *const () as usize, self.write)
+    }
 }
 
 impl Drop for StorageLease {
     fn drop(&mut self) {
-        // Remove the entry before dropping its Arc, so uniqueness checks can
-        // be conservative during release but can never overlook a real alias.
-        self.storage
-            .accesses
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|access| !Arc::ptr_eq(&access.id, &self.id));
+        self.storage.release_access(self.id);
     }
 }
 
@@ -1842,6 +1879,8 @@ pub trait KernelOutputStored<T: DType>: Send {
     }
     fn dtype_str(&self) -> &'static str;
     fn partition_shape_as_i32(&self) -> Vec<i32>;
+    /// The partition shape as bound, borrowed: what launch validation reads.
+    fn partition_shape(&self) -> &[usize];
     fn strides_hint(&self) -> Vec<i32>;
     fn spec(&self) -> &SpecializationBits;
     fn shape_as_i32(&self) -> Vec<i32>;
@@ -1900,6 +1939,9 @@ impl<T: DType> KernelOutputStored<T> for Partition<Tensor<T>> {
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition_shape.iter().map(|&x| x as i32).collect()
     }
+    fn partition_shape(&self) -> &[usize] {
+        &self.partition_shape
+    }
     fn strides_hint(&self) -> Vec<i32> {
         self.object
             .spec
@@ -1955,6 +1997,9 @@ impl<T: DType> KernelOutputStored<T> for Partition<&mut Tensor<T>> {
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition_shape.iter().map(|&x| x as i32).collect()
     }
+    fn partition_shape(&self) -> &[usize] {
+        &self.partition_shape
+    }
     fn strides_hint(&self) -> Vec<i32> {
         self.object
             .spec
@@ -1994,6 +2039,9 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<Tensor<
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition.partition_shape_as_i32()
     }
+    fn partition_shape(&self) -> &[usize] {
+        KernelOutputStored::partition_shape(&self.partition)
+    }
 
     fn strides_hint(&self) -> Vec<i32> {
         self.partition.strides_hint()
@@ -2030,6 +2078,9 @@ impl<T: DType> KernelOutputStored<T> for MappedLaunchPartition<Partition<&mut Te
 
     fn partition_shape_as_i32(&self) -> Vec<i32> {
         self.partition.partition_shape_as_i32()
+    }
+    fn partition_shape(&self) -> &[usize] {
+        KernelOutputStored::partition_shape(&self.partition)
     }
 
     fn strides_hint(&self) -> Vec<i32> {

@@ -1,7 +1,7 @@
 # compiler2 — tile-ir Backend
 
-compiler2 translates Rust AST into tile-ir ops and emits bytecode directly —
-no LLVM/MLIR dependency. Self-sufficient for type compilation and generic resolution.
+compiler2 translates Rust AST into tile-ir operations and emits bytecode
+without LLVM/MLIR. It handles type compilation and generic resolution.
 
 ## Bytecode Version: negotiated per toolchain (13.2 to 13.3)
 
@@ -15,8 +15,6 @@ to the emittable range; a toolkit older than CUDA 13.2 (the Tile floor) or a
 probe that cannot run is an error, not a fallback. 13.1 is not offered: the
 writer's field layouts are the 13.2 ones (see below), and a "13.1" image with
 those layouts was rejected by every toolkit.
-
-This section documents the versioned fields the Rust writer handles.
 
 ### v13.2 Changes (vs v13.1)
 

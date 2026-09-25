@@ -145,7 +145,7 @@ workspace's `Cargo.toml`:
 debug = false
 ```
 
-There is a limitation: Cargo provides only `DEBUG=true|false` to build
+Cargo provides only `DEBUG=true|false` to build
 scripts, not the exact debug level. Any enabled level currently selects
 device-debug mode, including `debug = "line-tables-only"` and `"limited"`.
 It also selects device optimization level 0 unless explicitly overridden,
@@ -206,8 +206,6 @@ my_kernel(args)
 // Compute Sanitizer: memory-access instrumentation.
 my_kernel(args).compile_options(CompileOptions::new().sanitize_memcheck(true)).sync()?;
 ```
-
-What each option does:
 
 - `debug_info(level)` replaces both debug flags. The individual
   `device_debug(bool)` and `lineinfo(bool)` setters change only their own

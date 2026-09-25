@@ -7,8 +7,8 @@ set -u
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test_runner_common.sh"
 
-# The CPU-reference examples need candle; see cutile-examples/Cargo.toml.
-EXTRA_FEATURES="--features reference-cpu"
+# Enable the features required by the CPU-reference and autotune examples.
+EXTRA_FEATURES="--features reference-cpu,experimental-tune"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --features) EXTRA_FEATURES="--features $2"; shift 2 ;;
@@ -31,5 +31,5 @@ cd "$REPO_ROOT/cutile-examples" || exit 1
 run_examples "$REPO_ROOT/cutile-examples/examples" $EXTRA_FEATURES
 
 print_summary_and_exit \
-    "All examples passed!" \
+    "All supported examples passed (see skipped examples above)." \
     "Some examples failed. See output above for details."

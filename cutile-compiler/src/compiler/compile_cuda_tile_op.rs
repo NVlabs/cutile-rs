@@ -195,6 +195,29 @@ fn memory_scope_value(scope: &str) -> Option<i64> {
     }
 }
 
+fn raw_view_padding(expr: &Expr) -> Result<Option<cutile_ir::ir::PaddingValue>, JITError> {
+    use cutile_ir::ir::PaddingValue;
+    let name = super::shared_utils::extract_zst_type_name(expr, "padding")?;
+    match name.as_str() {
+        "None" => Ok(None),
+        "Zero" => Ok(Some(PaddingValue::Zero)),
+        "NegZero" => Ok(Some(PaddingValue::NegZero)),
+        "Nan" => Ok(Some(PaddingValue::Nan)),
+        "PosInf" => Ok(Some(PaddingValue::PosInf)),
+        "NegInf" => Ok(Some(PaddingValue::NegInf)),
+        _ => Err(JITError::Generic(format!(
+            "unsupported view padding {name}"
+        ))),
+    }
+}
+
+fn inherit_pointer_attribute(ty: TileIrType, source: &TileIrType) -> TileIrType {
+    match source.pointer_attribute() {
+        Some(attribute) => ty.with_pointer_attribute(attribute),
+        None => ty,
+    }
+}
+
 fn extract_optional_zst_type_name(
     expr: &Expr,
     ctx: &CompilerContext,
@@ -401,6 +424,40 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         };
 
+        if let Some(capabilities) = &self.target_capabilities {
+            let location = self.ir_location(&call_expr.span());
+            if let Ok(opcode) = op_name_to_opcode(&op_name) {
+                cutile_ir::requirements::opcode_requirement(opcode)
+                    .check(capabilities, &op_name, &location)
+                    .map_err(JITError::from)?;
+            }
+            let since = match op_attrs.parse_string("since").as_deref() {
+                Some("V13_4") => cutile_ir::bytecode::BytecodeVersion::V13_4,
+                Some("V13_3") => cutile_ir::bytecode::BytecodeVersion::V13_3,
+                Some("V13_2") | None => cutile_ir::bytecode::BytecodeVersion::V13_2,
+                Some(other) => {
+                    return self.jit_error_result(
+                        &call_expr.span(),
+                        &format!("unknown Tile IR requirement {other}"),
+                    )
+                }
+            };
+            capabilities
+                .require_version(&op_name, since, &location)
+                .map_err(JITError::from)?;
+            if let Some(arch) = op_attrs.parse_string("min_arch") {
+                let minimum = arch
+                    .strip_prefix("sm_")
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| {
+                        self.jit_error(&call_expr.span(), "invalid minimum architecture metadata")
+                    })?;
+                capabilities
+                    .require_sm(&op_name, minimum, &location)
+                    .map_err(JITError::from)?;
+            }
+        }
+
         let cuda_tile_op_params = op_attrs
             .parse_string_arr("params")
             .unwrap_or_else(std::vec::Vec::new);
@@ -474,6 +531,62 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         return_type: Option<TileRustType>,
     ) -> Result<Option<TileRustValue>, JITError> {
         match op_name {
+            "cuda_tile.assume" => {
+                self.compile_raw_assumption(module, block_id, call_expr, fn_item, generic_args, ctx)
+            }
+            "cuda_tile.load_view_tko" | "cuda_tile.store_view_tko" => self.compile_raw_view_op(
+                module,
+                block_id,
+                call_expr,
+                fn_item,
+                op_name_to_opcode(op_name)?,
+                generic_args,
+                ctx,
+                return_type,
+            ),
+            "cuda_tile.atomic_red_view_tko" if fn_item.sig.ident == "atomic_red_view_raw" => self
+                .compile_raw_view_op(
+                    module,
+                    block_id,
+                    call_expr,
+                    fn_item,
+                    Opcode::AtomicRedViewTko,
+                    generic_args,
+                    ctx,
+                    return_type,
+                ),
+            "cuda_tile.gdc_launch_dependents_tko" | "cuda_tile.gdc_wait_tko" => {
+                let token_ty = self
+                    .compile_type(&syn::parse_quote!(Token), generic_args, &HashMap::new())?
+                    .ok_or_else(|| {
+                        self.jit_error(&call_expr.span(), "unable to resolve Token type")
+                    })?;
+                let mut builder = OpBuilder::new(
+                    op_name_to_opcode(op_name)?,
+                    self.ir_location(&call_expr.span()),
+                )
+                .result(TileIrType::Token);
+                if let Some(arg) = super::shared_utils::resolve_option_arg(&call_expr.args[0], ctx)
+                {
+                    let value = self
+                        .compile_expression(
+                            module,
+                            block_id,
+                            &arg,
+                            generic_args,
+                            ctx,
+                            Some(token_ty.clone()),
+                        )?
+                        .and_then(|v| v.value)
+                        .ok_or_else(|| self.jit_error(&arg.span(), "expected an ordering token"))?;
+                    builder = builder.operand(value);
+                }
+                let (op, results) = builder.build(module);
+                append_op(module, block_id, op);
+                Ok(Some(TileRustValue::new_primitive(
+                    results[0], token_ty, None,
+                )))
+            }
             "cuda_tile.make_partition_view"
                 if fn_item.sig.ident == "make_mapped_partition_view" =>
             {
@@ -669,7 +782,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "mapped partition tensor view must be an SSA value",
             );
         };
-        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value.ty.tile_ir_ty.clone()
+        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value
+            .ty
+            .tile_ir_ty
+            .as_ref()
+            .map(|t| t.without_pointer_attribute().clone())
         else {
             return self.jit_error_result(
                 &call_expr.args[0].span(),
@@ -727,12 +844,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let type_instance = generic_args.instantiate_type(&rust_ty, self.modules.primitives())?;
         let return_type = TileRustType {
             cuda_tile_ty_str: None,
-            tile_ir_ty: Some(TileIrType::PartitionView(PartitionViewType {
-                tile_shape: tile_shape.clone(),
-                tensor_view: tensor_view_ty,
-                dim_map: (0..tile_shape.len()).map(|i| i as i32).collect(),
-                padding_value: None,
-            })),
+            tile_ir_ty: Some(inherit_pointer_attribute(
+                TileIrType::PartitionView(PartitionViewType {
+                    tile_shape: tile_shape.clone(),
+                    tensor_view: tensor_view_ty,
+                    dim_map: (0..tile_shape.len()).map(|i| i as i32).collect(),
+                    padding_value: None,
+                }),
+                module.value_type(tensor_view_value),
+            )),
             cuda_tile_name: Some("!cuda_tile.partition_view".to_string()),
             params: vec![],
             rust_ty,
@@ -2102,7 +2222,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             return self
                 .jit_error_result(&call_expr.args[0].span(), "shape query source has no value");
         };
-        let src_ty = module.value_type(src).clone();
+        let src_ty = module.value_type(src).without_pointer_attribute().clone();
         let rank = match (&opcode, &src_ty) {
             (Opcode::GetIndexSpaceShape, TileIrType::PartitionView(pv)) => pv.tile_shape.len(),
             (Opcode::GetTensorShape, TileIrType::TensorView(tv)) => tv.shape.len(),
@@ -2218,6 +2338,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 );
             }
             let mut closure_variables = ctx.clone();
+            closure_variables.token_update_in_region = true;
             closure_variables.vars.insert(
                 closure_info.params[0].name.clone(),
                 TileRustValue::new_value_kind_like(arg0, elem_compiled_ty.clone()),
@@ -2365,6 +2486,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 );
             }
             let mut closure_variables = ctx.clone();
+            closure_variables.token_update_in_region = true;
             closure_variables.vars.insert(
                 closure_info.params[0].name.clone(),
                 TileRustValue::new_value_kind_like(arg0, elem_compiled_ty.clone()),
@@ -2522,7 +2644,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 ),
             );
         }
-        let return_type = return_type.unwrap();
+        let mut return_type = return_type.unwrap();
 
         let mut type_meta = None;
         if let Some(output_meta_data) = op_attrs.parse_string_arr("output_type_meta") {
@@ -2638,11 +2760,65 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     &format!("Unexpected op param {op_param} for {call_expr_arg_str}"),
                 );
             }
+            if opcode == Opcode::MakeTensorView && matches!(i, 1 | 2) {
+                if let Some(ir_ty) = &return_type.tile_ir_ty {
+                    if let TileIrType::TensorView(view) = ir_ty.without_pointer_attribute() {
+                        let dims = if i == 1 { &view.shape } else { &view.strides };
+                        // Shape witnesses can already contain only dynamic
+                        // fields, whereas Array::dims carries the full rank.
+                        if arg_values.len() == dims.len() {
+                            arg_values = arg_values
+                                .into_iter()
+                                .zip(dims)
+                                .filter_map(|(value, dim)| {
+                                    (*dim == cutile_ir::ir::DYNAMIC).then_some(value)
+                                })
+                                .collect();
+                        }
+                    }
+                }
+            }
             operand_lengths.push(arg_values.len().to_string());
             op_operands.extend_from_slice(&arg_values);
         }
 
+        let pointer_attribute =
+            if op_attrs.parse_string("pointer_attribute").as_deref() == Some("none") {
+                Some(cutile_ir::ir::PointerAttribute::None)
+            } else if matches!(
+                opcode,
+                Opcode::MakeTensorView | Opcode::MakePartitionView | Opcode::Offset
+            ) {
+                op_operands
+                    .first()
+                    .and_then(|v| module.value_type(*v).pointer_attribute())
+            } else {
+                None
+            };
+        if let Some(attribute) = pointer_attribute {
+            let ty = super::_type::convert_type(&return_type).ok_or_else(|| {
+                self.jit_error(&call_expr.span(), "expected a pointer or view result type")
+            })?;
+            return_type.tile_ir_ty = Some(ty.with_pointer_attribute(attribute));
+            return_type.cuda_tile_ty_str = None;
+        }
+
         let mut attrs: Vec<(String, Attribute)> = vec![];
+        // Conversion signedness belongs to the integer side, not necessarily
+        // to the first operand (ftoi's first operand is floating point).
+        if matches!(opcode, Opcode::FToI | Opcode::IToF) {
+            let integer_type = if opcode == Opcode::FToI {
+                &return_type
+            } else {
+                &compiled_args[0].ty
+            };
+            let element = integer_type
+                .get_instantiated_rust_element_type(self.modules.primitives())
+                .ok_or_else(|| {
+                    JITError::Generic("conversion requires a scalar element type".into())
+                })?;
+            attrs.push(get_signedness_attr("signedness", &element)?);
+        }
         for named_attr in cuda_tile_op_named_attributes.iter() {
             let name_attr_split = named_attr.split("=").collect::<Vec<&str>>();
             let (attr_name, attr_value) = (name_attr_split[0], name_attr_split[1]);
@@ -2679,7 +2855,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 let val_str = val_str.trim();
                 let attr_val = if val_str == "unit" {
                     // Unit attribute = boolean flag present.
-                    Attribute::i32(1)
+                    Attribute::Bool(true)
                 } else if let Ok(v) = val_str.parse::<i64>() {
                     Attribute::i32(v)
                 } else if val_str.starts_with("#cuda_tile.rounding<") {
@@ -2884,7 +3060,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                     let elem_ty_str = return_type
                         .get_cuda_tile_element_type(self.modules.primitives())?
                         .unwrap_or("i32".to_string());
-                    let result_ir_ty = super::_type::scalar_from_name(&elem_ty_str)
+                    let mut result_ir_ty = super::_type::scalar_from_name(&elem_ty_str)
                         .map(|sc| {
                             cutile_ir::ir::Type::Tile(cutile_ir::ir::TileType {
                                 shape: vec![],
@@ -2899,10 +3075,24 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                                 ),
                             })
                         });
-                    let data = crate::compiler::compile_expression::encode_literal_bytes(
+                    let mut data = crate::compiler::compile_expression::encode_literal_bytes(
                         &lit_value,
                         &elem_ty_str,
                     );
+                    // A scalar f4 tile is not a legal type, even when used
+                    // only as a constant-pool carrier. Keep the real tile
+                    // type and pack both nibbles of the splat byte.
+                    if super::_type::scalar_from_name(&elem_ty_str)
+                        == Some(cutile_ir::ir::ScalarType::F4E2M1FN)
+                    {
+                        result_ir_ty =
+                            super::_type::convert_type(&return_type).ok_or_else(|| {
+                                self.jit_error(&call_expr.span(), "constant requires a tile result")
+                            })?;
+                        if let Some(byte) = data.first_mut() {
+                            *byte = (*byte & 15) * 17;
+                        }
+                    }
                     attrs.push((
                         "value".to_string(),
                         Attribute::DenseElements(cutile_ir::ir::DenseElements {
@@ -3004,6 +3194,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
             }
         }
 
+        if matches!(opcode, Opcode::Exp | Opcode::TanH)
+            && rust_function_name.contains("_with_rounding")
+            && !attrs.iter().any(|(name, _)| name == "rounding_mode")
+        {
+            return self.jit_error_result(
+                &call_expr.span(),
+                "explicit exp/tanh rounding must be rounding::Approx or rounding::Full",
+            );
+        }
         if op_attrs.parse_bool("has_variadic_params").unwrap_or(false) {
             attrs.push((
                 "operandSegmentSizes".to_string(),
@@ -3412,7 +3611,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "gather_scatter_view tensor must be an SSA value",
             );
         };
-        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value.ty.tile_ir_ty.clone()
+        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value
+            .ty
+            .tile_ir_ty
+            .as_ref()
+            .map(|t| t.without_pointer_attribute().clone())
         else {
             return self.jit_error_result(
                 &call_expr.args[0].span(),
@@ -3487,12 +3690,15 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let type_instance = generic_args.instantiate_type(&rust_ty, self.modules.primitives())?;
         let return_type = TileRustType {
             cuda_tile_ty_str: None,
-            tile_ir_ty: Some(TileIrType::GatherScatterView(GatherScatterViewType {
-                tile_shape: tile_shape.clone(),
-                tensor_view: tensor_view_ty,
-                sparse_dim,
-                padding_value: None,
-            })),
+            tile_ir_ty: Some(inherit_pointer_attribute(
+                TileIrType::GatherScatterView(GatherScatterViewType {
+                    tile_shape: tile_shape.clone(),
+                    tensor_view: tensor_view_ty,
+                    sparse_dim,
+                    padding_value: raw_view_padding(&call_expr.args[2])?,
+                }),
+                module.value_type(tensor_view_value),
+            )),
             cuda_tile_name: Some("!cuda_tile.gather_scatter_view".to_string()),
             params: vec![],
             rust_ty,
@@ -3557,7 +3763,11 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 "strided_view tensor must be an SSA value",
             );
         };
-        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value.ty.tile_ir_ty.clone()
+        let Some(TileIrType::TensorView(tensor_view_ty)) = tensor_value
+            .ty
+            .tile_ir_ty
+            .as_ref()
+            .map(|t| t.without_pointer_attribute().clone())
         else {
             return self.jit_error_result(
                 &call_expr.args[0].span(),
@@ -3656,13 +3866,16 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let type_instance = generic_args.instantiate_type(&rust_ty, self.modules.primitives())?;
         let return_type = TileRustType {
             cuda_tile_ty_str: None,
-            tile_ir_ty: Some(TileIrType::StridedView(StridedViewType {
-                tile_shape: tile_shape.clone(),
-                traversal_strides,
-                tensor_view: tensor_view_ty,
-                dim_map,
-                padding_value: None,
-            })),
+            tile_ir_ty: Some(inherit_pointer_attribute(
+                TileIrType::StridedView(StridedViewType {
+                    tile_shape: tile_shape.clone(),
+                    traversal_strides,
+                    tensor_view: tensor_view_ty,
+                    dim_map,
+                    padding_value: raw_view_padding(&call_expr.args[2])?,
+                }),
+                module.value_type(tensor_view_value),
+            )),
             cuda_tile_name: Some("!cuda_tile.strided_view".to_string()),
             params: vec![],
             rust_ty,
@@ -3685,6 +3898,305 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let mut result = TileRustValue::new_structured_type(results[0], return_type, None);
         result.tensor_origin = tensor_value.tensor_origin;
         Ok(Some(result))
+    }
+
+    fn raw_integer_constant(
+        &self,
+        module: &mut Module,
+        block: BlockId,
+        expr: &Expr,
+        generics: &GenericVars,
+        ctx: &mut CompilerContext,
+    ) -> Result<i128, JITError> {
+        match expr {
+            Expr::Lit(ExprLit {
+                lit: Lit::Int(n), ..
+            }) => n
+                .base10_parse::<i128>()
+                .map_err(|e| self.jit_error(&expr.span(), &format!("integer constant: {e}"))),
+            Expr::Unary(e) if matches!(e.op, UnOp::Neg(_)) => {
+                Ok(-self.raw_integer_constant(module, block, &e.expr, generics, ctx)?)
+            }
+            Expr::Paren(e) => self.raw_integer_constant(module, block, &e.expr, generics, ctx),
+            _ => self
+                .compile_expression(module, block, expr, generics, ctx, None)?
+                .and_then(|v| v.bounds)
+                .filter(|b| b.start == b.end)
+                .map(|b| i128::from(b.start))
+                .ok_or_else(|| {
+                    self.jit_error(&expr.span(), "expected a compile-time integer constant")
+                }),
+        }
+    }
+
+    fn compile_raw_assumption(
+        &self,
+        module: &mut Module,
+        block: BlockId,
+        call: &ExprCall,
+        function: &ItemFn,
+        generics: &GenericVars,
+        ctx: &mut CompilerContext,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        use cutile_ir::ir::{Bounded, DivBy, SameElements};
+        let mut value = self
+            .compile_expression(module, block, &call.args[0], generics, ctx, None)?
+            .ok_or_else(|| {
+                self.jit_error(&call.span(), "assume requires an integer/pointer tile")
+            })?;
+        let source = value
+            .value
+            .ok_or_else(|| self.jit_error(&call.span(), "assume requires an SSA value"))?;
+        let optional = |module: &mut Module,
+                        ctx: &mut CompilerContext,
+                        index: usize|
+         -> Result<Option<i64>, JITError> {
+            super::shared_utils::resolve_option_arg(&call.args[index], ctx)
+                .map(|expr| {
+                    self.raw_integer_constant(module, block, &expr, generics, ctx)
+                        .and_then(|v| {
+                            i64::try_from(v).map_err(|_| {
+                                self.jit_error(&expr.span(), "predicate field must fit i64")
+                            })
+                        })
+                })
+                .transpose()
+        };
+        let predicate = match function.sig.ident.to_string().as_str() {
+            "assume_bounds_raw" => Attribute::Bounded(Bounded {
+                lb: optional(module, ctx, 1)?,
+                ub: optional(module, ctx, 2)?,
+            }),
+            "assume_div_by_raw" => {
+                let divisor =
+                    self.raw_integer_constant(module, block, &call.args[1], generics, ctx)?;
+                Attribute::DivBy(DivBy {
+                    divisor: u64::try_from(divisor).map_err(|_| {
+                        self.jit_error(&call.args[1].span(), "divisor must fit u64")
+                    })?,
+                    every: optional(module, ctx, 2)?,
+                    along: optional(module, ctx, 3)?,
+                })
+            }
+            "assume_same_elements_raw" => {
+                let Expr::Array(array) = &call.args[1] else {
+                    return self.jit_error_result(
+                        &call.args[1].span(),
+                        "groups must be a compile-time integer array",
+                    );
+                };
+                let mut values = Vec::new();
+                for expr in &array.elems {
+                    values.push(
+                        i64::try_from(
+                            self.raw_integer_constant(module, block, expr, generics, ctx)?,
+                        )
+                        .map_err(|_| self.jit_error(&expr.span(), "group size must fit i64"))?,
+                    );
+                }
+                Attribute::SameElements(SameElements { values })
+            }
+            _ => return self.jit_error_result(&call.span(), "unknown raw assumption"),
+        };
+        let (op, results) = OpBuilder::new(Opcode::Assume, self.ir_location(&call.span()))
+            .operand(source)
+            .result(module.value_type(source).clone())
+            .attr("predicate", predicate)
+            .build(module);
+        append_op(module, block, op);
+        value.value = Some(results[0]);
+        Ok(Some(value))
+    }
+
+    fn compile_raw_view_op(
+        &self,
+        module: &mut Module,
+        block_id: BlockId,
+        call: &ExprCall,
+        function: &ItemFn,
+        opcode: Opcode,
+        generics: &GenericVars,
+        ctx: &mut CompilerContext,
+        return_type: Option<TileRustType>,
+    ) -> Result<Option<TileRustValue>, JITError> {
+        let params = get_sig_param_names(&function.sig);
+        let argument = |name: &str| -> &Expr {
+            &call.args[params
+                .iter()
+                .position(|p| p == name)
+                .expect("raw view parameter")]
+        };
+        let compile_value = |module: &mut Module, ctx: &mut CompilerContext, name: &str| {
+            self.compile_expression(module, block_id, argument(name), generics, ctx, None)?
+                .ok_or_else(|| {
+                    self.jit_error(&argument(name).span(), &format!("expected {name} value"))
+                })
+        };
+        let view = compile_value(module, ctx, "view")?;
+        let view_value = view
+            .value
+            .ok_or_else(|| self.jit_error(&call.span(), "expected a view SSA value"))?;
+        let index = compile_value(module, ctx, "index")?;
+        let indices = index
+            .values
+            .ok_or_else(|| {
+                self.jit_error(
+                    &call.span(),
+                    "index must be an array or tuple in axis order",
+                )
+            })?
+            .into_iter()
+            .map(|v| {
+                v.value.ok_or_else(|| {
+                    self.jit_error(
+                        &call.span(),
+                        "each index must be a scalar or tile SSA value",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let token_type = self
+            .compile_type(&syn::parse_quote!(Token), generics, &HashMap::new())?
+            .ok_or_else(|| self.jit_error(&call.span(), "unable to resolve Token"))?;
+        let mut token = Vec::new();
+        if let Some(expr) = super::shared_utils::resolve_option_arg(argument("token"), ctx) {
+            token.push(
+                self.compile_expression(
+                    module,
+                    block_id,
+                    &expr,
+                    generics,
+                    ctx,
+                    Some(token_type.clone()),
+                )?
+                .and_then(|v| v.value)
+                .ok_or_else(|| self.jit_error(&expr.span(), "expected Token"))?,
+            );
+        }
+        let is_load = opcode == Opcode::LoadViewTko;
+        let is_atomic = opcode == Opcode::AtomicRedViewTko;
+        let mut builder = OpBuilder::new(opcode, self.ir_location(&call.span()));
+        let mut operands = vec![view_value];
+        let mut segments = vec![1];
+        let mut result_types = Vec::new();
+        if is_load {
+            let outer = return_type.as_ref().ok_or_else(|| {
+                self.jit_error(
+                    &call.span(),
+                    "raw view load requires a tuple return type annotation",
+                )
+            })?;
+            let Type::Tuple(tuple) = &outer.rust_ty else {
+                return self.jit_error_result(&call.span(), "expected (Tile<...>, Token)");
+            };
+            let result_type = self
+                .compile_type(&tuple.elems[0], generics, &HashMap::new())?
+                .ok_or_else(|| {
+                    self.jit_error(&call.span(), "unable to resolve loaded Tile type")
+                })?;
+            builder = builder.result(
+                super::_type::convert_type(&result_type)
+                    .ok_or_else(|| self.jit_error(&call.span(), "expected Tile result"))?,
+            );
+            result_types.push(result_type);
+        } else if !is_atomic {
+            let value = compile_value(module, ctx, "value")?
+                .value
+                .ok_or_else(|| self.jit_error(&call.span(), "expected stored tile"))?;
+            operands.insert(0, value);
+            segments.push(1);
+        }
+        operands.extend(&indices);
+        segments.push(indices.len() as i64);
+        if is_atomic {
+            let value = compile_value(module, ctx, "value")?;
+            let prefix = value
+                .ty
+                .get_cuda_tile_element_type_prefix(self.modules.primitives())?;
+            let mode = super::shared_utils::extract_zst_type_name(argument("mode"), "mode")?;
+            builder = builder.attr(
+                "mode",
+                Attribute::i32(AtomicMode::new(&mode, prefix)? as i64),
+            );
+            operands.push(
+                value
+                    .value
+                    .ok_or_else(|| self.jit_error(&call.span(), "expected reduction tile"))?,
+            );
+            segments.push(1);
+        }
+        operands.extend(&token);
+        segments.push(token.len() as i64);
+        let (ordering, scope, _) =
+            self.read_view_ordering_scope(&params, call, opcode.name(), is_load)?;
+        if is_atomic && (ordering != 1 || scope == 2) {
+            return self.jit_error_result(
+                &call.span(),
+                "atomic_red_view_tko requires Relaxed ordering and TileBlock or Device scope",
+            );
+        }
+        builder = builder
+            .result(TileIrType::Token)
+            .operands(operands)
+            .attr("memory_ordering_semantics", Attribute::i32(ordering))
+            .attr(
+                "operandSegmentSizes",
+                Attribute::Array(segments.into_iter().map(Attribute::i32).collect()),
+            );
+        if ordering != 0 {
+            builder = builder.attr("memory_scope", Attribute::i32(scope));
+        }
+        if !is_atomic {
+            let hints = self.read_view_hint_params(&params, call, ctx, generics)?;
+            if let Some(hints) =
+                super::optimization_hints::build_load_store_hints(&self.optimization_hints, hints)
+            {
+                builder = builder.attr("optimization_hints", hints);
+            }
+            let flags = compile_value(module, ctx, "inbounds")?
+                .values
+                .ok_or_else(|| {
+                    self.jit_error(
+                        &call.span(),
+                        "inbounds must be a compile-time boolean array",
+                    )
+                })?;
+            let mut inbounds = Vec::new();
+            for flag in flags {
+                let constant = flag
+                    .bounds
+                    .filter(|b| b.start == b.end)
+                    .map(|b| b.start)
+                    .ok_or_else(|| {
+                        self.jit_error(
+                            &call.span(),
+                            "inbounds entries must be compile-time booleans",
+                        )
+                    })?;
+                inbounds.push(Attribute::Bool(constant != 0));
+            }
+            if inbounds.len() != indices.len() {
+                return self.jit_error_result(
+                    &call.span(),
+                    "inbounds must have one entry per index dimension",
+                );
+            }
+            builder = builder.attr("inbounds", Attribute::Array(inbounds));
+        }
+        let (op, values) = builder.build(module);
+        append_op(module, block_id, op);
+        if is_load {
+            let tile = TileRustValue::new_structured_type(values[0], result_types.remove(0), None);
+            let token = TileRustValue::new_primitive(values[1], token_type, None);
+            Ok(Some(TileRustValue::new_compound(
+                vec![tile, token],
+                return_type.unwrap(),
+            )))
+        } else {
+            Ok(Some(TileRustValue::new_primitive(
+                values[0], token_type, None,
+            )))
+        }
     }
 
     fn compile_load_gather_scatter_view_tko(
@@ -3798,10 +4310,21 @@ impl<'m> CUDATileFunctionCompiler<'m> {
                 true,
             )?;
 
+        let cutile_ir::ir::Type::GatherScatterView(view_ty) = module
+            .value_type(cuda_tile_view_value)
+            .without_pointer_attribute()
+        else {
+            return self.jit_error_result(&call_expr.span(), "expected a gather/scatter view");
+        };
+        let indices = if view_ty.sparse_dim == 0 {
+            [cuda_tile_sparse_index, cuda_tile_dense_index]
+        } else {
+            [cuda_tile_dense_index, cuda_tile_sparse_index]
+        };
         let all_operands = [
             cuda_tile_view_value,
-            cuda_tile_sparse_index,
-            cuda_tile_dense_index,
+            indices[0],
+            indices[1],
             cuda_tile_token,
         ];
         let operand_segments: Vec<i64> = vec![1, 2, 1];
@@ -4046,7 +4569,16 @@ fn op_name_to_opcode(op_name: &str) -> Result<Opcode, JITError> {
         "tanh" => Ok(Opcode::TanH),
         "ceil" => Ok(Opcode::Ceil),
         "floor" => Ok(Opcode::Floor),
-        "pow" => Ok(Opcode::Pow),
+        "pow" | "fpowf" => Ok(Opcode::Pow),
+        "fpowi" => Ok(Opcode::FPowI),
+        "insert" => Ok(Opcode::Insert),
+        "gdc_launch_dependents_tko" => Ok(Opcode::GdcLaunchDependentsTko),
+        "gdc_wait_tko" => Ok(Opcode::GdcWaitTko),
+        "memory_fence_alias_tko" => Ok(Opcode::MemoryFenceAliasTko),
+        "alloca" => Ok(Opcode::Alloca),
+        "make_gather_scatter_view" => Ok(Opcode::MakeGatherScatterView),
+        "make_strided_view" => Ok(Opcode::MakeStridedView),
+        "atomic_red_view_tko" => Ok(Opcode::AtomicRedViewTko),
         "fma" => Ok(Opcode::Fma),
         "mmaf" => Ok(Opcode::MmaF),
         "mmaf_scaled" => Ok(Opcode::MmaFScaled),
