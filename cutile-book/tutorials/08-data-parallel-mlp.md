@@ -1,8 +1,8 @@
 # 8. Data Parallel MLP
 
-> Note: While async concepts are taught using the `tokio` runtime, any async runtime can be used.
+> Note: These examples use `tokio`, but cuTile works with other async runtimes.
 
-In this tutorial we show how to build a single-layer MLP, copy it to multiple GPUs, and execute distinct batches of data on each instance:
+Each GPU holds a copy of this single-layer MLP and processes a separate batch:
 
 ```text
 Input → Linear → ReLU → Output
@@ -14,7 +14,8 @@ Where:
 
 ---
 
-## The Code
+<a id="the-code"></a>
+## Multi-GPU forward pass
 
 ```rust
 #[cutile::module]
@@ -77,6 +78,7 @@ use data_parallel_module::{gemm, relu, matvec};
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
 
+    use std::sync::Arc;
     use cuda_async::device_operation::*;
     use data_parallel_module::{gemm, relu, matvec};
     use cutile::api;
@@ -113,7 +115,8 @@ async fn main() -> Result<(), DeviceError> {
     ];
     let w0 = api::randn(0.0f32, 1.0, [dim, dim], None); // impl DeviceOp
     let w1 = api::randn(0.0f32, 1.0, [dim], None); // impl DeviceOp
-    let w = zip!(w0.map(Into::into), w1.map(Into::into)).schedule(&devices[0])?.await?;
+    let w: (Arc<Tensor<f32>>, Arc<Tensor<f32>>) = zip!(w0.map(Into::into), w1.map(Into::into))
+        .schedule(&devices[0])?.await?;
     let mut joins = vec![];
     for i in 1..num_devices {
         let w_copy = tokio::spawn(zip!(dup(&w.0).map(Into::into), dup(&w.1).map(Into::into)).schedule(&devices[i])?);
@@ -129,7 +132,7 @@ async fn main() -> Result<(), DeviceError> {
     for i in 0..num_devices {
         let w = &model_weights[i];
         let (w0, w1) = (w.0.clone(), w.1.clone());
-        let data = api::randn(0.0, 1.0, [dim, dim], None).map(Into::into);
+        let data = api::randn(0.0, 1.0, [dim, dim], None);
         // Unified launcher: pass output partition and inputs directly.
         let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
         let out0 = gemm(out0, data, w0)
@@ -137,7 +140,7 @@ async fn main() -> Result<(), DeviceError> {
             .first()
             .unpartition();
         let out1 = api::zeros(&[dim]).partition([block_dim]);
-        let out1 = matvec(out1, out0.map(Into::into), w1)
+        let out1 = matvec(out1, out0, w1)
             .generics(output_layer.to_vec())
             .first()
             .unpartition();
@@ -161,9 +164,10 @@ async fn main() -> Result<(), DeviceError> {
 
 ---
 
-## Key Pattern: Compose Device Operations, Then Spawn
+(key-pattern-compose-device-operations-then-spawn)=
+## Spawning device operations
 
-Every device operation in the loop below is non-blocking. The loop itself is non-blocking:
+The loop schedules each forward pass without waiting for GPU completion:
 
 ```rust
 let mut futures: Vec<JoinHandle<Result<Partition<Tensor<f32>>, cuda_async::error::DeviceError>>> = vec![];
@@ -173,7 +177,7 @@ for i in 0..num_devices {
     let (w0, w1) = (w.0.clone(), w.1.clone());
     // Sample random data. Although the sampling procedure is a simulation,
     // this can be replaced with a procedure that actually samples a batch of data.
-    let data = api::randn(0.0, 1.0, [dim, dim], None).map(Into::into);
+    let data = api::randn(0.0, 1.0, [dim, dim], None);
     // Unified launcher: pass output partition and inputs directly.
     let out0 = api::zeros(&[dim, dim]).partition([block_dim, block_dim]);
     let out0 = gemm(out0, data, w0)
@@ -182,7 +186,7 @@ for i in 0..num_devices {
         .unpartition();
     // Final output: matvec + relu.
     let out1 = api::zeros(&[dim]).partition([block_dim]);
-    let out1 = matvec(out1, out0.map(Into::into), w1)
+    let out1 = matvec(out1, out0, w1)
         .generics(output_layer.to_vec())
         .first()
         .unpartition();

@@ -117,7 +117,9 @@ mod tests {
         );
         assert_eq!(explicit.opt_level, 2, "an explicit level wins");
 
-        let release = TileirasOptions::from_compile_options(&CompileOptions::new());
+        let release = TileirasOptions::from_compile_options(
+            &CompileOptions::new().debug_info(crate::hints::DebugInfoLevel::None),
+        );
         assert_eq!(release.opt_level, DEFAULT_OPT_LEVEL);
         assert_eq!(release, TileirasOptions::default());
     }

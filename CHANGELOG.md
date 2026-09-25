@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Raw Tile IR 13.4 operations: `insert`, `fpowi`, `fpowf` (the existing
+  `pow` spelling remains), GDC launch/wait tokens, and alias fencing.
+- `f8e5m3fnu`, explicit pointer classification, view `inbounds`, saturating
+  float-to-int, `NearestAway`, and kernel returns inside `loop`/`while`
+  on Tile IR 13.4. Returns in inlined helpers or beneath `for` remain
+  restricted.
+- Missing raw controls: allocation, arbitrary-rank gather/scatter and
+  strided view loads/stores, view atomic reduction, fast-accumulation MMA,
+  exp/tanh rounding, full-width/general-rank assumptions, private/constant
+  globals, and module producer metadata. Existing signatures are preserved.
+- Unsafe per-launch `programmatic_dependent_launch()` on generated builders
+  and `AsyncKernelLaunch`, with runtime driver entry-point lookup.
+- Tile IR 13.4 bytecode with selected-assembler version negotiation and
+  conjunctive version/architecture checks before JIT assembly. The writer
+  preserves 13.2/13.3 layouts and rejects newer features when targeting them.
+
+### Fixed
+
+- Loads through a read-only `Partition` are no longer chained on each
+  other's completion tokens. The token-threading work in 0.4.0's `set_token`
+  carried a load's completion token out of the inlined `Partition::load`
+  for immutable bindings, which serialized every read-only partition's
+  loads and slowed load-bound kernels by up to 35% (a fused norm+RoPE
+  kernel went from 20 to 27 µs). Only explicit `set_token` /
+  `set_tensor_token` installs now cross an inlining or block boundary for
+  immutable bindings; mutable bindings are unchanged.
+
+### Changed
+
+- Launch-site cache misses (a scalar argument's divisibility hint changed,
+  or a new specialization) no longer pay filesystem and environment lookups
+  per launch: the assembler fingerprint, the resolved toolchain and the
+  `CUTILE_BYTECODE_VERSION` override are trusted for one second before the
+  environment and filesystem are consulted again. A mid-process toolchain
+  switch still takes effect, within that window.
+- Launch-site cache hits no longer allocate in the launcher: kernel arguments
+  are marshalled in an arena that lives inline in the launch (the heap is
+  used only beyond 32 parameter slots), shape validation compares in place,
+  and the site probe borrows fixed-size arrays. A four-tensor launch went
+  from 15 heap allocations to 2, both in the submission envelope.
+
+- `Tensor::store` returns its completion `Token`; `Tensor::token` reads it
+  and unsafe `Tensor::set_token` installs an external dependency. Explicit
+  installation rejects conditional/loop regions, block-local receivers,
+  and subsequent shadowing until token updates use control-flow carries.
+  The raw `set_tensor_token` and `make_partition_view` helpers are unsafe;
+  safe partition helpers continue to preserve the tensor's own token.
+
+- Tile IR compiler, encoder and example/test prerequisites share a capability
+  registry, with checked documentation tables. Standalone bytecode validation
+  uses the JIT's assembler-version negotiation, including the CUDA 13.2
+  fallback for assemblers without `--list-versions`. CI now exercises 13.2
+  alongside 13.3 and the optional 13.4 lane.
+
+- `cutile-examples` no longer depends on candle by default: the CPU reference
+  helpers and the `flash_attention` example sit behind a `reference-cpu`
+  feature (`scripts/run_examples.sh` enables it). The default workspace build
+  therefore no longer fails on generic aarch64, where candle's `gemm-f16`
+  needs the `fullfp16` target feature (first seen bringing up DGX Spark).
+
+- `Global` now requires a sealed device atomic type, such as
+  `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`.
+  Global accesses reject `Weak` ordering and `TileBlock` scope in both
+  Rust and the JIT; unsafe raw intrinsics are unchanged. This is a breaking
+  API change intended for 0.4.0.
+
+- Kernel-cache eviction APIs `clear_kernel_cache`, `evict_kernel`, and
+  `retain_kernels` are available without `experimental-tune`, allowing
+  serving engines to manage cached specializations independently of
+  autotuning. Their unsafe quiesce-before-eviction contracts and return
+  values are unchanged (#268).
+
+### Fixed
+
+- Debug info: kernels calling a trait-dispatch wrapper as a free function
+  (`load_tile_like(x, out)`) attributed the inlined body to the module's
+  first line instead of the call, so `break <call line>` had no code and
+  stepping skipped it. The lowered call now keeps the call-site span.
+
 ## [0.3.1] - 2026-09-02
 
 A single `cargo add cutile` now suffices, kernels gain Triton-parity

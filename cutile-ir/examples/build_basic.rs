@@ -11,7 +11,7 @@
 //! Run with: cargo run -p cutile-ir --example build_basic
 
 use cutile_ir::builder::{append_op, build_single_block_region, OpBuilder};
-use cutile_ir::bytecode::{write_bytecode_to_file, Opcode};
+use cutile_ir::bytecode::{write_bytecode_version, BytecodeVersion, Opcode};
 use cutile_ir::ir::*;
 use std::process::Command;
 
@@ -36,7 +36,7 @@ fn cst_i32(m: &mut Module, blk: BlockId, val: i32) -> Value {
     r[0]
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut m = Module::new("add_module");
 
     // -- Types --
@@ -213,39 +213,34 @@ fn main() {
     let tmp = std::env::temp_dir();
     let bc = tmp.join("add_kernel.bc");
     let bc = bc.to_str().unwrap();
-    write_bytecode_to_file(&m, bc).expect("bytecode write failed");
-    println!("Wrote bytecode to {bc}");
+    let tileiras = tileiras_binary();
+    let version = bytecode_version(&tileiras)?;
+    std::fs::write(bc, write_bytecode_version(&m, version)?)?;
+    println!("Wrote Tile IR {version} bytecode to {bc}");
 
     // -- Compile with tileiras --
     let cubin = tmp.join("add_kernel.cubin");
     let cubin = cubin.to_str().unwrap();
-    let tileiras = tileiras_binary();
-    match Command::new(&tileiras)
+    let output = Command::new(&tileiras)
         .args(["--gpu-name", "sm_120", "--opt-level", "3", "-o", cubin, bc])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            println!("Compiled to {cubin}");
-        }
-        Ok(output) => {
-            eprintln!(
-                "tileiras error:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            std::process::exit(1);
-        }
-        Err(_) => {
-            println!(
-                "{} not found — skipping GPU compilation",
-                tileiras.display()
-            );
-        }
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "tileiras failed ({}):\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
     }
+    println!("Compiled to {cubin}");
+    Ok(())
 }
 
 fn tileiras_binary() -> std::path::PathBuf {
-    std::env::var_os("CUTILE_TILEIRAS_PATH")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("tileiras"))
+    cutile_ir::toolchain::tileiras_from_env()
+}
+
+fn bytecode_version(tileiras: &std::path::Path) -> std::io::Result<BytecodeVersion> {
+    let requested = std::env::var_os("CUTILE_BYTECODE_VERSION").filter(|v| !v.is_empty());
+    cutile_ir::toolchain::negotiate_bytecode_version(tileiras, requested.as_deref())
 }

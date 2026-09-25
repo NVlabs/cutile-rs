@@ -1,6 +1,6 @@
 # 7. Intro to Async Execution
 
-> Note: While async concepts are taught using the `tokio` runtime, any async runtime can be used.
+> Note: These examples use `tokio`, but cuTile works with other async runtimes.
 
 The sync API blocks the CPU until the GPU finishes:
 
@@ -23,10 +23,9 @@ With async, the CPU can do other work while the GPU computes:
 
 ## DeviceOp
 
-In cutile, GPU work is represented as a `DeviceOp` — a description of work to be done, not yet executed:
-
-- `DeviceOp` describes the work.
-- `.await` or `.sync_on(.)` executes it directly; `tokio::spawn` can run the future produced by `into_future()` or `.schedule(...)`.
+`DeviceOp` describes GPU work without executing it. `.await` or `.sync_on(.)`
+executes the operation; `tokio::spawn` can run the future produced by
+`into_future()` or `.schedule(...)`.
 
 ```rust
 // This creates a DeviceOp, but doesn't execute yet!
@@ -115,7 +114,9 @@ z[0] = 2 (expected 2.0)
 
 ## Overlapping Work with Spawn
 
-`.await` lets the programmer control *when* to execute work, but it blocks the enclosing async context — no further code in that `async` block runs until the awaited operation completes. (The underlying thread is freed and can run other tasks in the meantime, but *this* async context is suspended.) `tokio::spawn` converts a future into a concurrently executing *task*, returning a non-blocking handle that can later be awaited to retrieve the result.
+`.await` suspends the current task until the operation completes, freeing its
+thread to run other tasks. `tokio::spawn` starts a separate task and returns a
+handle immediately. Await that handle when you need the result.
 
 ```rust
 #[tokio::main]
@@ -178,7 +179,7 @@ let (a, b, c) = combined.await?;
 | Multi-GPU workloads | | ✓ |
 | Overlapping compute/transfer | | ✓ |
 
-Start with sync for learning, move to async for production.
+Start with sync. Use async when you have work to overlap.
 
 ---
 

@@ -63,6 +63,10 @@ mod my_module {
 use my_module::rms_norm;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("rms_norm", 0)? {
+        return Ok(());
+    }
+
     // Create a context. Device 0 is associated with the context.
     let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.

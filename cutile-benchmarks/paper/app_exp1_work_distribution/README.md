@@ -1,8 +1,7 @@
 # Appendix Experiment 1 — GPU Work Distribution (bimodal GEMMs)
 
-Evaluates §5.2 Part B2 of the paper: **one host thread + async is the
-primitive that lets you keep multiple CUDA streams busy with
-heterogeneous work units, without thread-per-stream overhead.**
+Evaluates §5.2 Part B2 of the paper: whether one async host thread can keep
+multiple CUDA streams busy with mixed-size GEMMs.
 
 ## Claim under test
 
@@ -20,21 +19,15 @@ strategies should behave as follows:
   dispatch via `DeviceFuture::scheduled(op, ExecutionContext(stream))`
   so launches stay on the intended stream.
 
-The paper claim: **async should match or beat threaded on throughput,
-while running on a single host thread** (programming-model efficiency
-argument — fewer CPU cores needed to drive the same GPU fleet).
+The paper tests whether async can match or beat threaded throughput while
+using one host thread.
 
-## Why this matters
+<a id="why-this-matters"></a>
+## Workload motivation
 
-Production GPU workloads are heterogeneous: small decodes
-interleaved with large prefills, mixed batch sizes, multi-model
-serving. A runtime that can schedule these dynamically across
-streams on one host thread is the primitive underneath continuous
-batching, chunked prefill, work-stealing, and elastic role assignment.
-
-This experiment isolates that primitive. It isn't a scheduler study;
-it validates that async + `DeviceOp` composition *can* be the
-primitive those schedulers are built on.
+Inference workloads mix small decodes with large prefills and varying batch
+sizes. This experiment measures dispatch across streams on one host thread.
+It does not evaluate a serving scheduler.
 
 ## Directory layout
 
@@ -83,12 +76,10 @@ the workers once and reuses them via command/done channels:
 context to that OS thread. Without this, driver calls serialize
 against whichever thread currently owns the context.
 
-**Stream creation in Mode C.** Per design discussion: the
-`Device` is constructed in `main()`, cloned to each async
-worker, and **the stream is created inside each worker task** (on
-the async thread). Creating streams in the outer thread and moving
-them into tasks turned out to pessimize the async path substantially
-on this hardware; creating them in-task fixed it.
+**Stream creation in Mode C.** `Device` is constructed in `main()` and cloned
+to each async worker. Each worker creates its own stream on the async thread.
+Creating streams on the outer thread and moving them into tasks was slower
+on this hardware.
 
 **Stream binding in Mode C.** Each `DeviceOp` is awaited via
 `DeviceFuture::scheduled(op, ExecutionContext::new(stream))` so
@@ -117,7 +108,8 @@ RESULTS_DIR=/tmp/cutile-paper-workdist FIGURES_DIR=/tmp/cutile-paper-figures ./r
 python3 plot_bimodal.py
 ```
 
-## Known characteristics observed so far
+<a id="known-characteristics-observed-so-far"></a>
+## Results
 
 - **Async scales with $S$** up to the GPU's stream-concurrency
   ceiling. On NVIDIA GeForce RTX 5090 with the workload above, async reaches
@@ -133,8 +125,5 @@ python3 plot_bimodal.py
 
 ## Interpretation for the paper
 
-The clean headline is: "async reaches the same GPU throughput ceiling as
-thread-per-stream for heterogeneous GPU work distribution, while consuming a
-single host thread." Thread-per-stream remains a strong baseline at moderate
-parallelism; the primary point is that async is a viable primitive for driving
-many streams from one host thread, not that thread-per-stream is broken.
+Async reaches the same GPU throughput ceiling as thread-per-stream using one
+host thread. Thread-per-stream is faster at moderate stream counts.

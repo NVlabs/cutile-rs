@@ -9,7 +9,7 @@
 //! cannot be served a release cubin (or serve one to anybody else).
 
 use cutile::prelude::*;
-use cutile::tile_kernel::CompileOptions;
+use cutile::tile_kernel::{CompileOptions, DebugInfoLevel};
 use my_module::scale_add;
 
 use crate::common;
@@ -50,7 +50,7 @@ fn device_debug_kernel_compiles_and_runs() {
     common::with_test_stack(|| {
         // --device-debug (implies --opt-level 0): the debug cubin must load
         // and produce the same results as release.
-        let debug = run_with(CompileOptions::new().device_debug(true));
+        let debug = run_with(CompileOptions::new().debug_info(DebugInfoLevel::Full));
         assert!(debug.iter().all(|&v| (v - 3.0f32).abs() < 1e-6));
     });
 }
@@ -58,7 +58,7 @@ fn device_debug_kernel_compiles_and_runs() {
 #[test]
 fn lineinfo_kernel_compiles_and_runs() {
     common::with_test_stack(|| {
-        let lineinfo = run_with(CompileOptions::new().lineinfo(true));
+        let lineinfo = run_with(CompileOptions::new().debug_info(DebugInfoLevel::Line));
         assert!(lineinfo.iter().all(|&v| (v - 3.0f32).abs() < 1e-6));
     });
 }

@@ -175,15 +175,18 @@ impl<T: DType> DeviceOp for CopyDeviceToDevice<T> {
         ctx: &ExecutionContext,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
         let num_bytes = self.num_elements * std::mem::size_of::<T>();
+        self._storage.retain(ctx, false)?;
         let dst = ctx.alloc_async(num_bytes)?;
-        memcpy_dtod_async::<T>(dst, self.src_ptr, self.num_elements, ctx.get_cuda_stream())?;
-        Ok(Tensor::from_raw_parts(
+        let tensor = Tensor::from_raw_parts(
             dst,
             num_bytes,
             ctx.get_device_id(),
             self.shape,
             self.strides,
-        ))
+        );
+        tensor.storage.retain(ctx, true)?;
+        memcpy_dtod_async::<T>(dst, self.src_ptr, self.num_elements, ctx.get_cuda_stream())?;
+        Ok(tensor)
     }
 }
 
@@ -234,21 +237,15 @@ pub fn dup<T: DType>(tensor: &Tensor<T>) -> impl DeviceOp<Output = Tensor<T>> {
 /// `src` into `dst`; both must have the same number of elements. No new GPU
 /// memory is allocated. `&Arc<Tensor<T>>` coerces to `&Tensor<T>` for `src`.
 ///
-/// The returned [`Memcpy`] borrows both tensors for `'a`. It holds only their
-/// device pointers, so that borrow is what ties the copy to the allocations:
-/// a copy executed after either tensor was dropped would be a device
-/// use-after-free, and the borrow checker now rejects it. `dst` is borrowed
-/// mutably, so no other host handle can read or write it while the op is
-/// alive; once the op is consumed (executed, recorded, or dropped) the borrow
-/// ends and same-stream ordering orders the copy before later consumers of
-/// `dst` — [`CudaGraph::update`](cuda_async::cuda_graph::CudaGraph::update)
-/// issues it on the graph's stream, and inside
-/// [`CudaGraph::scope`](cuda_async::cuda_graph::CudaGraph::scope) capture mode
-/// records it as a graph node.
+/// The operation borrows both tensors for `'a`. Submission retains their
+/// allocations independently of that borrow and checks for conflicting
+/// in-flight accesses on other streams, including after a future is forgotten.
+/// Same-stream consumers remain ordered after the copy.
 ///
 /// ## Panics
 ///
-/// Panics if `src` and `dst` have different element counts.
+/// Panics if `src` and `dst` have different element counts or `dst` has
+/// shared storage (for example, a zero-copy reshape alias).
 ///
 /// ## Examples
 ///
@@ -260,6 +257,7 @@ pub fn dup<T: DType>(tensor: &Tensor<T>) -> impl DeviceOp<Output = Tensor<T>> {
 /// s.record(api::memcpy(&mut input, &bufs.residual))?;
 /// ```
 pub fn memcpy<'a, T: DType>(dst: &'a mut Tensor<T>, src: &'a Tensor<T>) -> Memcpy<'a> {
+    dst.assert_unique_storage();
     assert_eq!(
         src.size(),
         dst.size(),
@@ -268,6 +266,8 @@ pub fn memcpy<'a, T: DType>(dst: &'a mut Tensor<T>, src: &'a Tensor<T>) -> Memcp
         dst.size(),
     );
     Memcpy {
+        src_storage: src.storage.clone(),
+        dst_storage: dst.storage.clone(),
         src_ptr: src.cu_deviceptr(),
         dst_ptr: dst.cu_deviceptr(),
         len: dst.num_bytes(),
@@ -280,6 +280,8 @@ pub fn memcpy<'a, T: DType>(dst: &'a mut Tensor<T>, src: &'a Tensor<T>) -> Memcp
 ///
 /// Records as a single graph node ([`GraphNode`]) — it allocates nothing.
 pub struct Memcpy<'a> {
+    src_storage: Arc<Storage>,
+    dst_storage: Arc<Storage>,
     src_ptr: cuda_core::sys::CUdeviceptr,
     dst_ptr: cuda_core::sys::CUdeviceptr,
     len: usize,
@@ -291,6 +293,8 @@ pub struct Memcpy<'a> {
 impl<'a> DeviceOp for Memcpy<'a> {
     type Output = ();
     unsafe fn execute(self, ctx: &ExecutionContext) -> Result<(), DeviceError> {
+        self.src_storage.retain(ctx, false)?;
+        self.dst_storage.retain(ctx, true)?;
         memcpy_dtod_async::<u8>(self.dst_ptr, self.src_ptr, self.len, ctx.get_cuda_stream())?;
         Ok(())
     }
@@ -332,6 +336,7 @@ impl<T: DType> DeviceOp for CopyDeviceToHostVec<T> {
         self,
         ctx: &ExecutionContext,
     ) -> Result<<Self as DeviceOp>::Output, DeviceError> {
+        self.tensor.storage.retain(ctx, false)?;
         let cu_deviceptr = self.tensor.cu_deviceptr();
         let size = self.tensor.size();
         // The `Vec` owns the host buffer from the start, so an early return
@@ -339,14 +344,18 @@ impl<T: DType> DeviceOp for CopyDeviceToHostVec<T> {
         // zero-size request and never yields null.
         let mut host = Vec::<T>::with_capacity(size);
         if size > 0 {
-            unsafe {
+            let copied = unsafe {
                 memcpy_dtoh_async(host.as_mut_ptr(), cu_deviceptr, size, ctx.get_cuda_stream())
-            }?;
+            };
+            // `execute` exposes a Vec to host-side combinators immediately.
+            // Prove initialization here, independent of pageable-copy behavior.
+            if let Err(error) = unsafe { ctx.get_cuda_stream().synchronize() } {
+                std::mem::forget(host);
+                return Err(error.into());
+            }
+            copied?;
         }
-        // SAFETY: `cuMemcpyDtoHAsync` into pageable host memory (a `Vec`'s
-        // heap buffer is pageable) returns only once the copy has completed,
-        // so all `size` elements are initialized here, and `size` is exactly
-        // the capacity reserved above.
+        // SAFETY: the copy completed and initialized the reserved elements.
         unsafe { host.set_len(size) };
         Ok(host)
     }
@@ -405,14 +414,17 @@ impl<T: DType> DeviceOp for CopyHostVecToDevice<T> {
         let shape = vec![num_elements as i32];
         let strides = vec![1];
         let dptr = ctx.alloc_async(element_size * num_elements)?;
-        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream())?;
-        Ok(Tensor::from_raw_parts(
+        let tensor = Tensor::from_raw_parts(
             dptr,
             element_size * num_elements,
             ctx.get_device_id(),
             shape.clone(),
             strides.clone(),
-        ))
+        );
+        tensor.storage.retain(ctx, true)?;
+        ctx.retain(vec.clone())?;
+        memcpy_htod_async(dptr, vec.as_ptr(), num_elements, ctx.get_cuda_stream())?;
+        Ok(tensor)
     }
 }
 
@@ -724,7 +736,7 @@ impl<T: DType> DeviceOp for AllocUninitialized<T> {
                 ))
             })?;
         let ptr = ctx.alloc_async(num_bytes)?;
-        Ok(std::mem::MaybeUninit::new(unsafe {
+        let tensor = unsafe {
             Tensor::from_raw_parts(
                 ptr,
                 num_bytes,
@@ -732,7 +744,9 @@ impl<T: DType> DeviceOp for AllocUninitialized<T> {
                 vec![self.len as i32],
                 vec![1],
             )
-        }))
+        };
+        tensor.storage.retain(ctx, true)?;
+        Ok(std::mem::MaybeUninit::new(tensor))
     }
 }
 

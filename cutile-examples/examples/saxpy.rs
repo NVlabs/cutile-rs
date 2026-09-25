@@ -21,6 +21,10 @@ use my_module::saxpy;
 
 // TODO (hme): Answer question about whether main should return Result<(), ...>
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("saxpy", 0)? {
+        return Ok(());
+    }
+
     // Create a context. Device 0 is associated with the context.
     let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.

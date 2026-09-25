@@ -67,6 +67,10 @@ mod my_module {
 use my_module::rms_norm;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("autotune", 0)? {
+        return Ok(());
+    }
+
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
     let (m, n) = (512usize, 1024usize);

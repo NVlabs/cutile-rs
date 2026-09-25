@@ -24,6 +24,10 @@ mod my_module {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), cuda_async::error::DeviceError> {
+    if !cutile_examples::requirements::BASELINE.check("async_add", 0)? {
+        return Ok(());
+    }
+
     let len = 2usize.pow(5);
 
     // Run add kernel twice, chaining lazily with .then().

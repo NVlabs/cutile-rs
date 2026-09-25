@@ -31,7 +31,9 @@ pub fn compile<F: Fn() -> Module>(
         .target("sm_120")
         .generics(generics.iter().map(|g| g.to_string()).collect())
         .strides(strides)
-        .options(CompileOptions::default())
+        // These audits pin optimized placement, independent of Cargo's
+        // development-profile device-debug default.
+        .options(CompileOptions::default().device_debug(false))
         .compile()
         .map(|artifacts| (artifacts.ir_text(), artifacts.check_counts()))
 }

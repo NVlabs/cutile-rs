@@ -87,12 +87,32 @@ fn get_int_hint(expr: &Expr) -> Result<i32, JITError> {
         .map_err(|e| JITError::Generic(format!("Failed to parse int hint: {e}")))
 }
 
+/// Device debug information to request from `tileiras`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugInfoLevel {
+    /// No device debug information.
+    None,
+    /// Source line tables for profiling optimized kernels.
+    Line,
+    /// Source locations and inline frames for debugging unoptimized kernels.
+    /// Source-variable inspection depends on support in the Tile IR toolchain.
+    Full,
+}
+
 /// Runtime compile options for kernel JIT compilation.
 ///
 /// These options control kernel-level compilation hints that can vary between
 /// launches. Different values trigger separate JIT compilations (they are part
 /// of the cache key).
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Default)]
+///
+/// `new()` and `default()` follow Cargo's profile `debug` setting for the
+/// target `cutile-compiler` library: disabled selects `None`, enabled selects
+/// `Full`. Cargo exposes only on/off to build scripts, so this also selects
+/// `Full` for `debug = "line-tables-only"` or `"limited"`, not `Line`.
+/// `CUDA_RUST_DEBUG=none|line|full` overrides this default at build time;
+/// changing it when running an already-built app has no effect. Use
+/// [`Self::debug_info`] to override the default for one compilation.
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct CompileOptions {
     pub occupancy: Option<i32>,
     pub num_cta_in_cga: Option<i32>,
@@ -116,9 +136,35 @@ pub struct CompileOptions {
     pub sanitize_memcheck: bool,
 }
 
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            occupancy: None,
+            num_cta_in_cga: None,
+            max_divisibility: None,
+            num_worker_warps_per_cta: None,
+            opt_level: None,
+            device_debug: env!("CUTILE_BUILD_DEBUG_INFO") == "full",
+            lineinfo: env!("CUTILE_BUILD_DEBUG_INFO") == "line",
+            sanitize_memcheck: false,
+        }
+    }
+}
+
 impl CompileOptions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Selects exactly one debug-info mode, replacing both debug flags.
+    ///
+    /// Other options, including an explicitly set optimization level, are
+    /// preserved. With no explicit optimization level, `Full` uses level 0
+    /// and `None` / `Line` use level 3.
+    pub fn debug_info(mut self, level: DebugInfoLevel) -> Self {
+        self.device_debug = level == DebugInfoLevel::Full;
+        self.lineinfo = level == DebugInfoLevel::Line;
+        self
     }
 
     pub fn occupancy(mut self, occupancy: i32) -> Self {

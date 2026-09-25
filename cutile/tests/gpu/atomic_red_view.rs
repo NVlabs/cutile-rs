@@ -41,6 +41,9 @@ use atomic_red_kernels::atomic_red_accumulate;
 #[test]
 fn atomic_red_view_accumulates_across_blocks() {
     common::with_test_stack(|| {
+        if !common::supports_tile_ir(&[cutile_ir::requirements::Feature::AtomicRedView]) {
+            return;
+        }
         let device = cuda_core::Device::new(0).expect("device");
         let stream = device.new_stream().expect("stream");
 

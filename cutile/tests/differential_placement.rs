@@ -312,6 +312,8 @@ fn hash_outputs(v: &[f32]) -> u64 {
 /// `Ok(output)` or `Err(stop message)`. Every launch error and device trap
 /// surfaces as an `Err` from a `sync()`.
 fn execute_case(name: &str) -> Result<Vec<f32>, String> {
+    // Exercise placement optimizations even when Cargo enables device debug.
+    let options = CompileOptions::new().device_debug(false);
     fn e<E: std::fmt::Display>(err: E) -> String {
         err.to_string()
     }
@@ -342,6 +344,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
             let z = api::zeros::<f32>(&[B, B]).sync().map_err(e)?;
             let (z, _x, _y, _flag) = diff_module::guarded_foreign(z.partition([B, B]), x, y, flag)
                 .generics(vec![B.to_string()])
+                .compile_options(options)
                 .sync()
                 .map_err(e)?;
             z.unpartition().to_host_vec().sync().map_err(e)
@@ -357,6 +360,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
             let limit = 4i32;
             let (z, _x, _limit) = diff_module::continue_before(z.partition([B]), x, limit)
                 .generics(vec![B.to_string()])
+                .compile_options(options)
                 .sync()
                 .map_err(e)?;
             z.unpartition().to_host_vec().sync().map_err(e)
@@ -372,6 +376,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
             let z = api::zeros::<f32>(&[4 * B]).sync().map_err(e)?;
             let (z, _x) = diff_module::block_id_foreign(z.partition([B]), x)
                 .generics(vec![B.to_string()])
+                .compile_options(options)
                 .sync()
                 .map_err(e)?;
             z.unpartition().to_host_vec().sync().map_err(e)
@@ -385,6 +390,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
             let z = api::zeros::<f32>(&[B]).sync().map_err(e)?;
             let (z, _x, _idx) = diff_module::runtime_scalar(z.partition([B]), x, idx)
                 .generics(vec![B.to_string()])
+                .compile_options(options)
                 .sync()
                 .map_err(e)?;
             z.unpartition().to_host_vec().sync().map_err(e)
@@ -408,6 +414,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
                 "same_view_walk" => {
                     let (z, _x) = diff_module::same_view_walk(z.partition([B]), x)
                         .generics(vec![B.to_string()])
+                        .compile_options(options)
                         .sync()
                         .map_err(e)?;
                     z
@@ -415,6 +422,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
                 "static_fold_walk" => {
                     let (z, _x) = diff_module::static_fold_walk(z.partition([B]), x)
                         .generics(vec![B.to_string()])
+                        .compile_options(options)
                         .sync()
                         .map_err(e)?;
                     z
@@ -422,6 +430,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
                 "wrapped_product_masked_by_max" => {
                     let (z, _x) = diff_module::wrapped_product_masked_by_max(z.partition([B]), x)
                         .generics(vec![B.to_string()])
+                        .compile_options(options)
                         .sync()
                         .map_err(e)?;
                     z
@@ -430,6 +439,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
                     let (z, _x) =
                         diff_module::wrapped_dividend_negative_remainder(z.partition([B]), x)
                             .generics(vec![B.to_string()])
+                            .compile_options(options)
                             .sync()
                             .map_err(e)?;
                     z
@@ -437,6 +447,7 @@ fn execute_case(name: &str) -> Result<Vec<f32>, String> {
                 "wrapped_product_static_extent" => {
                     let (z, _x) = diff_module::wrapped_product_static_extent(z.partition([B]), x)
                         .generics(vec![B.to_string()])
+                        .compile_options(options)
                         .sync()
                         .map_err(e)?;
                     z
@@ -484,7 +495,7 @@ fn differential_compile_runner() {
             .target("sm_120")
             .generics(vec![B.to_string()])
             .strides(&[("z", &[1]), ("x", &[1])])
-            .options(CompileOptions::default())
+            .options(CompileOptions::default().device_debug(false))
             .compile()
             .unwrap_or_else(|err| panic!("compile {case}: {err}"));
         let counts = artifacts.check_counts();

@@ -16,8 +16,10 @@ publish = false
 smoke-test = []
 
 [dev-dependencies]
+cutile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 
 [[bench]]
 name = "gemm"
@@ -47,12 +49,15 @@ harness = false
 name = "launch_overhead"
 harness = false
 
+[[bench]]
+name = "host_overhead"
+harness = false
+
 [dependencies]
 tokio = { workspace = true }
 cutile-compiler = { workspace = true }
 cuda-async = { workspace = true }
 cuda-core = { workspace = true }
-cutile = { workspace = true }
 
 [lints]
 workspace = true

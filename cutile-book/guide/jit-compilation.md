@@ -23,17 +23,12 @@ If the cache already contains a matching specialization, launch proceeds without
 
 ## What Gets Specialized
 
-The main question is which launch changes create a different specialization.
-
-:::{note}
-**Recompilation is scoped to changes that affect a kernel entry function's GPU specialization.**
-
-The closest Rust analogy is monomorphization. In ordinary Rust, a generic function such as `fn f<T, const N: usize>(...)` is compiled separately for each concrete `T` and `N` used by the program. In cuTile Rust, the generated launcher resolves the entry function's concrete type and const generic arguments, places them in the kernel cache key, and passes them to the device compiler. A different entry-function generic set therefore cannot reuse the previous cubin; it produces a distinct GPU specialization.
-:::
+Specialization works like Rust monomorphization: a generic function such as
+`fn f<T, const N: usize>(...)` is compiled for each concrete `T` and `N`.
+cuTile includes the entry function's type and const generic arguments in the
+kernel cache key. Changing them produces a new GPU specialization.
 
 ### Common Recompilation Triggers
-
-Two rules cover the cases users usually see.
 
 **Entry-function arguments.** Type and const generic arguments in the `#[cutile::entry]` signature specialize the generated GPU code. Those values are not always written next to `.generics(...)`; they can also be inferred from host-side values passed to the launcher:
 
@@ -54,7 +49,9 @@ The remaining user-controlled recompilation triggers are explicit. Use these API
 - `.const_grid((x, y, z))` embeds the launch grid as a compile-time value. Changing it creates a separate specialization. Use `.grid(...)` when the launch grid should remain runtime-only.
 - `.compile_options(opts)` embeds tuning choices such as occupancy, architecture-specific scheduling settings, and divisibility hints. Different options produce separate cache entries.
 
-The key distinction is whether the value participates in the launch cache lookup. `.grid(...)`, runtime scalar values, tensor contents, dynamic dimensions (`-1`), and `MappedPartitionMut`'s `num_tile_blocks` remain runtime launch or data inputs. They do not create new cache entries by themselves.
+Runtime inputs such as `.grid(...)`, scalar values, tensor contents, dynamic
+dimensions (`-1`), and `MappedPartitionMut`'s `num_tile_blocks` do not create
+cache entries by themselves.
 
 :::{note}
 cuTile may also cache separate optimized variants for tensor specialization hints derived from shape and stride metadata. This is a performance tradeoff: the compiler can generate better code when it knows facts such as power-of-two divisibility for shape dimensions and strides, or that a stride is exactly `1`. Those facts can enable simpler indexing, stronger alignment assumptions, and more efficient memory access. The hints affect cache reuse, but they are not separate values passed to the kernel entry function.
@@ -192,8 +189,6 @@ match TileFunctionKey {
 }
 ```
 
-The fields mean:
-
 | Field | What Changes It |
 |---|---|
 | `module_name`, `function_name` | The `#[cutile::module]` module and `#[cutile::entry]` function being launched. |
@@ -231,9 +226,27 @@ cutile::jit_cache::enable(std::sync::Arc::new(store));
 
 `cutile::jit_cache::disable()` stops all disk reads and writes; kernels already in the in-memory cache are unaffected. The `JitStore` trait behind `enable` is a plain byte-oriented get/put interface, so a custom backend (an object store, a network cache) can replace the filesystem implementation.
 
-A disk hit skips only the `tileiras` subprocess — the compiler frontend still runs on every in-memory miss, because launching needs its parameter-validation output, not just the cubin. The cache key is a SHA-256 over the complete `tileiras` input, field by field: the bytecode version the image was written at (`major.minor` and `tag`; see [Bytecode Version](#bytecode-version)), the serialized Tile IR bytecode itself, the target architecture, the optimization level together with the stage-2 flags byte (`device_debug`, `lineinfo`, `sanitize_memcheck`), and the resolved `tileiras` binary's fingerprint. Because the bytecode inlines every dependency module, changes represented in the serialized compiler input change the key. A changed `tileiras` fingerprint also makes old entries stop matching, although different binaries that report the same version are not distinguished. Stored entries carry a checksummed header that is re-validated field by field on every hit. Torn, corrupted, or request-mismatched entries are treated as misses and recompiled. The checksum provides integrity, not authenticity: anyone who can write the store can construct a valid entry containing arbitrary device code. Custom and shared store locations must therefore be writable only by trusted principals.
+A disk hit skips `tileiras`. The compiler frontend still runs on every
+in-memory miss to validate the launch parameters.
 
-Cache I/O can never fail a launch: every read, write, or eviction error is counted and the compile proceeds as if no cache were installed. Observability:
+The persistent key is a SHA-256 hash of the full `tileiras` input:
+
+- Bytecode version (`major.minor` and `tag`; see [Bytecode Version](#bytecode-version)).
+- Serialized Tile IR bytecode, including inlined dependency modules.
+- Target architecture.
+- Optimization level and the stage-2 flags (`device_debug`, `lineinfo`, `sanitize_memcheck`).
+- Resolved `tileiras` binary's fingerprint.
+
+Changes to these inputs invalidate old entries. Different assembler binaries
+that report the same version are not distinguished.
+
+Each entry has a checksummed header, validated on every hit. Incomplete,
+corrupted, or mismatched entries are recompiled. The checksum does not
+authenticate code: anyone with write access can create a valid entry containing
+arbitrary device code. Restrict writes to custom and shared stores to trusted users.
+
+Cache I/O errors are counted but do not fail a launch; compilation continues
+without the disk cache. To inspect cache use:
 
 - `cutile::jit_cache::stats()` — hits, misses, entries written, bytes written, soft I/O errors.
 - `cutile::jit_cache::jit_backend_compile_count()` / `jit_disk_hit_count()` — with `jit_compile_count()`, these satisfy `compiles == backend + disk_hits` absent failures.
@@ -241,7 +254,8 @@ Cache I/O can never fail a launch: every read, write, or eviction error is count
 
 The eviction policy is LRU by file mtime with a high/low watermark pair (defaults: collect above capacity, delete oldest entries down to 80%). The configured capacity is a soft target, not a hard cap: eviction is probabilistically triggered and uses a non-blocking lock, so transient overshoot is possible. Multiple processes can share one cache directory; writes are atomic and eviction is coordinated through a lock file.
 
-Concurrent cold-starting processes do not deduplicate compilation across process boundaries, so they may all run `tileiras` for the same missing key before their atomic writes converge on one entry. To avoid this one-time compilation stampede, warm the shared cache with a single process before launching parallel workers.
+Concurrent processes may each compile the same missing entry. Warm the shared
+cache in one process before starting parallel workers to avoid duplicate work.
 
 See `cutile-examples/examples/jit_disk_cache.rs`; run it twice to watch the second process hit the disk. For implementing a custom backend (an object store, a database), see `cutile-examples/examples/jit_custom_store.rs`.
 

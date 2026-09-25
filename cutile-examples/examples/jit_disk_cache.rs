@@ -47,6 +47,13 @@ mod disk_cache_example_module {
 }
 
 fn main() {
+    if !cutile_examples::requirements::BASELINE
+        .check("jit_disk_cache", 0)
+        .expect("query example capabilities")
+    {
+        return;
+    }
+
     let store = FileSystemJitStore::default_location().expect("open default cache directory");
     println!("cache directory: {}", store.root().display());
     jit_cache::enable(Arc::new(store));

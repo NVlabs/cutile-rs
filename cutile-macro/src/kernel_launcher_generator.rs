@@ -930,12 +930,16 @@ pub fn generate_kernel_launcher(
     // construction, toolchain fingerprinting, hashing, and the global cache
     // entirely — the volatile specialization inputs are compared against the
     // site's last resolution by value, borrowed from the arguments.
+    // Fixed-size arrays: the probe borrows them, so a steady-state launch
+    // allocates nothing here.
     launcher_method.block.stmts.push(parse_stmt(format!(
-        "let __specs: Vec<&{tile_rust_crate_root}::cutile_compiler::specialization::SpecializationBits> = vec![{}];",
+        "let __specs: [&{tile_rust_crate_root}::cutile_compiler::specialization::SpecializationBits; {}] = [{}];",
+        spec_ref_exprs.len(),
         spec_ref_exprs.join(",")
     )));
     launcher_method.block.stmts.push(parse_stmt(format!(
-        "let __hint_vals: Vec<{tile_rust_crate_root}::cutile_compiler::specialization::DivHint> = vec![{}];",
+        "let __hint_vals: [{tile_rust_crate_root}::cutile_compiler::specialization::DivHint; {}] = [{}];",
+        scalar_hint_value_exprs.len(),
         scalar_hint_value_exprs.join(",")
     )));
     launcher_method.block.stmts.push(parse_stmt(format!(
@@ -961,7 +965,7 @@ pub fn generate_kernel_launcher(
             let __generics_snapshot = function_generics.clone();
             let __specs_snapshot: Vec<{root}::cutile_compiler::specialization::SpecializationBits> =
                 spec_args.iter().map(|(_, s)| s.clone()).collect();
-            let __hints_snapshot = __hint_vals.clone();
+            let __hints_snapshot = __hint_vals.to_vec();
             let __options_snapshot = __compile_options.clone();
             let (function, validator) = self.jit_compile(
                 ctx, __module_ast_self,
@@ -1034,6 +1038,9 @@ pub fn generate_kernel_launcher(
     launcher_method.block.stmts.extend(validator_statements);
 
     // Above the `!_compile_only` gate so warmup validates the grid too.
+    launcher_method.block.stmts.push(parse_stmt(
+        "if self._programmatic_dependent_launch { validate_programmatic_dependent_launch(ctx.get_device_id())?; }".to_string(),
+    ));
     launcher_method.block.stmts.push(parse_stmt(format!(
         "let launch_grid: (u32, u32, u32) = self.infer_launch_grid(&[{}])?;",
         launch_grid_expr_strs.join(",")
@@ -1057,6 +1064,11 @@ pub fn generate_kernel_launcher(
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0
                 });
+            if self._programmatic_dependent_launch {
+                // SAFETY: the generated builder's unsafe opt-in transferred
+                // the dependency/lifetime obligations to its caller.
+                unsafe { kernel_launch.programmatic_dependent_launch(); }
+            }
             kernel_launch.execute(ctx)?;
         }})
         .unwrap()
@@ -1823,6 +1835,9 @@ fn get_tensor_code(
     let mut launch_grid_expr_strs = vec![];
     let validator_statements = if ty.mutability.is_some() {
         builder_statements.push(parse_stmt(format!(
+            "KernelOutputStored::retain(&{var_name}, ctx)?;"
+        )));
+        builder_statements.push(parse_stmt(format!(
             "KernelOutputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
         )));
         launch_grid_expr_strs.push(format!("KernelOutputStored::grid_bound(&{var_name})?"));
@@ -1837,21 +1852,24 @@ fn get_tensor_code(
                 let given_dtype = KernelOutputStored::dtype_str(&#var_ident);
                 kernel_launch_assert_with(tensor_validator.element_type == given_dtype, || format!("{} element type mismatch: the kernel was specialized for `{}` but the tensor holds `{}` (check the `.generics(..)` list)", #var_name, tensor_validator.element_type, given_dtype))?;
                 let valid_shape = &tensor_validator.shape;
-                let given_shape: Vec<i32> = KernelOutputStored::partition_shape_as_i32(&#var_ident);
+                let given_shape: &[usize] = KernelOutputStored::partition_shape(&#var_ident);
                 kernel_launch_assert_with(valid_shape.len() == given_shape.len(), || format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()))?;
-                kernel_launch_assert_with(valid_shape == &given_shape, || format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape, given_shape))?;
+                kernel_launch_assert_with(zip(valid_shape, given_shape).all(|(&expected, &given)| expected as i64 == given as i64), || format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape, given_shape))?;
                 // Runtime extents for launch-time check hoisting (indexed by
                 // signature position): root shape resolves `Dim` atoms, and the
                 // partition slab -- this param's kernel-visible view -- resolves
                 // `ViewExtent` atoms.
                 if !validator.launch_checks.is_empty() {
                     param_shapes[#var_idx] = KernelOutputStored::shape_as_i32(&#var_ident);
-                    view_shapes[#var_idx] = given_shape;
+                    view_shapes[#var_idx] = given_shape.iter().map(|&x| x as i32).collect();
                 }
             }
         }})
         .unwrap()
     } else {
+        builder_statements.push(parse_stmt(format!(
+            "KernelInputStored::retain(&{var_name}, ctx)?;"
+        )));
         builder_statements.push(parse_stmt(format!(
             "KernelInputStored::push_kernel_args(&{var_name}, &mut kernel_launch);"
         )));
@@ -1868,13 +1886,14 @@ fn get_tensor_code(
                 let valid_shape = &tensor_validator.shape;
                 let given_shape = #var_ident.shape();
                 kernel_launch_assert_with(valid_shape.len() == given_shape.len(), || format!("{} rank mismatch: Expected {}, got {}", #var_name, valid_shape.len(), given_shape.len()))?;
-                let valid_shape_mixed = zip(valid_shape, given_shape).map(|(&expected, &given)|{
-                    if expected == -1 { given } else { expected }
-                }).collect::<Vec<_>>();
-                let pred = zip(&valid_shape_mixed, given_shape).all(|(&expected, &given)|{
-                    expected == given
-                });
-                kernel_launch_assert_with(pred, || format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape_mixed, given_shape))?;
+                let pred = zip(valid_shape, given_shape).all(|(&expected, &given)| expected == -1 || expected == given);
+                kernel_launch_assert_with(pred, || {
+                    // Only a failing launch pays for the message.
+                    let valid_shape_mixed = zip(valid_shape, given_shape).map(|(&expected, &given)|{
+                        if expected == -1 { given } else { expected }
+                    }).collect::<Vec<_>>();
+                    format!("{} partition shape mismatch. Expected {:?}, got {:?}", #var_name, valid_shape_mixed, given_shape)
+                })?;
                 // TODO (hme): add validation for strides here too.
                 // Runtime extents for launch-time check hoisting (indexed by
                 // signature position). An immutable tensor is passed whole, so

@@ -120,7 +120,7 @@ fn compile_mlir(
         &[],
         &[],
         None,
-        &CompileOptions::default(),
+        &CompileOptions::default().device_debug(false),
     )
     .map_err(|err| err.to_string())
 }
@@ -139,7 +139,7 @@ fn artifacts(
     .target("sm_120")
     .generics(generics)
     .strides(strides)
-    .options(CompileOptions::default())
+    .options(CompileOptions::default().device_debug(false))
     .compile()
     .unwrap_or_else(|e| panic!("compile {name}: {e}"))
 }

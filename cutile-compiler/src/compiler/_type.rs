@@ -32,6 +32,7 @@ pub fn scalar_from_name(name: &str) -> Option<ScalarType> {
         "f8e4m3fn" | "f8E4M3FN" => Some(ScalarType::F8E4M3FN),
         "f8e5m2" | "f8E5M2" => Some(ScalarType::F8E5M2),
         "f8e8m0fnu" | "f8E8M0FNU" => Some(ScalarType::F8E8M0FNU),
+        "f8e5m3fnu" | "f8E5M3FNU" => Some(ScalarType::F8E5M3FNU),
         "f4e2m1fn" | "f4E2M1FN" => Some(ScalarType::F4E2M1FN),
         "f4e2m1fnx2" => Some(ScalarType::I8),
         // Rust-facing names (unsigned maps to signed CUDA types)
@@ -128,6 +129,7 @@ fn rust_scalar_type(name: &str) -> Option<ScalarType> {
         "f32" => Some(ScalarType::F32),
         "f64" => Some(ScalarType::F64),
         "f8e8m0fnu" => Some(ScalarType::F8E8M0FNU),
+        "f8e5m3fnu" => Some(ScalarType::F8E5M3FNU),
         "f4e2m1fn" => Some(ScalarType::F4E2M1FN),
         "f4e2m1fnx2" => Some(ScalarType::I8),
         "i4" => Some(ScalarType::I4),

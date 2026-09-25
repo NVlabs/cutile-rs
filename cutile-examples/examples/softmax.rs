@@ -28,6 +28,10 @@ use cutile::utils::Float;
 use my_module::softmax;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("softmax", 0)? {
+        return Ok(());
+    }
+
     // Create a context. Device 0 is associated with the context.
     let device = Device::new(0)?;
     // Create a new stream on which we run CUDA operations.

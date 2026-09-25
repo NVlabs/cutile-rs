@@ -56,6 +56,10 @@ async fn execute<T: DType + Display + PartialEq + Mul<Output = T> + Add<Output =
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("async_saxpy", 0)? {
+        return Ok(());
+    }
+
     execute::<f32>(2usize.pow(5)).await?;
     execute::<f64>(2usize.pow(5)).await?;
     Ok(())

@@ -27,5 +27,6 @@ pub mod scheduling_policies;
 /// host-crate migration. Not re-exported at the root; see the module docs.
 pub mod simt;
 mod slot_table;
+mod submission;
 
 pub use futures;

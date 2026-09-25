@@ -36,6 +36,10 @@ mod my_module {
 use my_module::dropout;
 
 fn main() -> Result<(), Error> {
+    if !cutile_examples::requirements::BASELINE.check("dropout", 0)? {
+        return Ok(());
+    }
+
     let device = Device::new(0)?;
     let stream = device.new_stream()?;
     let (m,) = (16,);

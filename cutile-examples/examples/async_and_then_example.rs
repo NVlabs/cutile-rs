@@ -30,6 +30,10 @@ mod my_module {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), DeviceError> {
+    if !cutile_examples::requirements::BASELINE.check("async_and_then_example", 0)? {
+        return Ok(());
+    }
+
     let policy = global_policy(0)?;
     let num_elements: usize = 2usize.pow(5);
     let strides = &[8, 1];

@@ -8,6 +8,9 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "gpu/tile_ir_13_4.rs"]
+mod tile_ir_13_4;
+
 #[path = "gpu/tensor.rs"]
 mod tensor;
 
@@ -93,6 +96,14 @@ mod launcher_guards;
 
 #[path = "gpu/graph_scope_inputs.rs"]
 mod graph_scope_inputs;
+
+#[path = "gpu/tensor_token.rs"]
+mod tensor_token;
+
+// `gpu/submission_lifetimes.rs` has its own binary (`tests/submission_lifetimes.rs`):
+// its stream Gates deadlock with any context-wide synchronize elsewhere in the
+// same process (first-use module loads, eviction unloads), so it must not share
+// a process with the rest of the suite. See that file's header.
 // 2026-08 codegen audit regressions, one module per fix; `audit_common`
 // holds the shared compile/transfer/subprocess helpers.
 // ---------------------------------------------------------------------------

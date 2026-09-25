@@ -171,6 +171,10 @@ impl IntoFuture for ScaleKernel {
 
 #[tokio::main()]
 async fn main() -> Result<(), cutile::error::Error> {
+    if !cutile_examples::requirements::BASELINE.check("interop", 0)? {
+        return Ok(());
+    }
+
     let num_elements = 2usize.pow(5);
     let tile_size = 4usize;
     let scale = 3.0f32;

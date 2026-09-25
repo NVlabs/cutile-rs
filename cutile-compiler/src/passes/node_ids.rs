@@ -41,6 +41,18 @@ pub fn expr_id(expr: &Expr) -> Option<NodeId> {
 
 pub fn set_expr_id(expr: &mut Expr, id: NodeId) {
     let span = expr.span();
+    set_expr_id_spanned(expr, id, span);
+}
+
+/// Like [`set_expr_id`], with an explicit span for the marker attribute.
+///
+/// The attribute is the expression's first token, so `expr.span()` starts at
+/// it from then on. For an expression assembled from tokens of more than one
+/// source text (a lowered dispatch call: user-written receiver and arguments,
+/// wrapper-body method name) `expr.span()` is not a usable anchor, because
+/// `Span::join` across source texts fails; callers pass the span of the
+/// expression being replaced instead.
+pub(crate) fn set_expr_id_spanned(expr: &mut Expr, id: NodeId, span: proc_macro2::Span) {
     let Some(attrs) = expr_attrs_mut(expr) else {
         return;
     };

@@ -40,7 +40,8 @@ exp(x_i - max) / Σ exp(x_j - max)
 
 ---
 
-## The Code
+<a id="the-code"></a>
+## Softmax kernel
 
 ```rust
 use cuda_async::device_operation::DeviceOp;
@@ -140,9 +141,10 @@ let tile_x_max: Tile<f32, { [BM, BN] }> =
 
 ---
 
-## The Fusion Pattern
+(the-fusion-pattern)=
+## Keeping intermediate values in registers
 
-Fused kernels load once, compute everything in registers, and store once:
+The fused kernel keeps its intermediate values in registers:
 
 ```rust
 // 1. LOAD once
@@ -158,8 +160,6 @@ let result = step3 / step4.broadcast(...);
 // 3. STORE once
 output.store(result);
 ```
-
-All intermediate values stay in registers — no global memory traffic between steps.
 
 ---
 

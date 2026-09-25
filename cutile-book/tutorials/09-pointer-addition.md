@@ -1,6 +1,8 @@
 # 9. Pointer Addition
 
-Sometimes the abstractions provided by cutile are not enough — you need direct control over memory. In this tutorial, we implement vector addition using raw device pointers, and use async to illustrate how things could go wrong.
+Raw device pointers give kernels direct access to memory. This vector addition
+example uses them with async execution, where the caller must keep the memory
+alive until the kernel finishes.
 
 > **Warning:** Working with raw pointers bypasses cutile's safety guarantees. Use them only when there is no other way to implement a kernel or further improve performance.
 
@@ -106,9 +108,12 @@ On the host side, `device_pointer()` returns a typed `DevicePointer<T>` handle f
 
 ---
 
-## The Danger of Async + Raw Pointers
+(the-danger-of-async-raw-pointers)=
+## Pointer lifetimes with async execution
 
-Because `tokio::spawn` is non-blocking, the host code continues executing immediately after the spawn call. If you were to drop or reallocate any of the tensors before the kernel finishes, the kernel would be operating on freed memory — classic undefined behavior. The `await` on the task handle is what ensures the kernel has completed before we proceed.
+`tokio::spawn` returns before the kernel finishes. Dropping or reallocating a
+tensor during that time can leave the kernel accessing freed memory, causing
+undefined behavior. Await the task handle before releasing the tensors.
 
 ---
 

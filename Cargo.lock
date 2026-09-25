@@ -160,7 +160,7 @@ dependencies = [
  "memmap2",
  "num-traits",
  "num_cpus",
- "rand 0.9.4",
+ "rand",
  "rand_distr",
  "rayon",
  "safetensors",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-async"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-bindings"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "bindgen 0.69.5",
  "libloading",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-core-derive"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-tile-rs"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "bindgen 0.71.1",
  "cmake",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "cutile"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -496,19 +496,20 @@ dependencies = [
 
 [[package]]
 name = "cutile-benchmarks"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "cuda-async",
  "cuda-core",
  "cutile",
  "cutile-compiler",
+ "futures",
  "tokio",
 ]
 
 [[package]]
 name = "cutile-compiler"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -528,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-examples"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -543,16 +544,17 @@ dependencies = [
 
 [[package]]
 name = "cutile-ir"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "half",
  "indexmap",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
 name = "cutile-kernels"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "cutile",
  "cutile-compiler",
@@ -560,12 +562,11 @@ dependencies = [
 
 [[package]]
 name = "cutile-macro"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "convert_case",
  "cutile-compiler",
  "itertools 0.14.0",
- "phf",
  "proc-macro2",
  "quote",
  "sha2",
@@ -667,7 +668,7 @@ checksum = "719a903cc23e4a89e87962c2a80fdb45cdaad0983a89bd150bb57b4c8571a7d5"
 dependencies = [
  "half",
  "num-traits",
- "rand 0.9.4",
+ "rand",
  "rand_distr",
 ]
 
@@ -956,7 +957,7 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
- "rand 0.9.4",
+ "rand",
  "rand_distr",
  "zerocopy",
 ]
@@ -1334,48 +1335,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "phf"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
-dependencies = [
- "phf_macros",
- "phf_shared",
-]
-
-[[package]]
-name = "phf_generator"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
-dependencies = [
- "phf_shared",
- "rand 0.8.6",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
-dependencies = [
- "phf_generator",
- "phf_shared",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
-dependencies = [
- "siphasher",
-]
-
-[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1493,21 +1452,12 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
-dependencies = [
- "rand_core 0.6.4",
-]
-
-[[package]]
-name = "rand"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
 dependencies = [
  "rand_chacha",
- "rand_core 0.9.5",
+ "rand_core",
 ]
 
 [[package]]
@@ -1517,14 +1467,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
- "rand_core 0.9.5",
+ "rand_core",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
 name = "rand_core"
@@ -1542,7 +1486,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
 dependencies = [
  "num-traits",
- "rand 0.9.4",
+ "rand",
 ]
 
 [[package]]
@@ -1786,12 +1730,6 @@ dependencies = [
  "errno",
  "libc",
 ]
-
-[[package]]
-name = "siphasher"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "slab"

@@ -15,9 +15,11 @@ use std::io::Write;
 use super::encoding::{patch_u32, patch_u64, EncodingWriter};
 use super::enums::{AttributeTag, BytecodeVersion, FunctionFlag, Section, TypeTag, MAGIC};
 use super::opcode::Opcode;
+use crate::ir::SymbolVisibility;
 use crate::ir::{
     Attribute, BlockId, Module, OpId, RegionId, TileElementType, Type, Value, ValueProducer,
 };
+use crate::requirements::{target_requirement, Feature};
 use crate::{Error, Result};
 
 // =========================================================================
@@ -42,6 +44,13 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
 
     let mut out = Vec::new();
 
+    if !BytecodeVersion::SUPPORTED.contains(&version) {
+        return Err(Error::BytecodeWrite(format!(
+            "unsupported bytecode version {version}; supported versions: {}",
+            BytecodeVersion::SUPPORTED.map(|v| v.to_string()).join(", ")
+        )));
+    }
+
     // Initialize writer context with all managers.
     let mut ctx = WriterCtx {
         module,
@@ -55,11 +64,16 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
     };
 
     // Pre-scan: register all types, strings, constants used by globals and functions.
+    if let Some(producer) = &module.producer {
+        require_version("module.producer", Feature::Producer.since(), version)?;
+        ctx.strings.get_or_insert(producer);
+    }
     for global in &module.globals {
         ctx.strings.get_or_insert(&global.sym_name);
         ctx.types.get_or_insert(&global.value.element_type);
     }
     for &func_op in &module.functions {
+        check_region_versions(module, func_op, version, false, false)?;
         prescan_function(
             module,
             func_op,
@@ -91,9 +105,77 @@ pub fn write_bytecode_version(module: &Module, version: BytecodeVersion) -> Resu
     write_string_section(&mut out, &ctx.strings)?;
 
     // 8. End marker
+    if let Some(producer) = &module.producer {
+        let mut payload = EncodingWriter::new();
+        payload.write_varint(ctx.strings.get_or_insert(producer));
+        let bytes = payload.into_bytes();
+        write_section_header(&mut out, Section::Producer, bytes.len(), 1);
+        out.extend_from_slice(&bytes);
+    }
     out.push(Section::EndOfBytecode as u8);
 
     Ok(out)
+}
+
+fn check_region_versions(
+    module: &Module,
+    id: OpId,
+    version: BytecodeVersion,
+    in_loop: bool,
+    in_for: bool,
+) -> Result<()> {
+    let op = module.op(id);
+    if op.opcode == Opcode::Return {
+        if in_for {
+            return Err(Error::BytecodeWrite(
+                "return is not allowed inside for".into(),
+            ));
+        }
+        if in_loop {
+            require_version("return inside loop", Feature::LoopReturn.since(), version)?;
+        }
+    }
+    for (_, attr) in &op.attributes {
+        if let Attribute::OptimizationHints(hints) = attr {
+            for (arch, values) in &hints.entries {
+                if let Some(requirement) = arch
+                    .strip_prefix("sm_")
+                    .and_then(|sm| sm.parse().ok())
+                    .and_then(target_requirement)
+                {
+                    require_version(
+                        &format!("optimization hint target {arch}"),
+                        requirement.since,
+                        version,
+                    )?;
+                }
+                if values
+                    .iter()
+                    .any(|(key, _)| key == "num_worker_warps_per_cta")
+                {
+                    require_version(
+                        "optimization hint 'num_worker_warps_per_cta'",
+                        Feature::WorkerWarps.since(),
+                        version,
+                    )?;
+                }
+            }
+        }
+    }
+    for &region in &op.regions {
+        for &block in &module.region(region).blocks {
+            for &child in &module.block(block).ops {
+                check_region_versions(
+                    module,
+                    child,
+                    version,
+                    in_loop || op.opcode == Opcode::Loop,
+                    in_for || op.opcode == Opcode::For,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Convenience: write bytecode directly to a file.
@@ -261,6 +343,19 @@ impl TypeManager {
 
     fn register_deps(&mut self, ty: &Type) {
         match ty {
+            Type::WithPointerAttribute(base, attr) => match base.as_ref() {
+                Type::Pointer(p) => {
+                    self.get_or_insert(&Type::Scalar(p.pointee));
+                }
+                Type::TensorView(tv) => {
+                    self.get_or_insert(&Type::Scalar(tv.element_type));
+                }
+                _ => {
+                    if let Some(dependency) = pointer_dependency(base) {
+                        self.get_or_insert(&dependency.with_pointer_attribute(*attr));
+                    }
+                }
+            },
             Type::Pointer(p) => {
                 self.get_or_insert(&Type::Scalar(p.pointee));
             }
@@ -303,20 +398,65 @@ fn serialize_type(
     w: &mut EncodingWriter,
     version: BytecodeVersion,
 ) -> Result<()> {
+    serialize_type_with_pointer_attribute(ty, types, w, version, None)
+}
+
+fn pointer_dependency(ty: &Type) -> Option<Type> {
     match ty {
+        Type::Tile(t) => match &t.element_type {
+            TileElementType::Pointer(p) => Some(Type::Pointer((**p).clone())),
+            _ => None,
+        },
+        Type::PartitionView(v) => Some(Type::TensorView(v.tensor_view.clone())),
+        Type::GatherScatterView(v) => Some(Type::TensorView(v.tensor_view.clone())),
+        Type::StridedView(v) => Some(Type::TensorView(v.tensor_view.clone())),
+        _ => None,
+    }
+}
+
+fn serialize_type_with_pointer_attribute(
+    ty: &Type,
+    types: &mut TypeManager,
+    w: &mut EncodingWriter,
+    version: BytecodeVersion,
+    pointer_attribute: Option<crate::ir::PointerAttribute>,
+) -> Result<()> {
+    let qualify = |ty: Type| match pointer_attribute {
+        Some(attr) => ty.with_pointer_attribute(attr),
+        None => ty,
+    };
+    match ty {
+        Type::WithPointerAttribute(base, attr) => {
+            require_version("ptr_attr", Feature::PointerAttribute.since(), version)?;
+            if !matches!(base.as_ref(), Type::Pointer(_) | Type::TensorView(_))
+                && pointer_dependency(base).is_none()
+            {
+                return Err(Error::BytecodeWrite(
+                    "ptr_attr requires a pointer, pointer tile or view type".into(),
+                ));
+            }
+            serialize_type_with_pointer_attribute(base, types, w, version, Some(*attr))?;
+        }
         Type::Scalar(s) => {
+            require_version(&format!("{s:?}"), s.minimum_version(), version)?;
             w.write_varint(s.type_tag() as u64);
         }
         Type::Pointer(p) => {
             w.write_varint(TypeTag::Pointer as u64);
+            if version >= BytecodeVersion::V13_4 {
+                w.write_varint(u64::from(pointer_attribute.is_some()));
+            }
             let idx = types.get_or_insert(&Type::Scalar(p.pointee));
             w.write_varint(idx);
+            if let Some(attr) = pointer_attribute {
+                w.write_byte(attr as u8);
+            }
         }
         Type::Tile(t) => {
             w.write_varint(TypeTag::Tile as u64);
             let elem_ty = match &t.element_type {
                 TileElementType::Scalar(s) => Type::Scalar(*s),
-                TileElementType::Pointer(p) => Type::Pointer((**p).clone()),
+                TileElementType::Pointer(p) => qualify(Type::Pointer((**p).clone())),
             };
             let idx = types.get_or_insert(&elem_ty);
             w.write_varint(idx);
@@ -324,10 +464,16 @@ fn serialize_type(
         }
         Type::TensorView(tv) => {
             w.write_varint(TypeTag::TensorView as u64);
+            if version >= BytecodeVersion::V13_4 {
+                w.write_varint(u64::from(pointer_attribute.is_some()));
+            }
             let idx = types.get_or_insert(&Type::Scalar(tv.element_type));
             w.write_varint(idx);
             w.write_le_var_size_i64(&tv.shape);
             w.write_le_var_size_i64(&tv.strides);
+            if let Some(attr) = pointer_attribute {
+                w.write_byte(attr as u8);
+            }
         }
         Type::PartitionView(pv) => {
             w.write_varint(TypeTag::PartitionView as u64);
@@ -340,7 +486,7 @@ fn serialize_type(
                 w.write_varint(flags);
             }
             w.write_le_var_size_i32(&pv.tile_shape);
-            let idx = types.get_or_insert(&Type::TensorView(pv.tensor_view.clone()));
+            let idx = types.get_or_insert(&qualify(Type::TensorView(pv.tensor_view.clone())));
             w.write_varint(idx);
             w.write_le_var_size_i32(&pv.dim_map);
             if version >= BytecodeVersion::V13_3 {
@@ -356,10 +502,15 @@ fn serialize_type(
             }
         }
         Type::GatherScatterView(gsv) => {
+            require_version(
+                "gather_scatter_view",
+                Feature::GatherScatterView.since(),
+                version,
+            )?;
             w.write_varint(TypeTag::GatherScatterView as u64);
             w.write_varint(if gsv.padding_value.is_some() { 1 } else { 0 });
             w.write_le_var_size_i32(&gsv.tile_shape);
-            let idx = types.get_or_insert(&Type::TensorView(gsv.tensor_view.clone()));
+            let idx = types.get_or_insert(&qualify(Type::TensorView(gsv.tensor_view.clone())));
             w.write_varint(idx);
             w.write_varint(gsv.sparse_dim as u64);
             if let Some(padding_value) = gsv.padding_value {
@@ -367,11 +518,12 @@ fn serialize_type(
             }
         }
         Type::StridedView(sv) => {
+            require_version("strided_view", Feature::StridedView.since(), version)?;
             w.write_varint(TypeTag::StridedView as u64);
             w.write_varint(if sv.padding_value.is_some() { 1 } else { 0 });
             w.write_le_var_size_i32(&sv.tile_shape);
             w.write_le_var_size_i32(&sv.traversal_strides);
-            let idx = types.get_or_insert(&Type::TensorView(sv.tensor_view.clone()));
+            let idx = types.get_or_insert(&qualify(Type::TensorView(sv.tensor_view.clone())));
             w.write_varint(idx);
             w.write_le_var_size_i32(&sv.dim_map);
             if let Some(padding_value) = sv.padding_value {
@@ -394,6 +546,19 @@ fn serialize_type(
         Type::Token => {
             w.write_varint(TypeTag::Token as u64);
         }
+    }
+    Ok(())
+}
+
+pub(super) fn require_version(
+    feature: &str,
+    required: BytecodeVersion,
+    target: BytecodeVersion,
+) -> Result<()> {
+    if target < required {
+        return Err(Error::BytecodeWrite(format!(
+            "{feature} requires bytecode version {required} or newer, requested {target}"
+        )));
     }
     Ok(())
 }
@@ -513,6 +678,20 @@ fn write_global_section(out: &mut Vec<u8>, ctx: &mut WriterCtx) -> Result<()> {
     w.write_varint(ctx.module.globals.len() as u64);
 
     for global in &ctx.module.globals {
+        if global.constant {
+            require_version(
+                "global.constant",
+                Feature::GlobalConstant.since(),
+                ctx.version,
+            )?;
+        }
+        if global.symbol_visibility != SymbolVisibility::Public {
+            require_version(
+                "global.symbol_visibility",
+                Feature::GlobalVisibility.since(),
+                ctx.version,
+            )?;
+        }
         // 1. Symbol name index.
         let name_idx = ctx.strings.get_or_insert(&global.sym_name);
         w.write_varint(name_idx);
@@ -908,14 +1087,11 @@ impl DebugInfoCollector {
 
     /// Converts a location into an interned attribute id (0 = no info).
     ///
-    /// Known consumer limitation: the current `tileiras` accepts this
-    /// section everywhere (verifier and `--lineinfo` line tables, both
-    /// files/lines correct), but its full `--device-debug` DWARF emission
-    /// can reject real programs whose inline chains reference multiple
-    /// subprogram scopes (probed in `tests/bytecode_validate.rs` `dbg_v*`;
-    /// every isolated shape passes, whole programs can fail). Being raised
-    /// upstream; emission stays reference-conformant rather than degrading
-    /// the data.
+    /// Preserve the producer's scopes and call chains. The compiler uses
+    /// one compilation unit for a kernel and its inlined helpers, while
+    /// keeping each helper's source file on its subprogram. Live cross-file
+    /// scopes are exercised through tileiras --device-debug by cutile's
+    /// `debug_info` integration test, not just by verifier-only probes.
     fn attr_for(&mut self, strings: &mut StringManager, loc: &crate::ir::Location) -> u64 {
         use crate::ir::Location;
         match loc {
@@ -1263,4 +1439,111 @@ fn find_attr<'a>(attrs: &'a [(String, Attribute)], name: &str) -> Option<&'a Att
 #[allow(dead_code)]
 fn is_function_level_attr(name: &str) -> bool {
     matches!(name, "sym_name" | "function_type" | "optimization_hints")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{PointerAttribute, PointerType, ScalarType, TensorViewType};
+
+    fn type_bytes(ty: &Type, version: BytecodeVersion) -> Result<Vec<u8>> {
+        let mut types = TypeManager::new();
+        types.get_or_insert(ty);
+        let mut writer = EncodingWriter::new();
+        serialize_type(ty, &mut types, &mut writer, version)?;
+        Ok(writer.into_bytes())
+    }
+
+    fn compare_python(name: &str, version: BytecodeVersion, present: bool, bytes: &[u8]) {
+        let Some(source) = std::env::var_os("CUTILE_PYTHON_SOURCE") else {
+            return;
+        };
+        let output = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/python_encoding.py"
+            ))
+            .arg(source)
+            .arg(name)
+            .arg(version.to_string())
+            .arg(present.to_string())
+            .output()
+            .expect("run Python type encoder");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn pointer_attribute_presence_and_legacy_layouts_match_reference() {
+        for (name, base) in [
+            (
+                "Pointer",
+                Type::Pointer(PointerType {
+                    pointee: ScalarType::F32,
+                }),
+            ),
+            (
+                "TensorView",
+                Type::TensorView(TensorViewType {
+                    element_type: ScalarType::F32,
+                    shape: vec![4],
+                    strides: vec![1],
+                }),
+            ),
+        ] {
+            for version in BytecodeVersion::SUPPORTED {
+                let absent = type_bytes(&base, version).unwrap();
+                compare_python(name, version, false, &absent);
+                let explicit = base.clone().with_pointer_attribute(PointerAttribute::None);
+                assert_ne!(base, explicit);
+                assert_eq!(
+                    Type::parse(&crate::ir::format_type(&explicit)),
+                    Some(explicit.clone())
+                );
+                if version < BytecodeVersion::V13_4 {
+                    assert!(type_bytes(&explicit, version)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("ptr_attr requires bytecode version 13.4"));
+                } else {
+                    assert_eq!(absent[1], 0);
+                    let present = type_bytes(&explicit, version).unwrap();
+                    assert_eq!(present[1], 1);
+                    assert_eq!(present.last(), Some(&0));
+                    compare_python(name, version, true, &present);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_scale_type_uses_multibyte_tag_and_refuses_old_versions() {
+        let ty = Type::Scalar(ScalarType::F8E5M3FNU);
+        assert_eq!(
+            type_bytes(&ty, BytecodeVersion::V13_4).unwrap(),
+            [0x82, 0x01]
+        );
+        compare_python("F8E5M3FNU", BytecodeVersion::V13_4, false, &[0x82, 0x01]);
+        assert!(type_bytes(&ty, BytecodeVersion::V13_3).is_err());
+    }
+
+    #[test]
+    fn producer_roundtrips_and_is_not_silently_dropped_on_13_2() {
+        let mut module = Module::new("producer");
+        module.producer = Some("cutile-rs test".into());
+        assert!(write_bytecode_version(&module, BytecodeVersion::V13_2).is_err());
+        for version in [BytecodeVersion::V13_3, BytecodeVersion::V13_4] {
+            let bytes = write_bytecode_version(&module, version).unwrap();
+            assert!(crate::decode_bytecode(&bytes)
+                .unwrap()
+                .contains("cutile-rs test"));
+        }
+    }
 }

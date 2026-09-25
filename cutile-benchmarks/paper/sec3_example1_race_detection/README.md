@@ -3,13 +3,14 @@
 **Paper section**: Section 3, "Example: Preventing Data Races"
 **Purpose**: Demonstrate a data race that cuTile Rust prevents structurally.
 
-## The example: Kernel-internal index bug in head permutation
+<a id="the-example-kernel-internal-index-bug-in-head-permutation"></a>
+## Incorrect destination index
 
 A kernel permutes head dimensions of a `(b, h, m, d)` attention tensor.
 Grid `(B*H, H, 1)` assigns each block a `(b, h1, h2)` triple: load from
 `src[b, h1, m, :]`, store to `dst[b, h2, m, :]`.
 
-The kernel has a subtle bug: the store index has `m` and `h2` swapped, so
+The store index has `m` and `h2` swapped, so
 the write is to `dst[b, m, h2, 0]` instead of `dst[b, h2, m, 0]`. The
 launcher is correct (distinct `src` and `dst` tensors). The launcher's
 borrow checker is satisfied.
@@ -33,8 +34,8 @@ The Tile IR memory model (see §2.3 of the paper) defines:
 
 The buggy kernel's concurrent stores are not ordered by tokens (tokens are
 intra-tile-thread only) and not scoped to `device` (the stores are `weak`
-in cuTile Python). They are not morally strong. By the memory model's own
-definition, the program has UB.
+in cuTile Python). These accesses are not morally strong, so the race causes
+undefined behavior.
 
 ## Why cuTile Rust makes this bug inexpressible
 
@@ -47,12 +48,8 @@ kernels::permute_heads(dst, src.clone()).sync()?;
 
 Each tile thread receives `dst: &mut Tensor<f32, {[1, 1, BM, BD]}>` — a
 partition view bound to exactly its assigned destination tile. The kernel
-writes to `dst` with `dst.store(tile)`; there is no destination index to
-choose and therefore no wrong index to choose.
-
-The equivalent "swap `m` and `h2`" bug cannot exist in the cuTile Rust
-kernel. The class of bugs that produces data races from wrong destination
-indices is structurally eliminated by the partition view.
+writes to its assigned tile with `dst.store(tile)`. It cannot select another
+block's destination by swapping `m` and `h2`.
 
 ### Python (races, produces non-deterministic output)
 
