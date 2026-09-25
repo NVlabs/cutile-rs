@@ -42,6 +42,7 @@ pub mod memory;
 pub mod module;
 pub mod peer;
 pub mod pinned_host_buffer;
+pub mod pinned_host_mapping;
 pub mod stream;
 pub mod vmm;
 
@@ -59,6 +60,7 @@ pub use launch::{
 };
 pub use module::{ConstantHandle, CudaFunction, CudaModule};
 pub use pinned_host_buffer::PinnedHostBuffer;
+pub use pinned_host_mapping::PinnedHostMapping;
 pub use stream::CudaStream;
 
 // The remaining items of oxide's crate root are identical on both surfaces;
