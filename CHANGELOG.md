@@ -7,86 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-25
+
+Debug builds support cuda-gdb and Nsight. DGX Spark is now supported.
+CUDA 13.4 Tile IR adds programmatic dependent launch. Runtime checks enforce
+tensor lifetimes for asynchronous work and graph replay. Both launch-site
+paths have lower overhead.
+
+### Breaking changes
+
+- `Global` requires a sealed device atomic type, such as
+  `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`. Global
+  accesses reject `Weak` ordering and `TileBlock` scope in Rust and the
+  JIT; unsafe raw intrinsics are unchanged (#288).
+- `Tensor::store` returns its completion `Token`. `Tensor::token` reads it;
+  unsafe `Tensor::set_token` installs an external dependency. Installation
+  rejects conditional/loop regions, block-local receivers, and subsequent
+  shadowing until token updates use control-flow carries. The raw
+  `set_tensor_token` and `make_partition_view` helpers are `unsafe`. Safe
+  partition helpers preserve the tensor's own token.
+- `Latency<const CYCLES: i32>` (was `u32`), so `Latency::<L>` works with an
+  `i32` kernel const generic (#275, closes #246).
+- `DeviceOp::execute` implementations must register owned resources with
+  `ExecutionContext::retain` before enqueueing work. Returning or borrowing
+  them in the output is insufficient. Conflicting cross-stream accesses
+  return `DeviceError` at enqueue; same-stream work stays stream-ordered.
+  Forgotten futures deliberately leak storage and access leases (#275).
+- Device debug information follows Cargo's profile. Development builds use
+  full device debugging at `O0`; release builds use none.
+  `CUDA_RUST_DEBUG=none|line|full` overrides the profile at build time (`line`
+  enables optimized profiling). Explicit `CompileOptions` take precedence
+  (#285).
+
 ### Added
 
 - Raw Tile IR 13.4 operations: `insert`, `fpowi`, `fpowf` (the existing
-  `pow` spelling remains), GDC launch/wait tokens, and alias fencing.
+  `pow` spelling remains), GDC launch/wait tokens, and alias fencing (#298).
 - `f8e5m3fnu`, explicit pointer classification, view `inbounds`, saturating
   float-to-int, `NearestAway`, and kernel returns inside `loop`/`while`
   on Tile IR 13.4. Returns in inlined helpers or beneath `for` remain
-  restricted.
-- Missing raw controls: allocation, arbitrary-rank gather/scatter and
+  restricted (#298).
+- Raw controls for allocation, arbitrary-rank gather/scatter and
   strided view loads/stores, view atomic reduction, fast-accumulation MMA,
   exp/tanh rounding, full-width/general-rank assumptions, private/constant
-  globals, and module producer metadata. Existing signatures are preserved.
+  globals, and module producer metadata. Existing signatures are preserved
+  (#298).
 - Unsafe per-launch `programmatic_dependent_launch()` on generated builders
-  and `AsyncKernelLaunch`, with runtime driver entry-point lookup.
-- Tile IR 13.4 bytecode with selected-assembler version negotiation and
-  conjunctive version/architecture checks before JIT assembly. The writer
-  preserves 13.2/13.3 layouts and rejects newer features when targeting them.
+  and `AsyncKernelLaunch`, with runtime driver entry-point lookup
+  (Tile IR 13.4, `sm_90+`) (#298).
+- Tile IR 13.4 bytecode with assembler version negotiation. Version and
+  architecture checks run before JIT assembly. The writer preserves
+  13.2/13.3 layouts and rejects newer features when targeting them (#298).
+- DGX Spark (GB10, `sm_121`, aarch64) support, verified with CUDA 13.3 and
+  13.4 on the 580 driver. A new tutorial runs Qwen3 inference with Grout
+  (#295, #303).
+- The CUDA driver loader probes the WSL2 shim (`/usr/lib/wsl/lib`) and the
+  Debian/Ubuntu multiarch path when `libcuda.so.1` is not on the library
+  path (#277, fixes #276).
+- Toolkit discovery accepts `/opt/cuda` (#190).
+- Kernel-cache eviction APIs `clear_kernel_cache`, `evict_kernel`, and
+  `retain_kernels` are available without `experimental-tune`. Serving engines
+  can manage cached specializations independently of autotuning. Their
+  unsafe quiesce-before-eviction contracts and return values are unchanged
+  (#282, closes #268).
 
-### Fixed
+### Performance
 
-- Loads through a read-only `Partition` are no longer chained on each
-  other's completion tokens. The token-threading work in 0.4.0's `set_token`
-  carried a load's completion token out of the inlined `Partition::load`
-  for immutable bindings, which serialized every read-only partition's
-  loads and slowed load-bound kernels by up to 35% (a fused norm+RoPE
-  kernel went from 20 to 27 µs). Only explicit `set_token` /
-  `set_tensor_token` installs now cross an inlining or block boundary for
-  immutable bindings; mutable bindings are unchanged.
+- Launch-site cache hits no longer allocate in the launcher. Arguments use
+  an inline arena, spilling to the heap beyond 32 parameter slots. Shape
+  validation compares in place; the site probe borrows fixed-size arrays.
+  A four-tensor launch dropped from 15 heap allocations to 2, both in the
+  submission envelope (#307).
+- Launch-site cache misses (changed scalar divisibility hints or new
+  specializations) reuse the assembler fingerprint, resolved toolchain and
+  `CUTILE_BYTECODE_VERSION` override for one second between environment and
+  filesystem lookups. Mid-process toolchain switches take effect within
+  that window (#307).
+- Lifetime bookkeeping uses a refcount per argument instead of two heap
+  allocations. Graph replay reacquires each distinct buffer once instead
+  of visiting every recorded node. A 32-node graph enqueues in 1.67 µs
+  (was 14.68 µs initially); a four-tensor launch takes 1.88 µs (#302).
 
 ### Changed
 
-- Launch-site cache misses (a scalar argument's divisibility hint changed,
-  or a new specialization) no longer pay filesystem and environment lookups
-  per launch: the assembler fingerprint, the resolved toolchain and the
-  `CUTILE_BYTECODE_VERSION` override are trusted for one second before the
-  environment and filesystem are consulted again. A mid-process toolchain
-  switch still takes effect, within that window.
-- Launch-site cache hits no longer allocate in the launcher: kernel arguments
-  are marshalled in an arena that lives inline in the launch (the heap is
-  used only beyond 32 parameter slots), shape validation compares in place,
-  and the site probe borrows fixed-size arrays. A four-tensor launch went
-  from 15 heap allocations to 2, both in the submission envelope.
-
-- `Tensor::store` returns its completion `Token`; `Tensor::token` reads it
-  and unsafe `Tensor::set_token` installs an external dependency. Explicit
-  installation rejects conditional/loop regions, block-local receivers,
-  and subsequent shadowing until token updates use control-flow carries.
-  The raw `set_tensor_token` and `make_partition_view` helpers are unsafe;
-  safe partition helpers continue to preserve the tensor's own token.
-
 - Tile IR compiler, encoder and example/test prerequisites share a capability
-  registry, with checked documentation tables. Standalone bytecode validation
+  registry with checked documentation tables. Standalone bytecode validation
   uses the JIT's assembler-version negotiation, including the CUDA 13.2
   fallback for assemblers without `--list-versions`. CI now exercises 13.2
-  alongside 13.3 and the optional 13.4 lane.
-
-- `cutile-examples` no longer depends on candle by default: the CPU reference
-  helpers and the `flash_attention` example sit behind a `reference-cpu`
-  feature (`scripts/run_examples.sh` enables it). The default workspace build
-  therefore no longer fails on generic aarch64, where candle's `gemm-f16`
-  needs the `fullfp16` target feature (first seen bringing up DGX Spark).
-
-- `Global` now requires a sealed device atomic type, such as
-  `Global<AtomicI32, { [] }>` instead of `Global<i32, { [] }>`.
-  Global accesses reject `Weak` ordering and `TileBlock` scope in both
-  Rust and the JIT; unsafe raw intrinsics are unchanged. This is a breaking
-  API change intended for 0.4.0.
-
-- Kernel-cache eviction APIs `clear_kernel_cache`, `evict_kernel`, and
-  `retain_kernels` are available without `experimental-tune`, allowing
-  serving engines to manage cached specializations independently of
-  autotuning. Their unsafe quiesce-before-eviction contracts and return
-  values are unchanged (#268).
+  alongside 13.3 and 13.4 (#298, #304).
+- Cross-module user helpers and methods retain their source locations and
+  inline scopes in device debug information. Core operations keep call-site
+  attribution (#285).
+- `cutile-examples` no longer depends on candle by default. CPU reference
+  helpers and the `flash_attention` example require `reference-cpu`, enabled
+  by `scripts/run_examples.sh`. The default workspace builds on generic
+  aarch64, where candle's `gemm-f16` needs `fullfp16`. This failure was first
+  seen on DGX Spark (#295).
+- The workspace pins a stable Rust toolchain (`rust-toolchain.toml`); the
+  reactor verification job alone uses nightly (#304).
 
 ### Fixed
 
-- Debug info: kernels calling a trait-dispatch wrapper as a free function
-  (`load_tile_like(x, out)`) attributed the inlined body to the module's
-  first line instead of the call, so `break <call line>` had no code and
-  stepping skipped it. The lowered call now keeps the call-site span.
+- cuda-async prevents use after free from safe code by retaining all tensor
+  storage used by a submission until completion, including after
+  borrowed-argument recovery, discarded outputs, errors, panics, and
+  forgotten futures. Graph replay records captured storage and reacquires
+  its accesses on every launch. Device-to-host copies synchronize before
+  exposing initialized `Vec` elements (#275, fixes #272 and #252).
+- f8 constants round to nearest-even, including subnormal boundaries and
+  E4M3FN finite saturation, instead of truncating the mantissa (#275,
+  fixes #250).
+- Read-only `Partition` loads no longer inherit each other's completion
+  tokens. The `set_token` changes in 0.4.0 carried load completion tokens out
+  of inlined `Partition::load` calls for immutable bindings. This serialized
+  read-only partition loads and slowed load-bound kernels by up to 35% (a fused
+  norm+RoPE kernel went from 20 to 27 µs). Only explicit `set_token` /
+  `set_tensor_token` installs cross an inlining or block boundary for
+  immutable bindings; mutable bindings are unchanged (#310).
+- Free-function calls to trait-dispatch wrappers (`load_tile_like(x, out)`)
+  retain their call-site spans. Previously, the inlined body pointed to the
+  module's first line, so `break <call line>` found no code and stepping
+  skipped the call (#311).
+- Submission-lifetime GPU tests run in a separate single-threaded binary.
+  In the aggregate binary, another test's module load could wait on a gated
+  stream and block the gate owner's host callback (#295).
 
 ## [0.3.1] - 2026-09-02
 

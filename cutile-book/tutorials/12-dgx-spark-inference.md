@@ -6,7 +6,8 @@ cuTile Rust, starting with the smaller Qwen3-4B model.
 
 The measurements below are from a DGX Spark (GB10, `sm_121`, 20 CPU cores, 128 GB of
 unified LPDDR5X memory) running DGX OS with the 580 driver and CUDA 13.4.
-They use Grout's `safe-kernels` branch at `deb7427` with cuTile Rust at `e04245b`.
+They use cuTile Rust `v0.4.0` and Grout at commit
+[`deb7427`](https://github.com/elibol/grout/commit/deb74274c731d4ca9e7f9b356a91892398498309).
 
 ---
 
@@ -61,18 +62,16 @@ These commands keep the model directories and cuTile Rust checkout next to Grout
 
 ```bash
 mkdir -p ~/dev && cd ~/dev
-git clone https://github.com/NVlabs/cutile-rs.git
-git -C cutile-rs checkout e04245bdcf1f5bfc602a2078168eff90ee40bebb
-git clone --branch safe-kernels https://github.com/elibol/grout.git
+git clone --branch v0.4.0 https://github.com/NVlabs/cutile-rs.git
+git clone https://github.com/elibol/grout.git
 git -C grout checkout deb74274c731d4ca9e7f9b356a91892398498309
 pip install -U "huggingface_hub[cli]"
 hf download Qwen/Qwen3-4B  --local-dir hf_models/qwen3_4b    # about 8 GB
 hf download Qwen/Qwen3-32B --local-dir hf_models/qwen3_32b   # about 66 GB
 ```
 
-At this revision, Grout's `Cargo.toml` uses cuTile Rust 0.4.0 from the sibling
-checkout through `[patch.crates-io]`. The commands select the revisions used for
-the measurements. The `safe-kernels` branch is in the `elibol/grout` fork.
+Grout's pinned commit depends on cuTile Rust 0.4.0. Its `[patch.crates-io]`
+uses the sibling `cutile-rs` checkout.
 
 Build Grout in release mode. On the Spark this takes well under a minute after the
 dependencies are compiled once:
