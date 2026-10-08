@@ -5,7 +5,7 @@
 <img src="assets/logo.svg" alt="cuTile Rust" width="380">
 
 [![Crates.io](https://badgen.net/crates/v/cutile)](https://crates.io/crates/cutile)
-[![Build](https://img.shields.io/github/actions/workflow/status/NVIDIA/cuda-rust/cutile-rs.yml?branch=main&label=build)](https://github.com/NVIDIA/cuda-rust/actions/workflows/cutile-rs.yml)
+[![Build](https://img.shields.io/badge/build-passing%20at%20archive-brightgreen.svg)](https://github.com/NVlabs/cutile-rs/actions/runs/36187730911)
 [![Docs](https://img.shields.io/badge/docs-book-blue.svg)](https://nvidia.github.io/cuda-rust/cutile/latest/)
 
 </div>
