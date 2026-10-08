@@ -6,9 +6,17 @@
 
 [![Crates.io](https://badgen.net/crates/v/cutile)](https://crates.io/crates/cutile)
 [![Build](https://img.shields.io/github/actions/workflow/status/NVlabs/cutile-rs/pr.yml?branch=main&event=push&label=build)](https://github.com/NVlabs/cutile-rs/actions/workflows/pr.yml)
-[![Docs](https://img.shields.io/badge/docs-book-blue.svg)](https://nvlabs.github.io/cutile-rs/)
+[![Docs](https://img.shields.io/badge/docs-book-blue.svg)](https://nvidia.github.io/cuda-rust/cutile/latest/)
 
 </div>
+
+> **This repository has moved to [NVIDIA/cuda-rust](https://github.com/NVIDIA/cuda-rust).
+> Please go there for all things cuTile Rust: documentation, issues, and pull requests.**
+>
+> **Development continues under [`cutile-rs/`](https://github.com/NVIDIA/cuda-rust/tree/main/cutile-rs),
+> with the documentation at [nvidia.github.io/cuda-rust/cutile](https://nvidia.github.io/cuda-rust/cutile/latest/).**
+> The open issues and pull requests that were here have been migrated, and this
+> repository is archived and kept read-only for history.
 
 cuTile Rust (`cutile-rs`) is a tile-based system for writing memory-safe,
 data-race-free GPU kernels in Rust. It extends Rust's ownership rules across host
