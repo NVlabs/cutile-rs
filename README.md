@@ -13,9 +13,9 @@
 > **This repository has moved to [NVIDIA/cuda-rust](https://github.com/NVIDIA/cuda-rust).
 > Please go there for all things cuTile Rust: documentation, issues, and pull requests.**
 >
-> **Development continues under [`cutile-rs/`](https://github.com/NVIDIA/cuda-rust/tree/main/cutile-rs),
-> with the documentation at [nvidia.github.io/cuda-rust/cutile](https://nvidia.github.io/cuda-rust/cutile/latest/).**
-> The open issues and pull requests that were here have been migrated, and this
+> **cuTile Rust development continues at <https://github.com/NVIDIA/cuda-rust/tree/main/cutile-rs>,
+> and the documentation lives at <https://nvidia.github.io/cuda-rust/cutile/latest/>.**
+> The open issues and pull requests that were here have been migrated there, and this
 > repository is archived and kept read-only for history.
 
 cuTile Rust (`cutile-rs`) is a tile-based system for writing memory-safe,
